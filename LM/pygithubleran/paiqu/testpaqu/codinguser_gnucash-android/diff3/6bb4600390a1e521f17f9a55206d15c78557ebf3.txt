@@ -1,0 +1,334 @@
+From 6bb4600390a1e521f17f9a55206d15c78557ebf3 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 24 Jul 2015 14:56:29 +0200
+Subject: [PATCH] Split amount icon now appears inside the amount edit text Set
+ the default actionbar color (for accounts with no color) to the primary theme
+ color Code refactoring
+
+TODO: fix broken split tests
+---
+ .../android/test/ui/TransactionsActivityTest.java  | 27 +++++++++++--
+ .../ui/transaction/TransactionFormFragment.java    | 23 +++++++----
+ .../ui/transaction/TransactionsActivity.java       |  2 +-
+ app/src/main/res/layout/dialog_export.xml          |  2 -
+ .../main/res/layout/fragment_new_transaction.xml   | 46 ++++------------------
+ app/src/main/res/values/colors.xml                 |  4 ++
+ app/src/main/res/values/styles.xml                 |  2 +
+ app/src/main/res/values/themes.xml                 | 15 +++----
+ 8 files changed, 62 insertions(+), 59 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 0ddf728d..d108976e 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -24,9 +24,16 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.preference.PreferenceManager;
+ import android.support.test.InstrumentationRegistry;
++import android.support.test.espresso.ViewAction;
++import android.support.test.espresso.action.CoordinatesProvider;
++import android.support.test.espresso.action.GeneralClickAction;
++import android.support.test.espresso.action.Press;
++import android.support.test.espresso.action.Tap;
+ import android.support.test.runner.AndroidJUnit4;
+ import android.test.ActivityInstrumentationTestCase2;
+ import android.util.Log;
++import android.view.View;
++import android.widget.EditText;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
+@@ -294,7 +301,7 @@ public void testAutoBalanceTransactions(){
+ 		onView(withId(R.id.input_transaction_amount)).perform(typeText("499"));
+ 
+ 		//no double entry so no split editor
+-		onView(withId(R.id.btn_open_splits)).check(matches(not(isDisplayed())));
++		//TODO: check that the split drawable is not displayed
+ 		onView(withId(R.id.menu_save)).perform(click());
+ 
+ 		assertThat(mTransactionsDbAdapter.getTotalTransactionsCount()).isEqualTo(1);
+@@ -329,7 +336,7 @@ public void testSplitEditor(){
+ 		onView(withId(R.id.input_transaction_name)).perform(typeText("Autobalance"));
+ 		onView(withId(R.id.input_transaction_amount)).perform(typeText("499"));
+ 
+-		onView(withId(R.id.btn_open_splits)).perform(click());
++		onView(withId(R.id.input_transaction_amount)).perform(clickSplitIcon());
+ 
+ 		onView(withId(R.id.split_list_layout)).check(matches(allOf(isDisplayed(), hasDescendant(withId(R.id.input_split_amount)))));
+ 
+@@ -502,7 +509,7 @@ public void testBulkMoveTransactions(){
+ 		assertThat(targetCount).isEqualTo(1);
+ 		
+ 		int afterOriginCount = mAccountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
+-		assertThat(afterOriginCount).isEqualTo(beforeOriginCount-1);
++		assertThat(afterOriginCount).isEqualTo(beforeOriginCount - 1);
+ 	}
+ 
+ 	//TODO: add normal transaction recording
+@@ -541,6 +548,20 @@ private void clickOnView(int viewId){
+ 		onView(withId(viewId)).perform(click());
+ 	}
+ 
++	public static ViewAction clickSplitIcon(){
++		return new GeneralClickAction(Tap.SINGLE,
++				new CoordinatesProvider() {
++					@Override
++					public float[] calculateCoordinates(View view) {
++						final int DRAWABLE_RIGHT = 2;
++						int x = view.getRight() - ((EditText)view).getCompoundDrawables()[DRAWABLE_RIGHT].getBounds().width();
++						int y = view.getTop() + view.getHeight()/2;
++
++						return new float[]{x, y};
++					}
++				}, Press.FINGER);
++	}
++
+ 	@Override
+ 	@After
+ 	public void tearDown() throws Exception {
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 6754e8fa..4819e844 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -35,6 +35,7 @@
+ import android.view.Menu;
+ import android.view.MenuInflater;
+ import android.view.MenuItem;
++import android.view.MotionEvent;
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.view.inputmethod.InputMethodManager;
+@@ -210,7 +211,6 @@
+ 
+     private AmountInputFormatter mAmountInputFormatter;
+ 
+-    private Button mOpenSplitsButton;
+     private String mAccountUID;
+ 
+     private List<Split> mSplitsList = new ArrayList<Split>();
+@@ -233,7 +233,6 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 		mCurrencyTextView       = (TextView) v.findViewById(R.id.currency_symbol);
+ 		mTransactionTypeButton  = (TransactionTypeSwitch) v.findViewById(R.id.input_transaction_type);
+ 		mDoubleAccountSpinner   = (Spinner) v.findViewById(R.id.input_double_entry_accounts_spinner);
+-        mOpenSplitsButton       = (Button) v.findViewById(R.id.btn_open_splits);
+         mRecurrenceTextView     = (TextView) v.findViewById(R.id.input_recurrence);
+         mSaveTemplateCheckbox = (CheckBox) v.findViewById(R.id.checkbox_save_template);
+         return v;
+@@ -252,7 +251,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
+ 		if (!mUseDoubleEntry){
+ 			getView().findViewById(R.id.layout_double_entry).setVisibility(View.GONE);
+-            mOpenSplitsButton.setVisibility(View.GONE);
++            mAmountEditText.setCompoundDrawablesWithIntrinsicBounds(0, 0, 0, 0);
+ 		}
+ 
+         mAccountUID = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
+@@ -550,11 +549,21 @@ private void openSplitEditor(){
+ 	private void setListeners() {
+         mAmountInputFormatter = new AmountTextWatcher(mAmountEditText); //new AmountInputFormatter(mAmountEditText);
+         mAmountEditText.addTextChangedListener(mAmountInputFormatter);
+-
+-        mOpenSplitsButton.setOnClickListener(new View.OnClickListener() {
++        mAmountEditText.setOnTouchListener(new View.OnTouchListener() {
+             @Override
+-            public void onClick(View view) {
+-                openSplitEditor();
++            public boolean onTouch(View v, MotionEvent event) {
++                final int DRAWABLE_LEFT = 0;
++                final int DRAWABLE_TOP = 1;
++                final int DRAWABLE_RIGHT = 2;
++                final int DRAWABLE_BOTTOM = 3;
++
++                if(event.getAction() == MotionEvent.ACTION_UP) {
++                    if(event.getRawX() >= (mAmountEditText.getRight() - mAmountEditText.getCompoundDrawables()[DRAWABLE_RIGHT].getBounds().width())) {
++                        openSplitEditor();
++                        return true;
++                    }
++                }
++                return false;
+             }
+         });
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index d511c489..1268c8ae 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -359,7 +359,7 @@ private void setTitleIndicatorColor() {
+             }
+             if (colorCode == null)
+             {
+-                iColor = getResources().getColor(R.color.title_green);
++                iColor = getResources().getColor(R.color.theme_primary);
+             }
+         }
+ 
+diff --git a/app/src/main/res/layout/dialog_export.xml b/app/src/main/res/layout/dialog_export.xml
+index 2627ef2d..89186e9f 100644
+--- a/app/src/main/res/layout/dialog_export.xml
++++ b/app/src/main/res/layout/dialog_export.xml
+@@ -110,8 +110,6 @@
+ 	        style="@style/TextAppearance.Hint" />
+ 
+         <LinearLayout android:id="@+id/recurrence_options"
+-            android:layout_height="wrap_content"
+-            android:layout_width="match_parent"
+             style="@style/FormRow">
+             <TextView
+                 android:id="@+id/label_recurring_transaction"
+diff --git a/app/src/main/res/layout/fragment_new_transaction.xml b/app/src/main/res/layout/fragment_new_transaction.xml
+index 70a8a4fa..1268ec5b 100644
+--- a/app/src/main/res/layout/fragment_new_transaction.xml
++++ b/app/src/main/res/layout/fragment_new_transaction.xml
+@@ -35,10 +35,7 @@
+ 			android:nextFocusDown="@+id/input_transaction_amount"
+ 			android:textSize="22sp" />
+ 
+-		<TableRow
+-			android:layout_width="match_parent"
+-			android:layout_height="wrap_content"
+-			style="@style/FormRow">
++		<TableRow style="@style/FormRow">
+ 
+ 			<TextView
+ 				android:id="@+id/currency_symbol"
+@@ -60,6 +57,8 @@
+ 				android:hint="@string/label_transaction_amount"
+ 				android:inputType="number"
+ 				android:nextFocusDown="@+id/input_description"
++				android:drawableRight="@drawable/content_split_holo_light"
++				android:drawableEnd="@drawable/content_split_holo_light"
+ 				android:textColor="@color/debit_red"
+ 				android:textSize="22sp" />
+ 
+@@ -76,31 +75,8 @@
+ 				android:checked="true"/>
+ 
+ 		</TableRow>
+-		<TableRow
+-			android:id="@+id/layout_open_splits"
+-			android:layout_width="match_parent"
+-			android:layout_height="wrap_content"
+-			style="@style/FormRow" >
+ 
+-			<ImageView android:layout_width="0dp"
+-				android:layout_weight="0.5"
+-				android:layout_height="wrap_content"
+-				android:layout_marginRight="5dp"
+-				android:layout_marginEnd="5dp"
+-				android:src="@drawable/content_split_holo_light"/>
+-			<Button android:id="@+id/btn_open_splits"
+-				android:layout_width="0dp"
+-				android:layout_weight="5"
+-				android:layout_height="wrap_content"
+-				style="@style/ButtonStyle"
+-				android:text="Open Split editor"
+-				/>
+-		</TableRow>
+-
+-		<TableRow
+-			android:id="@+id/layout_double_entry"
+-			android:layout_width="match_parent"
+-			android:layout_height="wrap_content"
++		<TableRow android:id="@+id/layout_double_entry"
+ 			style="@style/FormRow" >
+ 
+ 			<ImageView android:layout_width="0dp"
+@@ -115,9 +91,7 @@
+ 				android:layout_weight="5"
+ 				android:layout_height="wrap_content"  />
+ 		</TableRow>
+-		<TableRow android:layout_width="match_parent"
+-			android:layout_height="wrap_content"
+-			style="@style/FormRow" >
++		<TableRow style="@style/FormRow" >
+ 
+ 			<ImageView android:layout_width="0dp"
+ 				android:layout_weight="0.5"
+@@ -139,10 +113,7 @@
+ 				android:layout_height="wrap_content"
+ 				android:gravity="center"        />
+ 		</TableRow>
+-		<TableRow
+-			android:layout_height="wrap_content"
+-			android:layout_width="match_parent"
+-			style="@style/FormRow">
++		<TableRow style="@style/FormRow">
+ 
+ 			<ImageView android:layout_width="0dp"
+ 				android:layout_weight="0.5"
+@@ -160,10 +131,7 @@
+ 					android:inputType="textMultiLine|textCapSentences" />
+ 		</TableRow>
+ 
+-		<TableRow
+-			android:layout_height="wrap_content"
+-			android:layout_width="match_parent"
+-			style="@style/FormRow">
++		<TableRow style="@style/FormRow">
+ 
+ 			<ImageView android:layout_width="0dp"
+ 				android:layout_weight="0.5"
+diff --git a/app/src/main/res/values/colors.xml b/app/src/main/res/values/colors.xml
+index 6d940bb3..457a846e 100644
+--- a/app/src/main/res/values/colors.xml
++++ b/app/src/main/res/values/colors.xml
+@@ -26,4 +26,8 @@
+     <color name="account_blue">#1469EB</color>
+     <color name="account_purple">#B304AD</color>
+     <color name="action_mode_background">#616161</color>
++
++    <color name="theme_primary">#2E7D32</color> <!-- 800 -->
++    <color name="theme_primary_dark">#1B5E20</color> <!-- 900 -->
++    <color name="theme_accent">#FFAB00</color> <!-- A700 -->
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values/styles.xml b/app/src/main/res/values/styles.xml
+index 9e7db049..fa3bf199 100644
+--- a/app/src/main/res/values/styles.xml
++++ b/app/src/main/res/values/styles.xml
+@@ -88,6 +88,8 @@
+     </style>
+ 
+     <style name="FormRow">
++        <item name="android:layout_width">match_parent</item>
++        <item name="android:layout_height">wrap_content</item>
+         <item name="android:orientation">vertical</item>
+         <item name="android:gravity">center_vertical</item>
+         <item name="android:layout_marginBottom">@dimen/form_row_bottom_margin</item>
+diff --git a/app/src/main/res/values/themes.xml b/app/src/main/res/values/themes.xml
+index b5f49273..01811cfb 100644
+--- a/app/src/main/res/values/themes.xml
++++ b/app/src/main/res/values/themes.xml
+@@ -23,24 +23,25 @@
+         -->
+ 
+         <!-- Set AppCompats color theming attrs -->
+-        <item name="colorPrimary">#2E7D32</item> <!-- 800 -->
+-        <item name="colorPrimaryDark">#1B5E20</item> <!-- 900 -->
+-        <item name="colorAccent">#FFAB00</item> <!-- A700 -->
++        <item name="colorPrimary">@color/theme_primary</item>
++        <item name="colorPrimaryDark">@color/theme_primary_dark</item>
++        <item name="colorAccent">@color/theme_accent</item>
+     <!-- The rest of your attributes -->
+ 
+         <item name="actionModeBackground">@color/action_mode_background</item>
++        <item name="windowActionModeOverlay">true</item>
+         <item name="colorButtonNormal">#FFAB00</item>
+-
+     </style>
+ 
+     <style name="Theme.GnucashTheme.NoActionBar" parent="Theme.AppCompat.Light.NoActionBar">
+         <!-- Set AppCompats color theming attrs -->
+-        <item name="colorPrimary">#2E7D32</item> <!-- 800 -->
+-        <item name="colorPrimaryDark">#1B5E20</item> <!-- 900 -->
+-        <item name="colorAccent">#FFAB00</item> <!-- A700 -->
++        <item name="colorPrimary">@color/theme_primary</item>
++        <item name="colorPrimaryDark">@color/theme_primary_dark</item>
++        <item name="colorAccent">@color/theme_accent</item>
+         <!-- The rest of your attributes -->
+ 
+         <item name="actionModeBackground">@color/action_mode_background</item>
++        <item name="windowActionModeOverlay">true</item>
+         <item name="colorButtonNormal">#FFAB00</item>
+ 
+     </style>

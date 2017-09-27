@@ -1,0 +1,119 @@
+From 111d1c2d5d8e57bf26c10972a44befbbd481e062 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 19 Dec 2012 23:06:58 +0100
+Subject: [PATCH] Improved: specify encoding when exporting OFX Improved: Add
+ option to use SGML OFX headers during export (issue #43) This helps GnuCash
+ desktop to better detect encoding and import OFX files, especially for users
+ of non-Latin characters Fixes #16, #28
+
+---
+ GnucashMobile/AndroidManifest.xml                  |  4 ++--
+ GnucashMobile/res/values/strings.xml               |  3 +++
+ .../res/xml/fragment_general_preferences.xml       |  1 +
+ .../android/ui/accounts/ExportDialogFragment.java  | 23 ++++++++++++++++++++--
+ .../src/org/gnucash/android/util/OfxFormatter.java |  5 +++++
+ 5 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/GnucashMobile/AndroidManifest.xml b/GnucashMobile/AndroidManifest.xml
+index 739d4222..eba68ba4 100644
+--- a/GnucashMobile/AndroidManifest.xml
++++ b/GnucashMobile/AndroidManifest.xml
+@@ -17,8 +17,8 @@
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+-    android:versionCode="4"
+-    android:versionName="1.0.3" >
++    android:versionCode="5"
++    android:versionName="1.0.4.beta1" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="15"/>
+     
+diff --git a/GnucashMobile/res/values/strings.xml b/GnucashMobile/res/values/strings.xml
+index cbe54793..7b630f03 100644
+--- a/GnucashMobile/res/values/strings.xml
++++ b/GnucashMobile/res/values/strings.xml
+@@ -487,4 +487,7 @@
+ 	<string name="key_default_export_email">export_email_target</string>
+ 	<string name="title_default_export_email">Default export email</string>
+ 	<string name="summary_default_export_email">The default email address to send exports to. You can still change this when you export.</string>
++	<string name="key_sgml_ofx_header">sgml_ofx_header</string>
++	<string name="title_sgml_ofx_header">Use SGML for OFX header</string>
++	<string name="summary_sgml_ofx_header">Allows GnuCash desktop to correctly detect encoding of OFX file. Useful for non-Latin character sets.</string>
+ </resources>
+\ No newline at end of file
+diff --git a/GnucashMobile/res/xml/fragment_general_preferences.xml b/GnucashMobile/res/xml/fragment_general_preferences.xml
+index ff63cf99..87821a6d 100644
+--- a/GnucashMobile/res/xml/fragment_general_preferences.xml
++++ b/GnucashMobile/res/xml/fragment_general_preferences.xml
+@@ -29,6 +29,7 @@
+             android:inputType="textEmailAddress"/>
+         <CheckBoxPreference android:summary="@string/hint_export_choice" android:key="@string/key_export_all_transactions" android:title="@string/title_export_all_transactions"/>
+         <CheckBoxPreference android:summary="@string/hint_delete_after_export" android:key="@string/key_delete_transactions_after_export" android:title="@string/title_always_delete_exported_transactions"/>
++        <CheckBoxPreference android:title="@string/title_sgml_ofx_header" android:key="@string/key_sgml_ofx_header" android:summary="@string/summary_sgml_ofx_header"/>
+         
+     </PreferenceCategory>
+     
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+index cfc10092..1ea29501 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+@@ -16,11 +16,14 @@
+ 
+ package org.gnucash.android.ui.accounts;
+ 
++import java.io.BufferedWriter;
+ import java.io.File;
+ import java.io.FileInputStream;
+ import java.io.FileOutputStream;
+ import java.io.FileWriter;
+ import java.io.IOException;
++import java.io.OutputStreamWriter;
++import java.io.StringWriter;
+ import java.io.Writer;
+ import java.nio.channels.FileChannel;
+ import java.text.SimpleDateFormat;
+@@ -222,9 +225,25 @@ public void onClick(View v) {
+ 	private void writeToExternalStorage(Document doc) throws IOException{
+ 		File file = new File(mFilePath);
+ 		
+-		FileWriter writer = new FileWriter(file);
+-		write(doc, writer);
++//		FileWriter writer = new FileWriter(file);
++		BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
++		boolean useSgmlHeader = PreferenceManager.getDefaultSharedPreferences(getActivity())
++				.getBoolean(getString(R.string.key_sgml_ofx_header), false);
++
++		//if we want SGML OFX headers, write first to string and then prepend header
++		if (useSgmlHeader){		
++			StringWriter stringWriter = new StringWriter();
++			write(doc, stringWriter);
++			
++			StringBuffer stringBuffer = new StringBuffer(OfxFormatter.OFX_SGML_HEADER);
++			stringBuffer.append('\n');
++			writer.write(stringBuffer.toString());
++		} else {
++			write(doc, writer);
++		}
+ 		
++		writer.flush();
++		writer.close();
+ 	}
+ 	
+ 	/**
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+index 0babb022..d76c8432 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+@@ -76,6 +76,11 @@
+ 	public static final String OFX_HEADER = "OFXHEADER=\"200\" VERSION=\"211\" SECURITY=\"NONE\" OLDFILEUID=\"NONE\" NEWFILEUID=\"NONE\"";
+ 	
+ 	/**
++	 * SGML header for OFX. Used for compatibility with desktop GnuCash
++	 */
++	public static final String OFX_SGML_HEADER = "ENCODING:UTF-8 \nOFXHEADER:100 \nDATA:OFXSGML \nVERSION:211 \nSECURITY:NONE \nCHARSET:UTF-8 \nCOMPRESSION:NONE \nOLDFILEUID:NONE \nNEWFILEUID:NONE";
++	
++	/**
+ 	 * Builds an XML representation of the {@link Account}s and {@link Transaction}s in the database 
+ 	 * @param context Application context
+ 	 * @param exportAll Whether all transactions should be exported or only new ones since last export

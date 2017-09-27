@@ -1,0 +1,201 @@
+From 5f0bcb6d772b0a669ed38916d7c09a1fe4068fa4 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 18 Aug 2015 19:55:35 +0200
+Subject: [PATCH] Fixed: Infinite loop in database upgrade when error occurs
+
+Fixed: migration of commodity GUIDs to accounts and transactions
+Fixed: account color not displayed in list
+Fixed: crash when saving an account edit
+Fixed: missing foreign key constraint on commodities column in accounts and transactions tables
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 27 ++++++++---------
+ .../org/gnucash/android/db/DatabaseHelper.java     | 28 +++++++++++-------
+ .../org/gnucash/android/db/MigrationHelper.java    | 34 ++++++++++++----------
+ app/src/main/res/layout/cardview_account.xml       |  2 +-
+ app/src/main/res/values-pl/strings.xml             |  4 ---
+ 5 files changed, 51 insertions(+), 44 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 3a97e8ae..3333c9d9 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -140,25 +140,26 @@ public long bulkAddRecords(@NonNull List<Account> accountList){
+     protected SQLiteStatement compileReplaceStatement(Account account) {
+         if (mReplaceStatement == null){
+             mReplaceStatement = mDb.compileStatement("REPLACE INTO " + AccountEntry.TABLE_NAME + " ( "
+-                    + AccountEntry.COLUMN_UID + " , "
+-                    + AccountEntry.COLUMN_NAME + " , "
+-                    + AccountEntry.COLUMN_DESCRIPTION + " , "
+-                    + AccountEntry.COLUMN_TYPE + " , "
+-                    + AccountEntry.COLUMN_CURRENCY + " , "
+-                    + AccountEntry.COLUMN_COLOR_CODE + " , "
+-                    + AccountEntry.COLUMN_FAVORITE + " , "
+-                    + AccountEntry.COLUMN_FULL_NAME + " , "
+-                    + AccountEntry.COLUMN_PLACEHOLDER + " , "
+-                    + AccountEntry.COLUMN_CREATED_AT + " , "
+-                    + AccountEntry.COLUMN_HIDDEN + " , "
++                    + AccountEntry.COLUMN_UID           + " , "
++                    + AccountEntry.COLUMN_NAME          + " , "
++                    + AccountEntry.COLUMN_DESCRIPTION   + " , "
++                    + AccountEntry.COLUMN_TYPE          + " , "
++                    + AccountEntry.COLUMN_CURRENCY      + " , "
++                    + AccountEntry.COLUMN_COLOR_CODE    + " , "
++                    + AccountEntry.COLUMN_FAVORITE      + " , "
++                    + AccountEntry.COLUMN_FULL_NAME     + " , "
++                    + AccountEntry.COLUMN_PLACEHOLDER   + " , "
++                    + AccountEntry.COLUMN_CREATED_AT    + " , "
++                    + AccountEntry.COLUMN_HIDDEN        + " , "
+                     + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " , "
+-                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
++                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ?)");
+         }
+ 
+         mReplaceStatement.clearBindings();
+         mReplaceStatement.bindString(1, account.getUID());
+         mReplaceStatement.bindString(2, account.getName());
+-        mReplaceStatement.bindString(3, account.getDescription());
++        if (account.getDescription() != null)
++            mReplaceStatement.bindString(3, account.getDescription());
+         mReplaceStatement.bindString(4, account.getAccountType().name());
+         mReplaceStatement.bindString(5, account.getCurrency().getCurrencyCode());
+         if (account.getColorHexCode() != null) {
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 76d6c7f0..255f9a36 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -22,11 +22,14 @@
+ import android.util.Log;
+ import android.widget.Toast;
+ 
++import com.crashlytics.android.Crashlytics;
++
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Commodity;
+ import org.xml.sax.SAXException;
+ 
+ import java.io.IOException;
++import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+@@ -199,7 +202,7 @@ public void onOpen(SQLiteDatabase db) {
+     }
+ 
+     @Override
+-	public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
++	public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion){
+ 		Log.i(LOG_TAG, "Upgrading database from version "
+                 + oldVersion + " to " + newVersion);
+ 
+@@ -220,18 +223,23 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+                 Object result = method.invoke(null, db);
+                 oldVersion = Integer.parseInt(result.toString());
+ 
+-
+             } catch (NoSuchMethodException e) {
+-                Log.e(LOG_TAG, "Database upgrade method definition not found " + newVersion);
+-                e.printStackTrace();
+-            } catch (Exception e) {
+-                e.printStackTrace();
++                String msg = String.format("Database upgrade method upgradeToVersion%d(SQLiteDatabase) definition not found ", newVersion);
++                Log.e(LOG_TAG, msg, e);
++                Crashlytics.log(msg);
++                Crashlytics.logException(e);
++                throw new RuntimeException(e);
++            }  catch (IllegalAccessException e) {
++                String msg = String.format("Database upgrade to version %d failed. The upgrade method is inaccessible ", newVersion);
++                Log.e(LOG_TAG, msg, e);
++                Crashlytics.log(msg);
++                Crashlytics.logException(e);
++                throw new RuntimeException(e);
++            } catch (InvocationTargetException e){
++                Crashlytics.logException(e);
++                throw new RuntimeException(e);
+             }
+         }
+-
+-        if (oldVersion != newVersion) {
+-            Log.w(LOG_TAG, "Upgrade for the database failed. The Database is currently at version " + oldVersion);
+-        }
+ 	}
+ 
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index aa93841a..b8a09dcb 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -867,28 +867,30 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+             try {
+                 importCommodities(db);
+             } catch (SAXException | ParserConfigurationException | IOException e) {
+-                Log.e(DatabaseHelper.LOG_TAG, "Error loading currencies into the database");
+-                e.printStackTrace();
++                Log.e(DatabaseHelper.LOG_TAG, "Error loading currencies into the database", e);
++                Crashlytics.logException(e);
+                 throw new RuntimeException(e);
+             }
+ 
+             db.execSQL(" ALTER TABLE " + AccountEntry.TABLE_NAME
+-                    + " ADD COLUMN " + AccountEntry.COLUMN_COMMODITY_UID + " varchar(255)");
++                    + " ADD COLUMN " + AccountEntry.COLUMN_COMMODITY_UID + " varchar(255) "
++                    + " REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") ");
+ 
+             db.execSQL(" ALTER TABLE " + TransactionEntry.TABLE_NAME
+-                    + " ADD COLUMN " + TransactionEntry.COLUMN_COMMODITY_UID + " varchar(255)");
+-
+-            db.execSQL("INSERT INTO " + AccountEntry.TABLE_NAME + " ( "
+-                            + AccountEntry.COLUMN_COMMODITY_UID + ") "
+-                            + "SELECT " + CommodityEntry.COLUMN_UID + " FROM " + CommodityEntry.TABLE_NAME
+-                            + " WHERE " + CommodityEntry.COLUMN_MNEMONIC + " = " + AccountEntry.COLUMN_CURRENCY + ";"
+-            );
+-
+-            db.execSQL("INSERT INTO " + TransactionEntry.TABLE_NAME + " ( "
+-                            + TransactionEntry.COLUMN_COMMODITY_UID + ") "
+-                            + "SELECT " + CommodityEntry.COLUMN_UID + " FROM " + CommodityEntry.TABLE_NAME
+-                            + " WHERE " + CommodityEntry.COLUMN_MNEMONIC + " = " + TransactionEntry.COLUMN_CURRENCY + ";"
+-            );
++                    + " ADD COLUMN " + TransactionEntry.COLUMN_COMMODITY_UID + " varchar(255) "
++                    + " REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") ");
++
++            db.execSQL("UPDATE " + AccountEntry.TABLE_NAME + " SET " + AccountEntry.COLUMN_COMMODITY_UID + " = "
++                    + " (SELECT " + CommodityEntry.COLUMN_UID
++                    + " FROM " + CommodityEntry.TABLE_NAME
++                    + " WHERE " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_COMMODITY_UID + " = " + CommodityEntry.TABLE_NAME + "." + CommodityEntry.COLUMN_UID
++                    + ")");
++
++            db.execSQL("UPDATE " + TransactionEntry.TABLE_NAME + " SET " + TransactionEntry.COLUMN_COMMODITY_UID + " = "
++                    + " (SELECT " + CommodityEntry.COLUMN_UID
++                    + " FROM " + CommodityEntry.TABLE_NAME
++                    + " WHERE " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_COMMODITY_UID + " = " + CommodityEntry.TABLE_NAME + "." + CommodityEntry.COLUMN_UID
++                    + ")");
+ 
+             String createPricesSql = "CREATE TABLE " + PriceEntry.TABLE_NAME + " ("
+                     + PriceEntry._ID                    + " integer primary key autoincrement, "
+diff --git a/app/src/main/res/layout/cardview_account.xml b/app/src/main/res/layout/cardview_account.xml
+index c6a2c48f..9e2b6bea 100644
+--- a/app/src/main/res/layout/cardview_account.xml
++++ b/app/src/main/res/layout/cardview_account.xml
+@@ -35,7 +35,7 @@
+ 
+         <View android:id="@+id/account_color_strip"
+             android:layout_width="@dimen/strip_width"
+-            android:layout_height="match_parent"
++            android:layout_height="80dp"
+             android:layout_alignParentLeft="true"
+             android:layout_alignParentStart="true"/>
+ 
+diff --git a/app/src/main/res/values-pl/strings.xml b/app/src/main/res/values-pl/strings.xml
+index e57bfe01..ec6ae6d3 100644
+--- a/app/src/main/res/values-pl/strings.xml
++++ b/app/src/main/res/values-pl/strings.xml
+@@ -377,10 +377,6 @@
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Wybierz kolor</string>
+-    <!-- Content description for a color square. -->
+-    <string name="color_swatch_description" translatable="false">Kolor <xliff:g id="color_index" example="14">%1$d</xliff:g></string>
+-    <!-- Content description for a selected color square. -->
+-    <string name="color_swatch_description_selected" translatable="false">Kolor <xliff:g id="color_index" example="14">%1$d</xliff:g> wybrany</string>
+     <string name="label_account_color_and_type">Kolor i typ konta</string>
+     <string name="label_delete_sub_accounts">Usu sub-konta</string>
+     <string name="title_recent_accounts">Ostatnie</string>

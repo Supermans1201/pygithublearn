@@ -1,0 +1,107 @@
+From 13ef64a5bd2be9ec0b3923c90a209d6a46745df1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 11:13:25 +0100
+Subject: [PATCH] Fix QIF export sometimes exports all transactions
+
+This is due to the import still in progress while the last export time is set.
+Now we query the database to get the last export time (instead of using current time) which ensures that the import database transaction must have completed first.
+
+Fixes #444
+---
+ CHANGELOG.md                                            |  6 ++++++
+ app/build.gradle                                        |  2 +-
+ .../org/gnucash/android/db/TransactionsDbAdapter.java   | 17 +++++++++++++++++
+ .../org/gnucash/android/importer/GncXmlImporter.java    |  9 +++++++--
+ 4 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 10f24f1b..77ac5089 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,11 @@
+ Change Log
+ ===============================================================================
++Version 2.0.4 *(2015-12-xx)*
++----------------------------
++* Fixed: Transaction export time not always working reliably
++* Fixed: Renaming account causes transactions to be deleted
++
++
+ Version 2.0.3 *(2015-11-21)*
+ ----------------------------
+ * Fixed: Unable to enter decimal amounts in split editor
+diff --git a/app/build.gradle b/app/build.gradle
+index 820cf023..3280e903 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -5,7 +5,7 @@ apply plugin: 'io.fabric'
+ 
+ def versionMajor = 2
+ def versionMinor = 0
+-def versionPatch = 3
++def versionPatch = 4
+ def versionBuild = 0
+ 
+ def buildTime() {
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index b522ea7f..bf3d19af 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -37,6 +37,7 @@
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ 
++import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -634,6 +635,22 @@ public long getTimestampOfLatestTransaction(AccountType type, String currencyCod
+     }
+ 
+     /**
++     * Returns the most recent `modified_at` timestamp of non-template transactions in the database
++     * @return Last moodified time in milliseconds or null if no such transactions exist
++     */
++    public Timestamp getTimestampOfLastModification(){
++        Cursor cursor = mDb.query(TransactionEntry.TABLE_NAME,
++                new String[]{"MAX(" + TransactionEntry.COLUMN_MODIFIED_AT + ")"},
++                TransactionEntry.COLUMN_TEMPLATE + " = 0", null, null, null, null);
++        Timestamp timestamp = null;
++        if (cursor.moveToNext()){
++            String timeString = cursor.getString(0);
++            timestamp = Timestamp.valueOf(timeString);
++        }
++        return timestamp;
++    }
++
++    /**
+      * Returns the earliest or latest timestamp of transactions for a specific account type and currency
+      * @param mod Mode (either MAX or MIN)
+      * @param type AccountType
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index 43ea7c61..a6734ed1 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -21,6 +21,7 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.Exporter;
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+@@ -93,8 +94,12 @@ public static void parse(InputStream gncXmlInputStream) throws ParserConfigurati
+         xr.parse(new InputSource(bos));
+         long endTime = System.nanoTime();
+ 
+-        String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
+-        PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext()).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
++
++        Timestamp timeStamp = TransactionsDbAdapter.getInstance().getTimestampOfLastModification();
++        PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
++                .edit()
++                .putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp.toString())
++                .apply();
+ 
+         Log.d(GncXmlImporter.class.getSimpleName(), String.format("%d ns spent on importing the file", endTime-startTime));
+     }

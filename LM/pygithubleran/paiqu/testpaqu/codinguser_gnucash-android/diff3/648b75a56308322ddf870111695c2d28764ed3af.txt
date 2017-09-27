@@ -1,0 +1,1199 @@
+From 648b75a56308322ddf870111695c2d28764ed3af Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 11 May 2015 13:37:12 +0200
+Subject: [PATCH] Improved management of scheduled backup and export
+
+Export dialog now can only be used to create schedules, not manage them
+Improved reliability of tests
+Code refactoring
+---
+ .travis.yml                                        |   5 +-
+ README.md                                          |   2 +-
+ app/build.gradle                                   |  12 +-
+ .../android/test/ui/AccountsActivityTest.java      |  17 +-
+ .../android/test/ui/ExportTransactionsTest.java    |  17 +-
+ .../android/test/ui/TransactionsActivityTest.java  |  10 +-
+ .../android/db/ScheduledActionDbAdapter.java       |  66 +---
+ .../org/gnucash/android/export/ExportParams.java   |   3 +-
+ .../org/gnucash/android/ui/BaseDrawerActivity.java |  12 +-
+ .../android/ui/account/AccountsActivity.java       |   4 +-
+ .../{ => ui}/export/ExportDialogFragment.java      |  45 +--
+ .../ui/export/ScheduledExportListFragment.java     | 382 +++++++++++++++++++++
+ .../ui/transaction/ScheduledActionsActivity.java   |  22 +-
+ .../ScheduledTransactionsListFragment.java         |   2 +-
+ app/src/main/res/menu/scheduled_export_actions.xml |   7 +
+ app/src/main/res/values-de/strings.xml             |   4 +
+ app/src/main/res/values-el/strings.xml             |   4 +
+ app/src/main/res/values-es-rMX/strings.xml         |   4 +
+ app/src/main/res/values-es/strings.xml             |   4 +
+ app/src/main/res/values-fr/strings.xml             |   4 +
+ app/src/main/res/values-hu/strings.xml             |   4 +
+ app/src/main/res/values-it/strings.xml             |   4 +
+ app/src/main/res/values-nb/strings.xml             |   4 +
+ app/src/main/res/values-nl/strings.xml             |   4 +
+ app/src/main/res/values-pt-rBR/strings.xml         |   4 +
+ app/src/main/res/values-ru/strings.xml             |   4 +
+ app/src/main/res/values-zh/strings.xml             |   4 +
+ app/src/main/res/values/strings.xml                |   4 +
+ 28 files changed, 519 insertions(+), 139 deletions(-)
+ rename app/src/main/java/org/gnucash/android/{ => ui}/export/ExportDialogFragment.java (86%)
+ create mode 100644 app/src/main/java/org/gnucash/android/ui/export/ScheduledExportListFragment.java
+ create mode 100644 app/src/main/res/menu/scheduled_export_actions.xml
+
+diff --git a/.travis.yml b/.travis.yml
+index 688a9cdd..8f6a7c44 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -14,15 +14,12 @@ android:
+     - extra-google-google_play_services
+     - extra-google-m2repository
+     - extra-android-m2repository
+-    #- addon-google_apis-google-19
++    - addon-google_apis-google-19
+ 
+     # Specify at least one system image,
+     # if you need to run emulator(s) during your tests
+     - sys-img-armeabi-v7a-android-19
+ 
+-before_install:
+-  #- echo yes | android update sdk --all --filter build-tools-22.0.1 --no-ui --force > /dev/null
+-
+ # Emulator Management: Create, Start and Wait
+ before_script:
+   - echo no | android create avd --force -n test -t android-19 --abi armeabi-v7a
+diff --git a/README.md b/README.md
+index 8efdeec1..c95c260f 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+-<a href="https://travis-ci.org/codinguser/gnucash-android">
++<a href="https://travis-ci.org/codinguser/gnucash-android" target="_blank">
+ <img src="https://travis-ci.org/codinguser/gnucash-android.svg?branch=develop" alt="Travis build status" />
+ </a>
+ 
+diff --git a/app/build.gradle b/app/build.gradle
+index b0fbcd9d..31d205b4 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -6,7 +6,7 @@ apply plugin: 'crashlytics'
+ def versionMajor = 1
+ def versionMinor = 6
+ def versionPatch = 0
+-def versionBuild = 3
++def versionBuild = 4
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd_HHmm'UTC'")
+@@ -24,6 +24,7 @@ android {
+     buildToolsVersion "22.0.1"
+     defaultConfig {
+         applicationId "org.gnucash.android"
++        testApplicationId 'org.gnucash.android.test'
+         minSdkVersion 10
+         targetSdkVersion 19
+         versionCode versionMajor * 10000 + versionMinor * 1000 + versionPatch * 100 + versionBuild
+@@ -35,9 +36,7 @@ android {
+             resValue "string", "dropbox_app_secret", RELEASE_DROPBOX_APP_SECRET
+             resValue "string", "manifest_dropbox_app_key", "db-${RELEASE_DROPBOX_APP_KEY}"
+         } else {
+-            resValue "string", "dropbox_app_key", "dhjh8ke9wf05948"
+-            resValue "string", "dropbox_app_secret", "h2t9fphj3nr4wkw"
+-            resValue "string", "manifest_dropbox_app_key", "db-dhjh8ke9wf05948"
++            resValue "string", "manifest_dropbox_app_key", "db-xxx-xxxx"
+         }
+     }
+ 
+@@ -83,10 +82,13 @@ android {
+     productFlavors {
+         development {
+             applicationId 'org.gnucash.android.devel'
+-            testApplicationId 'org.gnucash.android.test.devel'
++            testApplicationId 'org.gnucash.android.devel.test'
+             resValue "string", "app_name", "GnuCash-devel"
+             versionName "${versionMajor}.${versionMinor}.${versionPatch}-dev${versionBuild}_${buildTime()}"
+             resValue "string", "app_version_name", "${versionName}"
++            resValue "string", "dropbox_app_key", "dhjh8ke9wf05948"
++            resValue "string", "dropbox_app_secret", "h2t9fphj3nr4wkw"
++            resValue "string", "manifest_dropbox_app_key", "db-dhjh8ke9wf05948"
+         }
+ 
+         beta {
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 3f9492cc..da815131 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -89,9 +89,13 @@ protected void setUp() throws Exception {
+ 
+         //the What's new dialog is usually displayed on first run
+         String dismissDialog = getActivity().getString(R.string.label_dismiss);
+-        if (mSolo.waitForText(dismissDialog,1,1000)){
++        if (mSolo.waitForText(dismissDialog)){
+             mSolo.clickOnText(dismissDialog);
++            mSolo.waitForDialogToClose();
+         }
++
++        //drawer is opened when the app is installed for the first time
++        mSolo.setNavigationDrawer(Solo.CLOSED);
+ 	}
+ 
+ /*
+@@ -207,7 +211,7 @@ public void testEditAccount(){
+ 
+         clickSherlockActionBarItem(R.id.menu_save);
+ 
+-		mSolo.waitForDialogToClose(2000);
++		mSolo.waitForDialogToClose();
+         mSolo.waitForText("Accounts");
+ 
+ 		List<Account> accounts = mAccountsDbAdapter.getAllAccounts();
+@@ -216,7 +220,8 @@ public void testEditAccount(){
+ 		assertEquals("Edited Account", latest.getName());
+ 		assertEquals(DUMMY_ACCOUNT_CURRENCY_CODE, latest.getCurrency().getCurrencyCode());	
+ 	}
+-	
++
++    //TODO: Add test for moving content of accounts before deleting it
+ 	public void testDeleteAccount(){
+         final String accountNameToDelete = "TO BE DELETED";
+         final String accountUidToDelete = "to-be-deleted";
+@@ -238,9 +243,11 @@ public void testDeleteAccount(){
+ 
+         clickSherlockActionBarItem(R.id.context_menu_delete);
+ 
++        mSolo.waitForDialogToOpen();
++        mSolo.clickOnRadioButton(0);
+         mSolo.clickOnView(mSolo.getView(R.id.btn_save));
+ 
+-        mSolo.waitForDialogToClose(1000);
++        mSolo.waitForDialogToClose();
+         mSolo.waitForText("Accounts");
+ 
+         Exception expectedException = null;
+@@ -285,7 +292,7 @@ public void testIntentAccountCreation(){
+ 	
+ 	protected void tearDown() throws Exception {
+         mSolo.finishOpenedActivities();
+-        mSolo.sleep(1000);
++        mSolo.waitForEmptyActivityStack(10000);
+         mAccountsDbAdapter.deleteAllRecords();
+ 
+ 		super.tearDown();
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 66f6a84f..e2a882ac 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -124,10 +124,11 @@ public void testExport(ExportFormat format){
+ 		mSolo.clickOnText(mSolo.getString(R.string.nav_menu_export));
+ 
+         mSolo.waitForText(getActivity().getString(R.string.menu_export_transactions));
++		mSolo.waitForDialogToOpen();
+ 		mSolo.clickOnText(format.name());
+ 		mSolo.clickOnButton(mSolo.getString(R.string.btn_export));
+ 
+-        mSolo.waitForDialogToClose(10000);
++        mSolo.waitForDialogToClose();
+ 		mSolo.sleep(2000); //sleep so that emulators can save the file
+ 
+ 		assertThat(folder.listFiles().length).isEqualTo(1);
+@@ -151,7 +152,7 @@ public void testDeleteTransactionsAfterExport(){
+ 	/**
+ 	 * Test creating a scheduled export
+ 	 */
+-	public void atestCreateExportSchedule(){
++	public void testCreateExportSchedule(){
+ 		mSolo.setNavigationDrawer(Solo.OPENED);
+ 		mSolo.clickOnText(mSolo.getString(R.string.nav_menu_export));
+ 		mSolo.waitForText(getActivity().getString(R.string.menu_export_transactions));
+@@ -159,12 +160,14 @@ public void atestCreateExportSchedule(){
+ 		mSolo.clickOnText(ExportFormat.XML.name());
+ 		mSolo.clickOnView(mSolo.getView(R.id.input_recurrence));
+ 
+-		mSolo.clickOnText("OFF");
+-		mSolo.pressSpinnerItem(0, 1);
++		mSolo.clickOnToggleButton("OFF");
+ 		mSolo.clickOnText("Done");
++		mSolo.waitForDialogToClose();
++
+ 		mSolo.clickOnButton(mSolo.getString(R.string.btn_export));
+-		mSolo.waitForDialogToClose(5000);
++		mSolo.waitForDialogToClose();
+ 
++		mSolo.sleep(2000); //wait for database save
+ 
+ 		ScheduledActionDbAdapter scheduledactionDbAdapter = new ScheduledActionDbAdapter(mDb);
+ 		assertThat(scheduledactionDbAdapter.getAllEnabledScheduledActions())
+@@ -172,7 +175,8 @@ public void atestCreateExportSchedule(){
+ 				.extracting("mActionType").contains(ScheduledAction.ActionType.BACKUP);
+ 
+ 		ScheduledAction action = scheduledactionDbAdapter.getAllScheduledActions().get(0);
+-		assertThat(action.getPeriodType()).isEqualTo(PeriodType.DAY);
++		assertThat(action.getPeriodType()).isEqualTo(PeriodType.WEEK);
++		assertThat(action.getEndTime()).isEqualTo(0);
+ 	}
+ 
+ 	//todo: add testing of export flag to unit test
+@@ -180,6 +184,7 @@ public void atestCreateExportSchedule(){
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		mSolo.finishOpenedActivities();
++		mSolo.waitForEmptyActivityStack(10000);
+ 		mAccountsDbAdapter.deleteAllRecords();
+         mDbHelper.close();
+         mDb.close();
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 8910c478..0d62b337 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -401,12 +401,6 @@ public void testOpenTransactionEditShouldNotModifyTransaction(){
+ 					TransactionFormFragment.DATE_FORMATTER.format(trxDate));
+ 			assertEquals(TransactionFormFragment.TIME_FORMATTER.format(expectedDate),
+ 					TransactionFormFragment.TIME_FORMATTER.format(trxDate));
+-			
+-			//FIXME: for some reason, the expected time is higher (in the future) than the actual time
+-			//this should not be the case since the transaction was created with the expected time
+-			//I guess it has to do with the time precision and the fact that the time is repeatedly 
+-			//converted to Date objects and back. But just validating the printable date and time should be ok
+-	//		assertEquals(mTransactionTimeMillis, trx.getTimeMillis());
+ 		}
+ 
+ 	public void testDeleteTransaction(){
+@@ -414,7 +408,7 @@ public void testDeleteTransaction(){
+ 		
+ 		mSolo.clickOnCheckBox(0);		
+ 		clickSherlockActionBarItem(R.id.context_menu_delete);
+-		
++
+ 		mSolo.sleep(500);
+ 
+ 		long id = mAccountsDbAdapter.getID(DUMMY_ACCOUNT_UID);
+@@ -487,7 +481,7 @@ public void testLegacyIntentTransactionRecording(){
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		mSolo.finishOpenedActivities();
+-		mSolo.sleep(1000); //wait for activities to finish before clearing db
++		mSolo.waitForEmptyActivityStack(10000);
+ 		mAccountsDbAdapter.deleteAllRecords();
+ 		super.tearDown();
+ 	}
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index fa9433e9..3cb26df0 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -23,8 +23,6 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.export.ExportFormat;
+-import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.model.ScheduledAction;
+ 
+ import java.util.ArrayList;
+@@ -154,7 +152,7 @@ public int bulkAddScheduledActions(List<ScheduledAction> scheduledActionList){
+      * @param cursor Cursor pointing to data set
+      * @return ScheduledEvent object instance
+      */
+-    private ScheduledAction buildScheduledEventInstance(final Cursor cursor){
++    public ScheduledAction buildScheduledActionInstance(final Cursor cursor){
+         String actionUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
+         long period     = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
+         long startTime  = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
+@@ -192,7 +190,7 @@ public ScheduledAction getScheduledAction(String uid){
+         ScheduledAction scheduledAction = null;
+         if (cursor != null) {
+             if (cursor.moveToFirst()) {
+-                scheduledAction = buildScheduledEventInstance(cursor);
++                scheduledAction = buildScheduledActionInstance(cursor);
+             }
+             cursor.close();
+         }
+@@ -213,7 +211,7 @@ public ScheduledAction getScheduledAction(String uid){
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         try {
+             while (cursor.moveToNext()) {
+-                scheduledActions.add(buildScheduledEventInstance(cursor));
++                scheduledActions.add(buildScheduledActionInstance(cursor));
+             }
+         } finally {
+             cursor.close();
+@@ -222,60 +220,6 @@ public ScheduledAction getScheduledAction(String uid){
+     }
+ 
+     /**
+-     * Returns the first export scheduled action in the database which matches the ExportFormat.
+-     * <p>There is an expectation that there will only be one scheduled action per export format in the database.</p>
+-     * @param exportFormat ExportFormat of scheduled backup
+-     * @return ScheduledAction for the backup or null
+-     */
+-    public ScheduledAction getScheduledBackupAction(ExportFormat exportFormat){
+-        Cursor cursor = mDb.query(ScheduledActionEntry.TABLE_NAME, null,
+-                ScheduledActionEntry.COLUMN_TYPE + "= ?",
+-                new String[]{ScheduledAction.ActionType.BACKUP.name()}, null, null, null);
+-        try{
+-            while(cursor.moveToNext()){
+-                String paramsCsv = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TAG));
+-                ExportParams params = ExportParams.parseCsv(paramsCsv);
+-                if (params.getExportFormat() == exportFormat){
+-                    return buildScheduledEventInstance(cursor);
+-                }
+-            }
+-        } finally {
+-            cursor.close();
+-        }
+-        return null;
+-    }
+-
+-    /**
+-     * Deletes the scheduled backup actions which correspond to the export format
+-     * @param exportFormat Export format
+-     * @return Number of records deleted
+-     */
+-    public int deleteScheduledBackupAction(ExportFormat exportFormat){
+-        List<String> uidsToBeDeleted = new ArrayList<>();
+-        Cursor cursor = mDb.query(ScheduledActionEntry.TABLE_NAME,
+-                new String[]{ScheduledActionEntry.COLUMN_UID, ScheduledActionEntry.COLUMN_TAG},
+-                ScheduledActionEntry.COLUMN_TYPE + "= ?",
+-                new String[]{ScheduledAction.ActionType.BACKUP.name()}, null, null, null);
+-        try{
+-            while(cursor.moveToNext()){
+-                String paramsCsv = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TAG));
+-                ExportParams params = ExportParams.parseCsv(paramsCsv);
+-                if (params.getExportFormat() == exportFormat){
+-                    uidsToBeDeleted.add(cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_UID)));
+-                }
+-            }
+-        } finally {
+-            cursor.close();
+-        }
+-
+-        int count = 0;
+-        for (String uid : uidsToBeDeleted) {
+-            count += mDb.delete(mTableName, ScheduledActionEntry.COLUMN_UID + "=?", new String[]{uid});
+-        }
+-        return count;
+-    }
+-
+-    /**
+      * Returns all scheduled events in the database
+      * @return List with all scheduled events
+      */
+@@ -283,7 +227,7 @@ public int deleteScheduledBackupAction(ExportFormat exportFormat){
+         Cursor cursor = fetchAllRecords();
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         while (cursor.moveToNext()){
+-            scheduledActions.add(buildScheduledEventInstance(cursor));
++            scheduledActions.add(buildScheduledActionInstance(cursor));
+         }
+         return scheduledActions;
+     }
+@@ -297,7 +241,7 @@ public int deleteScheduledBackupAction(ExportFormat exportFormat){
+                 null, ScheduledActionEntry.COLUMN_ENABLED + "=1", null, null, null, null);
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         while (cursor.moveToNext()){
+-            scheduledActions.add(buildScheduledEventInstance(cursor));
++            scheduledActions.add(buildScheduledActionInstance(cursor));
+         }
+         return scheduledActions;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index b121c474..120d052b 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -17,12 +17,13 @@
+ package org.gnucash.android.export;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.ui.export.ExportDialogFragment;
+ 
+ /**
+  * Encapsulation of the parameters used for exporting transactions.
+  * The parameters are determined by the user in the export dialog and are then transmitted to the asynchronous task which
+  * actually performs the export.
+- * @see org.gnucash.android.export.ExportDialogFragment
++ * @see ExportDialogFragment
+  * @see ExportAsyncTask
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+diff --git a/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
+index f9e7b85e..c6e1aa9f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
+@@ -143,7 +143,7 @@ private MergeAdapter createNavDrawerMergeAdapter() {
+         settingsHeader.setTextColor(titleColorGreen);
+ 
+         ArrayList<String> aboutNavOptions = new ArrayList<>();
+-//        aboutNavOptions.add("Backup & Export");
++        aboutNavOptions.add(getString(R.string.nav_menu_scheduled_backups));
+         aboutNavOptions.add(getString(R.string.nav_menu_settings));
+         //TODO: add help view
+         ArrayAdapter<String> aboutNavAdapter = new ArrayAdapter<>(this,
+@@ -217,7 +217,15 @@ protected void selectItem(int position) {
+             }
+                 break;
+ 
+-            case 9: //Settings activity
++            case 9: //scheduled backup
++                Intent intent = new Intent(this, ScheduledActionsActivity.class);
++                intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP);
++                intent.putExtra(ScheduledActionsActivity.EXTRA_DISPLAY_MODE,
++                        ScheduledActionsActivity.DisplayMode.EXPORT_ACTIONS);
++                startActivity(intent);
++                break;
++
++            case 10: //Settings activity
+                 startActivity(new Intent(this, SettingsActivity.class));
+                 break;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 3991a1e8..2f778431 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -54,12 +54,10 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+-import org.gnucash.android.export.ExportDialogFragment;
++import org.gnucash.android.ui.export.ExportDialogFragment;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+-import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.service.SchedulerService;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.chart.ChartReportActivity;
+ import org.gnucash.android.ui.passcode.PassLockActivity;
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportDialogFragment.java
+similarity index 86%
+rename from app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+rename to app/src/main/java/org/gnucash/android/ui/export/ExportDialogFragment.java
+index 3675b89f..6df927cb 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportDialogFragment.java
+@@ -14,10 +14,9 @@
+  * limitations under the License.
+  */
+ 
+-package org.gnucash.android.export;
++package org.gnucash.android.ui.export;
+ 
+ import android.app.Activity;
+-import android.app.ProgressDialog;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.os.Bundle;
+@@ -41,20 +40,17 @@
+ import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrenceFormatter;
+ import com.doomonafireball.betterpickers.recurrencepicker.RecurrencePickerDialog;
+ import com.dropbox.sync.android.DbxAccountManager;
+-import com.google.android.gms.common.api.GoogleApiClient;
+-import com.google.android.gms.common.api.ResultCallback;
+-import com.google.android.gms.drive.Drive;
+-import com.google.android.gms.drive.DriveFolder;
+-import com.google.android.gms.drive.MetadataChangeSet;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
++import org.gnucash.android.export.ExportAsyncTask;
++import org.gnucash.android.export.ExportFormat;
++import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.ui.settings.SettingsActivity;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ 
+-import java.io.File;
+ import java.util.List;
+ import java.util.UUID;
+ 
+@@ -138,22 +134,18 @@ public void onClick(View v) {
+ 			exportParameters.setExportTarget(mExportTarget);
+ 			exportParameters.setDeleteTransactionsAfterExport(mDeleteAllCheckBox.isChecked());
+ 
+-			ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+-			scheduledActionDbAdapter.deleteScheduledBackupAction(mExportFormat);
+-			List<ScheduledAction> events = RecurrenceParser.parse(mEventRecurrence,
++			List<ScheduledAction> scheduledActions = RecurrenceParser.parse(mEventRecurrence,
+ 					ScheduledAction.ActionType.BACKUP);
+-			//this is done on purpose, we will add only one scheduled action per export type
+-			//FIXME: Prevent user from setting multiple days in dialog or update scheduled action parser to return only one recurrence
+-			if (!events.isEmpty()){
+-				ScheduledAction scheduledAction = events.get(0);
++			for (ScheduledAction scheduledAction : scheduledActions) {
+ 				scheduledAction.setTag(exportParameters.toCsv());
+ 				scheduledAction.setActionUID(UUID.randomUUID().toString().replaceAll("-", ""));
+-				scheduledActionDbAdapter.addScheduledAction(scheduledAction);
++				ScheduledActionDbAdapter.getInstance().addScheduledAction(scheduledAction);
+ 			}
+-            dismiss();
+ 
+             Log.i(TAG, "Commencing async export of transactions");
+             new ExportAsyncTask(getActivity()).execute(exportParameters);
++
++			dismiss();
+ 		}
+ 		
+ 	}
+@@ -186,27 +178,8 @@ public void onRadioButtonClicked(View view){
+ 				mExportWarningTextView.setText(R.string.export_warning_xml);
+ 				break;
+         }
+-		refreshRecurrenceTextView(mExportFormat);
+     }
+ 
+-	/**
+-	 * Refreshes the recurrence text view for the specified backup format
+-	 * This is meant to be called every time the backup format is changed in the dialog
+-	 * @param exportFormat ExportFormat
+-	 */
+-	private void refreshRecurrenceTextView(ExportFormat exportFormat){
+-		String repeatString	= getString(R.string.label_tap_to_create_schedule);
+-		mEventRecurrence = new EventRecurrence();
+-		ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+-		ScheduledAction scheduledBackup = scheduledActionDbAdapter.getScheduledBackupAction(exportFormat);
+-		if (scheduledBackup != null){
+-			repeatString = scheduledBackup.getRepeatString();
+-			mRecurrenceRule = scheduledBackup.getRuleString();
+-			mEventRecurrence.parse(mRecurrenceRule);
+-		}
+-		mRecurrenceTextView.setText(repeatString);
+-	}
+-
+ 	@Override
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ScheduledExportListFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ScheduledExportListFragment.java
+new file mode 100644
+index 00000000..0f3a4ee0
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/ui/export/ScheduledExportListFragment.java
+@@ -0,0 +1,382 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.gnucash.android.ui.export;
++
++import android.content.Context;
++import android.content.res.Resources;
++import android.database.Cursor;
++import android.graphics.Rect;
++import android.os.Bundle;
++import android.support.v4.app.LoaderManager;
++import android.support.v4.content.Loader;
++import android.support.v4.widget.SimpleCursorAdapter;
++import android.util.Log;
++import android.util.SparseBooleanArray;
++import android.view.LayoutInflater;
++import android.view.TouchDelegate;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.CheckBox;
++import android.widget.CompoundButton;
++import android.widget.ListView;
++import android.widget.TextView;
++
++import com.actionbarsherlock.app.ActionBar;
++import com.actionbarsherlock.app.SherlockListFragment;
++import com.actionbarsherlock.view.ActionMode;
++import com.actionbarsherlock.view.Menu;
++import com.actionbarsherlock.view.MenuInflater;
++import com.actionbarsherlock.view.MenuItem;
++
++import org.gnucash.android.R;
++import org.gnucash.android.db.DatabaseCursorLoader;
++import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
++import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.ui.account.AccountsActivity;
++
++/**
++ * Fragment for displayed scheduled backup entries in the database
++ */
++public class ScheduledExportListFragment extends SherlockListFragment implements
++        LoaderManager.LoaderCallbacks<Cursor> {
++
++    /**
++     * Logging tag
++     */
++    protected static final String TAG = "ScheduledTrxnFragment";
++
++    private ScheduledActionDbAdapter mScheduledActionDbAdapter;
++    private SimpleCursorAdapter mCursorAdapter;
++    private ActionMode mActionMode = null;
++
++    /**
++     * Flag which is set when a transaction is selected
++     */
++    private boolean mInEditMode = false;
++
++
++    /**
++     * Callbacks for the menu items in the Context ActionBar (CAB) in action mode
++     */
++    private ActionMode.Callback mActionModeCallbacks = new ActionMode.Callback() {
++
++        @Override
++        public boolean onCreateActionMode(ActionMode mode, Menu menu) {
++            MenuInflater inflater = mode.getMenuInflater();
++            inflater.inflate(R.menu.transactions_context_menu, menu);
++            menu.removeItem(R.id.context_menu_move_transactions);
++            return true;
++        }
++
++        @Override
++        public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
++            //nothing to see here, move along
++            return false;
++        }
++
++        @Override
++        public void onDestroyActionMode(ActionMode mode) {
++            finishEditMode();
++        }
++
++        @Override
++        public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
++            switch (item.getItemId()) {
++                case R.id.context_menu_delete:
++                    for (long id : getListView().getCheckedItemIds()) {
++                        Log.i(TAG, "Deleting scheduled export(s)");
++                        mScheduledActionDbAdapter.deleteRecord(id);
++                    }
++                    mode.finish();
++                    getLoaderManager().destroyLoader(0);
++                    refreshList();
++                    return true;
++
++                default:
++                    return false;
++            }
++        }
++    };
++
++    @Override
++    public void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++
++        mScheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
++        mCursorAdapter = new ScheduledExportCursorAdapter(
++                getActivity().getApplicationContext(),
++                R.layout.list_item_scheduled_trxn, null,
++                new String[]{}, new int[]{});
++        setListAdapter(mCursorAdapter);
++    }
++
++    @Override
++    public View onCreateView(LayoutInflater inflater, ViewGroup container,
++                             Bundle savedInstanceState) {
++        return inflater.inflate(R.layout.fragment_scheduled_events_list, container, false);
++    }
++
++    @Override
++    public void onActivityCreated(Bundle savedInstanceState) {
++        super.onActivityCreated(savedInstanceState);
++
++        ActionBar actionBar = getSherlockActivity().getSupportActionBar();
++        actionBar.setDisplayShowTitleEnabled(true);
++        actionBar.setDisplayHomeAsUpEnabled(true);
++        actionBar.setHomeButtonEnabled(true);
++        actionBar.setTitle(R.string.title_scheduled_exports);
++
++        setHasOptionsMenu(true);
++        getListView().setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
++        ((TextView)getListView().getEmptyView()).setText(R.string.label_no_scheduled_exports_to_display);
++    }
++
++    /**
++     * Reload the list of transactions and recompute account balances
++     */
++    public void refreshList(){
++        getLoaderManager().restartLoader(0, null, this);
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        refreshList();
++    }
++
++    @Override
++    public void onListItemClick(ListView l, View v, int position, long id) {
++        super.onListItemClick(l, v, position, id);
++        if (mActionMode != null){
++            CheckBox checkbox = (CheckBox) v.findViewById(R.id.checkbox);
++            checkbox.setChecked(!checkbox.isChecked());
++            return;
++        } else {
++            startActionMode();
++        }
++    }
++
++    @Override
++    public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
++        menu.removeItem(R.id.menu_search);
++        menu.removeItem(R.id.menu_settings);
++        inflater.inflate(R.menu.scheduled_export_actions, menu);
++    }
++
++    @Override
++    public boolean onOptionsItemSelected(MenuItem item) {
++        switch (item.getItemId()){
++            case R.id.menu_add_scheduled_export:
++                AccountsActivity.showExportDialog(getActivity());
++                return true;
++            default:
++                return super.onOptionsItemSelected(item);
++        }
++    }
++
++    @Override
++    public Loader<Cursor> onCreateLoader(int arg0, Bundle arg1) {
++        Log.d(TAG, "Creating transactions loader");
++        return new ScheduledExportCursorLoader(getActivity());
++    }
++
++    @Override
++    public void onLoadFinished(Loader<Cursor> loader, Cursor cursor) {
++        Log.d(TAG, "Scheduled backup loader finished. Swapping in cursor");
++        mCursorAdapter.swapCursor(cursor);
++        mCursorAdapter.notifyDataSetChanged();
++    }
++
++    @Override
++    public void onLoaderReset(Loader<Cursor> loader) {
++        Log.d(TAG, "Resetting scheduled backup loader");
++        mCursorAdapter.swapCursor(null);
++    }
++
++    /**
++     * Finishes the edit mode in the list.
++     * Edit mode is started when at least one list item is selected
++     */
++    public void finishEditMode(){
++        mInEditMode = false;
++        uncheckAllItems();
++        mActionMode = null;
++    }
++
++    /**
++     * Sets the title of the Context ActionBar when in action mode.
++     * It sets the number highlighted items
++     */
++    public void setActionModeTitle(){
++        int count = getListView().getCheckedItemIds().length; //mSelectedIds.size();
++        if (count > 0){
++            mActionMode.setTitle(getResources().getString(R.string.title_selected, count));
++        }
++    }
++
++    /**
++     * Unchecks all the checked items in the list
++     */
++    private void uncheckAllItems() {
++        SparseBooleanArray checkedPositions = getListView().getCheckedItemPositions();
++        ListView listView = getListView();
++        for (int i = 0; i < checkedPositions.size(); i++) {
++            int position = checkedPositions.keyAt(i);
++            listView.setItemChecked(position, false);
++        }
++    }
++
++
++    /**
++     * Starts action mode and activates the Context ActionBar (CAB)
++     * Action mode is initiated as soon as at least one transaction is selected (highlighted)
++     */
++    private void startActionMode(){
++        if (mActionMode != null) {
++            return;
++        }
++        mInEditMode = true;
++        // Start the CAB using the ActionMode.Callback defined above
++        mActionMode = getSherlockActivity().startActionMode(mActionModeCallbacks);
++    }
++
++    /**
++     * Stops action mode and deselects all selected transactions.
++     * This method only has effect if the number of checked items is greater than 0 and {@link #mActionMode} is not null
++     */
++    private void stopActionMode(){
++        int checkedCount = getListView().getCheckedItemIds().length;
++        if (checkedCount <= 0 && mActionMode != null) {
++            mActionMode.finish();
++        }
++    }
++
++
++    /**
++     * Extends a simple cursor adapter to bind transaction attributes to views
++     * @author Ngewi Fet <ngewif@gmail.com>
++     */
++    protected class ScheduledExportCursorAdapter extends SimpleCursorAdapter {
++
++        public ScheduledExportCursorAdapter(Context context, int layout, Cursor c,
++                                            String[] from, int[] to) {
++            super(context, layout, c, from, to, 0);
++        }
++
++        @Override
++        public View getView(int position, View convertView, ViewGroup parent) {
++            final View view = super.getView(position, convertView, parent);
++            final int itemPosition = position;
++            CheckBox checkbox = (CheckBox) view.findViewById(R.id.checkbox);
++            //TODO: Revisit this if we ever change the application theme
++            int id = Resources.getSystem().getIdentifier("btn_check_holo_light", "drawable", "android");
++            checkbox.setButtonDrawable(id);
++
++            final TextView secondaryText = (TextView) view.findViewById(R.id.secondary_text);
++
++            checkbox.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
++
++                @Override
++                public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
++                    getListView().setItemChecked(itemPosition, isChecked);
++                    if (isChecked) {
++                        startActionMode();
++                    } else {
++                        stopActionMode();
++                    }
++                    setActionModeTitle();
++                }
++            });
++
++
++            ListView listView = (ListView) parent;
++            if (mInEditMode && listView.isItemChecked(position)){
++                view.setBackgroundColor(getResources().getColor(R.color.abs__holo_blue_light));
++                secondaryText.setTextColor(getResources().getColor(android.R.color.white));
++            } else {
++                view.setBackgroundColor(getResources().getColor(android.R.color.transparent));
++                secondaryText.setTextColor(getResources().getColor(android.R.color.secondary_text_light_nodisable));
++                checkbox.setChecked(false);
++            }
++
++            final View checkBoxView = checkbox;
++            final View parentView = view;
++            parentView.post(new Runnable() {
++                @Override
++                public void run() {
++                    if (isAdded()){ //may be run when fragment has been unbound from activity
++                        float extraPadding = getResources().getDimension(R.dimen.edge_padding);
++                        final android.graphics.Rect hitRect = new Rect();
++                        checkBoxView.getHitRect(hitRect);
++                        hitRect.right   += extraPadding;
++                        hitRect.bottom  += 3*extraPadding;
++                        hitRect.top     -= extraPadding;
++                        hitRect.left    -= 2*extraPadding;
++                        parentView.setTouchDelegate(new TouchDelegate(hitRect, checkBoxView));
++                    }
++                }
++            });
++
++            return view;
++        }
++
++        @Override
++        public void bindView(View view, Context context, Cursor cursor) {
++            super.bindView(view, context, cursor);
++
++            ScheduledAction scheduledAction = mScheduledActionDbAdapter.buildScheduledActionInstance(cursor);
++
++            TextView primaryTextView = (TextView) view.findViewById(R.id.primary_text);
++            ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
++            primaryTextView.setText(params.getExportFormat().name() + " "
++                    + scheduledAction.getActionType().name().toLowerCase() + " to "
++                    + params.getExportTarget().name().toLowerCase());
++
++            view.findViewById(R.id.right_text).setVisibility(View.GONE);
++
++            TextView descriptionTextView = (TextView) view.findViewById(R.id.secondary_text);
++            descriptionTextView.setText(scheduledAction.getRepeatString());
++
++        }
++    }
++
++    /**
++     * {@link DatabaseCursorLoader} for loading recurring transactions asynchronously from the database
++     * @author Ngewi Fet <ngewif@gmail.com>
++     */
++    protected static class ScheduledExportCursorLoader extends DatabaseCursorLoader {
++
++        public ScheduledExportCursorLoader(Context context) {
++            super(context);
++        }
++
++        @Override
++        public Cursor loadInBackground() {
++            mDatabaseAdapter = ScheduledActionDbAdapter.getInstance();
++
++            Cursor c = mDatabaseAdapter.fetchAllRecords(
++                    DatabaseSchema.ScheduledActionEntry.COLUMN_TYPE + "=?",
++                    new String[]{ScheduledAction.ActionType.BACKUP.name()});
++
++            registerContentObserver(c);
++            return c;
++        }
++    }
++
++}
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsActivity.java
+index 8ba54cb3..327b1ffe 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsActivity.java
+@@ -19,9 +19,8 @@
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.app.FragmentTransaction;
+ 
+-import com.actionbarsherlock.view.MenuItem;
+-
+ import org.gnucash.android.R;
++import org.gnucash.android.ui.export.ScheduledExportListFragment;
+ import org.gnucash.android.ui.passcode.PassLockActivity;
+ 
+ import java.util.MissingFormatArgumentException;
+@@ -49,21 +48,32 @@ protected void onCreate(Bundle savedInstanceState) {
+ 
+         switch (mDisplayMode){
+             case ALL_ACTIONS:
+-                showAllScheduledEventsFragment();
+-                break;
++                //TODO: do we even want this option. For now fall through to SX
+ 
+             case TRANSACTION_ACTIONS:
+                 showScheduledTransactionsFragment();
+                 break;
+ 
+             case EXPORT_ACTIONS:
+-
++                showScheduledExportsFragment();
+                 break;
+         }
+     }
+ 
+-    private void showAllScheduledEventsFragment(){
++    /**
++     * Shows the fragment with scheduled exports
++     */
++    private void showScheduledExportsFragment(){
++        FragmentManager fragmentManager = getSupportFragmentManager();
++        FragmentTransaction fragmentTransaction = fragmentManager
++                .beginTransaction();
++
++        ScheduledExportListFragment exportListFragment = new ScheduledExportListFragment();
+ 
++        fragmentTransaction.replace(R.id.fragment_container,
++                exportListFragment, "fragment_recurring_transactions");
++
++        fragmentTransaction.commit();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index 39ef8382..b633dddd 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -382,7 +382,7 @@ public void bindView(View view, Context context, Cursor cursor) {
+             TextView descriptionTextView = (TextView) view.findViewById(R.id.secondary_text);
+ 
+             ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+-            String scheduledActionUID = cursor.getString(cursor.getColumnIndexOrThrow("origin_scheduled_action_uid"));
++            String scheduledActionUID = cursor.getString(cursor.getColumnIndexOrThrow("origin_scheduled_action_uid")); //column created from join when fetching scheduled transactions
+             view.setTag(scheduledActionUID);
+             ScheduledAction scheduledAction = scheduledActionDbAdapter.getScheduledAction(scheduledActionUID);
+             descriptionTextView.setText(scheduledAction.getRepeatString());
+diff --git a/app/src/main/res/menu/scheduled_export_actions.xml b/app/src/main/res/menu/scheduled_export_actions.xml
+new file mode 100644
+index 00000000..f4553a07
+--- /dev/null
++++ b/app/src/main/res/menu/scheduled_export_actions.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<menu xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:id="@+id/menu_add_scheduled_export"
++        android:icon="@drawable/content_new_holo_dark"
++        android:title="@string/title_create_export_schedule"
++        android:showAsAction="always"/>
++</menu>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index eefdccc0..06b25d09 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -492,4 +492,8 @@ No user-identifiable information will be collected as part of this process!</str
+ 	<string name="label_report_currency">Select currency</string>
+ 	<string name="title_use_account_color">Account color in reports</string>
+ 	<string name="summary_use_account_color">Use account color in the pie chart</string>
++	<string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++	<string name="title_scheduled_exports">Scheduled Exports</string>
++	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++	<string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index daae6efb..83f02143 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -511,4 +511,8 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="label_report_currency">Select currency</string>
+ 	<string name="title_use_account_color">Account color in reports</string>
+ 	<string name="summary_use_account_color">Use account color in the pie chart</string>
++	<string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++	<string name="title_scheduled_exports">Scheduled Exports</string>
++	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++	<string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index a9b699db..04043549 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -496,4 +496,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+     <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++    <string name="title_scheduled_exports">Scheduled Exports</string>
++    <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++    <string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index d495135c..4e3e4a90 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -493,4 +493,8 @@ Este proceso solo recoge informaci&#243;n que no permite identificar al usuario<
+ 	<string name="label_report_currency">Select currency</string>
+ 	<string name="title_use_account_color">Account color in reports</string>
+ 	<string name="summary_use_account_color">Use account color in the pie chart</string>
++	<string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++	<string name="title_scheduled_exports">Scheduled Exports</string>
++	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++	<string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 94cefb41..447f6447 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -493,4 +493,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+     <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++    <string name="title_scheduled_exports">Scheduled Exports</string>
++    <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++    <string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index b0a31341..baf67383 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -497,4 +497,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+     <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++    <string name="title_scheduled_exports">Scheduled Exports</string>
++    <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++    <string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index d5215d02..5fd9d1ac 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -497,4 +497,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+     <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++    <string name="title_scheduled_exports">Scheduled Exports</string>
++    <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++    <string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 392b5f30..d70dc3d7 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -494,4 +494,8 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="label_report_currency">Select currency</string>
+ 	<string name="title_use_account_color">Account color in reports</string>
+ 	<string name="summary_use_account_color">Use account color in the pie chart</string>
++	<string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++	<string name="title_scheduled_exports">Scheduled Exports</string>
++	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++	<string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index f385acce..ec915353 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -498,4 +498,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+     <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++    <string name="title_scheduled_exports">Scheduled Exports</string>
++    <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++    <string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index b30baf9b..ec5d75aa 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -496,4 +496,8 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="label_report_currency">Select currency</string>
+ 	<string name="title_use_account_color">Account color in reports</string>
+ 	<string name="summary_use_account_color">Use account color in the pie chart</string>
++	<string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++	<string name="title_scheduled_exports">Scheduled Exports</string>
++	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++	<string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 31500dc4..6380d2d2 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -502,4 +502,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+     <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++    <string name="title_scheduled_exports">Scheduled Exports</string>
++    <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++    <string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index 4d90f344..f321303b 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -494,4 +494,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+     <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++    <string name="title_scheduled_exports">Scheduled Exports</string>
++    <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++    <string name="title_create_export_schedule">Create export schedule</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 9b3384e7..5abed413 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -501,4 +501,8 @@
+ No user-identifiable information will be collected as part of this process!</string>
+     <string name="label_export_format">Export Format</string>
+     <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
++    <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++    <string name="title_scheduled_exports">Scheduled Exports</string>
++    <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++    <string name="title_create_export_schedule">Create export schedule</string>
+ </resources>

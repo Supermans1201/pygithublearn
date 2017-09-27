@@ -1,0 +1,298 @@
+From 0b49a97b89f80084996a641481934bba55168b01 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 25 Jul 2014 10:37:50 +0200
+Subject: [PATCH] Fixed: Crash when deleting transactions with splits Fixed:
+ Splits editor shows wrong transaction type when editing splits
+
+---
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 13 +++---
+ app/src/org/gnucash/android/model/Transaction.java |  4 +-
+ .../ui/transaction/TransactionFormFragment.java    | 13 ++----
+ .../dialog/SplitEditorDialogFragment.java          | 47 +++++++++-------------
+ .../android/ui/util/AmountInputFormatter.java      | 19 ++-------
+ .../ui/util/TransactionTypeToggleButton.java       | 11 ++++-
+ 6 files changed, 46 insertions(+), 61 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+index 643ae801..c46d9b66 100644
+--- a/app/src/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -207,12 +207,12 @@ public Money computeSplitBalance(String accountUID){
+     public List<Split> getSplitsForTransactionInAccount(String transactionUID, String accountUID){
+         Cursor cursor = fetchSplitsForTransactionAndAccount(transactionUID, accountUID);
+         List<Split> splitList = new ArrayList<Split>();
+-        while (cursor != null && cursor.moveToNext()){
+-            splitList.add(buildSplitInstance(cursor));
+-        }
+-        if (cursor != null)
++        if (cursor != null){
++            while (cursor.moveToNext()){
++                splitList.add(buildSplitInstance(cursor));
++            }
+             cursor.close();
+-
++        }
+         return splitList;
+     }
+ 
+@@ -312,6 +312,9 @@ public Cursor fetchSplitsForAccount(String accountUID){
+      * @return Cursor to splits data set
+      */
+     public Cursor fetchSplitsForTransactionAndAccount(String transactionUID, String accountUID){
++        if (transactionUID == null || accountUID == null)
++            return null;
++
+         Log.v(TAG, "Fetching all splits for transaction ID " + transactionUID
+                 + "and account ID " + accountUID);
+         return mDb.query(SplitEntry.TABLE_NAME,
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index 0bf5321a..56606dd7 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -428,8 +428,8 @@ public static TransactionType getTypeForBalance(AccountType accountType, boolean
+     }
+ 
+     /**
+-     * Returns true if the amount represents a decrease for the account balance in accounty of type <code>accountType</code>, false otherwise
+-     * @return true if the amount represents a decrease movement for the account balance, false otherwise
++     * Returns true if the transaction type represents a decrease for the account balance for the <code>accountType</code>, false otherwise
++     * @return true if the amount represents a decrease in the account balance, false otherwise
+      * @see #getTypeForBalance(AccountType, boolean)
+      */
+     public static boolean shouldDecreaseBalance(AccountType accountType, TransactionType transactionType){
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index c4ef0687..beae19bc 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -22,8 +22,6 @@
+ import java.text.ParseException;
+ import java.util.*;
+ 
+-import android.app.AlarmManager;
+-import android.app.PendingIntent;
+ import android.support.v4.app.FragmentManager;
+ import android.widget.*;
+ import org.gnucash.android.R;
+@@ -55,7 +53,6 @@
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.view.inputmethod.InputMethodManager;
+-import android.widget.CompoundButton.OnCheckedChangeListener;
+ 
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockFragment;
+@@ -365,11 +362,9 @@ private void initalizeViews() {
+ 		mTimeTextView.setText(TIME_FORMATTER.format(time));
+ 		mTime = mDate = Calendar.getInstance();
+ 
+-		String typePref = PreferenceManager.getDefaultSharedPreferences(getActivity()).getString(getString(R.string.key_default_transaction_type), "DEBIT");
+-		if (typePref.equals("CREDIT")){
+-            mTransactionTypeButton.setChecked(false);
+-        }
+         mTransactionTypeButton.setAccountType(mAccountType);
++		String typePref = PreferenceManager.getDefaultSharedPreferences(getActivity()).getString(getString(R.string.key_default_transaction_type), "DEBIT");
++        mTransactionTypeButton.setChecked(TransactionType.valueOf(typePref));
+ 
+ 		final long accountId = getArguments().getLong(UxArgument.SELECTED_ACCOUNT_ID);
+ 		String code = Money.DEFAULT_CURRENCY_CODE;
+@@ -464,7 +459,7 @@ private void openSplitEditor(){
+ 	 * Sets click listeners for the dialog buttons
+ 	 */
+ 	private void setListeners() {
+-        mAmountInputFormatter = new AmountInputFormatter(mAmountEditText, mTransactionTypeButton);
++        mAmountInputFormatter = new AmountInputFormatter(mAmountEditText);
+         mAmountEditText.addTextChangedListener(mAmountInputFormatter);
+ 
+         mOpenSplitsButton.setOnClickListener(new View.OnClickListener() {
+@@ -474,7 +469,7 @@ public void onClick(View view) {
+             }
+         });
+ 
+-		mTransactionTypeButton.setupCheckedListener(mAmountEditText, mCurrencyTextView);
++		mTransactionTypeButton.setAmountFormattingListener(mAmountEditText, mCurrencyTextView);
+ 
+ 		mDateTextView.setOnClickListener(new View.OnClickListener() {
+ 
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 1c364141..504a3c15 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -117,12 +117,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             final Currency currency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountUID));
+             Split split = new Split(new Money(mBaseAmount, currency), mAccountUID);
+             AccountType accountType = mAccountsDbAdapter.getAccountType(mAccountUID);
+-            TransactionType transactionType;
+-            if (accountType.hasDebitNormalBalance()) {
+-                transactionType = mBaseAmount.signum() < 0 ? TransactionType.CREDIT : TransactionType.DEBIT;
+-            } else {
+-                transactionType = mBaseAmount.signum() < 0 ? TransactionType.CREDIT : TransactionType.DEBIT;
+-            }
++            TransactionType transactionType = Transaction.getTypeForBalance(accountType, mBaseAmount.signum() < 0);
+             split.setType(transactionType);
+             View view = addSplitView(split);
+             view.findViewById(R.id.input_accounts_spinner).setEnabled(false);
+@@ -186,8 +181,7 @@ private void bindSplitView(final View splitView, Split split){
+         final TextView splitUidTextView         = (TextView)    splitView.findViewById(R.id.split_uid);
+         final TransactionTypeToggleButton splitTypeButton = (TransactionTypeToggleButton) splitView.findViewById(R.id.btn_split_type);
+ 
+-        splitAmountEditText.addTextChangedListener(new AmountInputFormatter(splitAmountEditText,splitTypeButton));
+-        splitAmountEditText.addTextChangedListener(mBalanceUpdater);
++        splitAmountEditText.addTextChangedListener(new AmountInputFormatter(splitAmountEditText));
+ 
+         removeSplitButton.setOnClickListener(new View.OnClickListener() {
+             @Override
+@@ -199,17 +193,10 @@ public void onClick(View view) {
+             }
+         });
+ 
+-        accountsSpinner.setOnItemSelectedListener(new TypeButtonLabelUpdater(splitTypeButton));
+         updateTransferAccountsList(accountsSpinner);
++        accountsSpinner.setOnItemSelectedListener(new TypeButtonLabelUpdater(splitTypeButton));
+ 
+-        splitTypeButton.setupCheckedListener(splitAmountEditText, splitCurrencyTextView);
+-        splitTypeButton.setOnClickListener(new View.OnClickListener() {
+-            @Override
+-            public void onClick(View view) {
+-                updateTotal();
+-            }
+-        });
+-
++        splitTypeButton.setAmountFormattingListener(splitAmountEditText, splitCurrencyTextView);
+         splitTypeButton.setChecked(mBaseAmount.signum() > 0);
+         splitUidTextView.setText(UUID.randomUUID().toString());
+ 
+@@ -217,10 +204,20 @@ public void onClick(View view) {
+             splitAmountEditText.setText(split.getAmount().toPlainString());
+             splitMemoEditText.setText(split.getMemo());
+             splitUidTextView.setText(split.getUID());
+-
+-            setSelectedTransferAccount(mAccountsDbAdapter.getAccountID(split.getAccountUID()), accountsSpinner);
+-            splitTypeButton.setChecked(Transaction.shouldDecreaseBalance(splitTypeButton.getAccountType(), split.getType()));
++            String splitAccountUID = split.getAccountUID();
++            setSelectedTransferAccount(mAccountsDbAdapter.getAccountID(splitAccountUID), accountsSpinner);
++            splitTypeButton.setAccountType(mAccountsDbAdapter.getAccountType(splitAccountUID));
++            splitTypeButton.setChecked(split.getType());
+         }
++
++        //put these balance update triggers last last so as to avoid computing while still loading
++        splitAmountEditText.addTextChangedListener(mBalanceUpdater);
++        splitTypeButton.setOnClickListener(new View.OnClickListener() {
++            @Override
++            public void onClick(View view) {
++                updateTotal();
++            }
++        });
+     }
+ 
+     /**
+@@ -230,13 +227,7 @@ public void onClick(View view) {
+     private void setSelectedTransferAccount(long accountId, final Spinner accountsSpinner){
+         for (int pos = 0; pos < mCursorAdapter.getCount(); pos++) {
+             if (mCursorAdapter.getItemId(pos) == accountId){
+-                final int position = pos;
+-                accountsSpinner.postDelayed(new Runnable() {
+-                    @Override
+-                    public void run() {
+-                        accountsSpinner.setSelection(position);
+-                    }
+-                }, 100);
++                accountsSpinner.setSelection(pos);
+                 break;
+             }
+         }
+@@ -290,7 +281,7 @@ public void onClick(View view) {
+         List<Split> splitList = new ArrayList<Split>();
+         for (View splitView : mSplitItemViewList) {
+             EditText splitMemoEditText              = (EditText)    splitView.findViewById(R.id.input_split_memo);
+-            EditText splitAmountEditText      = (EditText)    splitView.findViewById(R.id.input_split_amount);
++            EditText splitAmountEditText            = (EditText)    splitView.findViewById(R.id.input_split_amount);
+             Spinner accountsSpinner                 = (Spinner)     splitView.findViewById(R.id.input_accounts_spinner);
+             TextView splitUidTextView               = (TextView)    splitView.findViewById(R.id.split_uid);
+             TransactionTypeToggleButton splitTypeButton = (TransactionTypeToggleButton) splitView.findViewById(R.id.btn_split_type);
+diff --git a/app/src/org/gnucash/android/ui/util/AmountInputFormatter.java b/app/src/org/gnucash/android/ui/util/AmountInputFormatter.java
+index 9ac19179..5e90b50d 100644
+--- a/app/src/org/gnucash/android/ui/util/AmountInputFormatter.java
++++ b/app/src/org/gnucash/android/ui/util/AmountInputFormatter.java
+@@ -18,7 +18,6 @@
+ import android.text.Editable;
+ import android.text.TextWatcher;
+ import android.widget.EditText;
+-import android.widget.ToggleButton;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ 
+ import java.math.BigDecimal;
+@@ -37,15 +36,13 @@
+ public class AmountInputFormatter implements TextWatcher {
+     private String current = "0";
+     private EditText amountEditText;
+-    private ToggleButton mTypeButton;
+     /**
+      * Flag to note if the user has manually edited the amount of the transaction
+      */
+     private boolean isModified = false;
+ 
+-    public AmountInputFormatter(EditText amountInput, ToggleButton typeButton) {
++    public AmountInputFormatter(EditText amountInput) {
+         this.amountEditText = amountInput;
+-        this.mTypeButton = typeButton;
+     }
+ 
+     @Override
+@@ -54,22 +51,12 @@ public void afterTextChanged(Editable s) {
+             return;
+ //make sure that the sign of the input is in line with the type button state
+         BigDecimal amount = TransactionFormFragment.parseInputToDecimal(s.toString());
+-        if (mTypeButton.isChecked()) {
+-            if (amount.signum() > 0) {
+-                amount = amount.negate();
+-            }
+-        } else { //if it is to increase account balance
+-            if (amount.signum() <= 0) {
+-//make the number positive
+-                amount = amount.negate();
+-            }
+-        }
+ 
+         DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());
+-        formatter.setMinimumFractionDigits(2);
++        formatter.setMinimumFractionDigits(2);  //TODO: Use fraction of the currency in question
+         formatter.setMaximumFractionDigits(2);
+ 
+-        current = formatter.format(amount.doubleValue());
++        current = formatter.format(amount.doubleValue()); //TODO: Try with Bigdecimal string instead of double
+         amountEditText.removeTextChangedListener(this);
+         amountEditText.setText(current);
+         amountEditText.setSelection(current.length());
+diff --git a/app/src/org/gnucash/android/ui/util/TransactionTypeToggleButton.java b/app/src/org/gnucash/android/ui/util/TransactionTypeToggleButton.java
+index 25ebb81f..23dba92c 100644
+--- a/app/src/org/gnucash/android/ui/util/TransactionTypeToggleButton.java
++++ b/app/src/org/gnucash/android/ui/util/TransactionTypeToggleButton.java
+@@ -24,6 +24,7 @@
+ import android.widget.ToggleButton;
+ import org.gnucash.android.R;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ 
+@@ -105,11 +106,19 @@ public void setAccountType(AccountType accountType){
+      * @param amoutView Amount string {@link android.widget.EditText}
+      * @param currencyTextView Currency symbol text view
+      */
+-    public void setupCheckedListener(EditText amoutView, TextView currencyTextView){
++    public void setAmountFormattingListener(EditText amoutView, TextView currencyTextView){
+         setOnCheckedChangeListener(new OnTypeChangedListener(amoutView, currencyTextView));
+     }
+ 
+     /**
++     * Toggles the button checked based on the movement caused by the transaction type for the specified account
++     * @param transactionType {@link org.gnucash.android.model.TransactionType} of the split
++     */
++    public void setChecked(TransactionType transactionType){
++        setChecked(Transaction.shouldDecreaseBalance(mAccountType, transactionType));
++    }
++
++    /**
+      * Returns the account type associated with this button
+      * @return
+      */

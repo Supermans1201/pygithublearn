@@ -1,0 +1,168 @@
+From b216f4f5b74fed0ee6d22be4e331f27157db9405 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 27 Apr 2015 11:12:56 +0200
+Subject: [PATCH] Fixed: scheduled transaction timestamps may be incorrect
+ (depending on when service is invoked)
+
+The timestamps are corrected by computing when they should have actually been executed
+Feature: Generate missed scheduled transactions (since last file open) during import of XML files
+---
+ .../org/gnucash/android/db/DatabaseHelper.java     |  1 +
+ .../gnucash/android/importer/GncXmlHandler.java    | 54 +++++++++++++++++++++-
+ .../gnucash/android/importer/ImportAsyncTask.java  |  1 -
+ .../gnucash/android/service/SchedulerService.java  | 12 ++++-
+ 4 files changed, 64 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 559ddbb9..412f0486 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -466,6 +466,7 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+                 scheduledAction.setActionUID(cursor.getString(cursor.getColumnIndexOrThrow(TransactionEntry.COLUMN_UID)));
+                 long period = cursor.getLong(cursor.getColumnIndexOrThrow("recurrence_period"));
+                 scheduledAction.setPeriod(period);
++                scheduledAction.setStartTime(timestamp.getTime()); //the start time is when the transaction was created
+                 scheduledAction.setLastRun(System.currentTimeMillis()); //prevent this from being executed at the end of migration
+                 scheduledActionDbAdapter.addScheduledAction(scheduledAction);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index a35584e4..4fbee7cf 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -122,6 +122,11 @@
+     List<Transaction> mTransactionList;
+ 
+     /**
++     * All the template transactions found during parsing of the XML
++     */
++    List<Transaction> mTemplateTransactions;
++
++    /**
+      * Accumulate attributes of splits found in this object
+      */
+     Split mSplit;
+@@ -227,6 +232,7 @@ private void init(@Nullable SQLiteDatabase db) {
+         mScheduledActionsList = new ArrayList<>();
+ 
+         mTemplatAccountList = new ArrayList<>();
++        mTemplateTransactions = new ArrayList<>();
+         mTemplateAccountToTransactionMap = new HashMap<>();
+ 
+         mAutoBalanceSplits = new ArrayList<>();
+@@ -457,7 +463,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     throw new SAXException("Unable to parse transaction time", e);
+                 }
+                 break;
+-            case GncXmlHelper.TAG_RECURRENCE_PERIOD:
++            case GncXmlHelper.TAG_RECURRENCE_PERIOD: //for parsing of old backup files
+                 mRecurrencePeriod = Long.parseLong(characterString);
+                 mTransaction.setTemplate(mRecurrencePeriod > 0);
+                 break;
+@@ -507,7 +513,9 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     mAutoBalanceSplits.add(imbSplit);
+                 }
+                 mTransactionList.add(mTransaction);
+-
++                if (mInTemplates){
++                    mTemplateTransactions.add(mTransaction);
++                }
+                 if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
+                     mTransaction.setTemplate(true);
+                     ScheduledAction scheduledAction = ScheduledAction.parseScheduledAction(mTransaction, mRecurrencePeriod);
+@@ -583,6 +591,9 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_SCHEDULED_ACTION:
+                 mScheduledActionsList.add(mScheduledAction);
++                int count = generateMissedScheduledTransactions(mScheduledAction);
++                Log.i(LOG_TAG, String.format("Generated %d transactions from scheduled actions", count));
++                mRecurrenceMultiplier = 1; //reset it, even though it will be parsed from XML each time
+                 break;
+         }
+ 
+@@ -711,4 +722,43 @@ private Currency getCurrencyForAccount(String accountUID){
+             return Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
+         }
+     }
++
++    /**
++     * Generates the runs of the scheduled action which have been missed since the file was last opened.
++     * @param scheduledAction Scheduled action for transaction
++     * @return Number of transaction instances generated
++     */
++    private int generateMissedScheduledTransactions(ScheduledAction scheduledAction){
++        //if this scheduled action should not be run for any reason, return immediately
++        if (scheduledAction.getActionType() != ScheduledAction.ActionType.TRANSACTION
++                || !scheduledAction.isEnabled()
++                || (scheduledAction.getEndTime() > 0 && scheduledAction.getEndTime() > System.currentTimeMillis())
++                || (scheduledAction.getTotalFrequency() > 0 && scheduledAction.getExecutionCount() >= scheduledAction.getTotalFrequency())){
++            return 0;
++        }
++
++        long lastRuntime = scheduledAction.getStartTime();
++        if (scheduledAction.getLastRun() > 0){
++            lastRuntime = scheduledAction.getLastRun();
++        }
++
++        int generatedTransactionCount = 0;
++        long period = scheduledAction.getPeriod();
++        final String actionUID = scheduledAction.getActionUID();
++        while ((lastRuntime = lastRuntime + period) <= System.currentTimeMillis()){
++            for (Transaction templateTransaction : mTemplateTransactions) {
++                if (templateTransaction.getUID().equals(actionUID)){
++                    Transaction transaction = new Transaction(templateTransaction, true);
++                    transaction.setTime(lastRuntime);
++                    transaction.setScheduledActionUID(scheduledAction.getUID());
++                    mTransactionList.add(transaction);
++                    scheduledAction.setExecutionCount(scheduledAction.getExecutionCount() + 1);
++                    ++generatedTransactionCount;
++                    break;
++                }
++            }
++        }
++        scheduledAction.setLastRun(lastRuntime);
++        return generatedTransactionCount;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+index b3ee27e1..0546a82c 100644
+--- a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -26,7 +26,6 @@
+ import com.crashlytics.android.Crashlytics;
+ 
+ import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.util.TaskDelegate;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 556dd4c7..aa85d985 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -34,6 +34,7 @@
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
+ 
++import java.sql.Timestamp;
+ import java.util.List;
+ import java.util.concurrent.ExecutionException;
+ 
+@@ -100,8 +101,17 @@ private void executeScheduledEvent(ScheduledAction scheduledAction){
+                 TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+                 Transaction trxnTemplate = transactionsDbAdapter.getTransaction(eventUID);
+                 Transaction recurringTrxn = new Transaction(trxnTemplate, true);
+-                recurringTrxn.setTime(System.currentTimeMillis());
+ 
++                //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
++                //so compute the actual transaction time from pre-known values
++                long transactionTime; //default
++                if (scheduledAction.getLastRun() > 0){
++                    transactionTime = scheduledAction.getLastRun() + scheduledAction.getPeriod();
++                } else {
++                    transactionTime = scheduledAction.getStartTime() + scheduledAction.getPeriod();
++                }
++                recurringTrxn.setTime(transactionTime);
++                recurringTrxn.setCreatedTimestamp(new Timestamp(transactionTime));
+                 transactionsDbAdapter.addTransaction(recurringTrxn);
+                 break;
+ 

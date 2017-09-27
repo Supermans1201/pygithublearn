@@ -1,0 +1,264 @@
+From 866c94f5bc45e92facc6974576aed28a144352e7 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 7 May 2015 12:02:09 +0200
+Subject: [PATCH] Fixed: Invalid QIF generated Fixed: no multicurrency QIF
+ generated
+
+Added Crashlytics logging statements
+Fixed: crash when refreshing account transactions
+Updated version numbers for beta3 release
+---
+ app/build.gradle                                   |  2 +-
+ .../gnucash/android/app/GnuCashApplication.java    |  2 +
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 31 --------
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  1 +
+ .../gnucash/android/export/ExportAsyncTask.java    | 86 ++++++++++++++--------
+ .../android/ui/settings/SettingsActivity.java      |  2 +
+ .../ui/transaction/TransactionsActivity.java       | 10 ++-
+ 7 files changed, 71 insertions(+), 63 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 2e73ba66..a2712c33 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -6,7 +6,7 @@ apply plugin: 'crashlytics'
+ def versionMajor = 1
+ def versionMinor = 6
+ def versionPatch = 0
+-def versionBuild = 2
++def versionBuild = 3
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd_HHmm'UTC'")
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 724de619..79e607c2 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -80,6 +80,7 @@ public void onCreate(){
+         try {
+             mDb = mDbHelper.getWritableDatabase();
+         } catch (SQLException e) {
++            Crashlytics.logException(e);
+             Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
+             mDb = mDbHelper.getReadableDatabase();
+         }
+@@ -165,6 +166,7 @@ public static String getDefaultCurrency(){
+         try { //there are some strange locales out there
+             currencyCode = Currency.getInstance(locale).getCurrencyCode();
+         } catch (Throwable e) {
++            Crashlytics.logException(e);
+             Log.e(context.getString(R.string.app_name), "" + e.getMessage());
+         } finally {
+             currencyCode = prefs.getString(context.getString(R.string.key_default_currency), currencyCode);
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 90792f69..7cbc6e7d 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -867,37 +867,6 @@ public Money getAccountsBalance(List<String> accountUIDList, long startTimestamp
+     }
+ 
+     /**
+-     * Returns a list of IDs for the sub-accounts for account <code>accountId</code>
+-     * @param accountId Account ID whose sub-accounts are to be retrieved
+-     * @return List of IDs for the sub-accounts for account <code>accountId</code>
+-     */
+-    public List<Long> getSubAccountIds(long accountId){
+-        List<Long> subAccounts = new ArrayList<Long>();
+-        String accountUID;
+-        try {
+-            accountUID = getUID(accountId);
+-        } catch (IllegalArgumentException e) {
+-            return subAccounts;
+-        }
+-
+-        Cursor cursor = mDb.query(AccountEntry.TABLE_NAME,
+-                new String[]{AccountEntry._ID},
+-                AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ?",
+-                new String[]{accountUID},
+-                null, null, null);
+-
+-        try {
+-            while (cursor.moveToNext()) {
+-                subAccounts.add(cursor.getLong(cursor.getColumnIndexOrThrow(AccountEntry._ID)));
+-            }
+-        } finally {
+-            cursor.close();
+-        }
+-
+-        return subAccounts;
+-    }
+-
+-    /**
+      * Returns a cursor to the dataset containing sub-accounts of the account with record ID <code>accoundId</code>
+      * @param accountUID GUID of the parent account
+      * @return {@link Cursor} to the sub accounts data set
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 90ed57f3..f10c315d 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -259,6 +259,7 @@ public int deleteAllRecords(){
+      * Returns the string unique ID (GUID) of a record in the database
+      * @param uid GUID of the record
+      * @return Long record ID
++     * @throws IllegalArgumentException if the GUID does not exist in the database
+      */
+     public long getID(@NonNull String uid){
+         Cursor cursor = mDb.query(mTableName,
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 047bf00d..da716c3a 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -252,37 +252,40 @@ public void onResult(DriveApi.DriveContentsResult result) {
+                     return;
+                 }
+                 final DriveContents driveContents = result.getDriveContents();
+-                // write content to DriveContents
+-                OutputStream outputStream = driveContents.getOutputStream();
+-                File exportedFile = new File(mExportParams.getTargetFilepath());
+-
+                 try {
+-                    FileInputStream fileInputStream = new FileInputStream(exportedFile);
+-                    byte[] buffer = new byte[1024];
+-                    int count = 0;
+-
+-                    while ((count = fileInputStream.read(buffer)) >= 0) {
+-                        outputStream.write(buffer, 0, count);
++                    // write content to DriveContents
++                    OutputStream outputStream = driveContents.getOutputStream();
++                    List<String> exportedFilePaths = getExportedFiles();
++                    for (String exportedFilePath : exportedFilePaths) {
++                        File exportedFile = new File(exportedFilePath);
++                        FileInputStream fileInputStream = new FileInputStream(exportedFile);
++                        byte[] buffer = new byte[1024];
++                        int count = 0;
++
++                        while ((count = fileInputStream.read(buffer)) >= 0) {
++                            outputStream.write(buffer, 0, count);
++                        }
++                        fileInputStream.close();
++                        outputStream.flush();
++                        exportedFile.delete();
++
++                        MetadataChangeSet changeSet = new MetadataChangeSet.Builder()
++                                .setTitle(exportedFile.getName())
++                                .setMimeType(getExportMimeType())
++                                .build();
++
++                        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
++                        String folderId = sharedPreferences.getString(mContext.getString(R.string.key_google_drive_app_folder_id), "");
++                        DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
++                        // create a file on root folder
++                        folder.createFile(googleApiClient, changeSet, driveContents)
++                                .setResultCallback(fileCallback);
+                     }
+-                    fileInputStream.close();
+-                    outputStream.flush();
+-                    exportedFile.delete();
++
+                 } catch (IOException e) {
+                     Crashlytics.logException(e);
+                     Log.e(TAG, e.getMessage());
+                 }
+-
+-                MetadataChangeSet changeSet = new MetadataChangeSet.Builder()
+-                        .setTitle(exportedFile.getName())
+-                        .setMimeType(getExportMimeType())
+-                        .build();
+-
+-                SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
+-                String folderId = sharedPreferences.getString(mContext.getString(R.string.key_google_drive_app_folder_id), "");
+-                DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
+-                // create a file on root folder
+-                folder.createFile(googleApiClient, changeSet, driveContents)
+-                        .setResultCallback(fileCallback);
+             }
+         });
+     }
+@@ -311,10 +314,13 @@ private void copyExportToDropbox() {
+         DbxFile dbExportFile = null;
+         try {
+             DbxFileSystem dbxFileSystem = DbxFileSystem.forAccount(mDbxAcctMgr.getLinkedAccount());
+-            File exportedFile = new File(mExportParams.getTargetFilepath());
+-            dbExportFile = dbxFileSystem.create(new DbxPath(exportedFile.getName()));
+-            dbExportFile.writeFromExistingFile(exportedFile, false);
+-            exportedFile.delete();
++            List<String> exportedFilePaths = getExportedFiles();
++            for (String exportedFilePath : exportedFilePaths) {
++                File exportedFile = new File(exportedFilePath);
++                dbExportFile = dbxFileSystem.create(new DbxPath(exportedFile.getName()));
++                dbExportFile.writeFromExistingFile(exportedFile, false);
++                exportedFile.delete();
++            }
+         } catch (DbxException.Unauthorized unauthorized) {
+             Crashlytics.logException(unauthorized);
+             Log.e(TAG, unauthorized.getMessage());
+@@ -329,6 +335,28 @@ private void copyExportToDropbox() {
+         }
+     }
+ 
++    /**
++     * Returns the list of files generated by one export session.
++     * <p>Typically it is one file. But QIF export generate multiple files per currency.</p>
++     * @return List of paths to exported files
++     * @throws IOException if the exported files could not be created
++     */
++    private List<String> getExportedFiles() throws IOException {
++        List<String> exportedFilePaths;
++        if (mExportParams.getExportFormat() == ExportFormat.QIF) {
++            String path = mExportParams.getTargetFilepath();
++            exportedFilePaths = splitQIF(new File(path), new File(path));
++        } else {
++            exportedFilePaths = new ArrayList<>();
++            exportedFilePaths.add(mExportParams.getTargetFilepath());
++        }
++        return exportedFilePaths;
++    }
++
++    /**
++     * Copies the exported file from the internal storage where it is generated to external storage
++     * which is accessible to the user
++     */
+     private void copyExportToSDCard() {
+         Log.i(TAG, "Moving exported file to external storage");
+         File src = new File(mExportParams.getTargetFilepath());
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 94744683..83a274ef 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -530,6 +530,8 @@ public void importAccounts() {
+         try {
+             startActivityForResult(chooser, AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE);
+         } catch (ActivityNotFoundException ex){
++            Crashlytics.log("No file manager for selecting files available");
++            Crashlytics.logException(ex);
+             Toast.makeText(this, R.string.toast_install_file_manager, Toast.LENGTH_LONG).show();
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index d243e645..308eb509 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -124,7 +124,7 @@
+ 
+     private ViewPager mPager;
+ 
+-    private SparseArray<Refreshable> mFragmentPageReferenceMap = new SparseArray<Refreshable>();
++    private SparseArray<Refreshable> mFragmentPageReferenceMap = new SparseArray<>();
+ 
+ 	private OnNavigationListener mTransactionListNavigationListener = new OnNavigationListener() {
+ 
+@@ -329,7 +329,13 @@ protected void onResume() {
+     private void setTitleIndicatorColor() {
+         //Basically, if we are in a top level account, use the default title color.
+         //but propagate a parent account's title color to children who don't have own color
+-        String colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountsDbAdapter.getID(mAccountUID));
++        long accountId = -1;
++        try {
++            accountId = mAccountsDbAdapter.getID(mAccountUID);
++        } catch (IllegalArgumentException e){
++            Log.e(TAG, e.getMessage());
++        }
++        String colorCode = mAccountsDbAdapter.getAccountColorCode(accountId);
+         int iColor = -1;
+         if (colorCode != null){
+             iColor = Color.parseColor(colorCode);

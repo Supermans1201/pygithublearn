@@ -1,0 +1,164 @@
+From 469602ddd6d9453819d5743ac682db02f36951e3 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 9 Jul 2012 23:13:40 +0200
+Subject: [PATCH] Fixed: All transactions always exported Improved: Do not
+ include accounts in OFX which have no exportable transactions Improved:
+ Limited export sharing to only apps which for mime type multipart/x-ofx
+ (GDrive, Dropbox, Email)
+
+---
+ GnucashMobile/src/org/gnucash/android/data/Account.java | 17 +++++++++++++++--
+ .../src/org/gnucash/android/data/Transaction.java       |  4 ++--
+ .../src/org/gnucash/android/db/AccountsDbAdapter.java   | 14 ++++++++++++++
+ .../org/gnucash/android/db/TransactionsDbAdapter.java   |  2 +-
+ .../org/gnucash/android/ui/ExportDialogFragment.java    |  2 +-
+ .../src/org/gnucash/android/util/OfxFormatter.java      |  7 +++++--
+ 6 files changed, 38 insertions(+), 8 deletions(-)
+
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index 5e948d9a..74f4fcaf 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -66,7 +66,7 @@
+ 	 * @param name Name of the account
+ 	 */
+ 	public Account(String name) {
+-		this.mName = name;
++		setName(name);
+ 		this.mUID = UUID.randomUUID().toString();
+ 		this.mUID.replaceAll("-", "");
+ 		this.mUID.replaceAll(":", "");
+@@ -77,7 +77,7 @@ public Account(String name) {
+ 	 * @param name String name of the account
+ 	 */
+ 	public void setName(String name) {
+-		this.mName = name;
++		this.mName = name.trim();
+ 	}
+ 
+ 	/**
+@@ -167,6 +167,19 @@ public int getTransactionCount(){
+ 	}
+ 	
+ 	/**
++	 * Returns true if there is atleast one transaction in the account
++	 * which has not yet been exported
++	 * @return <code>true</code> if there are unexported transactions, <code>false</code> otherwise.
++	 */
++	public boolean hasUnexportedTransactions(){
++		for (Transaction transaction : mTransactionsList) {
++			if (transaction.isExported() == false)
++				return true;			
++		}
++		return false;
++	}
++	
++	/**
+ 	 * Returns the aggregate of all transactions in this account.
+ 	 * It takes into account debit and credit amounts
+ 	 * @return Aggregate amount of all transactions in account.
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index cec6aed9..ef04d646 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -61,7 +61,7 @@
+ 	 */
+ 	public Transaction(double amount, String name) {
+ 		initDefaults();		
+-		this.mName = name;
++		setName(name);
+ 		setAmount(amount); //takes care of setting the type for us
+ 	}
+ 	
+@@ -133,7 +133,7 @@ public String getName() {
+ 	 * @param name String containing name of transaction to set
+ 	 */
+ 	public void setName(String name) {
+-		this.mName = name;
++		this.mName = name.trim();
+ 	}
+ 
+ 	/**
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 6b2efe32..fd69c5c6 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -25,6 +25,7 @@
+ package org.gnucash.android.db;
+ 
+ import java.util.ArrayList;
++import java.util.Iterator;
+ import java.util.List;
+ 
+ import org.gnucash.android.data.Account;
+@@ -223,6 +224,19 @@ public Account getAccount(String uid){
+ 		return accounts;
+ 	}
+ 	
++	public List<Account> getExportableAccounts(){
++		List<Account> accountsList = getAllAccounts();
++		Iterator<Account> it = accountsList.iterator();
++		
++		while (it.hasNext()){
++			Account account = it.next();
++			
++			if (account.hasUnexportedTransactions() == false)
++				it.remove();
++		}
++		return accountsList;
++	}
++	
+ 	/**
+ 	 * Returns a cursor to all account records in the database
+ 	 * @return {@link Cursor} to all account records
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index f7ae1ab3..f8a7a1cf 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -235,7 +235,7 @@ public int markAsExported(String accountUID){
+ 		
+ 		return mDb.update(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
+ 				contentValues, 
+-				DatabaseHelper.KEY_UID + "='" + accountUID + "'", 
++				DatabaseHelper.KEY_ACCOUNT_UID + "='" + accountUID + "'", 
+ 				null);
+ 	}
+ 	
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/ExportDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/ExportDialogFragment.java
+index ff50b6d0..6d79f3ff 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/ExportDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/ExportDialogFragment.java
+@@ -182,7 +182,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 	
+ 	private void shareFile(String path){
+ 		Intent shareIntent = new Intent(Intent.ACTION_SEND);
+-		shareIntent.setType("text/plain");
++		shareIntent.setType("multipart/x-ofx");
+ 		shareIntent.putExtra(Intent.EXTRA_STREAM, Uri.parse("file://"+ path));
+ 		shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Gnucash OFX export");
+ 		SimpleDateFormat formatter = new SimpleDateFormat("yyyy.MM.dd HH:mm");
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+index 14ee5fc4..7b8bbad6 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+@@ -75,7 +75,7 @@
+ 	 */
+ 	public OfxFormatter(Context context, boolean exportAll) {
+ 		AccountsDbAdapter dbAdapter = new AccountsDbAdapter(context);
+-		mAccountsList = dbAdapter.getAllAccounts();
++		mAccountsList = exportAll ? dbAdapter.getAllAccounts() : dbAdapter.getExportableAccounts();
+ 		dbAdapter.close();
+ 		mExportAll = exportAll;
+ 		mContext = context;
+@@ -115,7 +115,10 @@ public void toXml(Document doc, Element parent){
+ 		parent.appendChild(bankmsgs);		
+ 		
+ 		TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(mContext);
+-		for (Account account : mAccountsList) {				
++		for (Account account : mAccountsList) {		
++			if (account.getTransactionCount() == 0)
++				continue; 
++			
+ 			Element currency = doc.createElement("CURDEF");
+ 			currency.appendChild(doc.createTextNode(Currency.getInstance(Locale.getDefault()).getCurrencyCode()));						
+ 			

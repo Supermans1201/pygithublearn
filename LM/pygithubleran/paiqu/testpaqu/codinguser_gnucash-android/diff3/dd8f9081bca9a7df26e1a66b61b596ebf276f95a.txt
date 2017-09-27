@@ -1,0 +1,188 @@
+From dd8f9081bca9a7df26e1a66b61b596ebf276f95a Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Wed, 15 Oct 2014 18:31:19 +0300
+Subject: [PATCH] Constrain change month by month
+
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 53 ++++++++++++++++++++--
+ .../gnucash/android/ui/chart/PieChartActivity.java | 42 ++++++++++++-----
+ 2 files changed, 80 insertions(+), 15 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 69675d11..d44a291f 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -27,13 +27,20 @@
+ import android.database.sqlite.SQLiteStatement;
+ import android.util.Log;
+ 
+-import org.gnucash.android.model.*;
+-
+-import static org.gnucash.android.db.DatabaseSchema.*;
++import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
+ 
+ import java.util.ArrayList;
+ import java.util.List;
+ 
++import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
++import static org.gnucash.android.db.DatabaseSchema.SPLITS_DB_VERSION;
++import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
++
+ /**
+  * Manages persistence of {@link Transaction}s in the database
+  * Handles adding, modifying and deleting of transaction records.
+@@ -615,4 +622,44 @@ public int getNumCurrencies(String transactionUID) {
+         }
+         return numCurrencies;
+     }
++
++    /**
++     * Returns a timestamp of the earliest transaction for the specified account type
++     * @param type the account type
++     * @return the earliest transaction's timestamp. Returns 1970-01-01 00:00:00.000 if no transaction found
++     */
++    public long getTimestampOfEarliestTransaction(AccountType type) {
++        return getTimestamp("MIN", type);
++    }
++
++    /**
++     * Returns a timestamp of the latest transaction for the specified account type
++     * @param type the account type
++     * @return the latest transaction's timestamp. Returns 1970-01-01 00:00:00.000 if no transaction found
++     */
++    public long getTimestampOfLatestTransaction(AccountType type) {
++        return getTimestamp("MAX", type);
++    }
++
++    private long getTimestamp(String mod, AccountType type) {
++        String sql = "SELECT " + mod + "(" + TransactionEntry.COLUMN_TIMESTAMP + ")" +
++                " FROM " + TransactionEntry.TABLE_NAME +
++                " INNER JOIN " + SplitEntry.TABLE_NAME + " ON "
++                + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID + " = "
++                + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
++                " INNER JOIN " + AccountEntry.TABLE_NAME + " ON "
++                + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID + " = "
++                + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID +
++                " WHERE " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_TYPE + " = ?";
++        Cursor cursor = mDb.rawQuery(sql, new String[]{type.toString()});
++        long timestamp= 0;
++        if (cursor != null) {
++            if (cursor.moveToFirst()) {
++                timestamp = cursor.getLong(0);
++            }
++            cursor.close();
++        }
++        return timestamp;
++    }
++
+ }
+diff --git a/app/src/org/gnucash/android/ui/chart/PieChartActivity.java b/app/src/org/gnucash/android/ui/chart/PieChartActivity.java
+index 5cecc0a7..91dfb0e8 100644
+--- a/app/src/org/gnucash/android/ui/chart/PieChartActivity.java
++++ b/app/src/org/gnucash/android/ui/chart/PieChartActivity.java
+@@ -38,6 +38,7 @@
+ import org.achartengine.renderer.SimpleSeriesRenderer;
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+ import org.joda.time.LocalDateTime;
+@@ -77,6 +78,11 @@
+     private LocalDateTime mChartDate = new LocalDateTime();
+     private TextView mChartDateTextView;
+ 
++    private LocalDateTime mEarliestTransaction;
++    private LocalDateTime mLatestTransaction;
++
++    private AccountType mAccountType = AccountType.EXPENSE;
++
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+@@ -85,7 +91,10 @@ protected void onCreate(Bundle savedInstanceState) {
+         mPreviousMonthButton = (ImageButton) findViewById(R.id.previous_month_chart_button);
+         mNextMonthButton = (ImageButton) findViewById(R.id.next_month_chart_button);
+         mChartDateTextView = (TextView) findViewById(R.id.chart_date);
+-        mChartDateTextView.setText("Overall");
++
++        TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(this);
++        mEarliestTransaction = new LocalDateTime(transactionsDbAdapter.getTimestampOfEarliestTransaction(mAccountType));
++        mLatestTransaction = new LocalDateTime(transactionsDbAdapter.getTimestampOfLatestTransaction(mAccountType));
+ 
+         mAccountsDbAdapter = new AccountsDbAdapter(this);
+ 
+@@ -119,8 +128,7 @@ public void onClick(View v) {
+             @Override
+             public void onClick(View view) {
+                 mChartDate = mChartDate.minusMonths(1);
+-                mChartDateTextView.setText(mChartDate.toString(datePattern));
+-                setDataset((AccountType) ((Spinner) findViewById(R.id.chart_data_spinner)).getSelectedItem(), true);
++                setDataset(true);
+             }
+         });
+ 
+@@ -128,21 +136,20 @@ public void onClick(View view) {
+             @Override
+             public void onClick(View view) {
+                 mChartDate = mChartDate.plusMonths(1);
+-                mChartDateTextView.setText(mChartDate.toString(datePattern));
+-                setDataset((AccountType) ((Spinner) findViewById(R.id.chart_data_spinner)).getSelectedItem(), true);
++                setDataset(true);
+             }
+         });
+     }
+ 
+-
+-    private void setDataset(AccountType type, boolean forCurrentMonth) {
++    private void setDataset(boolean forCurrentMonth) {
++        mChartDateTextView.setText(forCurrentMonth ? mChartDate.toString(datePattern) : "Overall");
+         mRenderer.removeAllRenderers();
+         mSeries.clear();
+         mBalanceSum = 0;
+ 
+         List<Account> accountList = mAccountsDbAdapter.getSimpleAccountList();
+         for (Account account : accountList) {
+-            if (account.getAccountType() == type && !account.isPlaceholderAccount()) {
++            if (account.getAccountType() == mAccountType && !account.isPlaceholderAccount()) {
+                 double balance = 0;
+                 if (forCurrentMonth) {
+                     long start = mChartDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
+@@ -162,6 +169,18 @@ private void setDataset(AccountType type, boolean forCurrentMonth) {
+             }
+         }
+ 
++        if (mChartDate.plusMonths(1).dayOfMonth().withMinimumValue().withMillisOfDay(0).isBefore(mLatestTransaction)) {
++            mNextMonthButton.setEnabled(true);
++        } else {
++            mNextMonthButton.setEnabled(false);
++        }
++        if (mEarliestTransaction.getYear() != 1970 && mChartDate.minusMonths(1).dayOfMonth()
++                .withMaximumValue().withMillisOfDay(86399999).isAfter(mEarliestTransaction)) {
++            mPreviousMonthButton.setEnabled(true);
++        } else {
++            mPreviousMonthButton.setEnabled(false);
++        }
++
+         mPieChartView.repaint();
+     }
+ 
+@@ -178,10 +197,9 @@ private void addItemsOnSpinner() {
+ 
+     @Override
+     public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+-        AccountType type = (AccountType) ((Spinner) findViewById(R.id.chart_data_spinner)).getSelectedItem();
+-        mRenderer.setChartTitle(type.toString());
+-
+-        setDataset(type, false);
++        mAccountType = (AccountType) ((Spinner) findViewById(R.id.chart_data_spinner)).getSelectedItem();
++        mRenderer.setChartTitle(mAccountType.toString());
++        setDataset(false);
+     }
+ 
+     @Override

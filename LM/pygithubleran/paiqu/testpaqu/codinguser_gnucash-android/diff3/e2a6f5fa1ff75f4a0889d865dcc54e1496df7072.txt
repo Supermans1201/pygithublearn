@@ -1,0 +1,99 @@
+From e2a6f5fa1ff75f4a0889d865dcc54e1496df7072 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 29 Apr 2015 21:41:39 +0200
+Subject: [PATCH] Fixed: import crashes when there are scheduled transactions
+ in XML
+
+* Parse scheduled transaction <sx:autoCreate /> XML tag and use it when auto-generating transactions
+---
+ .../gnucash/android/importer/GncXmlHandler.java    | 13 +++++++++----
+ .../org/gnucash/android/model/ScheduledAction.java | 22 ++++++++++++++++++++++
+ 2 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 040d2398..7f77eac8 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -553,6 +553,9 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SX_ENABLED:
+                 mScheduledAction.setEnabled(characterString.equals("y"));
+                 break;
++            case GncXmlHelper.TAG_SX_AUTO_CREATE:
++                mScheduledAction.setAutoCreate(characterString.equals("y"));
++                break;
+             case GncXmlHelper.TAG_SX_NUM_OCCUR:
+                 mScheduledAction.setTotalFrequency(Integer.parseInt(characterString));
+                 break;
+@@ -604,7 +607,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SCHEDULED_ACTION:
+                 mScheduledActionsList.add(mScheduledAction);
+                 int count = generateMissedScheduledTransactions(mScheduledAction);
+-                Log.i(LOG_TAG, String.format("Generated %d transactions from scheduled actions", count));
++                Log.i(LOG_TAG, String.format("Generated %d transactions from scheduled action", count));
+                 mRecurrenceMultiplier = 1; //reset it, even though it will be parsed from XML each time
+                 break;
+         }
+@@ -708,10 +711,12 @@ public void endDocument() throws SAXException {
+             mAccountsDbAdapter.deleteAllRecords();
+             long nAccounts = mAccountsDbAdapter.bulkAddAccounts(mAccountList);
+             Log.d("Handler:", String.format("%d accounts inserted", nAccounts));
+-            long nTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTransactionList);
+-            Log.d("Handler:", String.format("%d transactions inserted", nTransactions));
++            //We need to add scheduled actions first because there is a foreign key constraint on transactions
++            //which are generated from scheduled actions (we do auto-create some transactions during import)
+             int nSchedActions = mScheduledActionsDbAdapter.bulkAddScheduledActions(mScheduledActionsList);
+             Log.d("Handler:", String.format("%d scheduled actions inserted", nSchedActions));
++            long nTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTransactionList);
++            Log.d("Handler:", String.format("%d transactions inserted", nTransactions));
+             long endTime = System.nanoTime();
+             Log.d("Handler:", String.format(" bulk insert time: %d", endTime - startTime));
+             mAccountsDbAdapter.setTransactionSuccessful();
+@@ -743,7 +748,7 @@ private Currency getCurrencyForAccount(String accountUID){
+     private int generateMissedScheduledTransactions(ScheduledAction scheduledAction){
+         //if this scheduled action should not be run for any reason, return immediately
+         if (scheduledAction.getActionType() != ScheduledAction.ActionType.TRANSACTION
+-                || !scheduledAction.isEnabled()
++                || !scheduledAction.isEnabled() || !scheduledAction.shouldAutoCreate()
+                 || (scheduledAction.getEndTime() > 0 && scheduledAction.getEndTime() > System.currentTimeMillis())
+                 || (scheduledAction.getTotalFrequency() > 0 && scheduledAction.getExecutionCount() >= scheduledAction.getTotalFrequency())){
+             return 0;
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index 059c87e9..bea49f09 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -75,6 +75,12 @@
+      */
+     private int mExecutionCount = 0;
+ 
++    /**
++     * Flag for whether the scheduled transaction should be auto-created
++     * TODO: Add this flag to the database. At the moment we always treat it as true
++     */
++    private boolean autoCreate = true;
++
+     public ScheduledAction(ActionType actionType){
+         mActionType = actionType;
+         mStartDate = System.currentTimeMillis();
+@@ -328,6 +334,22 @@ public void setExecutionCount(int executionCount){
+     }
+ 
+     /**
++     * Returns flag if transactions should be automatically created or not
++     * @return {@code true} if the transaction should be auto-created, {@code false} otherwise
++     */
++    public boolean shouldAutoCreate() {
++        return autoCreate;
++    }
++
++    /**
++     * Set flag for automatically creating transaction based on this scheduled action
++     * @param autoCreate Flag for auto creating transactions
++     */
++    public void setAutoCreate(boolean autoCreate) {
++        this.autoCreate = autoCreate;
++    }
++
++    /**
+      * Returns the event schedule (start, end and recurrence)
+      * @return String description of repeat schedule
+      */

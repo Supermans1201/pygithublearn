@@ -1,0 +1,177 @@
+From 6e87b0e26fe6cd45b34225ad431954c8a3faebcf Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 22 Apr 2015 10:11:34 +0800
+Subject: [PATCH] fix: constraint violation when importing
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  8 +++++-
+ .../gnucash/android/importer/GncXmlHandler.java    | 33 +++++++++++++++++++++-
+ .../org/gnucash/android/model/Transaction.java     | 14 +++++----
+ 3 files changed, 48 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 4c754761..65031aa1 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -72,6 +72,8 @@
+ 	 */
+     private final TransactionsDbAdapter mTransactionsAdapter;
+ 
++    private static String mImbalanceAccountPrefix = GnuCashApplication.getAppContext().getString(R.string.imbalance_account_name) + "-";
++
+     /**
+      * Overloaded constructor. Creates an adapter for an already open database
+      * @param db SQliteDatabase instance
+@@ -606,6 +608,7 @@ public String getOrCreateImbalanceAccountUID(Currency currency){
+         if (uid == null){
+             Account account = new Account(imbalanceAccountName, currency);
+             account.setAccountType(AccountType.BANK);
++            account.setParentUID(getOrCreateGnuCashRootAccountUID());
+             account.setHidden(!GnuCashApplication.isDoubleEntryEnabled());
+             addAccount(account);
+             uid = account.getUID();
+@@ -1207,6 +1210,9 @@ public boolean isFavoriteAccount(String accountUID){
+         return openingTransactions;
+     }
+ 
++    public static String getImbalanceAccountPrefix() {
++         return mImbalanceAccountPrefix;
++    }
+ 
+     /**
+      * Returns the imbalance account where to store transactions which are not double entry
+@@ -1214,7 +1220,7 @@ public boolean isFavoriteAccount(String accountUID){
+      * @return Imbalance account name
+      */
+     public static String getImbalanceAccountName(Currency currency){
+-        return GnuCashApplication.getAppContext().getString(R.string.imbalance_account_name) + "-" + currency.getCurrencyCode();
++        return getImbalanceAccountPrefix() + currency.getCurrencyCode();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 28db1316..74a851f1 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -115,6 +115,11 @@
+     Split mSplit;
+ 
+     /**
++     * The list for all added split for autobalancing
++     */
++    List<Split> mAutoBalanceSplits;
++
++    /**
+      * Ignore certain elements in GnuCash XML file, such as "<gnc:template-transactions>"
+      */
+     String mIgnoreElement = null;
+@@ -197,6 +202,8 @@ private void init(@Nullable SQLiteDatabase db) {
+         mAccountMap = new HashMap<>();
+         mTransactionList = new ArrayList<>();
+         mScheduledActionsList = new ArrayList<>();
++
++        mAutoBalanceSplits = new ArrayList<>();
+     }
+ 
+     @Override
+@@ -465,7 +472,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_TRANSACTION:
+                 mTransaction.setTemplate(mInTemplates);
+-                mTransaction.autoBalance();
++                mAutoBalanceSplits.add(mTransaction.autoBalanceImportAccount());
+                 mTransactionList.add(mTransaction);
+ 
+                 if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
+@@ -523,6 +530,7 @@ public void characters(char[] chars, int start, int length) throws SAXException
+     public void endDocument() throws SAXException {
+         super.endDocument();
+         HashMap<String, String> mapFullName = new HashMap<>(mAccountList.size());
++        HashMap<String, Account> mapImbalanceAccount = new HashMap<>();
+ 
+         // The XML has no ROOT, create one
+         if (mRootAccount == null) {
+@@ -532,12 +540,35 @@ public void endDocument() throws SAXException {
+             mAccountMap.put(mRootAccount.getUID(), mRootAccount);
+         }
+ 
++        String imbalancePrefix = AccountsDbAdapter.getImbalanceAccountPrefix();
++
+         for(Account account:mAccountList) {
+             mapFullName.put(account.getUID(), null);
++            boolean topLevel = false;
+             if (account.getParentUID() == null && account.getAccountType() != AccountType.ROOT) {
+                 account.setParentUID(mRootAccount.getUID());
++                topLevel = true;
++            }
++            if (topLevel || (mRootAccount.getUID().equals(account.getParentUID()))) {
++                if (account.getName().startsWith(imbalancePrefix)) {
++                    mapImbalanceAccount.put(account.getName().substring(imbalancePrefix.length()), account);
++                }
+             }
+         }
++
++        for (Split split: mAutoBalanceSplits) {
++            String currencyCode = split.getAccountUID();
++            Account imbAccount = mapImbalanceAccount.get(currencyCode);
++            if (imbAccount == null) {
++                imbAccount = new Account(imbalancePrefix + currencyCode, Currency.getInstance(currencyCode));
++                imbAccount.setParentUID(mRootAccount.getUID());
++                imbAccount.setAccountType(AccountType.BANK);
++                mapImbalanceAccount.put(currencyCode, imbAccount);
++                mAccountList.add(imbAccount);
++            }
++            split.setAccountUID(imbAccount.getUID());
++        }
++
+         java.util.Stack<Account> stack = new Stack<>();
+         for (Account account:mAccountList){
+             if (mapFullName.get(account.getUID()) != null) {
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 43c20fa9..bbbda26a 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -166,8 +166,11 @@ private void initDefaults(){
+     /**
+      * Auto-balance the transaction by creating an imbalance split where necessary
+      * <p><b>Note:</b>If a transaction has splits with different currencies, not auto-balancing will be performed.</p>
++     *
++     * The added split will not use any account in db, but will use currency code as account UID.
++     * The added split will be returned, to be filled with proper account UID later.
+      */
+-    public void autoBalance(){
++    public Split autoBalanceImportAccount(){
+         //FIXME: when multiple currencies per transaction are supported
+         Currency lastCurrency = null;
+         for (Split split : mSplitList) {
+@@ -175,7 +178,7 @@ public void autoBalance(){
+             if (lastCurrency == null)
+                 lastCurrency = currentCurrency;
+             else if (lastCurrency != currentCurrency){
+-                return;
++                return null;
+             }
+         }
+ 
+@@ -183,9 +186,11 @@ else if (lastCurrency != currentCurrency){
+         if (!imbalance.isAmountZero()){
+             Currency currency = Currency.getInstance(mCurrencyCode);
+             Split split = new Split(imbalance.negate(),
+-                    AccountsDbAdapter.getInstance().getOrCreateImbalanceAccountUID(currency));
+-            mSplitList.add(split);
++                    currency.getCurrencyCode());
++            addSplit(split);
++            return split;
+         }
++        return null;
+     }
+ 
+     /**
+@@ -230,7 +235,6 @@ public void setSplits(List<Split> splitList){
+      */
+     public void addSplit(Split split){
+         //sets the currency of the split to the currency of the transaction
+-        //split.setAmount(split.getAmount().withCurrency(Currency.getInstance(mCurrencyCode)));
+         split.setTransactionUID(mUID);
+         mSplitList.add(split);
+     }

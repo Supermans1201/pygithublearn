@@ -1,0 +1,611 @@
+From 6032f0541cca33f34f0c594fedaa7222751b2cf7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Wed, 12 Oct 2016 01:46:48 +0200
+Subject: [PATCH] Move mutable field PeriodType.mMultiplier to Recurrence.
+
+PeriodType enum values should be immutable. The instances are shared so,
+once a value is got, it shouldn't be possible to set its fields.
+
+This was causing some tests to fail, as they were getting the same
+instance but setting different values for the field.
+---
+ .../org/gnucash/android/db/MigrationHelper.java    |   6 +-
+ .../android/db/adapter/RecurrenceDbAdapter.java    |   4 +-
+ .../gnucash/android/export/xml/GncXmlExporter.java |   8 +-
+ .../gnucash/android/importer/GncXmlHandler.java    |   2 +-
+ .../java/org/gnucash/android/model/Budget.java     |   8 +-
+ .../java/org/gnucash/android/model/PeriodType.java |  86 ----------------
+ .../java/org/gnucash/android/model/Recurrence.java | 111 ++++++++++++++++++---
+ .../org/gnucash/android/model/ScheduledAction.java |  11 +-
+ .../gnucash/android/ui/util/RecurrenceParser.java  |   2 +-
+ .../test/unit/db/ScheduledActionDbAdapterTest.java |   5 +-
+ .../android/test/unit/model/RecurrenceTest.java    |   2 +-
+ .../test/unit/model/ScheduledActionTest.java       |   4 +-
+ 12 files changed, 120 insertions(+), 129 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 74c24869..f5d3805e 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -42,7 +42,6 @@
+ import org.gnucash.android.model.BaseModel;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
+@@ -1360,13 +1359,12 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+                 String uid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_UID));
+                 long period = cursor.getLong(cursor.getColumnIndexOrThrow("period"));
+                 long startTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
+-                PeriodType periodType = PeriodType.parse(period);
+-                Recurrence recurrence = new Recurrence(periodType);
++                Recurrence recurrence = Recurrence.fromLegacyPeriod(period);
+                 recurrence.setPeriodStart(new Timestamp(startTime));
+ 
+                 contentValues.clear();
+                 contentValues.put(RecurrenceEntry.COLUMN_UID, recurrence.getUID());
+-                contentValues.put(RecurrenceEntry.COLUMN_MULTIPLIER, recurrence.getPeriodType().getMultiplier());
++                contentValues.put(RecurrenceEntry.COLUMN_MULTIPLIER, recurrence.getMultiplier());
+                 contentValues.put(RecurrenceEntry.COLUMN_PERIOD_TYPE, recurrence.getPeriodType().name());
+                 contentValues.put(RecurrenceEntry.COLUMN_PERIOD_START, recurrence.getPeriodStart().toString());
+                 db.insert(RecurrenceEntry.TABLE_NAME, null, contentValues);
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
+index 90ca5dcf..50074bad 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
+@@ -61,9 +61,9 @@ public Recurrence buildModelInstance(@NonNull Cursor cursor) {
+         String byDay = cursor.getString(cursor.getColumnIndexOrThrow(RecurrenceEntry.COLUMN_BYDAY));
+ 
+         PeriodType periodType = PeriodType.valueOf(type);
+-        periodType.setMultiplier((int) multiplier);
+ 
+         Recurrence recurrence = new Recurrence(periodType);
++        recurrence.setMultiplier((int) multiplier);
+         recurrence.setPeriodStart(Timestamp.valueOf(periodStart));
+         if (periodEnd != null)
+             recurrence.setPeriodEnd(Timestamp.valueOf(periodEnd));
+@@ -77,7 +77,7 @@ public Recurrence buildModelInstance(@NonNull Cursor cursor) {
+     @Override
+     protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Recurrence recurrence) {
+         stmt.clearBindings();
+-        stmt.bindLong(1, recurrence.getPeriodType().getMultiplier());
++        stmt.bindLong(1, recurrence.getMultiplier());
+         stmt.bindString(2, recurrence.getPeriodType().name());
+         if (recurrence.getByDay() != null)
+             stmt.bindString(3, recurrence.getByDay());
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 5d9b41ee..c9642027 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -23,10 +23,9 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
+-import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+-import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.RecurrenceDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportFormat;
+@@ -36,9 +35,9 @@
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.BaseModel;
+ import org.gnucash.android.model.Book;
+-import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Budget;
+ import org.gnucash.android.model.BudgetAmount;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.Recurrence;
+@@ -49,7 +48,6 @@
+ import org.xmlpull.v1.XmlSerializer;
+ 
+ import java.io.BufferedOutputStream;
+-import java.io.File;
+ import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.OutputStreamWriter;
+@@ -704,7 +702,7 @@ private void exportPrices(XmlSerializer xmlSerializer) throws IOException {
+     private void exportRecurrence(XmlSerializer xmlSerializer, Recurrence recurrence) throws IOException{
+         PeriodType periodType = recurrence.getPeriodType();
+         xmlSerializer.startTag(null, GncXmlHelper.TAG_RX_MULT);
+-        xmlSerializer.text(String.valueOf(periodType.getMultiplier()));
++        xmlSerializer.text(String.valueOf(recurrence.getMultiplier()));
+         xmlSerializer.endTag(null, GncXmlHelper.TAG_RX_MULT);
+         xmlSerializer.startTag(null, GncXmlHelper.TAG_RX_PERIOD_TYPE);
+         xmlSerializer.text(periodType.name().toLowerCase());
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 29f30076..5f9c0ff1 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -737,8 +737,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_RX_PERIOD_TYPE:
+                 try {
+                     PeriodType periodType = PeriodType.valueOf(characterString.toUpperCase());
+-                    periodType.setMultiplier(mRecurrenceMultiplier);
+                     mRecurrence.setPeriodType(periodType);
++                    mRecurrence.setMultiplier(mRecurrenceMultiplier);
+                 } catch (IllegalArgumentException ex){ //the period type constant is not supported
+                     String msg = "Unsupported period constant: " + characterString;
+                     Log.e(LOG_TAG, msg);
+diff --git a/app/src/main/java/org/gnucash/android/model/Budget.java b/app/src/main/java/org/gnucash/android/model/Budget.java
+index db199b36..add15128 100644
+--- a/app/src/main/java/org/gnucash/android/model/Budget.java
++++ b/app/src/main/java/org/gnucash/android/model/Budget.java
+@@ -202,7 +202,7 @@ public long getNumberOfPeriods() {
+      */
+     public long getStartofCurrentPeriod(){
+         LocalDateTime localDate = new LocalDateTime();
+-        int interval = mRecurrence.getPeriodType().getMultiplier();
++        int interval = mRecurrence.getMultiplier();
+         switch (mRecurrence.getPeriodType()){
+             case DAY:
+                 localDate = localDate.millisOfDay().withMinimumValue().plusDays(interval);
+@@ -226,7 +226,7 @@ public long getStartofCurrentPeriod(){
+      */
+     public long getEndOfCurrentPeriod(){
+         LocalDateTime localDate = new LocalDateTime();
+-        int interval = mRecurrence.getPeriodType().getMultiplier();
++        int interval = mRecurrence.getMultiplier();
+         switch (mRecurrence.getPeriodType()){
+             case DAY:
+                 localDate = localDate.millisOfDay().withMaximumValue().plusDays(interval);
+@@ -246,7 +246,7 @@ public long getEndOfCurrentPeriod(){
+ 
+     public long getStartOfPeriod(int periodNum){
+         LocalDateTime localDate = new LocalDateTime(mRecurrence.getPeriodStart().getTime());
+-        int interval = mRecurrence.getPeriodType().getMultiplier() * periodNum;
++        int interval = mRecurrence.getMultiplier() * periodNum;
+         switch (mRecurrence.getPeriodType()){
+             case DAY:
+                 localDate = localDate.millisOfDay().withMinimumValue().plusDays(interval);
+@@ -271,7 +271,7 @@ public long getStartOfPeriod(int periodNum){
+      */
+     public long getEndOfPeriod(int periodNum){
+         LocalDateTime localDate = new LocalDateTime();
+-        int interval = mRecurrence.getPeriodType().getMultiplier() * periodNum;
++        int interval = mRecurrence.getMultiplier() * periodNum;
+         switch (mRecurrence.getPeriodType()){
+             case DAY:
+                 localDate = localDate.millisOfDay().withMaximumValue().plusDays(interval);
+diff --git a/app/src/main/java/org/gnucash/android/model/PeriodType.java b/app/src/main/java/org/gnucash/android/model/PeriodType.java
+index 06b13cc4..882620be 100644
+--- a/app/src/main/java/org/gnucash/android/model/PeriodType.java
++++ b/app/src/main/java/org/gnucash/android/model/PeriodType.java
+@@ -16,12 +16,6 @@
+ 
+ package org.gnucash.android.model;
+ 
+-import android.content.res.Resources;
+-
+-import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.ui.util.RecurrenceParser;
+-
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+ import java.util.Locale;
+@@ -34,63 +28,6 @@
+ public enum PeriodType {
+     DAY, WEEK, MONTH, YEAR; // TODO: 22.10.2015 add support for hourly
+ 
+-    int mMultiplier = 1; //multiplier for the period type
+-
+-    /**
+-     * Computes the {@link PeriodType} for a given {@code period}
+-     * @param period Period in milliseconds since Epoch
+-     * @return PeriodType corresponding to the period
+-     */
+-    public static PeriodType parse(long period){
+-        PeriodType periodType = DAY;
+-        int result = (int) (period/ RecurrenceParser.YEAR_MILLIS);
+-        if (result > 0) {
+-            periodType = YEAR;
+-            periodType.setMultiplier(result);
+-            return periodType;
+-        }
+-
+-        result = (int) (period/RecurrenceParser.MONTH_MILLIS);
+-        if (result > 0) {
+-            periodType = MONTH;
+-            periodType.setMultiplier(result);
+-            return periodType;
+-        }
+-
+-        result = (int) (period/RecurrenceParser.WEEK_MILLIS);
+-        if (result > 0) {
+-            periodType = WEEK;
+-            periodType.setMultiplier(result);
+-            return periodType;
+-        }
+-
+-        result = (int) (period/RecurrenceParser.DAY_MILLIS);
+-        if (result > 0) {
+-            periodType = DAY;
+-            periodType.setMultiplier(result);
+-            return periodType;
+-        }
+-
+-        return periodType;
+-    }
+-
+-    /**
+-     * Sets the multiplier for this period type
+-     * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
+-     * @param multiplier Multiplier for this period type
+-     */
+-    public void setMultiplier(int multiplier){
+-        mMultiplier = multiplier;
+-    }
+-
+-    /**
+-     * Returns the multiplier for this period type. The default multiplier is 1.
+-     * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
+-     * @return  Multiplier for this period type
+-     */
+-    public int getMultiplier(){
+-        return mMultiplier;
+-    }
+ 
+     /**
+      * Returns the frequency description of this period type.
+@@ -113,27 +50,6 @@ public String getFrequencyDescription() {
+     }
+ 
+     /**
+-     * Returns a localized string describing this period type's frequency.
+-     * @return String describing period type
+-     */
+-    public String getFrequencyRepeatString(){
+-        Resources res = GnuCashApplication.getAppContext().getResources();
+-        //todo: take multiplier into account here
+-        switch (this) {
+-            case DAY:
+-                return res.getQuantityString(R.plurals.label_every_x_days, mMultiplier, mMultiplier);
+-            case WEEK:
+-                return res.getQuantityString(R.plurals.label_every_x_weeks, mMultiplier, mMultiplier);
+-            case MONTH:
+-                return res.getQuantityString(R.plurals.label_every_x_months, mMultiplier, mMultiplier);
+-            case YEAR:
+-                return res.getQuantityString(R.plurals.label_every_x_years, mMultiplier, mMultiplier);
+-            default:
+-                return "";
+-        }
+-    }
+-
+-    /**
+      * Returns the parts of the recurrence rule which describe the day or month on which to run the
+      * scheduled transaction. These parts are the BYxxx
+      * @param startTime Start time of transaction used to determine the start day of execution
+@@ -155,6 +71,4 @@ public String getByParts(long startTime){
+         }
+         return partString;
+     }
+-
+-
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index 4c8dfe61..51467426 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -17,6 +17,7 @@
+ package org.gnucash.android.model;
+ 
+ import android.content.Context;
++import android.content.res.Resources;
+ import android.support.annotation.NonNull;
+ 
+ import org.gnucash.android.R;
+@@ -58,6 +59,8 @@
+      */
+     private String mByDay;
+ 
++    private int mMultiplier = 1; //multiplier for the period type
++
+     public Recurrence(@NonNull PeriodType periodType){
+         setPeriodType(periodType);
+         mPeriodStart = new Timestamp(System.currentTimeMillis());
+@@ -119,7 +122,7 @@ public long getPeriod(){
+                 baseMillis = RecurrenceParser.YEAR_MILLIS;
+                 break;
+         }
+-        return mPeriodType.getMultiplier() * baseMillis;
++        return mMultiplier * baseMillis;
+     }
+ 
+     /**
+@@ -127,7 +130,7 @@ public long getPeriod(){
+      * @return String description of repeat schedule
+      */
+     public String getRepeatString(){
+-        StringBuilder repeatBuilder = new StringBuilder(mPeriodType.getFrequencyRepeatString());
++        StringBuilder repeatBuilder = new StringBuilder(getFrequencyRepeatString());
+         Context context = GnuCashApplication.getAppContext();
+ 
+         String dayOfWeek = new SimpleDateFormat("EEEE", GnuCashApplication.getDefaultLocale())
+@@ -143,12 +146,12 @@ public String getRepeatString(){
+         return repeatBuilder.toString();
+     }
+ 
+-        /**
+-         * Creates an RFC 2445 string which describes this recurring event.
+-         * <p>See http://recurrance.sourceforge.net/</p>
+-         * <p>The output of this method is not meant for human consumption</p>
+-         * @return String describing event
+-         */
++    /**
++     * Creates an RFC 2445 string which describes this recurring event.
++     * <p>See http://recurrance.sourceforge.net/</p>
++     * <p>The output of this method is not meant for human consumption</p>
++     * @return String describing event
++     */
+     public String getRuleString(){
+         String separator = ";";
+ 
+@@ -166,7 +169,7 @@ public String getRuleString(){
+ 
+ 
+         ruleBuilder.append("FREQ=").append(mPeriodType.getFrequencyDescription()).append(separator);
+-        ruleBuilder.append("INTERVAL=").append(mPeriodType.getMultiplier()).append(separator);
++        ruleBuilder.append("INTERVAL=").append(mMultiplier).append(separator);
+         if (getCount() > 0)
+             ruleBuilder.append("COUNT=").append(getCount()).append(separator);
+         ruleBuilder.append(mPeriodType.getByParts(mPeriodStart.getTime())).append(separator);
+@@ -180,7 +183,7 @@ public String getRuleString(){
+      */
+     public int getDaysLeftInCurrentPeriod(){
+         LocalDate startDate = new LocalDate(System.currentTimeMillis());
+-        int interval = mPeriodType.getMultiplier() - 1;
++        int interval = mMultiplier - 1;
+         LocalDate endDate = null;
+         switch (mPeriodType){
+             case DAY:
+@@ -209,7 +212,7 @@ public int getDaysLeftInCurrentPeriod(){
+     public int getNumberOfPeriods(int numberOfPeriods) {
+         LocalDate startDate = new LocalDate(mPeriodStart.getTime());
+         LocalDate endDate;
+-        int interval = mPeriodType.getMultiplier();
++        int interval = mMultiplier;
+         //// TODO: 15.08.2016 Why do we add the number of periods. maybe rename method or param
+         switch (mPeriodType){
+ 
+@@ -274,7 +277,7 @@ public int getCount(){
+         if (mPeriodEnd == null)
+             return -1;
+ 
+-        int multiple = mPeriodType.getMultiplier();
++        int multiple = mMultiplier;
+         ReadablePeriod jodaPeriod;
+         switch (mPeriodType){
+             case DAY:
+@@ -303,7 +306,7 @@ public int getCount(){
+ /*
+         //this solution does not use looping, but is not very accurate
+ 
+-        int multiplier = mPeriodType.getMultiplier();
++        int multiplier = mMultiplier;
+         LocalDateTime startDate = new LocalDateTime(mPeriodStart.getTime());
+         LocalDateTime endDate = new LocalDateTime(mPeriodEnd.getTime());
+         switch (mPeriodType){
+@@ -328,7 +331,7 @@ public int getCount(){
+     public void setPeriodEnd(int numberOfOccurences){
+         LocalDateTime localDate = new LocalDateTime(mPeriodStart.getTime());
+         LocalDateTime endDate;
+-        int occurrenceDuration = numberOfOccurences * mPeriodType.getMultiplier();
++        int occurrenceDuration = numberOfOccurences * mMultiplier;
+         switch (mPeriodType){
+             case DAY:
+                 endDate = localDate.plusDays(occurrenceDuration);
+@@ -362,4 +365,84 @@ public Timestamp getPeriodEnd(){
+     public void setPeriodEnd(Timestamp endTimestamp){
+         mPeriodEnd = endTimestamp;
+     }
++
++    /**
++     * Returns the multiplier for the period type. The default multiplier is 1.
++     * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2.
++     *
++     * @return  Multiplier for the period type
++     */
++    public int getMultiplier(){
++        return mMultiplier;
++    }
++
++    /**
++     * Sets the multiplier for the period type.
++     * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2.
++     *
++     * @param multiplier Multiplier for the period type
++     */
++    public void setMultiplier(int multiplier){
++        mMultiplier = multiplier;
++    }
++
++    /**
++     * Returns a localized string describing the period type's frequency.
++     *
++     * @return String describing the period type
++     */
++    private String getFrequencyRepeatString(){
++        Resources res = GnuCashApplication.getAppContext().getResources();
++        //todo: take multiplier into account here
++        switch (mPeriodType) {
++            case DAY:
++                return res.getQuantityString(R.plurals.label_every_x_days, mMultiplier, mMultiplier);
++            case WEEK:
++                return res.getQuantityString(R.plurals.label_every_x_weeks, mMultiplier, mMultiplier);
++            case MONTH:
++                return res.getQuantityString(R.plurals.label_every_x_months, mMultiplier, mMultiplier);
++            case YEAR:
++                return res.getQuantityString(R.plurals.label_every_x_years, mMultiplier, mMultiplier);
++            default:
++                return "";
++        }
++    }
++
++    /**
++     * Returns a new {@link Recurrence} with the {@link PeriodType} specified in the old format.
++     *
++     * @param period Period in milliseconds since Epoch (old format to define a period)
++     * @return Recurrence with the specified period.
++     */
++    public static Recurrence fromLegacyPeriod(long period) {
++        int result = (int) (period/RecurrenceParser.YEAR_MILLIS);
++        if (result > 0) {
++            Recurrence recurrence = new Recurrence(PeriodType.YEAR);
++            recurrence.setMultiplier(result);
++            return recurrence;
++        }
++
++        result = (int) (period/RecurrenceParser.MONTH_MILLIS);
++        if (result > 0) {
++            Recurrence recurrence = new Recurrence(PeriodType.MONTH);
++            recurrence.setMultiplier(result);
++            return recurrence;
++        }
++
++        result = (int) (period/RecurrenceParser.WEEK_MILLIS);
++        if (result > 0) {
++            Recurrence recurrence = new Recurrence(PeriodType.WEEK);
++            recurrence.setMultiplier(result);
++            return recurrence;
++        }
++
++        result = (int) (period/RecurrenceParser.DAY_MILLIS);
++        if (result > 0) {
++            Recurrence recurrence = new Recurrence(PeriodType.DAY);
++            recurrence.setMultiplier(result);
++            return recurrence;
++        }
++
++        return new Recurrence(PeriodType.DAY);
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index f7279af5..d051ac4e 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -20,12 +20,9 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.joda.time.DateTime;
+-import org.joda.time.LocalDate;
+ import org.joda.time.LocalDateTime;
+ 
+ import java.sql.Timestamp;
+-import java.text.DateFormat;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+ import java.util.Locale;
+@@ -151,7 +148,7 @@ public long getTimeOfLastSchedule(){
+             return  -1;
+ 
+         LocalDateTime startTime = LocalDateTime.fromDateFields(new Date(mStartDate));
+-        int multiplier = mRecurrence.getPeriodType().getMultiplier();
++        int multiplier = mRecurrence.getMultiplier();
+ 
+         int factor = (mExecutionCount-1) * multiplier;
+         switch (mRecurrence.getPeriodType()){
+@@ -179,7 +176,7 @@ public long getTimeOfLastSchedule(){
+      * @return Next run time in milliseconds
+      */
+     public long computeNextScheduledExecutionTime(){
+-        int multiplier = mRecurrence.getPeriodType().getMultiplier();
++        int multiplier = mRecurrence.getMultiplier();
+         //this is the last planned time for the action to occur, not the last run time
+         long lastActionTime = getTimeOfLastSchedule(); //mStartDate + ((mExecutionCount-1)*getPeriod());
+         if (lastActionTime < 0){
+@@ -472,8 +469,8 @@ public Recurrence getRecurrence() {
+      * @see #setRecurrence(Recurrence)
+      */
+     public void setRecurrence(PeriodType periodType, int ordinal){
+-        periodType.setMultiplier(ordinal);
+         Recurrence recurrence = new Recurrence(periodType);
++        recurrence.setMultiplier(ordinal);
+         setRecurrence(recurrence);
+     }
+ 
+@@ -510,7 +507,7 @@ public void setRecurrence(@NonNull Recurrence recurrence) {
+     public static ScheduledAction parseScheduledAction(Transaction transaction, long period){
+         ScheduledAction scheduledAction = new ScheduledAction(ActionType.TRANSACTION);
+         scheduledAction.mActionUID = transaction.getUID();
+-        Recurrence recurrence = new Recurrence(PeriodType.parse(period));
++        Recurrence recurrence = Recurrence.fromLegacyPeriod(period);
+         scheduledAction.setRecurrence(recurrence);
+         return scheduledAction;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index 6309db40..efbd3aef 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -73,8 +73,8 @@ public static Recurrence parse(EventRecurrence eventRecurrence){
+         }
+ 
+         int interval = eventRecurrence.interval == 0 ? 1 : eventRecurrence.interval; //bug from betterpickers library sometimes returns 0 as the interval
+-        periodType.setMultiplier(interval);
+         Recurrence recurrence = new Recurrence(periodType);
++        recurrence.setMultiplier(interval);
+         parseEndTime(eventRecurrence, recurrence);
+         recurrence.setByDay(parseByDay(eventRecurrence.byday));
+         if (eventRecurrence.startDate != null)
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/ScheduledActionDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/ScheduledActionDbAdapterTest.java
+index 0a513db6..fd56a34f 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/ScheduledActionDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/ScheduledActionDbAdapterTest.java
+@@ -65,8 +65,9 @@ public void everyScheduledActionShouldHaveRecurrence(){
+     public void testGenerateRepeatString(){
+         ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
+         PeriodType periodType = PeriodType.MONTH;
+-        periodType.setMultiplier(2);
+-        scheduledAction.setRecurrence(new Recurrence(periodType));
++        Recurrence recurrence = new Recurrence(periodType);
++        recurrence.setMultiplier(2);
++        scheduledAction.setRecurrence(recurrence);
+         scheduledAction.setTotalPlannedExecutionCount(4);
+         Resources res = GnuCashApplication.getAppContext().getResources();
+         String repeatString = res.getQuantityString(R.plurals.label_every_x_months, 2, 2) + ", " +
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/RecurrenceTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/RecurrenceTest.java
+index 567137f6..5f76ff6e 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/RecurrenceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/RecurrenceTest.java
+@@ -61,8 +61,8 @@ public void testRecurrenceCountComputation(){
+         DateTime startTime = new DateTime(2016, 6, 6, 9, 0);
+         DateTime endTime = new DateTime(2016, 8, 29, 10, 0);
+         PeriodType biWeekly = PeriodType.WEEK;
+-        biWeekly.setMultiplier(2);
+         recurrence = new Recurrence(biWeekly);
++        recurrence.setMultiplier(2);
+         recurrence.setPeriodStart(new Timestamp(startTime.getMillis()));
+         recurrence.setPeriodEnd(new Timestamp(endTime.getMillis()));
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+index c1a0b927..b0bed494 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+@@ -98,9 +98,9 @@ public void settingRecurrence_shouldSetEndTime(){
+     public void testComputingNextScheduledExecution(){
+         ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
+         PeriodType periodType = PeriodType.MONTH;
+-        periodType.setMultiplier(2);
+ 
+         Recurrence recurrence = new Recurrence(periodType);
++        recurrence.setMultiplier(2);
+         DateTime startDate = new DateTime(2015, 8, 15, 12, 0);
+         recurrence.setPeriodStart(new Timestamp(startDate.getMillis()));
+         scheduledAction.setRecurrence(recurrence);
+@@ -116,8 +116,8 @@ public void testComputingNextScheduledExecution(){
+     public void testComputingTimeOfLastSchedule(){
+         ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
+         PeriodType periodType = PeriodType.WEEK;
+-        periodType.setMultiplier(2);
+         Recurrence recurrence = new Recurrence(periodType);
++        recurrence.setMultiplier(2);
+         scheduledAction.setRecurrence(recurrence);
+         DateTime startDate = new DateTime(2016, 6, 6, 9, 0);
+         scheduledAction.setStartTime(startDate.getMillis());

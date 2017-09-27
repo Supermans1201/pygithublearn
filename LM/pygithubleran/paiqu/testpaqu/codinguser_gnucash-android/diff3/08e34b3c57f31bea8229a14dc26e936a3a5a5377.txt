@@ -1,0 +1,191 @@
+From fd7007ef21c50b1fb3b24d06ac63173b02832f5f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Sun, 24 Apr 2016 18:56:00 +0200
+Subject: [PATCH 1/3] Avoid Price.toString() failing for certain values of
+ numerator/denominator.
+
+Fixes a regression introduced in 66cc533 (bugfix #479) in which the
+numerator/denominator division fails with an ArithmeticException if no
+MathContext is provided. BigDecimal tries to return an exact result,
+which is not possible when rounding and precision aren't specified.
+
+See BigDecimal javadoc:
+http://docs.oracle.com/javase/7/docs/api/java/math/BigDecimal.html
+
+Fixes Crashlitics issue #196
+https://fabric.io/gnucash/android/apps/org.gnucash.android/issues/571b4a95ffcdc04250f98ba0
+---
+ .../main/java/org/gnucash/android/model/Price.java  |  3 ++-
+ .../gnucash/android/test/unit/model/PriceTest.java  | 21 +++++++++++++++++++++
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/Price.java b/app/src/main/java/org/gnucash/android/model/Price.java
+index df02d380..7fde8683 100644
+--- a/app/src/main/java/org/gnucash/android/model/Price.java
++++ b/app/src/main/java/org/gnucash/android/model/Price.java
+@@ -4,6 +4,7 @@
+ 
+ 
+ import java.math.BigDecimal;
++import java.math.MathContext;
+ import java.sql.Timestamp;
+ import java.text.DecimalFormat;
+ import java.text.NumberFormat;
+@@ -156,6 +157,6 @@ public String toString() {
+         BigDecimal denominator = new BigDecimal(mValueDenom);
+         DecimalFormat formatter = (DecimalFormat) NumberFormat.getNumberInstance();
+         formatter.setMaximumFractionDigits(6);
+-        return formatter.format(numerator.divide(denominator));
++        return formatter.format(numerator.divide(denominator, MathContext.DECIMAL32));
+     }
+ }
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/PriceTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/PriceTest.java
+index b9abc63e..93c9d862 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/PriceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/PriceTest.java
+@@ -23,6 +23,7 @@
+ import java.util.Locale;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
++import static org.junit.Assert.fail;
+ 
+ 
+ public class PriceTest {
+@@ -52,6 +53,26 @@ public void toString_shouldUseDefaultLocale() {
+         assertThat(price.toString()).isEqualTo("1,234");
+     }
+ 
++    /**
++     * BigDecimal throws an ArithmeticException if it can't represent exactly
++     * a result. This can happen with divisions like 1/3 if no precision and
++     * round mode is specified with a MathContext.
++     */
++    @Test
++    public void toString_shouldNotFailForInfinitelyLongDecimalExpansion() {
++        long numerator = 1;
++        long denominator = 3;
++        Price price = new Price();
++
++        price.setValueNum(numerator);
++        price.setValueDenom(denominator);
++        try {
++            price.toString();
++        } catch (ArithmeticException e) {
++            fail("The numerator/denominator division in Price.toString() should not fail.");
++        }
++    }
++
+     @Test
+     public void getNumerator_shouldReduceAutomatically() {
+         long numerator = 1;
+
+From 36accb0f547047d158c3a2cc7c7f851a0df87c65 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Tue, 26 Apr 2016 19:10:07 +0200
+Subject: [PATCH 2/3] Assign colors to accounts when "Account color in reports"
+ is checked.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/495
+---
+ .../org/gnucash/android/ui/report/BarChartFragment.java     |  4 +++-
+ .../org/gnucash/android/ui/report/PieChartFragment.java     | 13 +++++++++----
+ .../gnucash/android/ui/report/ReportSummaryFragment.java    |  4 +++-
+ 3 files changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/BarChartFragment.java b/app/src/main/java/org/gnucash/android/ui/report/BarChartFragment.java
+index 3aa0502c..0cf4ae44 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/BarChartFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/BarChartFragment.java
+@@ -229,7 +229,9 @@ private BarData getData() {
+                         if (!accountToColorMap.containsKey(account.getUID())) {
+                             Integer color;
+                             if (mUseAccountColor) {
+-                                color = account.getColor();
++                                color = (account.getColor() != Account.DEFAULT_COLOR)
++                                        ? account.getColor()
++                                        : COLORS[accountToColorMap.size() % COLORS.length];
+                             } else {
+                                 color = COLORS[accountToColorMap.size() % COLORS.length];
+                             }
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/PieChartFragment.java b/app/src/main/java/org/gnucash/android/ui/report/PieChartFragment.java
+index f4e7692a..c0e1ca4a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/PieChartFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/PieChartFragment.java
+@@ -42,7 +42,6 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+ 
+@@ -197,9 +196,15 @@ private PieData getData() {
+                         mReportStartTime, mReportEndTime).asDouble();
+                 if (balance > 0) {
+                     dataSet.addEntry(new Entry((float) balance, dataSet.getEntryCount()));
+-                    colors.add(mUseAccountColor
+-                            ? account.getColor()
+-                            : ReportsActivity.COLORS[(dataSet.getEntryCount() - 1) % ReportsActivity.COLORS.length]);
++                    int color;
++                    if (mUseAccountColor) {
++                        color = (account.getColor() != Account.DEFAULT_COLOR)
++                                ? account.getColor()
++                                : ReportsActivity.COLORS[(dataSet.getEntryCount() - 1) % ReportsActivity.COLORS.length];
++                    } else {
++                        color = ReportsActivity.COLORS[(dataSet.getEntryCount() - 1) % ReportsActivity.COLORS.length];
++                    }
++                    colors.add(color);
+                     labels.add(account.getName());
+                 }
+             }
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/ReportSummaryFragment.java b/app/src/main/java/org/gnucash/android/ui/report/ReportSummaryFragment.java
+index a84c02ac..93d0d694 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/ReportSummaryFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/ReportSummaryFragment.java
+@@ -199,7 +199,9 @@ private PieData getData() {
+                         Collections.singletonList(account.getUID()), start, end).asDouble();
+                 if (balance > 0) {
+                     dataSet.addEntry(new Entry((float) balance, dataSet.getEntryCount()));
+-                    colors.add(account.getColor());
++                    colors.add(account.getColor() != Account.DEFAULT_COLOR
++                            ? account.getColor()
++                            : ReportsActivity.COLORS[(dataSet.getEntryCount() - 1) % ReportsActivity.COLORS.length]);
+                     labels.add(account.getName());
+                 }
+             }
+
+From c427f218fbed1b8d2a29f314a0ca870a1ab913ad Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 28 Apr 2016 15:00:22 +0200
+Subject: [PATCH 3/3] Upgrade version strings for 2nd beta release of v2.0.7
+
+---
+ CHANGELOG.md     | 2 +-
+ app/build.gradle | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 19ba4c4b..cad161c0 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,6 +1,6 @@
+ Change Log
+ ===============================================================================
+-Version 2.0.7 *(2016-04-20)*
++Version 2.0.7 *(2016-05-05)*
+ ----------------------------
+ * Fixed: Currency exchange rate does not accept very small rates (> 2 decimal places)
+ * Improved: Updated translations for Japanese, Polish, French, 
+diff --git a/app/build.gradle b/app/build.gradle
+index f4613f4e..cc8ab487 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -6,7 +6,7 @@ apply plugin: 'io.fabric'
+ def versionMajor = 2
+ def versionMinor = 0
+ def versionPatch = 7
+-def versionBuild = 0
++def versionBuild = 2
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd HH:mm 'UTC'")

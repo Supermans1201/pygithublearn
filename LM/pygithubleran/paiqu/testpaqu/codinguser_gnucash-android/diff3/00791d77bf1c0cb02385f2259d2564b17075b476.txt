@@ -1,0 +1,807 @@
+From 00791d77bf1c0cb02385f2259d2564b17075b476 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 10 Aug 2015 14:42:48 +0200
+Subject: [PATCH] Added new view for displaying transaction info
+
+Fixed some bugs with opening activity for editing transactions
+Fixed: crash in split editor due to new FormActivity
+---
+ app/build.gradle                                   |   3 +-
+ app/src/main/AndroidManifest.xml                   |   3 +
+ .../gnucash/android/app/GnuCashApplication.java    |  12 ++
+ .../java/org/gnucash/android/ui/FormActivity.java  |  28 +++-
+ .../android/ui/account/AccountsActivity.java       |   2 +-
+ .../ui/transaction/TransactionFormFragment.java    |  12 +-
+ .../ui/transaction/TransactionInfoActivity.java    | 177 +++++++++++++++++++++
+ .../ui/transaction/TransactionsActivity.java       |  18 +--
+ .../ui/transaction/TransactionsListFragment.java   |   7 +-
+ .../dialog/SplitEditorDialogFragment.java          |   3 +-
+ .../res/drawable-hdpi/ic_mode_edit_white_24dp.png  | Bin 0 -> 219 bytes
+ .../res/drawable-mdpi/ic_mode_edit_white_24dp.png  | Bin 0 -> 165 bytes
+ .../res/drawable-xhdpi/ic_mode_edit_white_24dp.png | Bin 0 -> 239 bytes
+ .../drawable-xxhdpi/ic_mode_edit_white_24dp.png    | Bin 0 -> 302 bytes
+ app/src/main/res/layout/activity_accounts.xml      |   2 +-
+ app/src/main/res/layout/activity_form.xml          |   2 +-
+ .../main/res/layout/activity_transaction_info.xml  | 108 +++++++++++++
+ app/src/main/res/layout/fragment_accounts_list.xml |   2 +-
+ .../main/res/layout/fragment_new_transaction.xml   |   1 +
+ .../res/layout/toolbar_transactions_activity.xml   |   2 +-
+ app/src/main/res/values/styles.xml                 |  12 +-
+ 21 files changed, 357 insertions(+), 37 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java
+ create mode 100644 app/src/main/res/drawable-hdpi/ic_mode_edit_white_24dp.png
+ create mode 100644 app/src/main/res/drawable-mdpi/ic_mode_edit_white_24dp.png
+ create mode 100644 app/src/main/res/drawable-xhdpi/ic_mode_edit_white_24dp.png
+ create mode 100644 app/src/main/res/drawable-xxhdpi/ic_mode_edit_white_24dp.png
+ create mode 100644 app/src/main/res/layout/activity_transaction_info.xml
+
+diff --git a/app/build.gradle b/app/build.gradle
+index f0961bfc..12ff5697 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -163,7 +163,8 @@ dependencies {
+             'com.github.PhilJay:MPAndroidChart:v2.1.0',
+             'joda-time:joda-time:2.7',
+             'com.google.android.gms:play-services-drive:7.0.0',
+-            'com.crashlytics.android:crashlytics:1.+'
++            'com.crashlytics.android:crashlytics:1.+',
++            'com.jakewharton:butterknife:7.0.1'
+     )
+ 
+     testCompile('org.robolectric:robolectric:3.0',
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index ab18b3e2..143e8e8f 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -101,6 +101,9 @@
+         <activity android:name=".ui.FormActivity"
+             android:theme="@style/Theme.GnucashTheme.NoActionBar"
+             android:configChanges="orientation|screenSize"/>
++        <activity android:name=".ui.transaction.TransactionInfoActivity"
++            android:theme="@style/Theme.GnucashTheme.NoActionBar"
++            android:configChanges="orientation|screenSize"/>
+         <activity android:name=".ui.chart.ChartReportActivity" />
+         <activity android:name=".ui.chart.PieChartActivity" />
+         <activity android:name=".ui.chart.LineChartActivity" />
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index d7bf9081..849e2bf6 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -23,6 +23,7 @@
+ import android.content.SharedPreferences;
+ import android.database.SQLException;
+ import android.database.sqlite.SQLiteDatabase;
++import android.graphics.Color;
+ import android.os.Build;
+ import android.preference.PreferenceManager;
+ import android.util.Log;
+@@ -71,6 +72,17 @@
+ 
+     private static ScheduledActionDbAdapter mScheduledActionDbAdapter;
+ 
++    /**
++     * Returns darker version of specified <code>color</code>.
++     * Use for theming the status bar color when setting the color of the actionBar
++     */
++    public static int darken(int color) {
++        float[] hsv = new float[3];
++        Color.colorToHSV(color, hsv);
++        hsv[2] *= 0.8f; // value component
++        return Color.HSVToColor(hsv);
++    }
++
+     @Override
+     public void onCreate(){
+         super.onCreate();
+diff --git a/app/src/main/java/org/gnucash/android/ui/FormActivity.java b/app/src/main/java/org/gnucash/android/ui/FormActivity.java
+index 4e2ce4ce..3571d90a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/FormActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/FormActivity.java
+@@ -27,10 +27,10 @@
+ import android.view.MenuItem;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.ui.account.AccountFormFragment;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+-import org.gnucash.android.ui.transaction.TransactionsActivity;
+ 
+ /**
+  * Activity for displaying forms
+@@ -38,6 +38,8 @@
+  */
+ public class FormActivity extends AppCompatActivity {
+ 
++    private String mAccountUID;
++
+     public enum FormType {ACCOUNT_FORM, TRANSACTION_FORM, EXPORT_FORM}
+ 
+     @Override
+@@ -45,7 +47,7 @@ protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         setContentView(R.layout.activity_form);
+ 
+-        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar_actionbar);
++        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar_transaction_info);
+         setSupportActionBar(toolbar);
+ 
+         android.support.v7.app.ActionBar actionBar = getSupportActionBar();
+@@ -58,15 +60,15 @@ protected void onCreate(Bundle savedInstanceState) {
+         String formtypeString = intent.getStringExtra(UxArgument.FORM_TYPE);
+         FormType formType = FormType.valueOf(formtypeString);
+ 
+-        String accountUID = intent.getStringExtra(UxArgument.SELECTED_ACCOUNT_UID);
+-        if (accountUID == null){
+-            accountUID = intent.getStringExtra(UxArgument.PARENT_ACCOUNT_UID);
++        mAccountUID = intent.getStringExtra(UxArgument.SELECTED_ACCOUNT_UID);
++        if (mAccountUID == null){
++            mAccountUID = intent.getStringExtra(UxArgument.PARENT_ACCOUNT_UID);
+         }
+-        if (accountUID != null) {
+-            int colorCode = AccountsDbAdapter.getActiveAccountColorResource(accountUID);
++        if (mAccountUID != null) {
++            int colorCode = AccountsDbAdapter.getActiveAccountColorResource(mAccountUID);
+             actionBar.setBackgroundDrawable(new ColorDrawable(colorCode));
+             if (Build.VERSION.SDK_INT > 20)
+-                getWindow().setStatusBarColor(TransactionsActivity.darken(colorCode));
++                getWindow().setStatusBarColor(GnuCashApplication.darken(colorCode));
+         }
+         switch (formType){
+             case ACCOUNT_FORM:
+@@ -92,6 +94,7 @@ protected void onCreate(Bundle savedInstanceState) {
+     public boolean onOptionsItemSelected(MenuItem item) {
+         switch (item.getItemId()){
+             case android.R.id.home:
++                setResult(RESULT_CANCELED);
+                 finish();
+                 return true;
+         }
+@@ -99,6 +102,15 @@ public boolean onOptionsItemSelected(MenuItem item) {
+         return super.onOptionsItemSelected(item);
+     }
+ 
++    /**
++     * Return the GUID of the account for which the form is displayed.
++     * If the form is a transaction form, the transaction is created within that account. If it is
++     * an account form, then the GUID is the parent account
++     * @return GUID of account
++     */
++    public String getCurrentAccountUID() {
++        return mAccountUID;
++    }
+ 
+     /**
+      * Shows the form for creating/editing accounts
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index c3fb47fd..d0702ebd 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -219,7 +219,7 @@ public void onCreate(Bundle savedInstanceState) {
+         setContentView(R.layout.activity_accounts);
+         setUpDrawer();
+ 
+-        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar_actionbar);
++        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar_transaction_info);
+         setSupportActionBar(toolbar);
+ 
+         final Intent intent = getIntent();
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 0dab3e53..a2898a6c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -16,6 +16,7 @@
+ 
+ package org.gnucash.android.ui.transaction;
+ 
++import android.app.Activity;
+ import android.content.Context;
+ import android.content.SharedPreferences;
+ import android.database.Cursor;
+@@ -287,7 +288,7 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+ 
+         setListeners();
+         ActionBar actionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
+-        actionBar.setSubtitle(mAccountsDbAdapter.getFullyQualifiedAccountName(mAccountUID));
++//        actionBar.setSubtitle(mAccountsDbAdapter.getFullyQualifiedAccountName(mAccountUID));
+ 
+         if (mTransaction == null) {
+             actionBar.setTitle(R.string.title_add_transaction);
+@@ -795,7 +796,7 @@ private void saveNewTransaction() {
+         //update widgets, if any
+ 		WidgetConfigurationActivity.updateAllWidgets(getActivity().getApplicationContext());
+ 
+-		finish();
++		finish(Activity.RESULT_OK);
+ 	}
+ 
+     /**
+@@ -857,13 +858,13 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 
+ 		switch (item.getItemId()) {
+             case android.R.id.home:
+-                finish();
++                finish(Activity.RESULT_CANCELED);
+                 return true;
+ 
+ 		case R.id.menu_save:
+             if (mMultiCurrency) {
+                 Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
+-                finish();
++                finish(Activity.RESULT_CANCELED);
+             }
+             else if (mAmountEditText.getText().length() == 0) {
+                 Toast.makeText(getActivity(), R.string.toast_transanction_amount_required, Toast.LENGTH_SHORT).show();
+@@ -910,8 +911,9 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+ 	 * Finishes the fragment appropriately.
+ 	 * Depends on how the fragment was loaded, it might have a backstack or not
+ 	 */
+-	private void finish() {
++	private void finish(int resultCode) {
+ 		if (getActivity().getSupportFragmentManager().getBackStackEntryCount() == 0){
++            getActivity().setResult(resultCode);
+ 			//means we got here directly from the accounts list activity, need to finish
+ 			getActivity().finish();
+ 		} else {
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java
+new file mode 100644
+index 00000000..c05d4046
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java
+@@ -0,0 +1,177 @@
++package org.gnucash.android.ui.transaction;
++
++import android.app.Activity;
++import android.content.Intent;
++import android.graphics.drawable.ColorDrawable;
++import android.os.Build;
++import android.os.Bundle;
++import android.support.v7.app.ActionBar;
++import android.support.v7.app.AppCompatActivity;
++import android.support.v7.widget.Toolbar;
++import android.view.MenuItem;
++import android.view.View;
++import android.widget.TextView;
++
++import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.ui.FormActivity;
++import org.gnucash.android.ui.UxArgument;
++
++import java.text.DateFormat;
++import java.util.Date;
++import java.util.MissingFormatArgumentException;
++
++import butterknife.Bind;
++import butterknife.ButterKnife;
++import butterknife.OnClick;
++
++/**
++ * Activity for displaying transaction information
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
++public class TransactionInfoActivity extends AppCompatActivity{
++
++    @Bind(R.id.trn_description) TextView mTransactionDescription;
++    @Bind(R.id.transaction_amount)TextView mTransactionAmount;
++    @Bind(R.id.trn_transfer_account) TextView mTransferAccount;
++    @Bind(R.id.trn_time_and_date) TextView mTimeAndDate;
++    @Bind(R.id.trn_recurrence) TextView mRecurrence;
++    @Bind(R.id.trn_notes) TextView mNotes;
++    @Bind(R.id.toolbar_transaction_info) Toolbar mToolBar;
++    private String mTransactionUID;
++    private String mAccountUID;
++
++    public static final int REQUEST_EDIT_TRANSACTION = 0x10;
++
++    @Override
++    protected void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++
++        setContentView(R.layout.activity_transaction_info);
++
++        mTransactionUID = getIntent().getStringExtra(UxArgument.SELECTED_TRANSACTION_UID);
++        mAccountUID     = getIntent().getStringExtra(UxArgument.SELECTED_ACCOUNT_UID);
++
++        if (mTransactionUID == null || mAccountUID == null){
++            throw new MissingFormatArgumentException("You must specify both the transaction and account GUID");
++        }
++
++        ButterKnife.bind(this);
++        setSupportActionBar(mToolBar);
++
++        ActionBar actionBar = getSupportActionBar();
++        assert actionBar != null;
++        actionBar.setElevation(0);
++        actionBar.setHomeButtonEnabled(true);
++        actionBar.setDisplayHomeAsUpEnabled(true);
++        actionBar.setHomeAsUpIndicator(R.drawable.ic_close_white_24dp);
++        actionBar.setDisplayShowTitleEnabled(false);
++
++
++        bindViews();
++
++        int themeColor = AccountsDbAdapter.getActiveAccountColorResource(mAccountUID);
++        actionBar.setBackgroundDrawable(new ColorDrawable(themeColor));
++        mToolBar.setBackgroundColor(themeColor);
++        if (Build.VERSION.SDK_INT > 20)
++            getWindow().setStatusBarColor(GnuCashApplication.darken(themeColor));
++
++    }
++
++    /**
++     * Reads the transaction information from the database and binds it to the views
++     */
++    private void bindViews(){
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        Transaction transaction = transactionsDbAdapter.getTransaction(mTransactionUID);
++
++        mTransactionDescription.setText(transaction.getDescription());
++        Money balance = transaction.getBalance(mAccountUID);
++        mTransactionAmount.setText(balance.formattedString());
++        int color = balance.isNegative() ? R.color.debit_red : R.color.credit_green;
++        mTransactionAmount.setTextColor(getResources().getColor(color));
++
++        if (!GnuCashApplication.isDoubleEntryEnabled()){
++            findViewById(R.id.row_transfer_account).setVisibility(View.GONE);
++        } else {
++            findViewById(R.id.row_transfer_account).setVisibility(View.VISIBLE);
++            if (transaction.getSplits().size() == 2) {
++                if (transaction.getSplits().get(0).isPairOf(transaction.getSplits().get(1))) {
++                    for (Split split : transaction.getSplits()) {
++                        if (!split.getAccountUID().equals(mAccountUID)) {
++                            mTransferAccount.setText(
++                                    AccountsDbAdapter.getInstance()
++                                            .getFullyQualifiedAccountName(split.getAccountUID()));
++                            break;
++                        }
++                    }
++                }
++            } else {
++                mTransferAccount.setText(transaction.getSplits().size() + " splits");
++            }
++        }
++
++        Date trnDate = new Date(transaction.getTimeMillis());
++        String timeAndDate = DateFormat.getDateTimeInstance(DateFormat.FULL, DateFormat.SHORT).format(trnDate);
++        mTimeAndDate.setText(timeAndDate);
++
++        if (transaction.getScheduledActionUID() != null){
++            ScheduledAction scheduledAction = ScheduledActionDbAdapter.getInstance().getScheduledAction(transaction.getScheduledActionUID());
++            mRecurrence.setText(scheduledAction.getRepeatString());
++            findViewById(R.id.row_trn_recurrence).setVisibility(View.VISIBLE);
++
++        } else {
++            findViewById(R.id.row_trn_recurrence).setVisibility(View.GONE);
++        }
++
++        if (transaction.getNote() != null){
++            mNotes.setText(transaction.getNote());
++            findViewById(R.id.row_trn_notes).setVisibility(View.VISIBLE);
++        } else {
++            findViewById(R.id.row_trn_notes).setVisibility(View.GONE);
++        }
++
++    }
++
++    /**
++     * Refreshes the transaction information
++     */
++    private void refresh(){
++        bindViews();
++    }
++
++    @OnClick(R.id.fab_edit_transaction)
++    public void editTransaction(){
++        Intent createTransactionIntent = new Intent(this.getApplicationContext(), FormActivity.class);
++        createTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
++        createTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
++        createTransactionIntent.putExtra(UxArgument.SELECTED_TRANSACTION_UID, mTransactionUID);
++        createTransactionIntent.putExtra(UxArgument.FORM_TYPE, FormActivity.FormType.TRANSACTION_FORM.name());
++        startActivityForResult(createTransactionIntent, REQUEST_EDIT_TRANSACTION);
++    }
++
++    @Override
++    public boolean onOptionsItemSelected(MenuItem item) {
++        switch (item.getItemId()) {
++            case android.R.id.home:
++                finish();
++                return true;
++            default:
++                return super.onOptionsItemSelected(item);
++        }
++    }
++
++    @Override
++    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
++        if (resultCode == Activity.RESULT_OK){
++            refresh();
++        }
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 1d329768..d6274e2e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -20,7 +20,6 @@
+ import android.content.Context;
+ import android.content.Intent;
+ import android.database.Cursor;
+-import android.graphics.Color;
+ import android.graphics.drawable.ColorDrawable;
+ import android.os.Build;
+ import android.os.Bundle;
+@@ -28,7 +27,6 @@
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.app.FragmentStatePagerAdapter;
+-import android.support.v4.app.FragmentTransaction;
+ import android.support.v4.view.PagerAdapter;
+ import android.support.v4.view.ViewPager;
+ import android.support.v4.widget.ResourceCursorAdapter;
+@@ -255,7 +253,7 @@ protected void onCreate(Bundle savedInstanceState) {
+         setContentView(R.layout.activity_transactions);
+         setUpDrawer();
+ 
+-        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar_actionbar);
++        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar_transaction_info);
+         setSupportActionBar(toolbar);
+         getSupportActionBar().setDisplayShowTitleEnabled(false);
+ 
+@@ -314,19 +312,10 @@ private void setTitleIndicatorColor() {
+             getSupportActionBar().setBackgroundDrawable(new ColorDrawable(iColor));
+ 
+         if (Build.VERSION.SDK_INT > 20)
+-            getWindow().setStatusBarColor(darken(iColor));
++            getWindow().setStatusBarColor(GnuCashApplication.darken(iColor));
+     }
+ 
+     /**
+-     * Returns darker version of specified <code>color</code>.
+-     */
+-    public static int darken(int color) {
+-        float[] hsv = new float[3];
+-        Color.colorToHSV(color, hsv);
+-        hsv[2] *= 0.8f; // value component
+-        return Color.HSVToColor(hsv);
+-    }
+-    /**
+ 	 * Set up action bar navigation list and listener callbacks
+ 	 */
+ 	private void setupActionBarNavigation() {
+@@ -400,9 +389,10 @@ public boolean onOptionsItemSelected(MenuItem item) {
+                 return true;
+ 
+             case R.id.menu_edit_account:
+-                Intent editAccountIntent = new Intent(this, AccountsActivity.class);
++                Intent editAccountIntent = new Intent(this, FormActivity.class);
+                 editAccountIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+                 editAccountIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
++                editAccountIntent.putExtra(UxArgument.FORM_TYPE, FormActivity.FormType.ACCOUNT_FORM.name());
+                 startActivityForResult(editAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);
+                 return true;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 508e6f32..255efbf4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -18,6 +18,7 @@
+ 
+ import android.app.Activity;
+ import android.content.Context;
++import android.content.Intent;
+ import android.content.res.Resources;
+ import android.database.Cursor;
+ import android.graphics.Rect;
+@@ -230,7 +231,11 @@ public void onListItemClick(ListView l, View v, int position, long id) {
+ 			checkbox.setChecked(!checkbox.isChecked());
+ 			return;
+ 		}
+-		mTransactionEditListener.editTransaction(mTransactionsDbAdapter.getUID(id));
++		Intent intent = new Intent(getActivity(), TransactionInfoActivity.class);
++		intent.putExtra(UxArgument.SELECTED_TRANSACTION_UID, mTransactionsDbAdapter.getUID(id));
++		intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
++		startActivity(intent);
++//		mTransactionEditListener.editTransaction(mTransactionsDbAdapter.getUID(id));
+ 	}
+ 
+ 	@Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 6f8cf4fa..c89de454 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -43,6 +43,7 @@
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.ui.FormActivity;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+@@ -201,7 +202,7 @@ private void initArgs() {
+         mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+ 
+         Bundle args = getArguments();
+-        mAccountUID = ((TransactionsActivity) getActivity()).getCurrentAccountUID();
++        mAccountUID = ((FormActivity) getActivity()).getCurrentAccountUID();
+         mBaseAmount = new BigDecimal(args.getString(UxArgument.AMOUNT_STRING));
+ 
+         String conditions = "(" //+ AccountEntry._ID + " != " + mAccountId + " AND "
+diff --git a/app/src/main/res/drawable-hdpi/ic_mode_edit_white_24dp.png b/app/src/main/res/drawable-hdpi/ic_mode_edit_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..595ff10ac241c28cd774720f34a91f58c6892dcf
+GIT binary patch
+literal 219
+zcmeAS@N?(olHy`uVBq!ia0vp^Dj>|k0wldT1B8LpB2O2`5Rc<;FKpyGWFX@9u)F))
+z*;~Krtafv?I)%E_Y_K{}=&{m7?a*G%T~B-z4<COj{<C~dk%B0*|F=#F(ejvfmM&iN
+zdp9+!rbTLIx%J<Q%>T5qy=?Zpsw#8tS1Xd&9k2*~>k}K1Ey;A{<}r&^GyiQbDLWRp
+zHtQZo@<JsZhw1H>OLK!~9QxBGc=AX`N|Mrqd7MsSY794L@SiwUF=4J|?MqgvM-%Km
+Tlv}?Bx|YGy)z4*}Q$iB}qq10?
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-mdpi/ic_mode_edit_white_24dp.png b/app/src/main/res/drawable-mdpi/ic_mode_edit_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..12b09f1d9b28e275323add8a5f26a40709b3550e
+GIT binary patch
+literal 165
+zcmeAS@N?(olHy`uVBq!ia0vp^5+KaM0wlfaz7_+i98VX=5R22v2@+Kg_J9Ac|NpmV
+z;J?TA96oAc&PVGdUZ@}Y5}^>ueD%XLiQ|9%%Clen^me~?-P5>$?ao_51Xjx|Qk^y-
+zdBRlThZ6o?Q|jd-p2|(pELRqpvP6?TOTpK2Qrr9gcRRh0Ezy*ZVPIH1?c-DthJyV-
+Pdl@`k{an^LB{Ts5yXZdH
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xhdpi/ic_mode_edit_white_24dp.png b/app/src/main/res/drawable-xhdpi/ic_mode_edit_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a06bff5a2fc95d5117ce9880821384626d8864d
+GIT binary patch
+literal 239
+zcmV<L01*F)P)<h;3K|Lk000e1NJLTq001xm001xu1ONa4{R=S+0002CNkl<ZScUD<
+z%?ZL_5QO0c>+mP(MLbxIU<bA!R*+V_+CkJ5A&8gp5RjPfTMuyth3pjYys)fUEcORO
+zffF7$V4~qmG-y`|5*=QV=<)mnwn#@#>@tZx11_<06E_Cm;EuJEI5KzuPNK$?!{-w<
+zW;{Mke9afh-**!m1^<@N@NHtL<VCj+{>5K^$DhZ|FM=P=&qvIgiFq?I{~>Up@NR&`
+pI{_Y_4KVpkfXgQVHXn-(+!KC0r!M+UZ~XuO002ovPDHLkV1hXhU+Vw>
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xxhdpi/ic_mode_edit_white_24dp.png b/app/src/main/res/drawable-xxhdpi/ic_mode_edit_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..02e19d04570c6f86c7885615cbc9a271a7a04873
+GIT binary patch
+literal 302
+zcmV+}0nz@6P)<h;3K|Lk000e1NJLTq002k;002k`1ONa4|Kxkj0002>Nkl<ZXx{DF
+zu@Qnm5QX6*5o|<5+i|SLA`Bb@>p%{z$v^{5pMgUJ9P141uEYB)_=4RF_CjEcv6+Mn
+znIBAnGv0XNgxmvXi5r?~6rMQtq!!1P)XA|U^>VC8*ddh(X+J>9y^)Suv$GbGo?4@P
+z$3{eY=xvsabkJP%VN!{O?z@vFl@sq+=QG$(GU4=-%sAbo$vH)W(<W`LIW3YsM~@`t
+zd`T-$90#LJ4mp3rxso#y=RyuS<On%6IU{i@a>#MY3BegB1ZSKdK$X(b(iukxii#&)
+zXB+`2Dj&R^aRxxq;yb_>Cjp8^Kc>z&j4?L%KF;(Ssh;`jUH||907*qoM6N<$f)^cq
+A)Bpeg
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/layout/activity_accounts.xml b/app/src/main/res/layout/activity_accounts.xml
+index 96ca16c8..ffb0b690 100644
+--- a/app/src/main/res/layout/activity_accounts.xml
++++ b/app/src/main/res/layout/activity_accounts.xml
+@@ -29,7 +29,7 @@
+                   android:layout_height="match_parent">
+ 
+         <android.support.v7.widget.Toolbar
+-            android:id="@+id/toolbar_actionbar"
++            android:id="@+id/toolbar_transaction_info"
+             android:background="?attr/colorPrimary"
+             android:layout_width="match_parent"
+             android:layout_height="?attr/actionBarSize"
+diff --git a/app/src/main/res/layout/activity_form.xml b/app/src/main/res/layout/activity_form.xml
+index b1a4e783..8fdf73f9 100644
+--- a/app/src/main/res/layout/activity_form.xml
++++ b/app/src/main/res/layout/activity_form.xml
+@@ -21,7 +21,7 @@
+     android:layout_height="match_parent">
+ 
+     <android.support.v7.widget.Toolbar
+-        android:id="@+id/toolbar_actionbar"
++        android:id="@+id/toolbar_transaction_info"
+         android:background="?attr/colorPrimary"
+         android:layout_width="match_parent"
+         android:layout_height="?attr/actionBarSize"
+diff --git a/app/src/main/res/layout/activity_transaction_info.xml b/app/src/main/res/layout/activity_transaction_info.xml
+new file mode 100644
+index 00000000..de755670
+--- /dev/null
++++ b/app/src/main/res/layout/activity_transaction_info.xml
+@@ -0,0 +1,108 @@
++<?xml version="1.0" encoding="utf-8"?>
++<android.support.design.widget.CoordinatorLayout
++    xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:orientation="vertical"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent">
++
++    <android.support.design.widget.FloatingActionButton
++        android:id="@+id/fab_edit_transaction"
++        android:layout_height="40dp"
++        android:layout_width="40dp"
++        app:layout_anchor="@id/toolbar_transaction_info"
++        app:layout_anchorGravity="bottom|left|start"
++        android:layout_marginLeft="8dp"
++        android:scaleType="center"
++        android:src="@drawable/ic_mode_edit_white_24dp"
++        />
++
++    <LinearLayout
++        android:orientation="vertical"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent">
++        <android.support.v7.widget.Toolbar
++            android:id="@+id/toolbar_transaction_info"
++            android:background="?attr/colorPrimary"
++            android:layout_width="match_parent"
++            android:layout_height="128dp"
++            android:minHeight="?attr/actionBarSize"
++            android:gravity="bottom"
++            app:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar"
++            app:popupTheme="@style/ThemeOverlay.AppCompat.Light" >
++            <TextView android:id="@+id/trn_description"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                tools:text="Transaction description which can be rather long"
++                android:gravity="bottom"
++                android:maxLines="3"
++                android:paddingBottom="20dp"
++                android:textAppearance="@style/TextAppearance.AppCompat.Widget.ActionBar.Title"/>
++        </android.support.v7.widget.Toolbar>
++
++        <TableLayout android:id="@+id/fragment_transaction_form"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:padding="@dimen/dialog_padding"
++            android:layout_marginTop="20dp"
++            android:stretchColumns="1"
++            android:orientation="vertical" >
++
++            <TableRow style="@style/FormRow">
++                <TextView
++                    android:id="@+id/currency_symbol"
++                    style="@style/FormIcon"
++                    android:gravity="center"
++                    android:textSize="22dp"
++                    android:text="$" />
++
++                <TextView android:id="@+id/transaction_amount"
++                    style="@style/TransactionInfo"
++                    android:textSize="22sp"/>
++            </TableRow>
++
++            <TableRow android:id="@+id/row_transfer_account"
++                style="@style/FormRow" >
++
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_forward"/>
++
++                <TextView android:id="@+id/trn_transfer_account"
++                    style="@style/TransactionInfo" />
++            </TableRow>
++
++            <TableRow android:id="@+id/row_time_and_date"
++                style="@style/FormRow" >
++
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_time"/>
++
++                <TextView android:id="@+id/trn_time_and_date"
++                    style="@style/TransactionInfo" />
++            </TableRow>
++
++            <TableRow android:id="@+id/row_trn_recurrence"
++                style="@style/FormRow">
++
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_rotate_right"/>
++
++                <TextView android:id="@+id/trn_recurrence"
++                    style="@style/TransactionInfo" />
++
++            </TableRow>
++
++            <TableRow android:id="@+id/row_trn_notes"
++                style="@style/FormRow">
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_sort_by_size"/>
++
++                <TextView android:id="@+id/trn_notes"
++                    style="@style/TransactionInfo" />
++            </TableRow>
++
++
++        </TableLayout>
++    </LinearLayout>
++</android.support.design.widget.CoordinatorLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/fragment_accounts_list.xml b/app/src/main/res/layout/fragment_accounts_list.xml
+index 84fb5e11..aebee0aa 100644
+--- a/app/src/main/res/layout/fragment_accounts_list.xml
++++ b/app/src/main/res/layout/fragment_accounts_list.xml
+@@ -37,7 +37,7 @@
+         android:id="@+id/fab_create_account"
+         android:layout_width="wrap_content"
+         android:layout_height="wrap_content"
+-        android:layout_gravity="end|bottom"
++        android:layout_gravity="end|bottom|right"
+         android:layout_above="@id/transactions_sum_bar"
+         android:layout_alignParentBottom="true"
+         android:layout_alignParentRight="true"
+diff --git a/app/src/main/res/layout/fragment_new_transaction.xml b/app/src/main/res/layout/fragment_new_transaction.xml
+index 37b5eb1c..9ba38bdb 100644
+--- a/app/src/main/res/layout/fragment_new_transaction.xml
++++ b/app/src/main/res/layout/fragment_new_transaction.xml
+@@ -23,6 +23,7 @@
+ 		android:layout_width="match_parent"
+ 		android:layout_height="wrap_content"
+ 		android:padding="@dimen/dialog_padding"
++		android:stretchColumns="1"
+ 		android:orientation="vertical" >
+ 
+ 		<TableRow style="@style/FormRow">
+diff --git a/app/src/main/res/layout/toolbar_transactions_activity.xml b/app/src/main/res/layout/toolbar_transactions_activity.xml
+index 0a6822fe..ed92fb65 100644
+--- a/app/src/main/res/layout/toolbar_transactions_activity.xml
++++ b/app/src/main/res/layout/toolbar_transactions_activity.xml
+@@ -17,7 +17,7 @@
+ <android.support.v7.widget.Toolbar
+     xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:app="http://schemas.android.com/apk/res-auto"
+-    android:id="@+id/toolbar_actionbar"
++    android:id="@+id/toolbar_transaction_info"
+     android:background="?attr/colorPrimary"
+     android:layout_width="match_parent"
+     app:elevation="10dp"
+diff --git a/app/src/main/res/values/styles.xml b/app/src/main/res/values/styles.xml
+index 47275157..d9573d52 100644
+--- a/app/src/main/res/values/styles.xml
++++ b/app/src/main/res/values/styles.xml
+@@ -121,14 +121,14 @@
+         <item name="android:layout_width">match_parent</item>
+         <item name="android:layout_height">1dp</item>
+         <item name="android:background">?android:attr/listDivider</item>
+-        <item name="android:layout_marginLeft">40dp</item>
++        <item name="android:layout_marginLeft">50dp</item>
+     </style>
+ 
+     <style name="FormIcon">
+         <item name="android:layout_width">0dp</item>
+         <item name="android:layout_weight">0.5</item>
+         <item name="android:layout_height">wrap_content</item>
+-        <item name="android:layout_marginRight">10dp</item>
++        <item name="android:layout_marginRight">20dp</item>
+         <item name="android:layout_marginEnd">10dp</item>
+     </style>
+ 
+@@ -136,4 +136,12 @@
+         <item name="android:textSize">16sp</item>
+         <item name="android:textAllCaps">true</item>
+     </style>
++
++    <style name="TransactionInfo">
++        <item name="android:layout_width">0dp</item>
++        <item name="android:layout_weight">5</item>
++        <item name="android:layout_height">wrap_content</item>
++        <item name="android:textSize">16sp</item>
++        <item name="android:textColor">@android:color/black</item>
++    </style>
+ </resources>
+\ No newline at end of file

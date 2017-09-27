@@ -1,0 +1,201 @@
+From 84aba53c42b979b0d7bbec6a6051370c2cd2dc9f Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 30 Aug 2013 15:16:26 +0200
+Subject: [PATCH] Fixed: transaction description field does not proceed to next
+ input on clicking "next" (closes #116) Sorted sub-accounts in alphabetical
+ order Use full qualified account names in WidgetConfigurationActivity dialog
+ Prevent setting an account's parent to one of it's children
+
+---
+ app/res/layout/fragment_new_transaction.xml        |  3 ++
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  9 +++--
+ .../android/ui/accounts/AddAccountFragment.java    | 40 +++++++++++++++-------
+ .../ui/widget/WidgetConfigurationActivity.java     | 12 +++----
+ 4 files changed, 40 insertions(+), 24 deletions(-)
+
+diff --git a/app/res/layout/fragment_new_transaction.xml b/app/res/layout/fragment_new_transaction.xml
+index 7388922a..847125c4 100644
+--- a/app/res/layout/fragment_new_transaction.xml
++++ b/app/res/layout/fragment_new_transaction.xml
+@@ -34,6 +34,8 @@
+ 	        android:ems="10" 
+ 	        android:layout_marginBottom="@dimen/dialog_padding"
+ 	        android:inputType="textCapSentences"
++            android:imeOptions="actionNext"
++            android:nextFocusDown="@+id/input_transaction_amount"
+ 	        style="@style/ListItemText" />
+ 	
+ 	    <LinearLayout 
+@@ -62,6 +64,7 @@
+ 		        android:layout_marginBottom="@dimen/dialog_padding"
+ 		        android:hint="@string/label_transaction_amount"
+ 		        android:inputType="number"
++                android:nextFocusDown="@+id/input_description"
+ 		        android:textColor="@color/debit_red"
+ 		        style="@style/ListItemText" />
+ 		    
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index c1cbc308..f0e58e6b 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -203,13 +203,15 @@ public long getAccountID(String uid){
+ 	/**
+ 	 * Returns the  unique ID of the parent account of the account with unique ID <code>uid</code>
+ 	 * If the account has no parent, null is returned
+-	 * @param uid Unique Identifier of account whose parent is to be returned
++	 * @param uid Unique Identifier of account whose parent is to be returned. Should not be null
+ 	 * @return DB record UID of the parent account, null if the account has no parent
+ 	 */
+ 	public String getParentAccountUID(String uid){
+ 		Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
+ 				new String[] {DatabaseHelper.KEY_ROW_ID, DatabaseHelper.KEY_PARENT_ACCOUNT_UID}, 
+-				DatabaseHelper.KEY_UID + " = '" + uid + "'", null, null, null, null);
++				DatabaseHelper.KEY_UID + " = ?",
++                new String[]{uid},
++                null, null, null, null);
+ 		String result = null;
+ 		if (cursor != null && cursor.moveToFirst()){
+ 			Log.d(TAG, "Account already exists. Returning existing id");
+@@ -432,7 +434,7 @@ public Cursor fetchSubAccounts(long accountId){
+                 null,
+                 DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " = ?",
+                 new String[]{getAccountUID(accountId)},
+-                null, null, null);
++                null, null, DatabaseHelper.KEY_NAME + " ASC");
+     }
+ 
+     /**
+@@ -440,6 +442,7 @@ public Cursor fetchSubAccounts(long accountId){
+      * @return Cursor to the top level accounts
+      */
+     public Cursor fetchTopLevelAccounts(){
++        //condition which selects accounts with no parent, whose UID is not ROOT and whose name is not ROOT
+         StringBuilder condition = new StringBuilder("(");
+         condition.append(DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " IS NULL");
+         condition.append(" OR ");
+diff --git a/app/src/org/gnucash/android/ui/accounts/AddAccountFragment.java b/app/src/org/gnucash/android/ui/accounts/AddAccountFragment.java
+index 1dfe6a46..efe149c6 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AddAccountFragment.java
++++ b/app/src/org/gnucash/android/ui/accounts/AddAccountFragment.java
+@@ -49,6 +49,7 @@
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
++import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ /**
+  * Fragment used for creating and editing accounts
+@@ -163,15 +164,12 @@ public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+ 	public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+ 		
+-		ArrayAdapter<String> arrayAdapter = new ArrayAdapter<String>(
++		ArrayAdapter<String> currencyArrayAdapter = new ArrayAdapter<String>(
+ 				getActivity(), 
+ 				android.R.layout.simple_spinner_item, 
+ 				getResources().getStringArray(R.array.currency_names));		
+-		arrayAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-		mCurrencySpinner.setAdapter(arrayAdapter);
+-
+-        loadParentAccountList();
+-        loadAccountTypesList();
++		currencyArrayAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++		mCurrencySpinner.setAdapter(currencyArrayAdapter);
+ 
+         mSelectedAccountId = getArguments().getLong(TransactionsListFragment.SELECTED_ACCOUNT_ID);
+         if (mSelectedAccountId > 0) {
+@@ -179,6 +177,10 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             getSherlockActivity().getSupportActionBar().setTitle(R.string.title_edit_account);
+         }
+ 
++        //need to load the cursor adapters for the spinners before initializing the views
++        loadParentAccountList();
++        loadAccountTypesList();
++
+         if (mAccount != null){
+             initializeViewsWithAccount(mAccount);
+         } else {
+@@ -268,26 +270,38 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 		
+ 		return false;
+ 	}
+-	
++
++    /**
++     * Loads the list of possible accounts which can be set as a parent account and initializes the spinner
++     */
+ 	private void loadParentAccountList(){
+-		String condition = DatabaseHelper.KEY_ROW_ID + "!=" + mSelectedAccountId;
++        String condition = null;
++        if (mAccount != null){  //if editing an account
++            // limit cyclic account hierarchies. Still technically possible since we don't forbid descendant accounts
++            condition = "(" + DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " IS NULL "
++                    + " OR " + DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " != '" + mAccount.getUID() + "')"
++                    + " AND " + DatabaseHelper.KEY_ROW_ID + "!=" + mSelectedAccountId;
++            //TODO: Limit all descendants of the account to eliminate the possibility of cyclic hierarchy
++        }
++
+ 		mCursor = mAccountsDbAdapter.fetchAccounts(condition);
+-		if (mCursor.getCount() <= 0){
++		if (mCursor == null || mCursor.getCount() <= 0){
+             final View view = getView();
+             view.findViewById(R.id.layout_parent_account).setVisibility(View.GONE);
+             view.findViewById(R.id.label_parent_account).setVisibility(View.GONE);
+         }
+ 
+-		String[] from = new String[] {DatabaseHelper.KEY_NAME};
+-		int[] to = new int[] {android.R.id.text1};
+-		mCursorAdapter = new SimpleCursorAdapter(
++		mCursorAdapter = new QualifiedAccountNameCursorAdapter(
+ 				getActivity(), 
+ 				android.R.layout.simple_spinner_item, 
+-				mCursor, from, to, 0);
++				mCursor);
+ 		mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);		
+ 		mParentAccountSpinner.setAdapter(mCursorAdapter);
+ 	}
+ 
++    /**
++     * Loads the list of account types into the account type selector spinner
++     */
+     private void loadAccountTypesList(){
+         String[] accountTypes = getResources().getStringArray(R.array.account_type_entry_values);
+         ArrayAdapter<String> accountTypesAdapter = new ArrayAdapter<String>(
+diff --git a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index d56dc216..ee977bb3 100644
+--- a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -46,6 +46,7 @@
+ import android.widget.RemoteViews;
+ import android.widget.Spinner;
+ import android.widget.Toast;
++import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ /**
+  * Activity for configuration which account to diplay on a widget. 
+@@ -70,9 +71,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 		mAccountsSpinner = (Spinner) findViewById(R.id.input_accounts_spinner);
+ 		mOkButton 		= (Button) findViewById(R.id.btn_save);
+ 		mCancelButton 	= (Button) findViewById(R.id.btn_cancel);
+-		
+-		String[] from = new String[] {DatabaseHelper.KEY_NAME};
+-		int[] to = new int[] {android.R.id.text1};
++
+ 		mAccountsDbAdapter = new AccountsDbAdapter(this);
+ 		Cursor cursor = mAccountsDbAdapter.fetchAllRecords();
+ 		
+@@ -81,12 +80,9 @@ public void onCreate(Bundle savedInstanceState) {
+ 			finish();
+ 		}
+ 			
+-		mCursorAdapter = new SimpleCursorAdapter(this, 
++		mCursorAdapter = new QualifiedAccountNameCursorAdapter(this,
+ 				android.R.layout.simple_spinner_item, 
+-				cursor,
+-				from,
+-				to, 
+-				0);
++				cursor);
+ 		mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+ 		mAccountsSpinner.setAdapter(mCursorAdapter);
+ 		

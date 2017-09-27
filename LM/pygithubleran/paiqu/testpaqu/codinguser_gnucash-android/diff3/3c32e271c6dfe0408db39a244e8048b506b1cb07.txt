@@ -1,0 +1,95 @@
+From ae6d8d48b4ee60eb99b9dca5ed3544bf574ae8ac Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Mon, 27 Mar 2017 20:45:10 +0200
+Subject: [PATCH] Ensure default_transfer_account_uid fields don't reference
+ deleted accounts
+
+For some reason we don't have a foreign key constraint on this field, so we
+have to enforce it from code. We do so from AccountsDbAdapter.deleteRecord(String)
+but not from DatabaseAdapter.deleteRecord(long), which is not overriden
+by AccountsDbAdapter (called by AccountsListFragment).
+
+We don't override deleteRecord(long) to avoid infinite recursion (if we call
+deleteRecord(String) to avoid code duplication). So we just change
+AccountsListFragment to call deleteRecord(String). The proper solution, with a
+SQL constraint, will be implemented later when we restructure the database to
+make it compatible with the desktop.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/654
+---
+ .../org/gnucash/android/db/DatabaseSchema.java     |  2 +-
+ .../org/gnucash/android/db/MigrationHelper.java    | 34 ++++++++++++++++++++++
+ .../android/ui/account/AccountsListFragment.java   |  4 ++-
+ 3 files changed, 38 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 0f32f068..01f07d2d 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -39,7 +39,7 @@
+      * Version number of database containing accounts and transactions info.
+      * With any change to the database schema, this number must increase
+      */
+-    public static final int DATABASE_VERSION = 13;
++    public static final int DATABASE_VERSION = 14;
+ 
+     /**
+      * Name of the database
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index f5d3805e..b526689b 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -1474,4 +1474,38 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+ 
+         return oldVersion;
+     }
++
++    /**
++     * Upgrades the database to version 14.
++     * <p>This migration makes the following changes to the database:
++     * <ul>
++     *     <li>Fixes accounts referencing a default transfer account that no longer
++     *         exists (see #654)</li>
++     * </ul>
++     * </p>
++     * @param db SQLite database to be upgraded
++     * @return New database version, 14 if migration succeeds, 13 otherwise
++     */
++    static int upgradeDbToVersion14(SQLiteDatabase db) {
++        Log.i(DatabaseHelper.LOG_TAG, "Upgrading database to version 14");
++        int oldVersion = 13;
++
++        db.beginTransaction();
++        try {
++            ContentValues contentValues = new ContentValues();
++            contentValues.putNull(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID);
++            db.update(
++                    AccountEntry.TABLE_NAME,
++                    contentValues,
++                    AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID
++                            + " NOT IN (SELECT " + AccountEntry.COLUMN_UID
++                            + "             FROM " + AccountEntry.TABLE_NAME + ")",
++                    null);
++            db.setTransactionSuccessful();
++            oldVersion = 14;
++        } finally {
++            db.endTransaction();
++        }
++        return oldVersion;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 5a449f46..f6e9382a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -247,7 +247,9 @@ public void tryDeleteAccount(long rowId) {
+         if (acc.getTransactionCount() > 0 || mAccountsDbAdapter.getSubAccountCount(acc.getUID()) > 0) {
+             showConfirmationDialog(rowId);
+         } else {
+-            mAccountsDbAdapter.deleteRecord(rowId);
++            // Avoid calling AccountsDbAdapter.deleteRecord(long). See #654
++            String uid = mAccountsDbAdapter.getUID(rowId);
++            mAccountsDbAdapter.deleteRecord(uid);
+             refresh();
+         }
+     }

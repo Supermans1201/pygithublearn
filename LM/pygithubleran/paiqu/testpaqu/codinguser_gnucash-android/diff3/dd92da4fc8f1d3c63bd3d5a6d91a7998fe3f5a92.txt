@@ -1,0 +1,299 @@
+From dd92da4fc8f1d3c63bd3d5a6d91a7998fe3f5a92 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sun, 12 Apr 2015 19:35:18 +0800
+Subject: [PATCH] remove multi-currency transaction
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 15 ++---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 50 ++++++++++++----
+ .../gnucash/android/export/xml/GncXmlExporter.java | 70 ++++++++++++----------
+ 3 files changed, 84 insertions(+), 51 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 55c5213f..e6e414de 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -23,6 +23,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
+ import android.support.annotation.NonNull;
++import android.support.annotation.Nullable;
+ import android.text.TextUtils;
+ import android.util.Log;
+ 
+@@ -728,7 +729,7 @@ public Cursor fetchAllRecordsOrderedByFullName(){
+      * @param orderBy orderBy clause
+      * @return Cursor set of accounts which fulfill <code>where</code>
+      */
+-    public Cursor fetchAccounts(String where, String[] whereArgs, String orderBy){
++    public Cursor fetchAccounts(@Nullable String where, @Nullable String[] whereArgs, @Nullable String orderBy){
+         if (orderBy == null){
+             orderBy = AccountEntry.COLUMN_NAME + " ASC";
+         }
+@@ -952,24 +953,20 @@ public Cursor fetchFavoriteAccounts(){
+     /**
+      * Returns the GnuCash ROOT account UID.
+      * <p>In GnuCash desktop account structure, there is a root account (which is not visible in the UI) from which
+-     * other top level accounts derive. GnuCash Android does not have this ROOT account by default unless the account
+-     * structure was imported from GnuCash for desktop. Hence this method also returns <code>null</code> as an
+-     * acceptable result.</p>
+-     * <p><b>Note:</b> NULL is an acceptable response, be sure to check for it</p>
++     * other top level accounts derive. GnuCash Android also enforces a ROOT account now</p>
+      * @return Unique ID of the GnuCash root account.
+      */
+     public String getGnuCashRootAccountUID() {
+         Cursor cursor = fetchAccounts(AccountEntry.COLUMN_TYPE + "= ?",
+                 new String[]{AccountType.ROOT.name()}, null);
+-        String rootUID = null;
+         try {
+             if (cursor.moveToFirst()) {
+-                rootUID = cursor.getString(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_UID));
++                return cursor.getString(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_UID));
+             }
+         } finally {
+             cursor.close();
+         }
+-        return rootUID;
++        throw new IllegalArgumentException("ROOT account doesn't exist in DB");
+     }
+ 
+     /**
+@@ -1097,7 +1094,7 @@ public String getAccountFullName(String accountUID) {
+         finally {
+             cursor.close();
+         }
+-        return null;
++        throw new IllegalArgumentException("account UID: " + accountUID + " does not exist");
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 66bf8aef..df61aa1b 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -23,6 +23,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
++import android.support.annotation.Nullable;
+ import android.text.TextUtils;
+ import android.util.Log;
+ 
+@@ -144,15 +145,15 @@ public long bulkAddTransactions(List<Transaction> transactionList){
+         try {
+             mDb.beginTransaction();
+             SQLiteStatement replaceStatement = mDb.compileStatement("REPLACE INTO " + TransactionEntry.TABLE_NAME + " ( "
+-                + TransactionEntry.COLUMN_UID 		    + " , "
+-                + TransactionEntry.COLUMN_DESCRIPTION   + " , "
+-                + TransactionEntry.COLUMN_NOTES         + " , "
+-                + TransactionEntry.COLUMN_TIMESTAMP     + " , "
+-                + TransactionEntry.COLUMN_EXPORTED      + " , "
+-                + TransactionEntry.COLUMN_CURRENCY      + " , "
+-                + TransactionEntry.COLUMN_CREATED_AT    + " , "
+-                + TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " , "
+-                + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ? , ?)");
++                    + TransactionEntry.COLUMN_UID + " , "
++                    + TransactionEntry.COLUMN_DESCRIPTION + " , "
++                    + TransactionEntry.COLUMN_NOTES + " , "
++                    + TransactionEntry.COLUMN_TIMESTAMP + " , "
++                    + TransactionEntry.COLUMN_EXPORTED + " , "
++                    + TransactionEntry.COLUMN_CURRENCY + " , "
++                    + TransactionEntry.COLUMN_CREATED_AT + " , "
++                    + TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " , "
++                    + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ? , ?)");
+             for (Transaction transaction : transactionList) {
+                 //Log.d(TAG, "Replacing transaction in db");
+                 replaceStatement.clearBindings();
+@@ -163,7 +164,12 @@ public long bulkAddTransactions(List<Transaction> transactionList){
+                 replaceStatement.bindLong(5,    transaction.isExported() ? 1 : 0);
+                 replaceStatement.bindString(6,  transaction.getCurrencyCode());
+                 replaceStatement.bindString(7,  transaction.getCreatedTimestamp().toString());
+-                replaceStatement.bindString(8,  transaction.getScheduledActionUID());
++                if (transaction.getScheduledActionUID() == null) {
++                    replaceStatement.bindNull(8);
++                }
++                else {
++                    replaceStatement.bindString(8, transaction.getScheduledActionUID());
++                }
+                 replaceStatement.bindLong(9,    transaction.isTemplate() ? 1 : 0);
+                 replaceStatement.execute();
+                 rowInserted ++;
+@@ -324,10 +330,11 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+         return transactions;
+     }
+ 
+-    public Cursor fetchTransactionsWithSplits(String [] columns, String where, String[] whereArgs, String orderBy) {
++    public Cursor fetchTransactionsWithSplits(String [] columns, @Nullable String where, @Nullable String[] whereArgs, @Nullable String orderBy) {
+         return mDb.query(TransactionEntry.TABLE_NAME + " , " + SplitEntry.TABLE_NAME +
+                         " ON " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
+-                        " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID,
++                        " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID +
++                        " , trans_extra_info ON trans_extra_info.trans_acct_t_uid = " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID ,
+                 columns, where, whereArgs, null, null,
+                 orderBy);
+     }
+@@ -367,6 +374,25 @@ public int getTotalTransactionsCount() {
+         }
+     }
+ 
++    public int getTotalTransactionsCount(@Nullable String where, @Nullable String[] whereArgs) {
++        Cursor cursor = mDb.query(true, TransactionEntry.TABLE_NAME + " , trans_extra_info ON "
++                        + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID
++                        + " = trans_extra_info.trans_acct_t_uid",
++                new String[]{"COUNT(*)"},
++                where,
++                whereArgs,
++                null,
++                null,
++                null,
++                null);
++        try{
++            cursor.moveToFirst();
++            return cursor.getInt(0);
++        } finally {
++            cursor.close();
++        }
++    }
++
+ 	/**
+ 	 * Builds a transaction instance with the provided cursor.
+ 	 * The cursor should already be pointing to the transaction record in the database
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 082b5b69..cce0901c 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -124,9 +124,9 @@ private void exportAccounts(XmlSerializer xmlSerializer) throws IOException {
+             // is omitted
+             //
+             // account slots, color, placeholder, default transfer account, favorite
+-            ArrayList<String> slotKey = new ArrayList<String>();
+-            ArrayList<String> slotType = new ArrayList<String>();
+-            ArrayList<String> slotValue = new ArrayList<String>();
++            ArrayList<String> slotKey = new ArrayList<>();
++            ArrayList<String> slotType = new ArrayList<>();
++            ArrayList<String> slotValue = new ArrayList<>();
+             slotKey.add(GncXmlHelper.KEY_PLACEHOLDER);
+             slotType.add(GncXmlHelper.ATTR_VALUE_STRING);
+             slotValue.add(Boolean.toString(cursor.getInt(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER)) != 0));
+@@ -169,10 +169,11 @@ private void exportAccounts(XmlSerializer xmlSerializer) throws IOException {
+     }
+ 
+     private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTemplates) throws IOException {
+-        String where = null;
+-        if (exportTemplates){
+-            where = TransactionEntry.TABLE_NAME+"."+TransactionEntry.COLUMN_TEMPLATE + "=0";
++        String where = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TEMPLATE + "=0 AND trans_extra_info.trans_currency_count = 1";
++        if (exportTemplates) {
++            where = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TEMPLATE + "=1";
+         }
++        Log.d(getClass().getSimpleName(), where == null ? "null": where);
+         Cursor cursor = mTransactionsDbAdapter.fetchTransactionsWithSplits(
+                 new String[]{
+                         TransactionEntry.TABLE_NAME+"."+ TransactionEntry.COLUMN_UID + " AS trans_uid",
+@@ -191,7 +192,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                         where, null,
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " ASC , " +
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " ASC ");
+-
++        Log.d(getClass().getSimpleName(), "finish query : " + cursor.getCount());
+         String lastTrxUID = "";
+         Currency trxCurrency;
+         int fractionDigits;
+@@ -199,6 +200,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+         String denomString = "100";
+         while (cursor.moveToNext()){
+             String curTrxUID = cursor.getString(cursor.getColumnIndexOrThrow("trans_uid"));
++            Log.d(getClass().getSimpleName(), "trans : " + curTrxUID);
+             if (!lastTrxUID.equals(curTrxUID)) { // new transaction starts
+                 if (!lastTrxUID.equals("")) { // there's an old transaction, close it
+                     xmlSerializer.endTag(null, GncXmlHelper.TAG_TRN_SPLITS);
+@@ -249,11 +251,12 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_TRN_DESCRIPTION);
+                 xmlSerializer.text(cursor.getString(cursor.getColumnIndexOrThrow("trans_desc")));
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_TRN_DESCRIPTION);
++                Log.d(getClass().getSimpleName(), "trans : " + cursor.getString(cursor.getColumnIndexOrThrow("trans_desc")));
+                 lastTrxUID = curTrxUID;
+                 // slots
+-                ArrayList<String> slotKey = new ArrayList<String>();
+-                ArrayList<String> slotType = new ArrayList<String>();
+-                ArrayList<String> slotValue = new ArrayList<String>();
++                ArrayList<String> slotKey = new ArrayList<>();
++                ArrayList<String> slotType = new ArrayList<>();
++                ArrayList<String> slotValue = new ArrayList<>();
+ 
+                 String notes = cursor.getString(cursor.getColumnIndexOrThrow("trans_notes"));
+                 boolean exported = cursor.getInt(cursor.getColumnIndexOrThrow("trans_exported")) == 1;
+@@ -470,20 +473,17 @@ private void serializeDate(XmlSerializer xmlSerializer, String tag, long timeMil
+         xmlSerializer.endTag(null, tag);
+     }
+ 
+-    private void exportCommodity(XmlSerializer xmlSerializer) throws IOException {
+-        List<Currency> currencies = mAccountsDbAdapter.getCurrencies();
++    private void exportCommodity(XmlSerializer xmlSerializer, List<Currency> currencies) throws IOException {
+         for (Currency currency : currencies) {
+-            if (!currency.getCurrencyCode().equals("XXX")) {
+-                xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY);
+-                xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_VERSION, "2.0.0");
+-                xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
+-                xmlSerializer.text("ISO4217");
+-                xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
+-                xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_ID);
+-                xmlSerializer.text(currency.getCurrencyCode());
+-                xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
+-                xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY);
+-            }
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY);
++            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_VERSION, "2.0.0");
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
++            xmlSerializer.text("ISO4217");
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_ID);
++            xmlSerializer.text(currency.getCurrencyCode());
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY);
+         }
+     }
+ 
+@@ -513,10 +513,16 @@ public void generateExport(Writer writer) throws ExporterException{
+             xmlSerializer.text(UUID.randomUUID().toString().replaceAll("-", ""));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_BOOK_ID);
+             //commodity count
+-//            xmlSerializer.startTag(null, GncXmlHelper.TAG_COUNT_DATA);
+-//            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, "commodity");
+-//            xmlSerializer.text(mAccountsDbAdapter.getCurrencies().size() + "");
+-//            xmlSerializer.endTag(null, GncXmlHelper.TAG_COUNT_DATA);
++            List<Currency> currencies = mAccountsDbAdapter.getCurrencies();
++            for (int i = 0; i< currencies.size();i++) {
++                if (currencies.get(i).getCurrencyCode().equals("XXX")) {
++                    currencies.remove(i);
++                }
++            }
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_COUNT_DATA);
++            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, "commodity");
++            xmlSerializer.text(currencies.size() + "");
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_COUNT_DATA);
+             //account count
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_COUNT_DATA);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, "account");
+@@ -525,14 +531,18 @@ public void generateExport(Writer writer) throws ExporterException{
+             //transaction count
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_COUNT_DATA);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, "transaction");
+-            xmlSerializer.text(mTransactionsDbAdapter.getTotalTransactionsCount() + "");
++            xmlSerializer.text(mTransactionsDbAdapter.getTotalTransactionsCount(
++                    TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TEMPLATE + " = 0 AND " +
++                    "trans_extra_info.trans_currency_count = 1",
++                    null
++            ) + "");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_COUNT_DATA);
+             // export the commodities used in the DB
+-            //dexportCommodity(xmlSerializer);
++            exportCommodity(xmlSerializer, currencies);
+             // accounts. bulk import does not rely on account order
+             // the cursor gather account in arbitrary order
+             exportAccounts(xmlSerializer);
+-
++            Log.d(getClass().getSimpleName(), "finish export accounts");
+             // transactions.
+             exportTransactions(xmlSerializer, false);
+ 

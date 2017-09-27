@@ -1,0 +1,212 @@
+From 0fd12f92d7c0101b231d45bc2607cac904bacc9f Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 9 Aug 2016 17:23:33 +0200
+Subject: [PATCH] Fix: accounts list not updated after initial creation of
+ default accounts
+
+Make code more robust against "no active book" database state errors
+Improve transaction test reliability
+---
+ .../android/test/ui/TransactionsActivityTest.java   |  4 +++-
+ .../org/gnucash/android/app/GnuCashApplication.java |  2 +-
+ .../gnucash/android/db/adapter/BooksDbAdapter.java  |  9 ++++++++-
+ .../gnucash/android/importer/ImportAsyncTask.java   | 21 +++++++--------------
+ .../android/ui/account/AccountsActivity.java        |  3 ++-
+ .../android/ui/account/AccountsListFragment.java    |  4 ++++
+ .../android/ui/common/BaseDrawerActivity.java       |  4 ++--
+ 7 files changed, 27 insertions(+), 20 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index e2813839..2766da8e 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -591,13 +591,15 @@ public void testMoveTransaction(){
+ 	@Test
+ 	public void editingSplit_shouldNotSetAmountToZero(){
+ 		setDoubleEntryEnabled(true);
++		setDefaultTransactionType(TransactionType.DEBIT);
++
+ 		mTransactionsDbAdapter.deleteAllRecords();
+ 
+ 		Account account = new Account("Z Account", Commodity.getInstance(CURRENCY_CODE));
+ 		mAccountsDbAdapter.addRecord(account, DatabaseAdapter.UpdateMethod.insert);
+ 
++		//create new transaction "Transaction Acct" --> "Transfer Account"
+ 		onView(withId(R.id.fab_create_transaction)).perform(click());
+-
+ 		onView(withId(R.id.input_transaction_name)).perform(typeText("Test Split"));
+ 		onView(withId(R.id.input_transaction_amount)).perform(typeText("1024"));
+ 
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 518de619..3f5b228d 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -210,7 +210,7 @@ public static BooksDbAdapter getBooksDbAdapter(){
+      * Loads the book with GUID {@code bookUID}
+      * @param bookUID GUID of the book to be loaded
+      */
+-    public static void loadBook(String bookUID){
++    public static void loadBook(@NonNull String bookUID){
+         mBooksDbAdapter.setActive(bookUID);
+         initDatabaseAdapters();
+         AccountsActivity.start(getAppContext());
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index 4306dc17..bc6116e7 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -94,9 +94,14 @@ public Book buildModelInstance(@NonNull Cursor cursor) {
+ 
+     /**
+      * Sets the book with unique identifier {@code uid} as active and all others as inactive
++     * <p>If the parameter is null, then the currently active book is not changed</p>
+      * @param bookUID Unique identifier of the book
++     * @return GUID of the currently active book
+      */
+-    public void setActive(String bookUID){
++    public String setActive(@NonNull String bookUID){
++        if (bookUID == null)
++            return BooksDbAdapter.getInstance().getActiveBookUID();
++
+         ContentValues contentValues = new ContentValues();
+         contentValues.put(BookEntry.COLUMN_ACTIVE, 0);
+         mDb.update(mTableName, contentValues, null, null); //disable all
+@@ -104,6 +109,8 @@ public void setActive(String bookUID){
+         contentValues.clear();
+         contentValues.put(BookEntry.COLUMN_ACTIVE, 1);
+         mDb.update(mTableName, contentValues, BookEntry.COLUMN_UID + " = ?", new String[]{bookUID});
++
++        return bookUID;
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+index 6f1656d2..0e3891ae 100644
+--- a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -34,7 +34,6 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+-import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.util.TaskDelegate;
+ 
+ import java.io.InputStream;
+@@ -48,6 +47,8 @@
+     private TaskDelegate mDelegate;
+     private ProgressDialog mProgressDialog;
+ 
++    private String mImportedBookUID;
++
+     public ImportAsyncTask(Activity context){
+         this.mContext = context;
+     }
+@@ -76,10 +77,9 @@ protected void onPreExecute() {
+ 
+     @Override
+     protected Boolean doInBackground(Uri... uris) {
+-        String bookUID = null;
+         try {
+             InputStream accountInputStream = mContext.getContentResolver().openInputStream(uris[0]);
+-            bookUID = GncXmlImporter.parse(accountInputStream);
++            mImportedBookUID = GncXmlImporter.parse(accountInputStream);
+ 
+         } catch (Exception exception){
+             Log.e(ImportAsyncTask.class.getName(), "" + exception.getMessage());
+@@ -98,12 +98,6 @@ public void run() {
+                 }
+             });
+ 
+-            //a database is always created at the beginning of import
+-            //if there was an error during import, delete the created database
+-            if (bookUID != null) {
+-                mContext.deleteDatabase(bookUID);
+-            }
+-
+             return false;
+         }
+ 
+@@ -114,19 +108,17 @@ public void run() {
+             ContentValues contentValues = new ContentValues();
+             contentValues.put(DatabaseSchema.BookEntry.COLUMN_DISPLAY_NAME, displayName);
+             contentValues.put(DatabaseSchema.BookEntry.COLUMN_SOURCE_URI, uris[0].toString());
+-            BooksDbAdapter.getInstance().updateRecord(bookUID, contentValues);
++            BooksDbAdapter.getInstance().updateRecord(mImportedBookUID, contentValues);
+ 
+             cursor.close();
+         }
+ 
+         //set the preferences to their default values
+-        mContext.getSharedPreferences(bookUID, Context.MODE_PRIVATE)
++        mContext.getSharedPreferences(mImportedBookUID, Context.MODE_PRIVATE)
+                 .edit()
+                 .putBoolean(mContext.getString(R.string.key_use_double_entry), true)
+                 .apply();
+ 
+-        ((GnuCashApplication)mContext.getApplication()).loadBook(bookUID);
+-
+         return true;
+     }
+ 
+@@ -148,6 +140,7 @@ protected void onPostExecute(Boolean importSuccess) {
+         int message = importSuccess ? R.string.toast_success_importing_accounts : R.string.toast_error_importing_accounts;
+         Toast.makeText(mContext, message, Toast.LENGTH_SHORT).show();
+ 
+-        AccountsActivity.start(mContext);
++        if (mImportedBookUID != null)
++            GnuCashApplication.loadBook(mImportedBookUID);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 827c91dc..f32dfe62 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -377,10 +377,11 @@ private void init() {
+         boolean firstRun = prefs.getBoolean(getString(R.string.key_first_run), true);
+ 
+         if (firstRun){
+-            startActivity(new Intent(this, FirstRunWizardActivity.class));
++            startActivity(new Intent(GnuCashApplication.getAppContext(), FirstRunWizardActivity.class));
+ 
+             //default to using double entry and save the preference explicitly
+             prefs.edit().putBoolean(getString(R.string.key_use_double_entry), true).apply();
++            finish();
+         } else {
+             getSDWritePermission();
+         }
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index b641ec65..6004729e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -288,6 +288,10 @@ public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+ 
+ 
+     @Override
++    /**
++     * Refresh the account list as a sublist of another account
++     * @param parentAccountUID GUID of the parent account
++     */
+     public void refresh(String parentAccountUID) {
+         getArguments().putString(UxArgument.PARENT_ACCOUNT_UID, parentAccountUID);
+         refresh();
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index 5229c276..eee5966c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -297,7 +297,7 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 AccountsActivity.importXmlFileFromIntent(this, data, null);
+                 break;
+-            case BaseDrawerActivity.REQUEST_OPEN_DOCUMENT:
++            case BaseDrawerActivity.REQUEST_OPEN_DOCUMENT: //this uses the Storage Access Framework
+                 final int takeFlags = data.getFlags()
+                         & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                 AccountsActivity.importXmlFileFromIntent(this, data, null);
+@@ -322,7 +322,7 @@ public boolean onMenuItemClick(MenuItem item) {
+         BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
+         String bookUID = booksDbAdapter.getUID(id);
+         if (!bookUID.equals(booksDbAdapter.getActiveBookUID())){
+-            ((GnuCashApplication) getApplication()).loadBook(bookUID);
++            GnuCashApplication.loadBook(bookUID);
+             finish();
+         }
+         AccountsActivity.start(GnuCashApplication.getAppContext());

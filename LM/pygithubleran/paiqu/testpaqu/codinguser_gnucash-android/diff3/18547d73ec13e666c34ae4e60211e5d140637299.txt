@@ -1,0 +1,347 @@
+From 18547d73ec13e666c34ae4e60211e5d140637299 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 12 Sep 2015 22:38:59 +0200
+Subject: [PATCH] Added some tests
+
+Added commodity UID for accounts and transactions to the database
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 23 ++++----
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  2 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 20 +++++--
+ .../org/gnucash/android/model/Transaction.java     | 15 ------
+ .../android/ui/account/AccountFormFragment.java    |  2 +-
+ .../test/unit/db/AccountsDbAdapterTest.java        | 61 ++++++++++++++++++++++
+ .../test/unit/db/TransactionsDbAdapterTest.java    | 22 ++++----
+ .../android/test/unit/model/TransactionTest.java   | 17 ++++++
+ 8 files changed, 116 insertions(+), 46 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 293a7b9e..0329aeab 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -151,8 +151,9 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Account account
+                     + AccountEntry.COLUMN_PLACEHOLDER   + " , "
+                     + AccountEntry.COLUMN_CREATED_AT    + " , "
+                     + AccountEntry.COLUMN_HIDDEN        + " , "
++                    + AccountEntry.COLUMN_COMMODITY_UID + " , "
+                     + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " , "
+-                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ?)");
++                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ?, ?)");
+             //commodity_uid is not forgotten. It will be inserted by a database trigger
+         }
+ 
+@@ -171,15 +172,18 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Account account
+         mReplaceStatement.bindLong(9, account.isPlaceholderAccount() ? 1 : 0);
+         mReplaceStatement.bindString(10, account.getCreatedTimestamp().toString());
+         mReplaceStatement.bindLong(11, account.isHidden() ? 1 : 0);
++        if (account.getCommodityUID() != null)
++            mReplaceStatement.bindString(12, account.getCommodityUID());
++
+         String parentAccountUID = account.getParentUID();
+         if (parentAccountUID == null && account.getAccountType() != AccountType.ROOT) {
+             parentAccountUID = getOrCreateGnuCashRootAccountUID();
+         }
+         if (parentAccountUID != null) {
+-            mReplaceStatement.bindString(12, parentAccountUID);
++            mReplaceStatement.bindString(13, parentAccountUID);
+         }
+         if (account.getDefaultTransferAccountUID() != null) {
+-            mReplaceStatement.bindString(13, account.getDefaultTransferAccountUID());
++            mReplaceStatement.bindString(14, account.getDefaultTransferAccountUID());
+         }
+ 
+         return mReplaceStatement;
+@@ -414,17 +418,6 @@ public String getParentAccountUID(@NonNull String uid){
+ 	}
+ 
+     /**
+-     * Returns the  unique ID of the parent account of the account with database ID <code>id</code>
+-     * If the account has no parent, null is returned.
+-     * @param id DB record ID of account . Should not be null
+-     * @return DB record UID of the parent account, null if the account has no parent
+-     * @see #getParentAccountUID(String)
+-     */
+-    public String getParentAccountUID(long id){
+-        return getParentAccountUID(getUID(id));
+-    }
+-	
+-    /**
+      * Returns the color code for the account in format #rrggbb
+      * @param accountId Database row ID of the account
+      * @return String color code of account or null if none
+@@ -496,7 +489,9 @@ public AccountType getAccountType(long accountId){
+ 	/**
+ 	 * Returns a list of accounts which have transactions that have not been exported yet
+ 	 * @return List of {@link Account}s with unexported transactions
++     * @deprecated This uses the exported flag in the database which is no longer supported.
+ 	 */
++    @Deprecated
+     public List<Account> getExportableAccounts(){
+         LinkedList<Account> accountsList = new LinkedList<Account>();
+         Cursor cursor = mDb.query(
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index de53fc1f..351f1cf1 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -260,7 +260,7 @@ public Model getRecord(@NonNull String uid){
+                 return buildModelInstance(cursor);
+             }
+             else {
+-                throw new IllegalArgumentException("split " + uid + " does not exist");
++                throw new IllegalArgumentException("Record with " + uid + " does not exist");
+             }
+         } finally {
+             cursor.close();
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 2b433c31..780aa58d 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -89,6 +89,11 @@ public void addRecord(@NonNull Transaction transaction){
+         Log.d(LOG_TAG, "Replacing transaction in db");
+         mDb.beginTransaction();
+         try {
++            Split imbalanceSplit = transaction.getAutoBalanceSplit();
++            if (imbalanceSplit != null){
++                String imbalanceAccountUID = AccountsDbAdapter.getInstance().getOrCreateImbalanceAccountUID(transaction.getCurrency());
++                imbalanceSplit.setAccountUID(imbalanceAccountUID);
++            }
+             super.addRecord(transaction);
+ 
+             Log.d(LOG_TAG, "Adding splits for transaction");
+@@ -162,9 +167,10 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Transaction tra
+                     + TransactionEntry.COLUMN_TIMESTAMP + " , "
+                     + TransactionEntry.COLUMN_EXPORTED + " , "
+                     + TransactionEntry.COLUMN_CURRENCY + " , "
++                    + TransactionEntry.COLUMN_COMMODITY_UID + " , "
+                     + TransactionEntry.COLUMN_CREATED_AT + " , "
+                     + TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " , "
+-                    + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ? , ?)");
++                    + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ?, ? , ?)");
+         }
+ 
+         mReplaceStatement.clearBindings();
+@@ -174,12 +180,16 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Transaction tra
+         mReplaceStatement.bindLong(4,   transaction.getTimeMillis());
+         mReplaceStatement.bindLong(5, transaction.isExported() ? 1 : 0);
+         mReplaceStatement.bindString(6, transaction.getCurrencyCode());
+-        mReplaceStatement.bindString(7, transaction.getCreatedTimestamp().toString());
++
++        if(transaction.getCommodityUID() != null)
++            mReplaceStatement.bindString(7, transaction.getCommodityUID());
++        mReplaceStatement.bindString(8, transaction.getCreatedTimestamp().toString());
++
+         if (transaction.getScheduledActionUID() == null)
+-            mReplaceStatement.bindNull(8);
++            mReplaceStatement.bindNull(9);
+         else
+-            mReplaceStatement.bindString(8,  transaction.getScheduledActionUID());
+-        mReplaceStatement.bindLong(9, transaction.isTemplate() ? 1 : 0);
++            mReplaceStatement.bindString(9,  transaction.getScheduledActionUID());
++        mReplaceStatement.bindLong(10, transaction.isTemplate() ? 1 : 0);
+ 
+         return mReplaceStatement;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index bacc51b8..408734a3 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -179,21 +179,6 @@ private void initDefaults(){
+      * @return Split whose amount is the imbalance of this transaction
+      */
+     public Split getAutoBalanceSplit(){
+-        //The values should be balanced even for multi-currency transactions
+-        //Currency lastCurrency = null;
+-        //for (Split split : mSplitList) {
+-        //    Currency currentCurrency = split.getQuantity().getCurrency();
+-        //    if (lastCurrency == null)
+-        //        lastCurrency = currentCurrency;
+-        //    else if (lastCurrency != currentCurrency){
+-        //        return null; //for now we will not autobalance multi-currency transactions
+-        //    }
+-        //}
+-
+-        //if all the splits are the same currency but the transaction is another
+-        //if (!lastCurrency.getCurrencyCode().equals(mCurrencyCode))
+-        //    return null;
+-
+         Money imbalance = getImbalance();
+         if (!imbalance.isAmountZero()){
+             Currency currency = Currency.getInstance(mCurrencyCode);
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 437af5d4..bd3552f4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -611,7 +611,7 @@ private void loadParentAccountList(AccountType accountType){
+         if (mAccount != null){  //if editing an account
+             mDescendantAccountUIDs = mAccountsDbAdapter.getDescendantAccountUIDs(mAccount.getUID(), null, null);
+             String rootAccountUID = mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID();
+-            List<String> descendantAccountUIDs = new ArrayList<String>(mDescendantAccountUIDs);
++            List<String> descendantAccountUIDs = new ArrayList<>(mDescendantAccountUIDs);
+             if (rootAccountUID != null)
+                 descendantAccountUIDs.add(rootAccountUID);
+             // limit cyclic account hierarchies.
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index 72530a1b..2167a8fd 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -2,10 +2,13 @@
+ 
+ import org.assertj.core.data.Index;
+ import org.gnucash.android.BuildConfig;
++import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
+@@ -20,12 +23,16 @@
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.robolectric.annotation.Config;
++import org.xml.sax.SAXException;
+ 
++import java.io.IOException;
+ import java.math.BigDecimal;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.List;
+ 
++import javax.xml.parsers.ParserConfigurationException;
++
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.junit.Assert.assertEquals;
+ 
+@@ -325,6 +332,60 @@ public void shouldRecursivelyDeleteAccount(){
+ 
+     }
+ 
++    @Test
++    public void shouldGetDescendantAccounts(){
++        loadDefaultAccounts();
++
++        String uid = mAccountsDbAdapter.findAccountUidByFullName("Expenses:Auto");
++        List<String> descendants = mAccountsDbAdapter.getDescendantAccountUIDs(uid, null, null);
++
++        assertThat(descendants).hasSize(4);
++    }
++
++    @Test
++    public void shouldReassignDescendantAccounts(){
++        loadDefaultAccounts();
++
++        String savingsAcctUID = mAccountsDbAdapter.findAccountUidByFullName("Assets:Current Assets:Savings Account");
++
++        String currentAssetsUID = mAccountsDbAdapter.findAccountUidByFullName("Assets:Current Assets");
++        String assetsUID = mAccountsDbAdapter.findAccountUidByFullName("Assets");
++
++        assertThat(mAccountsDbAdapter.getParentAccountUID(savingsAcctUID)).isEqualTo(currentAssetsUID);
++        mAccountsDbAdapter.reassignDescendantAccounts(currentAssetsUID, assetsUID);
++        assertThat(mAccountsDbAdapter.getParentAccountUID(savingsAcctUID)).isEqualTo(assetsUID);
++
++        assertThat(mAccountsDbAdapter.getFullyQualifiedAccountName(savingsAcctUID)).isEqualTo("Assets:Savings Account");
++
++    }
++
++    @Test
++    public void shouldCreateImbalanceAccountOnDemand(){
++        assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(0);
++
++        Currency usd = Currency.getInstance("USD");
++        String imbalanceUID = mAccountsDbAdapter.getImbalanceAccountUID(usd);
++        assertThat(imbalanceUID).isNull();
++        assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(0);
++
++        imbalanceUID = mAccountsDbAdapter.getOrCreateImbalanceAccountUID(usd);
++        assertThat(imbalanceUID).isNotNull().isNotEmpty();
++        assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(2);
++    }
++
++    /**
++     * Loads the default accounts from file resource
++     */
++    private void loadDefaultAccounts(){
++        try {
++            GncXmlImporter.parse(GnuCashApplication.getAppContext().getResources().openRawResource(R.raw.default_accounts));
++        } catch (ParserConfigurationException | SAXException | IOException e) {
++            e.printStackTrace();
++            throw new RuntimeException("Could not create default accounts");
++        }
++    }
++
++
+ 	@After
+ 	public void tearDown() throws Exception {
+ 		mAccountsDbAdapter.deleteAllRecords();
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+index 70f4ee10..d718c2a9 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+@@ -89,19 +89,21 @@ public void deletingTransactionsShouldDeleteSplits(){
+ 		assertThat(mSplitsDbAdapter.getSplitsForTransaction(transaction.getUID())).hasSize(0);
+ 	}
+ 
+-	/**
+-	 * Adding a split to a transaction should set the transaction UID of the split to the GUID of the transaction
+-	 */
+ 	@Test
+-	public void addingSplitsShouldSetTransactionUID(){
+-		Transaction transaction = new Transaction("");
+-		assertThat(transaction.getCurrencyCode()).isEqualTo(Money.DEFAULT_CURRENCY_CODE);
+-
+-		Split split = new Split(Money.getZeroInstance(), alphaAccount.getUID());
+-		assertThat(split.getTransactionUID()).isEmpty();
++	public void shouldBalanceTransactionsOnSave(){
++		Transaction transaction = new Transaction("Auto balance");
++		Split split = new Split(new Money(BigDecimal.TEN, Currency.getInstance(Money.DEFAULT_CURRENCY_CODE)),
++				alphaAccount.getUID());
+ 
+ 		transaction.addSplit(split);
+-		assertThat(split.getTransactionUID()).isEqualTo(transaction.getUID());
++
++		mTransactionsDbAdapter.addRecord(transaction);
++
++		Transaction trn = mTransactionsDbAdapter.getRecord(transaction.getUID());
++		assertThat(trn.getSplits()).hasSize(2);
++
++		String imbalanceAccountUID = mAccountsDbAdapter.getImbalanceAccountUID(Currency.getInstance(Money.DEFAULT_CURRENCY_CODE));
++		assertThat(trn.getSplits()).extracting("mAccountUID").contains(imbalanceAccountUID);
+ 	}
+ 
+ 	@Test
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+index 1058f2a3..b781c7bd 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+@@ -1,6 +1,7 @@
+ package org.gnucash.android.test.unit.model;
+ 
+ import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.junit.Test;
+ 
+@@ -26,4 +27,20 @@ public void testCloningTransaction(){
+ 		assertThat(transaction.getTimeMillis()).isEqualTo(clone2.getTimeMillis());
+ 		//TODO: Clone the created_at and modified_at times?
+ 	}
++
++	/**
++	 * Adding a split to a transaction should set the transaction UID of the split to the GUID of the transaction
++	 */
++	@Test
++	public void addingSplitsShouldSetTransactionUID(){
++		Transaction transaction = new Transaction("");
++		assertThat(transaction.getCurrencyCode()).isEqualTo(Money.DEFAULT_CURRENCY_CODE);
++
++		Split split = new Split(Money.getZeroInstance(), "test-account");
++		assertThat(split.getTransactionUID()).isEmpty();
++
++		transaction.addSplit(split);
++		assertThat(split.getTransactionUID()).isEqualTo(transaction.getUID());
++	}
++
+ }

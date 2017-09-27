@@ -1,0 +1,176 @@
+From 736e984bd97c1b892923a31500b60cffa2c414b8 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 22 Apr 2015 13:52:47 +0800
+Subject: [PATCH] code clean up
+
+---
+ .../org/gnucash/android/db/SplitsDbAdapter.java    |  5 ++-
+ .../gnucash/android/importer/GncXmlHandler.java    | 44 +++++++++++++++-------
+ .../main/java/org/gnucash/android/model/Money.java |  6 ++-
+ 3 files changed, 37 insertions(+), 18 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index d4b581a7..cb1843a8 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -95,7 +95,8 @@ public long addSplit(Split split){
+      * If the split already exists, then it is simply updated.
+      * This function will NOT update the exported status of corresponding transactions.
+      * All or none of the splits will be inserted/updated into the database.
+-     * @param splitList {@link org.gnucash.android.model.Split} to be recorded in DB
++     * @param splitList {@link org.gnucash.android.model.Split} to be recorded in DB. The amount
++     *                                                         of all splits should be non-negative
+      * @return Number of records of the newly saved split
+      */
+     public long bulkAddSplits(List<Split> splitList) {
+@@ -117,7 +118,7 @@ public long bulkAddSplits(List<Split> splitList) {
+                     replaceStatement.bindString(2, split.getMemo());
+                 }
+                 replaceStatement.bindString(3, split.getType().name());
+-                replaceStatement.bindString(4, split.getAmount().absolute().toPlainString());
++                replaceStatement.bindString(4, split.getAmount().toPlainString());
+                 replaceStatement.bindString(5, split.getCreatedTimestamp().toString());
+                 replaceStatement.bindString(6, split.getAccountUID());
+                 replaceStatement.bindString(7, split.getTransactionUID());
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index e0851b04..a906f94d 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -115,11 +115,16 @@
+     Split mSplit;
+ 
+     /**
+-     * Quantity of the split
++     * (Absolute) quantity of the split
+      */
+     BigDecimal mQuantity;
+ 
+     /**
++     * Whether the quantity is negative
++     */
++    boolean mNegativeQuantity;
++
++    /**
+      * The list for all added split for autobalancing
+      */
+     List<Split> mAutoBalanceSplits;
+@@ -399,13 +404,17 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                         mInCreditFormulaSlot = false;
+                     }
+                 } else if (mInTemplates && mInDebitFormulaSlot) {
+-                    NumberFormat numberFormat = GncXmlHelper.getNumberFormatForTemplateSplits();
+                     try {
+-                        Number number = numberFormat.parse(characterString);
+-                        Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
++                        // TODO: test this. I do not have template transactions to test
++                        // Going through double to decimal will lose accuracy.
++                        // NEVER use double for money.
++                        // from Android SDK Ddoc:
++                        //    new BigDecimal(0.1) is equal to 0.1000000000000000055511151231257827021181583404541015625. This happens as 0.1 cannot be represented exactly in binary.
++                        //    To generate a big decimal instance which is equivalent to 0.1 use the BigDecimal(String) constructor.
++                        Money amount = new Money(new BigDecimal(characterString), mTransaction.getCurrency());
+                         mSplit.setAmount(amount.absolute());
+                         mSplit.setType(TransactionType.DEBIT);
+-                    } catch (ParseException e) {
++                    } catch (NumberFormatException e) {
+                         Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
+                         e.printStackTrace();
+                     } finally {
+@@ -463,7 +472,14 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SPLIT_QUANTITY:
+                 // delay the assignment of currency when the split account is seen
+                 try {
+-                    mQuantity = GncXmlHelper.parseMoney(characterString);
++                    String q = characterString;
++                    if (q.charAt(0) == '-') {
++                        mNegativeQuantity = true;
++                        q = q.substring(1);
++                    } else {
++                        mNegativeQuantity = false;
++                    }
++                    mQuantity = GncXmlHelper.parseMoney(q);
+                 } catch (ParseException e) {
+                     e.printStackTrace();
+                     throw new SAXException("Unable to parse money", e);
+@@ -472,10 +488,9 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SPLIT_ACCOUNT:
+                 //the split amount uses the account currency
+                 Money amount = new Money(mQuantity, getCurrencyForAccount(characterString));
+-
+                 //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
+-                mSplit.setType(amount.isNegative() ? TransactionType.CREDIT : TransactionType.DEBIT);
+-                mSplit.setAmount(amount.absolute());
++                mSplit.setType(mNegativeQuantity ? TransactionType.CREDIT : TransactionType.DEBIT);
++                mSplit.setAmount(amount);
+                 mSplit.setAccountUID(characterString);
+                 break;
+             case GncXmlHelper.TAG_TRN_SPLIT:
+@@ -556,6 +571,7 @@ public void endDocument() throws SAXException {
+ 
+         String imbalancePrefix = AccountsDbAdapter.getImbalanceAccountPrefix();
+ 
++        // Add all account without a parent to ROOT, and collect top level imbalance accounts
+         for(Account account:mAccountList) {
+             mapFullName.put(account.getUID(), null);
+             boolean topLevel = false;
+@@ -570,6 +586,7 @@ public void endDocument() throws SAXException {
+             }
+         }
+ 
++        // Set the account for created balancing splits to correct imbalance accounts
+         for (Split split: mAutoBalanceSplits) {
+             String currencyCode = split.getAccountUID();
+             Account imbAccount = mapImbalanceAccount.get(currencyCode);
+@@ -593,17 +610,16 @@ public void endDocument() throws SAXException {
+             while (!stack.isEmpty()) {
+                 Account acc = stack.peek();
+                 if (acc.getAccountType() == AccountType.ROOT) {
+-                    // append blank to Root Account, ensure it always sorts first
++                    // ROOT_ACCOUNT_FULL_NAME should ensure ROOT always sorts first
+                     mapFullName.put(acc.getUID(), AccountsDbAdapter.ROOT_ACCOUNT_FULL_NAME);
+                     stack.pop();
+                     continue;
+                 }
+                 String parentUID = acc.getParentUID();
+                 Account parentAccount = mAccountMap.get(parentUID);
+-                // In accounts tree that are not imported, top level ROOT account
+-                // does not exist, which will make all top level accounts have a
+-                // null parent
+-                if (parentAccount == null || parentAccount.getAccountType() == AccountType.ROOT) {
++                // ROOT account will be added if not exist, so now anly ROOT
++                // has an empty parent
++                if (parentAccount.getAccountType() == AccountType.ROOT) {
+                     // top level account, full name is the same as its name
+                     mapFullName.put(acc.getUID(), acc.getName());
+                     stack.pop();
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index e012b151..ee266545 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -17,6 +17,8 @@
+ package org.gnucash.android.model;
+ 
+ 
++import android.support.annotation.NonNull;
++
+ import java.math.BigDecimal;
+ import java.math.MathContext;
+ import java.math.RoundingMode;
+@@ -370,7 +372,7 @@ public Money multiply(int multiplier){
+ 	 * @return <code>true</code> if the amount is negative, <code>false</code> otherwise.
+ 	 */
+ 	public boolean isNegative(){
+-		return mAmount.compareTo(new BigDecimal(0)) == -1;
++		return mAmount.compareTo(BigDecimal.ZERO) == -1;
+ 	}
+ 	
+ 	/**
+@@ -422,7 +424,7 @@ public boolean equals(Object obj) {
+ 	}
+ 
+ 	@Override
+-	public int compareTo(Money another) {
++	public int compareTo(@NonNull Money another) {
+ 		if (!mCurrency.equals(another.mCurrency))
+ 			throw new IllegalArgumentException("Cannot compare different currencies yet");
+ 		return mAmount.compareTo(another.mAmount);

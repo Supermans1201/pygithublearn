@@ -1,0 +1,348 @@
+From ec4e6687ef50886202a9d796dcec954a4efdfd46 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 23 Aug 2014 21:38:24 +0200
+Subject: [PATCH] Fixed: Transaction edits not persisted to db. Fixes #180
+
+Fixed: Fatal crash when error occurs in importing/exporting transaction (instead of displaying error message)
+Fixed: Editing a transfer transaction does not edit other side of the transaction
+Removed progress dialog from database migration (seems to be cause of some crashes)
+Transaction templates are not only available when creating new transactions
+Added some input validation to database adapters
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  6 +--
+ app/src/org/gnucash/android/db/DatabaseHelper.java | 10 -----
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 22 ++++++++++-
+ .../gnucash/android/export/ExporterAsyncTask.java  | 17 +++++---
+ .../gnucash/android/importer/ImportAsyncTask.java  | 18 ++++++---
+ .../ui/transaction/TransactionFormFragment.java    | 46 +++++++++++++---------
+ .../ui/widget/WidgetConfigurationActivity.java     |  1 +
+ 7 files changed, 76 insertions(+), 44 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 26a5e277..a976926b 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -651,11 +651,11 @@ public Money getAccountBalance(long accountId){
+      */
+     public Cursor fetchSubAccounts(long accountId){
+         Log.v(TAG, "Fetching sub accounts for account id " + accountId);
++        String accountUID = getAccountUID(accountId);
+         return mDb.query(AccountEntry.TABLE_NAME,
+                 null,
+-                AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ?",
+-                new String[]{getAccountUID(accountId)},
+-                null, null, AccountEntry.COLUMN_NAME + " ASC");
++                AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = '" + accountUID + "'",
++                null, null, null, AccountEntry.COLUMN_NAME + " ASC");
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index be2faf05..f44bbdc6 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -127,8 +127,6 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 		Log.i(LOG_TAG, "Upgrading database from version "
+ 				+ oldVersion + " to " + newVersion);
+ 
+-        ProgressDialog progressDialog = ProgressDialog.show(mContext, "Upgrading database", "Processing...", true);
+-
+ 		if (oldVersion < newVersion){
+ 			//introducing double entry accounting
+ 			Log.i(LOG_TAG, "Upgrading database to version " + newVersion);
+@@ -194,7 +192,6 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 5 && newVersion >= 6){
+                 Log.i(LOG_TAG, "Upgrading database to version 6");
+-                progressDialog.setMessage("Upgrading database to version 6");
+ 
+                 String addFullAccountNameQuery = " ALTER TABLE " + AccountEntry.TABLE_NAME
+                         + " ADD COLUMN " + AccountEntry.COLUMN_FULL_NAME + " varchar(255) ";
+@@ -227,7 +224,6 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 6 && newVersion >= DatabaseSchema.SPLITS_DB_VERSION){
+                 Log.i(LOG_TAG, "Upgrading database to version 7");
+-                progressDialog.setMessage("Upgrading to version " + SPLITS_DB_VERSION);
+ 
+                 //for users who do not have double-entry activated, we create imbalance accounts for their splits
+                 //TODO: Enable when we can hide imbalance accounts from user
+@@ -237,17 +233,12 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ //                    accountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
+ //                }
+ 
+-                progressDialog.setMessage("Backing up database");
+                 try {
+                     String filepath = MigrationHelper.exportDatabase(db, ExportFormat.GNC_XML);
+ 
+-                    progressDialog.setMessage("Upgrading database schema");
+-
+                     dropAllDatabaseTables(db);
+                     createDatabaseTables(db);
+ 
+-                    progressDialog.setMessage("Restoring database");
+-
+                     MigrationHelper.importGnucashXML(db, filepath);
+                 } catch (Exception e){
+                     Toast.makeText(mContext, "Error upgrading database.\n" + e.getMessage(), Toast.LENGTH_LONG).show();
+@@ -257,7 +248,6 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+             }
+ 		}
+ 
+-        progressDialog.dismiss();
+         if (oldVersion != newVersion) {
+             Log.w(LOG_TAG, "Upgrade for the database failed. The Database is currently at version " + oldVersion);
+         }
+diff --git a/app/src/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+index c46d9b66..cdd364b6 100644
+--- a/app/src/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -114,7 +114,15 @@ public Split buildSplitInstance(Cursor cursor){
+      * @return {@link org.gnucash.android.model.Split} instance
+      */
+     public Split getSplit(String uid){
+-        long id = getID(uid);
++        return getSplit(getID(uid));
++    }
++
++    /**
++     * Returns the Split instance given the database id
++     * @param id Database record ID of the split
++     * @return {@link org.gnucash.android.model.Split} instance
++     */
++    public Split getSplit(long id){
+         Cursor cursor = fetchRecord(id);
+ 
+         Split split = null;
+@@ -233,6 +241,9 @@ public Cursor fetchSplits(String condition, String sortOrder){
+      * @return Database record ID of split
+      */
+     public long getID(String uid){
++        if (uid == null)
++            return 0;
++
+         Cursor cursor = mDb.query(SplitEntry.TABLE_NAME,
+                 new String[] {SplitEntry._ID},
+                 SplitEntry.COLUMN_UID + " = ?", new String[]{uid}, null, null, null);
+@@ -355,9 +366,13 @@ public Cursor fetchAllRecords() {
+ 
+     @Override
+     public boolean deleteRecord(long rowId) {
+-        String transactionUID = getSplit(getUID(rowId)).getTransactionUID();
++        Split split = getSplit(rowId);
++        String transactionUID = split == null ? null : split.getTransactionUID();
+         boolean result = deleteRecord(SplitEntry.TABLE_NAME, rowId);
+ 
++        if (!result) //we didn't delete for whatever reason, invalid rowId etc
++            return false;
++
+         //if we just deleted the last split, then remove the transaction from db
+         Cursor cursor = fetchSplitsForTransaction(transactionUID);
+         if (cursor != null){
+@@ -376,6 +391,9 @@ public boolean deleteRecord(long rowId) {
+      */
+     public long getTransactionID(String transactionUID){
+         long id = -1;
++        if (transactionUID == null)
++            return id;
++
+         Cursor c = mDb.query(TransactionEntry.TABLE_NAME,
+                 new String[]{TransactionEntry._ID},
+                 TransactionEntry.COLUMN_UID + "=?",
+diff --git a/app/src/org/gnucash/android/export/ExporterAsyncTask.java b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+index 7a52fa50..c6593dc0 100644
+--- a/app/src/org/gnucash/android/export/ExporterAsyncTask.java
++++ b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -16,6 +16,7 @@
+ 
+ package org.gnucash.android.export;
+ 
++import android.app.Activity;
+ import android.app.ProgressDialog;
+ import android.content.Context;
+ import android.content.Intent;
+@@ -48,7 +49,7 @@
+     /**
+      * App context
+      */
+-    private final Context mContext;
++    private final Activity mContext;
+ 
+     private ProgressDialog mProgressDialog;
+ 
+@@ -62,7 +63,7 @@
+      */
+     private ExportParams mExportParams;
+ 
+-    public ExporterAsyncTask(Context context){
++    public ExporterAsyncTask(Activity context){
+         this.mContext = context;
+     }
+ 
+@@ -110,9 +111,15 @@ protected Boolean doInBackground(ExportParams... params) {
+         } catch (Exception e) {
+             e.printStackTrace();
+             Log.e(TAG, e.getMessage());
+-            Toast.makeText(mContext, R.string.toast_export_error,
+-                    Toast.LENGTH_SHORT).show();
+-            Toast.makeText(mContext, e.getLocalizedMessage(), Toast.LENGTH_LONG).show();
++            final String err_msg = e.getLocalizedMessage();
++            mContext.runOnUiThread(new Runnable() {
++                @Override
++                public void run() {
++                    Toast.makeText(mContext, R.string.toast_export_error,
++                            Toast.LENGTH_SHORT).show();
++                    Toast.makeText(mContext, err_msg, Toast.LENGTH_LONG).show();
++                }
++            });
+             return false;
+         }
+         return true;
+diff --git a/app/src/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+index b585aad0..a19cb035 100644
+--- a/app/src/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -14,6 +14,7 @@
+  * limitations under the License.
+  */package org.gnucash.android.importer;
+ 
++import android.app.Activity;
+ import android.app.ProgressDialog;
+ import android.content.Context;
+ import android.os.AsyncTask;
+@@ -30,10 +31,10 @@
+  * The AccountsActivity is opened when importing is done.
+  */
+ public class ImportAsyncTask extends AsyncTask<InputStream, Void, Boolean> {
+-    private final Context context;
++    private final Activity context;
+     private ProgressDialog progressDialog;
+ 
+-    public ImportAsyncTask(Context context){
++    public ImportAsyncTask(Activity context){
+         this.context = context;
+     }
+ 
+@@ -57,10 +58,17 @@ protected Boolean doInBackground(InputStream... inputStreams) {
+             GncXmlImporter.parse(context, inputStreams[0]);
+         } catch (Exception exception){
+             exception.printStackTrace();
++            final String err_msg = exception.getLocalizedMessage();
+             Log.e(ImportAsyncTask.class.getName(), exception.getMessage());
+-            Toast.makeText(context,
+-                    context.getString(R.string.toast_error_importing_accounts) + "\n" + exception.getLocalizedMessage(),
+-                    Toast.LENGTH_LONG).show();
++            context.runOnUiThread(new Runnable() {
++                @Override
++                public void run() {
++                    Toast.makeText(context,
++                            context.getString(R.string.toast_error_importing_accounts) + "\n" + err_msg,
++                            Toast.LENGTH_LONG).show();
++                }
++            });
++
+             return false;
+         }
+         return true;
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 7d03c967..2f391b2a 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -25,7 +25,6 @@
+ import android.support.v4.app.FragmentManager;
+ import android.widget.*;
+ import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.*;
+ import org.gnucash.android.model.*;
+ import org.gnucash.android.ui.transaction.dialog.DatePickerDialogFragment;
+@@ -252,13 +251,14 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+         });
+ 
+         setListeners();
+-		if (mTransaction == null)
+-			initalizeViews();
+-		else {
++		if (mTransaction == null) {
++            initalizeViews();
++            initTransactionNameAutocomplete();
++        } else {
+ 			initializeViewsWithTransaction();
+ 		}
+ 
+-        initTransactionNameAutocomplete();
++
+ 	}
+ 
+     /**
+@@ -302,7 +302,7 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+                     if (!amountEntered) //if user already entered an amount
+                         mAmountEditText.setText(splitList.get(0).getAmount().toPlainString());
+                 } else {
+-                    if (amountEntered){ //if user entered own amount, clear
++                    if (amountEntered){ //if user entered own amount, clear loaded splits and use the user value
+                         mSplitsList.clear();
+                         setAmountEditViewVisible(View.VISIBLE);
+                     } else {
+@@ -449,9 +449,8 @@ private void openSplitEditor(){
+         }
+         FragmentManager fragmentManager = getActivity().getSupportFragmentManager();
+         String baseAmountString;
+-        long transactionId = getArguments().getLong(UxArgument.SELECTED_TRANSACTION_ID);
+ 
+-        if (transactionId <= 0){
++        if (mTransaction == null){ //if we are creating a new transaction (not editing an existing one)
+             BigDecimal enteredAmount = parseInputToDecimal(mAmountEditText.getText().toString());
+             baseAmountString = enteredAmount.toPlainString();
+         } else {
+@@ -578,19 +577,28 @@ private void saveNewTransaction() {
+ 		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getCurrencyCode(accountID));
+ 		Money amount 	= new Money(amountBigd, currency).absolute();
+ 
+-		if (mTransaction != null){
+-            if (mSplitsList.size() == 2) {
+-                //if it is a simple transfer where the editor was not used, then respect the button
+-                for (Split split : mSplitsList) {
+-                    if (split.getAccountUID().equals(accountUID)){
+-                        split.setType(mTransactionTypeButton.getTransactionType());
+-                        split.setAmount(amount.absolute());
+-                    } else {
+-                        split.setType(mTransactionTypeButton.getTransactionType().invert());
+-                    }
++        //capture any edits which were done directly (not using split editor)
++        if (mSplitsList.size() == 2 && mSplitsList.get(0).isPairOf(mSplitsList.get(1))) {
++            //if it is a simple transfer where the editor was not used, then respect the button
++            for (Split split : mSplitsList) {
++                if (split.getAccountUID().equals(accountUID)){
++                    split.setType(mTransactionTypeButton.getTransactionType());
++                    split.setAmount(amount);
++                } else {
++                    split.setType(mTransactionTypeButton.getTransactionType().invert());
++                    split.setAmount(amount);
+                 }
+             }
+-            mTransaction.setSplits(mSplitsList);
++        }
++
++		if (mTransaction != null){
++            if (!mUseDoubleEntry){
++                Split split = new Split(amount, accountUID);
++                split.setType(mTransactionTypeButton.getTransactionType());
++                mTransaction.getSplits().clear();
++                mTransaction.addSplit(split);
++            } else
++                mTransaction.setSplits(mSplitsList);
+ 			mTransaction.setDescription(description);
+ 		} else {
+ 			mTransaction = new Transaction(description);
+diff --git a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index f0b74fc3..726becd8 100644
+--- a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -201,6 +201,7 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 		views.setOnClickPendingIntent(R.id.btn_new_transaction, pendingIntent);
+ 		
+ 		appWidgetManager.updateAppWidget(appWidgetId, views);
++        accountsDbAdapter.close();
+ 	}
+ 	
+ 	/**

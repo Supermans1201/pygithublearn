@@ -1,0 +1,628 @@
+From 3f3597f76efc513adbfcf76891a9130b3323345c Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 20 Dec 2013 00:16:22 +0100
+Subject: [PATCH] Feature: Color code accounts Color codes in GnuCash accounts
+ structure file are now imported The color of the account themes the tab
+ display of the account view and any child accounts which do not have an own
+ color
+
+---
+ app/res/layout/list_item_account.xml               |   4 +
+ app/res/values/colors.xml                          |   5 +
+ app/res/values/dimens.xml                          |   1 +
+ app/src/org/gnucash/android/data/Account.java      |  37 +++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  22 ++-
+ .../org/gnucash/android/db/DatabaseAdapter.java    |   1 +
+ app/src/org/gnucash/android/db/DatabaseHelper.java |  10 +
+ .../android/ui/accounts/AccountsActivity.java      |   6 +
+ .../android/ui/accounts/AccountsListFragment.java  |   9 +-
+ .../android/ui/colorpicker/ColorPickerDialog.java  | 201 +++++++++++++++++++++
+ .../ui/transactions/TransactionsActivity.java      |  28 ++-
+ .../android/util/GnucashAccountXmlHandler.java     |  19 +-
+ 12 files changed, 332 insertions(+), 11 deletions(-)
+ create mode 100644 app/src/org/gnucash/android/ui/colorpicker/ColorPickerDialog.java
+
+diff --git a/app/res/layout/list_item_account.xml b/app/res/layout/list_item_account.xml
+index 3d5e8772..c2d5b67b 100644
+--- a/app/res/layout/list_item_account.xml
++++ b/app/res/layout/list_item_account.xml
+@@ -23,6 +23,10 @@
+               android:paddingRight="@dimen/edge_padding"
+               android:orientation="horizontal"
+               style="@style/ListItem">
++
++    <View   android:id="@+id/account_color_strip"
++            android:layout_width="@dimen/strip_width"
++            android:layout_height="match_parent" />
+     <include
+             layout="@layout/list_item_2_lines"
+             android:layout_height="wrap_content"
+diff --git a/app/res/values/colors.xml b/app/res/values/colors.xml
+index d849dc37..5b0a8263 100644
+--- a/app/res/values/colors.xml
++++ b/app/res/values/colors.xml
+@@ -20,4 +20,9 @@
+     <color name="light_gray">#FFAAAAAA</color>
+     <color name="abs__holo_blue_light">#ff33b5e5</color>
+     <color name="title_green">#319D67</color>
++    <color name="account_green">#319D67</color>
++    <color name="account_red">#D13E29</color>
++    <color name="account_gold">#EE8600</color>
++    <color name="account_blue">#1469EB</color>
++    <color name="account_purple">#B304AD</color>
+ </resources>
+\ No newline at end of file
+diff --git a/app/res/values/dimens.xml b/app/res/values/dimens.xml
+index 7b59c18a..5c514f5e 100644
+--- a/app/res/values/dimens.xml
++++ b/app/res/values/dimens.xml
+@@ -26,4 +26,5 @@
+     <dimen name="widget_margin">8dp</dimen>
+     <dimen name="section_header_height">20dp</dimen>
+     <dimen name="form_row_bottom_margin">10dp</dimen>
++    <dimen name="strip_width">5dp</dimen>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/org/gnucash/android/data/Account.java b/app/src/org/gnucash/android/data/Account.java
+index 59886eb3..a108b979 100644
+--- a/app/src/org/gnucash/android/data/Account.java
++++ b/app/src/org/gnucash/android/data/Account.java
+@@ -23,7 +23,7 @@
+ import java.util.Locale;
+ import java.util.UUID;
+ 
+-import android.content.Context;
++import android.graphics.Color;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.export.ofx.OfxExporter;
+@@ -127,6 +127,11 @@ public boolean hasInvertedCredit(){
+      */
+     private boolean mPlaceholderAccount;
+ 
++    /**
++     * Account color field in hex format #rrggbb
++     */
++    private String mColorCode;
++
+ 	/**
+ 	 * An extra key for passing the currency code (according ISO 4217) in an intent
+ 	 */
+@@ -311,13 +316,35 @@ public boolean hasUnexportedTransactions(){
+ 	public Money getBalance(){
+ 		//TODO: Consider double entry transactions
+ 		Money balance = new Money(new BigDecimal(0), this.mCurrency);
+-		for (Transaction transx : mTransactionsList) {
+-			balance = balance.add(transx.getAmount());		
++		for (Transaction transaction : mTransactionsList) {
++			balance = balance.add(transaction.getAmount());
+ 		}
+ 		return balance;
+ 	}
+-	
+-	/**
++
++    /**
++     * Returns the color code of the account in the format #rrggbb
++     * @return Color code of the account
++     */
++    public String getColorCode() {
++        return mColorCode;
++    }
++
++    /**
++     * Sets the color code of the account.
++     * @param colorCode Color code to be set in the format #rrggbb
++     * @throws java.lang.IllegalArgumentException if the color code is not properly formatted
++     */
++    public void setColorCode(String colorCode) {
++        //TODO: Proper regex validation
++        if (!colorCode.startsWith("#") || colorCode.length() < 4 || colorCode.length() > 9){
++            throw new IllegalArgumentException("Invalid color code for account");
++        }
++        this.mColorCode = colorCode;
++    }
++
++
++    /**
+ 	 * @return the mCurrency
+ 	 */
+ 	public Currency getCurrency() {
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index ecd7b4e7..1a6e4f98 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -76,6 +76,7 @@ public long addAccount(Account account){
+ 		contentValues.put(DatabaseHelper.KEY_PARENT_ACCOUNT_UID, account.getParentUID());
+         contentValues.put(DatabaseHelper.KEY_DEFAULT_TRANSFER_ACCOUNT_UID, account.getDefaultTransferAccountUID());
+         contentValues.put(DatabaseHelper.KEY_PLACEHOLDER, account.isPlaceholderAccount() ? 1 : 0);
++        contentValues.put(DatabaseHelper.KEY_COLOR_CODE, account.getColorCode());
+ 
+ 		long rowId = -1;
+ 		if ((rowId = getAccountID(account.getUID())) > 0){
+@@ -182,6 +183,7 @@ public Account buildAccountInstance(Cursor c){
+ 		account.setTransactions(mTransactionsAdapter.getAllTransactionsForAccount(uid));
+         account.setPlaceHolderFlag(c.getInt(DatabaseAdapter.COLUMN_PLACEHOLDER) == 1);
+         account.setDefaultTransferAccountUID(c.getString(DatabaseAdapter.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID));
++        account.setColorCode(c.getString(DatabaseAdapter.COLUMN_COLOR_CODE));
+ 		return account;
+ 	}
+ 		
+@@ -269,7 +271,25 @@ public String getAccountUID(long id){
+ 		}
+ 		return uid;
+ 	}
+-	
++
++    /**
++     * Returns the color code for the account in format #rrggbb
++     * @param accountId Database row ID of the account
++     * @return String color code of account or null if none
++     */
++    public String getAccountColorCode(long accountId){
++        String colorCode = null;
++        Cursor c = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                new String[]{DatabaseHelper.KEY_ROW_ID, DatabaseHelper.KEY_COLOR_CODE},
++                DatabaseHelper.KEY_ROW_ID + "=" + accountId,
++                null, null, null, null);
++        if (c != null && c.moveToFirst()){
++            colorCode = c.getString(c.getColumnIndexOrThrow(DatabaseHelper.KEY_COLOR_CODE));
++            c.close();
++        }
++        return colorCode;
++    }
++
+ 	/**
+ 	 * Returns the {@link AccountType} of the account with unique ID <code>uid</code>
+ 	 * @param uid Unique ID of the account
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index da214643..499e7e4a 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -56,6 +56,7 @@
+ 	public static final int COLUMN_PARENT_ACCOUNT_UID   = 5;
+     public static final int COLUMN_PLACEHOLDER          = 6;
+     public static final int COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID = 7;
++    public static final int COLUMN_COLOR_CODE           = 8;
+ 	
+ 	/**
+ 	 * {@link DatabaseHelper} for creating and opening the database
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index 5cb0b356..fca70b3e 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -114,6 +114,11 @@
+      */
+     public static final String KEY_DEFAULT_TRANSFER_ACCOUNT_UID = "default_transfer_account_uid";
+ 
++    /**
++     * Color code for the account
++     */
++    public static final String KEY_COLOR_CODE = "color_code";
++
+ 	/**
+ 	 * Transaction description database column
+ 	 */
+@@ -158,6 +163,7 @@
+ 			+ KEY_PARENT_ACCOUNT_UID + " varchar(255), "
+             + KEY_PLACEHOLDER + " tinyint default 0, "
+             + KEY_DEFAULT_TRANSFER_ACCOUNT_UID + " varchar(255), "
++            + KEY_COLOR_CODE + " varchar(255), "
+ 			+ "UNIQUE (" + KEY_UID + ")"	
+ 			+ ");";
+ 	
+@@ -245,8 +251,12 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+                 String addDefaultTransferAccount = "ALTER TABLE " + ACCOUNTS_TABLE_NAME
+                         + " ADD COLUMN " + KEY_DEFAULT_TRANSFER_ACCOUNT_UID + " varchar(255)";
+ 
++                String addAccountColor = " ALTER TABLE " + ACCOUNTS_TABLE_NAME
++                        + " ADD COLUMN " + KEY_COLOR_CODE + " varchar(255)";
++
+                 db.execSQL(addRecurrencePeriod);
+                 db.execSQL(addDefaultTransferAccount);
++                db.execSQL(addAccountColor);
+ 
+                 oldVersion = 4;
+             }
+diff --git a/app/src/org/gnucash/android/ui/accounts/AccountsActivity.java b/app/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+index 80d0a5b5..29b40f70 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AccountsActivity.java
++++ b/app/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+@@ -337,24 +337,30 @@ public void onClick(DialogInterface dialog, int which) {
+ 					switch (index) {
+ 					case 0:
+ 						account.setAccountType(AccountType.EXPENSE);
++                        account.setColorCode(getString(R.color.account_red));
+ 						break;
+ 						
+ 					case 1:
+ 						account.setAccountType(AccountType.INCOME);
++                        account.setColorCode(getString(R.color.account_green));
+ 						break;
+ 						
+ 					case 2:
+ 						account.setAccountType(AccountType.ASSET);
++                        account.setColorCode(getString(R.color.account_gold));
+ 						break;
+ 					case 3:
+ 						account.setAccountType(AccountType.EQUITY);
++                        account.setColorCode(getString(R.color.account_blue));
+ 						break;
+ 					case 4:
+ 						account.setAccountType(AccountType.LIABILITY);
++                        account.setColorCode(getString(R.color.account_purple));
+ 						break;
+ 						
+ 					default:
+ 						account.setAccountType(AccountType.CASH);
++                        account.setColorCode(getString(R.color.account_green));
+ 						break;
+ 					}
+ 					dbAdapter.addAccount(account);
+diff --git a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 60360c36..76d4c57c 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -24,6 +24,7 @@
+ import android.content.DialogInterface;
+ import android.content.Intent;
+ import android.database.Cursor;
++import android.graphics.Color;
+ import android.graphics.Rect;
+ import android.os.AsyncTask;
+ import android.os.Bundle;
+@@ -673,8 +674,14 @@ public void bindView(View v, Context context, Cursor cursor) {
+                     .findViewById(R.id.transactions_summary);
+             new AccountBalanceTask(accountBalanceTextView, getActivity()).execute(accountId);
+ 
+-            boolean isPlaceholderAccount = mAccountsDbAdapter.isPlaceholderAccount(accountId);
++            View colorStripView = v.findViewById(R.id.account_color_strip);
++            String accountColor = cursor.getString(DatabaseAdapter.COLUMN_COLOR_CODE);
++            if (accountColor != null){
++                int color = Color.parseColor(accountColor);
++                colorStripView.setBackgroundColor(color);
++            }
+ 
++            boolean isPlaceholderAccount = mAccountsDbAdapter.isPlaceholderAccount(accountId);
+             ImageButton newTransactionButton = (ImageButton) v.findViewById(R.id.btn_new_transaction);
+             if (isPlaceholderAccount){
+                 newTransactionButton.setVisibility(View.GONE);
+diff --git a/app/src/org/gnucash/android/ui/colorpicker/ColorPickerDialog.java b/app/src/org/gnucash/android/ui/colorpicker/ColorPickerDialog.java
+new file mode 100644
+index 00000000..6913faa7
+--- /dev/null
++++ b/app/src/org/gnucash/android/ui/colorpicker/ColorPickerDialog.java
+@@ -0,0 +1,201 @@
++/*
++ * Copyright (C) 2013 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.gnucash.android.ui.colorpicker;
++
++        import android.app.Activity;
++        import android.app.AlertDialog;
++        import android.app.Dialog;
++        import android.app.DialogFragment;
++        import android.os.Bundle;
++        import android.view.LayoutInflater;
++        import android.view.View;
++        import android.widget.ProgressBar;
++
++        import com.android.colorpicker.ColorPickerSwatch.OnColorSelectedListener;
++
++/**
++ * A dialog which takes in as input an array of colors and creates a palette allowing the user to
++ * select a specific color swatch, which invokes a listener.
++ */
++public class ColorPickerDialog extends DialogFragment implements OnColorSelectedListener {
++
++    public static final int SIZE_LARGE = 1;
++    public static final int SIZE_SMALL = 2;
++
++    protected AlertDialog mAlertDialog;
++
++    protected static final String KEY_TITLE_ID = "title_id";
++    protected static final String KEY_COLORS = "colors";
++    protected static final String KEY_SELECTED_COLOR = "selected_color";
++    protected static final String KEY_COLUMNS = "columns";
++    protected static final String KEY_SIZE = "size";
++
++    protected int mTitleResId = R.string.color_picker_default_title;
++    protected int[] mColors = null;
++    protected int mSelectedColor;
++    protected int mColumns;
++    protected int mSize;
++
++    private ColorPickerPalette mPalette;
++    private ProgressBar mProgress;
++
++    protected OnColorSelectedListener mListener;
++
++    public ColorPickerDialog() {
++        // Empty constructor required for dialog fragments.
++    }
++
++    public static ColorPickerDialog newInstance(int titleResId, int[] colors, int selectedColor,
++                                                int columns, int size) {
++        ColorPickerDialog ret = new ColorPickerDialog();
++        ret.initialize(titleResId, colors, selectedColor, columns, size);
++        return ret;
++    }
++
++    public void initialize(int titleResId, int[] colors, int selectedColor, int columns, int size) {
++        setArguments(titleResId, columns, size);
++        setColors(colors, selectedColor);
++    }
++
++    public void setArguments(int titleResId, int columns, int size) {
++        Bundle bundle = new Bundle();
++        bundle.putInt(KEY_TITLE_ID, titleResId);
++        bundle.putInt(KEY_COLUMNS, columns);
++        bundle.putInt(KEY_SIZE, size);
++        setArguments(bundle);
++    }
++
++    public void setOnColorSelectedListener(OnColorSelectedListener listener) {
++        mListener = listener;
++    }
++
++    @Override
++    public void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++
++        if (getArguments() != null) {
++            mTitleResId = getArguments().getInt(KEY_TITLE_ID);
++            mColumns = getArguments().getInt(KEY_COLUMNS);
++            mSize = getArguments().getInt(KEY_SIZE);
++        }
++
++        if (savedInstanceState != null) {
++            mColors = savedInstanceState.getIntArray(KEY_COLORS);
++            mSelectedColor = (Integer) savedInstanceState.getSerializable(KEY_SELECTED_COLOR);
++        }
++    }
++
++    @Override
++    public Dialog onCreateDialog(Bundle savedInstanceState) {
++        final Activity activity = getActivity();
++
++        View view = LayoutInflater.from(getActivity()).inflate(R.layout.color_picker_dialog, null);
++        mProgress = (ProgressBar) view.findViewById(android.R.id.progress);
++        mPalette = (ColorPickerPalette) view.findViewById(R.id.color_picker);
++        mPalette.init(mSize, mColumns, this);
++
++        if (mColors != null) {
++            showPaletteView();
++        }
++
++        mAlertDialog = new AlertDialog.Builder(activity)
++                .setTitle(mTitleResId)
++                .setView(view)
++                .create();
++
++        return mAlertDialog;
++    }
++
++    @Override
++    public void onColorSelected(int color) {
++        if (mListener != null) {
++            mListener.onColorSelected(color);
++        }
++
++        if (getTargetFragment() instanceof OnColorSelectedListener) {
++            final OnColorSelectedListener listener =
++                    (OnColorSelectedListener) getTargetFragment();
++            listener.onColorSelected(color);
++        }
++
++        if (color != mSelectedColor) {
++            mSelectedColor = color;
++            // Redraw palette to show checkmark on newly selected color before dismissing.
++            mPalette.drawPalette(mColors, mSelectedColor);
++        }
++
++        dismiss();
++    }
++
++    public void showPaletteView() {
++        if (mProgress != null && mPalette != null) {
++            mProgress.setVisibility(View.GONE);
++            refreshPalette();
++            mPalette.setVisibility(View.VISIBLE);
++        }
++    }
++
++    public void showProgressBarView() {
++        if (mProgress != null && mPalette != null) {
++            mProgress.setVisibility(View.VISIBLE);
++            mPalette.setVisibility(View.GONE);
++        }
++    }
++
++    public void setColors(int[] colors, int selectedColor) {
++        if (mColors != colors || mSelectedColor != selectedColor) {
++            mColors = colors;
++            mSelectedColor = selectedColor;
++            refreshPalette();
++        }
++    }
++
++    public void setColors(int[] colors) {
++        if (mColors != colors) {
++            mColors = colors;
++            refreshPalette();
++        }
++    }
++
++    public void setSelectedColor(int color) {
++        if (mSelectedColor != color) {
++            mSelectedColor = color;
++            refreshPalette();
++        }
++    }
++
++    private void refreshPalette() {
++        if (mPalette != null && mColors != null) {
++            mPalette.drawPalette(mColors, mSelectedColor);
++        }
++    }
++
++    public int[] getColors() {
++        return mColors;
++    }
++
++    public int getSelectedColor() {
++        return mSelectedColor;
++    }
++
++    @Override
++    public void onSaveInstanceState(Bundle outState) {
++        super.onSaveInstanceState(outState);
++        outState.putIntArray(KEY_COLORS, mColors);
++        outState.putSerializable(KEY_SELECTED_COLOR, mSelectedColor);
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+index 9205a161..cd0b62c4 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+@@ -19,6 +19,7 @@
+ import android.content.Context;
+ import android.content.Intent;
+ import android.database.Cursor;
++import android.graphics.Color;
+ import android.os.Bundle;
+ import android.support.v4.app.*;
+ import android.support.v4.view.PagerAdapter;
+@@ -123,6 +124,12 @@
+      */
+     private SpinnerAdapter mSpinnerAdapter;
+ 
++    /**
++     * This is the last known color for the title indicator.
++     * This is used to remember the color of the top level account if the child account doesn't have one.
++     */
++    private static int sLastTitleColor = R.color.title_green;
++
+     private TextView mSectionHeaderTransactions;
+     private TitlePageIndicator mTitlePageIndicator;
+ 
+@@ -261,6 +268,7 @@ public void refresh(long accountId) {
+     @Override
+     public void refresh(){
+         refresh(mAccountId);
++        setTitleIndicatorColor();
+     }
+ 
+ 	@Override
+@@ -276,8 +284,11 @@ protected void onCreate(Bundle savedInstanceState) {
+ 		mAccountId = getIntent().getLongExtra(
+                 TransactionsListFragment.SELECTED_ACCOUNT_ID, -1);
+ 
++        mAccountsDbAdapter = new AccountsDbAdapter(this);
+ 		setupActionBarNavigation();
+ 
++        setTitleIndicatorColor();
++
+ 		if (getIntent().getAction().equals(Intent.ACTION_INSERT_OR_EDIT)) {
+             mPager.setVisibility(View.GONE);
+             mTitlePageIndicator.setVisibility(View.GONE);
+@@ -297,7 +308,7 @@ protected void onCreate(Bundle savedInstanceState) {
+ 		mActivityRunning = true;
+ 	}
+ 
+-    /**
++   /**
+      * Loads the fragment for creating/editing transactions and initializes it to be displayed
+      */
+     private void initializeCreateOrEditTransaction() {
+@@ -315,11 +326,24 @@ private void initializeCreateOrEditTransaction() {
+     }
+ 
+     /**
++     * Sets the color for the ViewPager title indicator to match the account color
++     */
++    private void setTitleIndicatorColor() {
++        String colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountId);
++        if (colorCode != null){
++            sLastTitleColor = Color.parseColor(colorCode);
++        }
++
++        mTitlePageIndicator.setSelectedColor(sLastTitleColor);
++        mTitlePageIndicator.setTextColor(sLastTitleColor);
++        mTitlePageIndicator.setFooterColor(sLastTitleColor);
++    }
++
++    /**
+ 	 * Set up action bar navigation list and listener callbacks
+ 	 */
+ 	private void setupActionBarNavigation() {
+ 		// set up spinner adapter for navigation list
+-		mAccountsDbAdapter = new AccountsDbAdapter(this);
+ 		Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecords();
+ 		mSpinnerAdapter = new QualifiedAccountNameCursorAdapter(getSupportActionBar().getThemedContext(),
+                 R.layout.sherlock_spinner_item, accountsCursor);
+diff --git a/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java b/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
+index fee01b1d..493547ab 100644
+--- a/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
++++ b/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
+@@ -69,6 +69,10 @@
+      */
+     private static final String PLACEHOLDER_KEY = "placeholder";
+ 
++    /**
++     * Value of color slots in GnuCash account structure file
++     */
++    private static final String COLOR_KEY = "color";
+ 
+     AccountsDbAdapter mDatabaseAdapter;
+ 
+@@ -82,8 +86,9 @@
+      */
+     Account mAccount;
+ 
+-    boolean mInPlaceHolderSlot = false;
+-    boolean mISO4217Currency = false;
++    boolean mInColorSlot        = false;
++    boolean mInPlaceHolderSlot  = false;
++    boolean mISO4217Currency    = false;
+ 
+     public GnucashAccountXmlHandler(Context context) {
+         mDatabaseAdapter = new AccountsDbAdapter(context);
+@@ -144,6 +149,9 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             if (characterString.equals(PLACEHOLDER_KEY)){
+                 mInPlaceHolderSlot = true;
+             }
++            if (characterString.equals(COLOR_KEY)){
++                mInColorSlot = true;
++            }
+         }
+ 
+         if (qualifiedName.equalsIgnoreCase(TAG_SLOT_VALUE)){
+@@ -154,6 +162,13 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 };
+                 mInPlaceHolderSlot = false;
+             }
++
++            if (mInColorSlot){
++                Log.d(LOG_TAG, "Setting account color");
++                String color = "#" + characterString.trim().replaceAll(".(.)?", "$1").replace("null", "");
++                mAccount.setColorCode(color);
++                mInColorSlot = false;
++            }
+         }
+         //reset the accumulated characters
+         mContent.setLength(0);

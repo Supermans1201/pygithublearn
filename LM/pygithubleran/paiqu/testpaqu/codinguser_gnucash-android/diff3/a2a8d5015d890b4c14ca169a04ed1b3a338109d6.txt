@@ -1,0 +1,780 @@
+From a2a8d5015d890b4c14ca169a04ed1b3a338109d6 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 3 Nov 2015 13:53:13 +0100
+Subject: [PATCH] Use commodity fraction digits instead of those from Currency
+
+Currency fraction digits seem to vary with Android/Java version and device.
+This leads to inconsistencies in the way balances are calculated. By using our Commodities, we are sure that we get consistent values across all devices since pre-load the database ourselves
+---
+ .../gnucash/android/db/CommoditiesDbAdapter.java   |  6 +--
+ .../org/gnucash/android/db/DatabaseHelper.java     |  3 +-
+ .../org/gnucash/android/db/DatabaseSchema.java     |  2 +-
+ .../org/gnucash/android/db/MigrationHelper.java    |  7 ++-
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 17 +++---
+ .../gnucash/android/export/xml/GncXmlExporter.java | 17 +++---
+ .../gnucash/android/export/xml/GncXmlHelper.java   |  9 ++--
+ .../android/importer/CommoditiesXmlHandler.java    | 15 ++++++
+ .../java/org/gnucash/android/model/Commodity.java  | 61 +++++++++++++++++++---
+ .../main/java/org/gnucash/android/model/Money.java | 43 ++++++++-------
+ .../android/receivers/TransactionRecorder.java     |  5 +-
+ .../android/ui/account/AccountsActivity.java       |  2 +-
+ .../dialog/TransferFundsDialogFragment.java        |  6 ++-
+ .../android/ui/util/widget/CalculatorEditText.java |  7 ++-
+ .../android/test/unit/export/GncXmlHelperTest.java |  8 ++-
+ .../android/test/unit/model/AccountTest.java       | 15 ++++++
+ .../android/test/unit/model/CommodityTest.java     | 49 +++++++++++++++++
+ .../gnucash/android/test/unit/model/MoneyTest.java |  9 ++++
+ .../gnucash/android/test/unit/model/SplitTest.java |  8 +++
+ 19 files changed, 224 insertions(+), 65 deletions(-)
+ create mode 100644 app/src/test/java/org/gnucash/android/test/unit/model/CommodityTest.java
+
+diff --git a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+index 3a62142e..043a8291 100644
+--- a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+@@ -37,7 +37,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Commodity commo
+                     + CommodityEntry.COLUMN_MNEMONIC        + " , "
+                     + CommodityEntry.COLUMN_LOCAL_SYMBOL    + " , "
+                     + CommodityEntry.COLUMN_CUSIP           + " , "
+-                    + CommodityEntry.COLUMN_FRACTION        + " , "
++                    + CommodityEntry.COLUMN_SMALLEST_FRACTION + " , "
+                     + CommodityEntry.COLUMN_QUOTE_FLAG      + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? ) ");
+         }
+ 
+@@ -48,7 +48,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Commodity commo
+         mReplaceStatement.bindString(4, commodity.getMnemonic());
+         mReplaceStatement.bindString(5, commodity.getLocalSymbol());
+         mReplaceStatement.bindString(6, commodity.getCusip());
+-        mReplaceStatement.bindLong(7, commodity.getFraction());
++        mReplaceStatement.bindLong(7, commodity.getSmallestFraction());
+         mReplaceStatement.bindLong(8,   commodity.getQuoteFlag());
+ 
+         return mReplaceStatement;
+@@ -62,7 +62,7 @@ public Commodity buildModelInstance(@NonNull final Cursor cursor) {
+         String cusip = cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_CUSIP));
+         String localSymbol = cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_LOCAL_SYMBOL));
+ 
+-        int fraction = cursor.getInt(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_FRACTION));
++        int fraction = cursor.getInt(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_SMALLEST_FRACTION));
+         int quoteFlag = cursor.getInt(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_QUOTE_FLAG));
+ 
+         Commodity commodity = new Commodity(fullname, mnemonic, fraction);
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 968b4c09..5af6e0e9 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -31,7 +31,6 @@
+ import java.io.IOException;
+ import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+-import java.util.Locale;
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+ 
+@@ -143,7 +142,7 @@
+             + CommodityEntry.COLUMN_MNEMONIC    + " varchar(255) not null, "
+             + CommodityEntry.COLUMN_LOCAL_SYMBOL+ " varchar(255) not null default '', "
+             + CommodityEntry.COLUMN_CUSIP       + " varchar(255), "
+-            + CommodityEntry.COLUMN_FRACTION    + " integer not null, "
++            + CommodityEntry.COLUMN_SMALLEST_FRACTION + " integer not null, "
+             + CommodityEntry.COLUMN_QUOTE_FLAG  + " integer not null, "
+             + CommodityEntry.COLUMN_CREATED_AT  + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + CommodityEntry.COLUMN_MODIFIED_AT + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index de4b3e72..c39568a3 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -160,7 +160,7 @@ private DatabaseSchema(){}
+         /**
+          * The fraction is the number of sub-units that the basic commodity can be divided into
+          */
+-        public static final String COLUMN_FRACTION      = "fraction";
++        public static final String COLUMN_SMALLEST_FRACTION = "fraction";
+ 
+         /**
+          * A CUSIP is a nine-character alphanumeric code that identifies a North American financial security
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 943087c0..b8039c6b 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -53,7 +53,6 @@
+ import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.List;
+-import java.util.UUID;
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.parsers.SAXParser;
+@@ -853,7 +852,7 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+                     + CommodityEntry.COLUMN_MNEMONIC    + " varchar(255) not null, "
+                     + CommodityEntry.COLUMN_LOCAL_SYMBOL+ " varchar(255) not null default '', "
+                     + CommodityEntry.COLUMN_CUSIP       + " varchar(255), "
+-                    + CommodityEntry.COLUMN_FRACTION    + " integer not null, "
++                    + CommodityEntry.COLUMN_SMALLEST_FRACTION + " integer not null, "
+                     + CommodityEntry.COLUMN_QUOTE_FLAG  + " integer not null, "
+                     + CommodityEntry.COLUMN_CREATED_AT  + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                     + CommodityEntry.COLUMN_MODIFIED_AT + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+@@ -958,7 +957,7 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+             String query = "SELECT " + "A." + AccountEntry.COLUMN_UID + " AS account_uid "
+                     + " FROM " + AccountEntry.TABLE_NAME + " AS A, " + CommodityEntry.TABLE_NAME + " AS C "
+                     + " WHERE A." + AccountEntry.COLUMN_CURRENCY + " = C." + CommodityEntry.COLUMN_MNEMONIC
+-                    + " AND C." + CommodityEntry.COLUMN_FRACTION + "= 1";
++                    + " AND C." + CommodityEntry.COLUMN_SMALLEST_FRACTION + "= 1";
+ 
+             Cursor cursor = db.rawQuery(query, null);
+ 
+@@ -1007,7 +1006,7 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+             query = "SELECT " + "A." + AccountEntry.COLUMN_UID + " AS account_uid "
+                     + " FROM " + AccountEntry.TABLE_NAME + " AS A, " + CommodityEntry.TABLE_NAME + " AS C "
+                     + " WHERE A." + AccountEntry.COLUMN_CURRENCY + " = C." + CommodityEntry.COLUMN_MNEMONIC
+-                    + " AND C." + CommodityEntry.COLUMN_FRACTION + "= 1000";
++                    + " AND C." + CommodityEntry.COLUMN_SMALLEST_FRACTION + "= 1000";
+ 
+             cursor = db.rawQuery(query, null);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index b96b85fa..84215fc8 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -28,6 +28,7 @@
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.TransactionType;
+@@ -210,21 +211,21 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+             Money total = Money.createZeroInstance(currencyCode);
+             CommoditiesDbAdapter commoditiesDbAdapter = null;
+             PricesDbAdapter pricesDbAdapter = null;
+-            Currency currency = null;
++            Commodity commodity = null;
+             String currencyUID = null;
+             while (cursor.moveToNext()) {
+                 long amount_num = cursor.getLong(0);
+                 long amount_denom = cursor.getLong(1);
+-                String commodity = cursor.getString(2);
++                String commodityCode = cursor.getString(2);
+                 //Log.d(getClass().getName(), commodity + " " + amount_num + "/" + amount_denom);
+-                if (commodity.equals("XXX") || amount_num == 0) {
++                if (commodityCode.equals("XXX") || amount_num == 0) {
+                     // ignore custom currency
+                     continue;
+                 }
+                 if (!hasDebitNormalBalance) {
+                     amount_num = -amount_num;
+                 }
+-                if (commodity.equals(currencyCode)) {
++                if (commodityCode.equals(currencyCode)) {
+                     // currency matches
+                     total = total.add(new Money(amount_num, amount_denom, currencyCode));
+                     //Log.d(getClass().getName(), "currency " + commodity + " sub - total " + total);
+@@ -233,11 +234,11 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+                     if (commoditiesDbAdapter == null) {
+                         commoditiesDbAdapter = new CommoditiesDbAdapter(mDb);
+                         pricesDbAdapter = new PricesDbAdapter(mDb);
+-                        currency = Currency.getInstance(currencyCode);
++                        commodity = commoditiesDbAdapter.getCommodity(currencyCode);
+                         currencyUID = commoditiesDbAdapter.getCommodityUID(currencyCode);
+                     }
+                     // get price
+-                    String commodityUID = commoditiesDbAdapter.getCommodityUID(commodity);
++                    String commodityUID = commoditiesDbAdapter.getCommodityUID(commodityCode);
+                     Pair<Long, Long> price = pricesDbAdapter.getPrice(commodityUID, currencyUID);
+                     if (price.first <= 0 || price.second <= 0) {
+                         // no price exists, just ignore it
+@@ -245,8 +246,8 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+                     }
+                     BigDecimal amount = Money.getBigDecimal(amount_num, amount_denom);
+                     BigDecimal amountConverted = amount.multiply(new BigDecimal(price.first))
+-                            .divide(new BigDecimal(price.second), currency.getDefaultFractionDigits(), BigDecimal.ROUND_HALF_EVEN);
+-                    total = total.add(new Money(amountConverted, currency));
++                            .divide(new BigDecimal(price.second), commodity.getSmallestFractionDigits(), BigDecimal.ROUND_HALF_EVEN);
++                    total = total.add(new Money(amountConverted, commodity));
+                     //Log.d(getClass().getName(), "currency " + commodity + " sub - total " + total);
+                 }
+             }
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 8577781f..6d8179eb 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -23,6 +23,7 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportFormat;
+@@ -31,6 +32,7 @@
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.BaseModel;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.ScheduledAction;
+@@ -147,8 +149,9 @@ private void exportAccounts(XmlSerializer xmlSerializer) throws IOException {
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_ACCOUNT_COMMODITY);
+             // commodity scu
++            Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(acctCurrencyCode);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SCU);
+-            xmlSerializer.text(Integer.toString((int) Math.pow(10, Currency.getInstance(acctCurrencyCode).getDefaultFractionDigits())));
++            xmlSerializer.text(Integer.toString(commodity.getSmallestFraction()));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SCU);
+             // account description
+             String description = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_DESCRIPTION));
+@@ -283,7 +286,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " ASC , " +
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " ASC ");
+         String lastTrxUID = "";
+-        Currency trxCurrency = null;
++        Commodity trnCommodity = null;
+         String denomString = "100";
+ 
+         if (exportTemplates) {
+@@ -319,14 +322,14 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 xmlSerializer.text(curTrxUID);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_TRX_ID);
+                 // currency
+-                String currency = cursor.getString(cursor.getColumnIndexOrThrow("trans_currency"));
+-                trxCurrency = Currency.getInstance(currency);
++                String currencyCode = cursor.getString(cursor.getColumnIndexOrThrow("trans_currency"));
++                trnCommodity = CommoditiesDbAdapter.getInstance().getCommodity(currencyCode);//Currency.getInstance(currencyCode);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_TRX_CURRENCY);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
+                 xmlSerializer.text("ISO4217");
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_ID);
+-                xmlSerializer.text(currency);
++                xmlSerializer.text(currencyCode);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_TRX_CURRENCY);
+                 // date posted, time which user put on the transaction
+@@ -456,14 +459,14 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                     slotValues.add(GncXmlHelper.formatTemplateSplitAmount(splitAmount));
+                     slotKeys.add(GncXmlHelper.KEY_CREDIT_NUMERIC);
+                     slotTypes.add(GncXmlHelper.ATTR_VALUE_NUMERIC);
+-                    slotValues.add(GncXmlHelper.formatSplitAmount(splitAmount, trxCurrency));
++                    slotValues.add(GncXmlHelper.formatSplitAmount(splitAmount, trnCommodity));
+                 } else {
+                     slotKeys.add(GncXmlHelper.KEY_DEBIT_FORMULA);
+                     slotTypes.add(GncXmlHelper.ATTR_VALUE_STRING);
+                     slotValues.add(GncXmlHelper.formatTemplateSplitAmount(splitAmount));
+                     slotKeys.add(GncXmlHelper.KEY_DEBIT_NUMERIC);
+                     slotTypes.add(GncXmlHelper.ATTR_VALUE_NUMERIC);
+-                    slotValues.add(GncXmlHelper.formatSplitAmount(splitAmount, trxCurrency));
++                    slotValues.add(GncXmlHelper.formatSplitAmount(splitAmount, trnCommodity));
+                 }
+ 
+                 exportSlots(xmlSerializer, slotKeys, slotTypes, slotValues);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 92de9512..6a13908c 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -19,6 +19,8 @@
+ 
+ import android.support.annotation.NonNull;
+ 
++import org.gnucash.android.db.CommoditiesDbAdapter;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ 
+ import java.math.BigDecimal;
+@@ -194,12 +196,11 @@ public static BigDecimal parseSplitAmount(String amountString) throws ParseExcep
+     /**
+      * Formats money amounts for splits in the format 2550/100
+      * @param amount Split amount as BigDecimal
+-     * @param trxCurrency Currency of the transaction
++     * @param commodity Commodity of the transaction
+      * @return Formatted split amount
+      */
+-    public static String formatSplitAmount(BigDecimal amount, Currency trxCurrency){
+-        int fractionDigits = trxCurrency.getDefaultFractionDigits();
+-        int denomInt = (int) Math.pow(10, fractionDigits);
++    public static String formatSplitAmount(BigDecimal amount, Commodity commodity){
++        int denomInt = commodity.getSmallestFraction();
+         BigDecimal denom = new BigDecimal(denomInt);
+         String denomString = Integer.toString(denomInt);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+index 6b4ce3a1..34e75e03 100644
+--- a/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+@@ -1,3 +1,18 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
+ package org.gnucash.android.importer;
+ 
+ import android.database.sqlite.SQLiteDatabase;
+diff --git a/app/src/main/java/org/gnucash/android/model/Commodity.java b/app/src/main/java/org/gnucash/android/model/Commodity.java
+index 169e2d15..154c3169 100644
+--- a/app/src/main/java/org/gnucash/android/model/Commodity.java
++++ b/app/src/main/java/org/gnucash/android/model/Commodity.java
+@@ -1,3 +1,18 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
+ package org.gnucash.android.model;
+ 
+ /**
+@@ -16,19 +31,19 @@
+     private String mFullname;
+     private String mCusip;
+     private String mLocalSymbol = "";
+-    private int mFraction;
++    private int mSmallestFraction;
+     private int mQuoteFlag;
+ 
+     /**
+      * Create a new commodity
+      * @param fullname Official full name of the currency
+      * @param mnemonic Official abbreviated designation for the currency
+-     * @param fraction Number of sub-units that the basic commodity can be divided into
++     * @param smallestFraction Number of sub-units that the basic commodity can be divided into, as power of 10. e.g. 10^&lt;number_of_fraction_digits&gt;
+      */
+-    public Commodity(String fullname, String mnemonic, int fraction){
++    public Commodity(String fullname, String mnemonic, int smallestFraction){
+         this.mFullname = fullname;
+         this.mMnemonic = mnemonic;
+-        this.mFraction = fraction;
++        setSmallestFraction(smallestFraction);
+     }
+ 
+     public Namespace getNamespace() {
+@@ -88,12 +103,42 @@ public void setLocalSymbol(String localSymbol) {
+         this.mLocalSymbol = localSymbol;
+     }
+ 
+-    public int getFraction() {
+-        return mFraction;
++    /**
++     * Returns the smallest fraction supported by the commodity as a power of 10.
++     * <p>i.e. for commodities with no fractions, 1 is returned, for commodities with 2 fractions, 100 is returned</p>
++     * @return Smallest fraction as power of 10
++     */
++    public int getSmallestFraction() {
++        return mSmallestFraction;
++    }
++
++    /**
++     * Returns the (minimum) number of digits that this commodity supports in its fractional part
++     * @return Number of digits in fraction
++     */
++    public int getSmallestFractionDigits(){
++        switch (mSmallestFraction) {
++            case 1:     return 0;
++            case 10:    return 1;
++            case 100:   return 2;
++            case 1000:  return 3;
++            default:
++                throw new UnsupportedOperationException("Invalid fraction digits in commodity with fraction: " + mSmallestFraction);
++        }
+     }
+ 
+-    public void setFraction(int fraction) {
+-        this.mFraction = fraction;
++    /**
++     * Sets the smallest fraction for the commodity.
++     * <p>The fraction is a power of 10. So commodities with 2 fraction digits, have fraction of 10^2 = 100.<br>
++     *     If the parameter is any other value, a default fraction of 100 will be set</p>
++     * @param smallestFraction Smallest fraction as power of ten
++     * @throws IllegalArgumentException if the smallest fraction is not a power of 10
++     */
++    public void setSmallestFraction(int smallestFraction) {
++        if (smallestFraction != 1 && smallestFraction != 10 && smallestFraction != 100 && smallestFraction != 1000 && smallestFraction != 10000) //make sure we are not getting digits
++            this.mSmallestFraction = 100;
++        else
++            this.mSmallestFraction = smallestFraction;
+     }
+ 
+     public int getQuoteFlag() {
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 20024b1c..686bc379 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -23,6 +23,7 @@
+ import com.crashlytics.android.Crashlytics;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ 
+ import java.math.BigDecimal;
+ import java.math.BigInteger;
+@@ -49,11 +50,12 @@
+  */
+ public final class Money implements Comparable<Money>{
+ 
++	//// FIXME: 03.11.2015 Currency#getDefaultFractionDigits() is unreliable. Switch to Commodity
+ 	/**
+ 	 * Currency of the account
+ 	 */
+ 	private Currency mCurrency;
+-	
++
+ 	/**
+ 	 * Amount value held by this object
+ 	 */
+@@ -135,7 +137,17 @@ public Money(BigDecimal amount, Currency currency){
+ 		this.mAmount = amount;
+ 		setCurrency(currency);
+ 	}
+-	
++
++	/**
++	 * Creates a new money amount
++	 * @param amount Value of the amount
++	 * @param commodity Commodity of the money
++	 */
++	public Money(BigDecimal amount, Commodity commodity){
++		this.mAmount = amount;
++		mCurrency = Currency.getInstance(commodity.getMnemonic());
++	}
++
+ 	/**
+ 	 * Overloaded constructor.
+ 	 * Accepts strings as arguments and parses them to create the Money object
+@@ -269,7 +281,8 @@ public long getDenominator() {
+ 	 * @return Scale of amount as integer
+ 	 */
+ 	private int getScale() {
+-		int scale = mCurrency.getDefaultFractionDigits();
++		Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(mCurrency.getCurrencyCode());
++		int scale = commodity.getSmallestFractionDigits();
+ 		if (scale < 0) {
+ 			scale = mAmount.scale();
+ 		}
+@@ -322,8 +335,9 @@ public String asString(){
+ 	 */
+     public String formattedString(Locale locale){
+ 		NumberFormat formatter = NumberFormat.getInstance(locale);
+-		formatter.setMinimumFractionDigits(mCurrency.getDefaultFractionDigits());
+-		formatter.setMaximumFractionDigits(mCurrency.getDefaultFractionDigits());
++		Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(mCurrency.getCurrencyCode());
++		formatter.setMinimumFractionDigits(commodity.getSmallestFractionDigits());
++		formatter.setMaximumFractionDigits(commodity.getSmallestFractionDigits());
+ 		return formatter.format(asDouble()) + " " + mCurrency.getSymbol(locale);
+ 	}
+ 
+@@ -349,7 +363,8 @@ public Money negate(){
+ 	 * @param amount {@link BigDecimal} amount to be set
+ 	 */
+ 	private void setAmount(BigDecimal amount) {
+-		mAmount = amount.setScale(mCurrency.getDefaultFractionDigits(), ROUNDING_MODE);
++		Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(mCurrency.getCurrencyCode());
++		mAmount = amount.setScale(commodity.getSmallestFractionDigits(), ROUNDING_MODE);
+ 	}
+ 	
+ 	/**
+@@ -472,20 +487,8 @@ public boolean isNegative(){
+ 	 * @return String representation of the amount (without currency) of the Money object
+ 	 */
+ 	public String toPlainString(){
+-		return mAmount.setScale(mCurrency.getDefaultFractionDigits(), ROUNDING_MODE).toPlainString();
+-	}
+-
+-	/**
+-	 * Returns the formatted amount in the default locale
+-	 * <p>This prints the money amount with locale formatting like the decimal separation character</p>
+-	 * @return Locale-formatted amount
+-	 */
+-	public String formattedAmount(){
+-		NumberFormat formatter = NumberFormat.getInstance();
+-		formatter.setMinimumFractionDigits(mCurrency.getDefaultFractionDigits());
+-		formatter.setMaximumFractionDigits(mCurrency.getDefaultFractionDigits());
+-		formatter.setGroupingUsed(false);
+-		return formatter.format(asDouble());
++		Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(getCurrency().getCurrencyCode());
++		return mAmount.setScale(commodity.getSmallestFractionDigits(), ROUNDING_MODE).toPlainString();
+ 	}
+ 
+ 	/**
+diff --git a/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java b/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
+index 3e192af0..b3147599 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
++++ b/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
+@@ -24,8 +24,10 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+@@ -73,7 +75,8 @@ public void onReceive(Context context, Intent intent) {
+         if (accountUID != null) {
+             TransactionType type = TransactionType.valueOf(args.getString(Transaction.EXTRA_TRANSACTION_TYPE));
+             BigDecimal amountBigDecimal = (BigDecimal) args.getSerializable(Transaction.EXTRA_AMOUNT);
+-            amountBigDecimal = amountBigDecimal.setScale(Currency.getInstance(currencyCode).getDefaultFractionDigits(), BigDecimal.ROUND_HALF_EVEN).round(MathContext.DECIMAL128);
++            Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(currencyCode);
++            amountBigDecimal = amountBigDecimal.setScale(commodity.getSmallestFractionDigits(), BigDecimal.ROUND_HALF_EVEN).round(MathContext.DECIMAL128);
+             Money amount = new Money(amountBigDecimal, Currency.getInstance(currencyCode));
+             Split split = new Split(amount.absolute(), accountUID);
+             split.setType(type);
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 878eae0a..6a1915a6 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -152,7 +152,7 @@
+     /**
+      * Configuration for rating the app
+      */
+-    public static RateThisApp.Config rateAppConfig = new RateThisApp.Config(14, 50);
++    public static RateThisApp.Config rateAppConfig = new RateThisApp.Config(14, 100);
+ 
+     /**
+      * Adapter for managing the sub-account and transaction fragment pages in the accounts view
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+index 2a40a34f..9166d21e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+@@ -37,6 +37,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.PricesDbAdapter;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Price;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+@@ -107,7 +108,8 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle sa
+ 
+         CommoditiesDbAdapter commoditiesDbAdapter = CommoditiesDbAdapter.getInstance();
+         String commodityUID = commoditiesDbAdapter.getCommodityUID(fromCurrency.getCurrencyCode());
+-        String currencyUID = commoditiesDbAdapter.getCommodityUID(mTargetCurrency.getCurrencyCode());
++        Commodity currencyCommodity = commoditiesDbAdapter.getCommodity(mTargetCurrency.getCurrencyCode());
++        String currencyUID = currencyCommodity.getUID();
+         PricesDbAdapter pricesDbAdapter = PricesDbAdapter.getInstance();
+         Pair<Long, Long> price = pricesDbAdapter.getPrice(commodityUID, currencyUID);
+ 
+@@ -116,7 +118,7 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle sa
+             BigDecimal num = new BigDecimal(price.first);
+             BigDecimal denom = new BigDecimal(price.second);
+             mExchangeRateInput.setText(num.divide(denom, MathContext.DECIMAL32).toString());
+-            mConvertedAmountInput.setText(mOriginAmount.asBigDecimal().multiply(num).divide(denom, mTargetCurrency.getDefaultFractionDigits(), BigDecimal.ROUND_HALF_EVEN).toString());
++            mConvertedAmountInput.setText(mOriginAmount.asBigDecimal().multiply(num).divide(denom, currencyCommodity.getSmallestFractionDigits(), BigDecimal.ROUND_HALF_EVEN).toString());
+         }
+ 
+         mExchangeRateInput.addTextChangedListener(textChangeListener);
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+index 9805df25..c0ebf47e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+@@ -37,6 +37,8 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.CommoditiesDbAdapter;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.ui.common.FormActivity;
+ 
+ import java.math.BigDecimal;
+@@ -327,11 +329,12 @@ public BigDecimal getValue(){
+      * @param amount BigDecimal amount
+      */
+     public void setValue(BigDecimal amount){
+-        BigDecimal newAmount = amount.setScale(mCurrency.getDefaultFractionDigits(), BigDecimal.ROUND_HALF_EVEN);
++        Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(mCurrency.getCurrencyCode());
++        BigDecimal newAmount = amount.setScale(commodity.getSmallestFractionDigits(), BigDecimal.ROUND_HALF_EVEN);
+ 
+         DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());
+         formatter.setMinimumFractionDigits(0);
+-        formatter.setMaximumFractionDigits(mCurrency.getDefaultFractionDigits());
++        formatter.setMaximumFractionDigits(commodity.getSmallestFractionDigits());
+         formatter.setGroupingUsed(false);
+         String resultString = formatter.format(newAmount.doubleValue());
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java b/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
+index 20bc2e09..0e4c811f 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
+@@ -1,6 +1,7 @@
+ package org.gnucash.android.test.unit.export;
+ 
+ import org.gnucash.android.export.xml.GncXmlHelper;
++import org.gnucash.android.model.Commodity;
+ import org.junit.Test;
+ 
+ import java.math.BigDecimal;
+@@ -34,13 +35,16 @@ public void shouldFailToParseWronglyFormattedInput() throws ParseException {
+ 
+     @Test
+     public void testFormatSplitAmount(){
++        Commodity usdCommodity = new Commodity("US Dollars", "USD", 100);
++        Commodity euroCommodity = new Commodity("Euro", "EUR", 100);
++
+         BigDecimal bigDecimal = new BigDecimal("45.90");
+-        String amount = GncXmlHelper.formatSplitAmount(bigDecimal, Currency.getInstance("USD"));
++        String amount = GncXmlHelper.formatSplitAmount(bigDecimal, usdCommodity);
+         assertThat(amount).isEqualTo("4590/100");
+ 
+ 
+         bigDecimal = new BigDecimal("350");
+-        amount = GncXmlHelper.formatSplitAmount(bigDecimal, Currency.getInstance("EUR"));
++        amount = GncXmlHelper.formatSplitAmount(bigDecimal, euroCommodity);
+         assertThat(amount).isEqualTo("35000/100");
+     }
+ }
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+index e3b9193a..ff14d175 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+@@ -1,3 +1,18 @@
++/*
++ * Copyright (c) 2012 - 2014 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
+ package org.gnucash.android.test.unit.model;
+ 
+ import org.gnucash.android.model.Account;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/CommodityTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/CommodityTest.java
+new file mode 100644
+index 00000000..14d82b9b
+--- /dev/null
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/CommodityTest.java
+@@ -0,0 +1,49 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.test.unit.model;
++
++import org.gnucash.android.model.Commodity;
++import org.junit.Test;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/**
++ * Test commodities
++ */
++public class CommodityTest {
++
++    @Test
++    public void setSmallestFraction_shouldNotUseDigits(){
++        Commodity commodity = new Commodity("Test", "USD", 4);
++        assertThat(commodity.getSmallestFraction()).isEqualTo(100);
++
++        commodity.setSmallestFraction(1000);
++        assertThat(commodity.getSmallestFraction()).isEqualTo(1000);
++    }
++
++    @Test
++    public void testSmallestFractionDigits(){
++        Commodity commodity = new Commodity("Test", "USD", 4);
++        assertThat(commodity.getSmallestFractionDigits()).isEqualTo(2);
++
++        commodity.setSmallestFraction(10);
++        assertThat(commodity.getSmallestFractionDigits()).isEqualTo(1);
++
++        commodity.setSmallestFraction(1);
++        assertThat(commodity.getSmallestFractionDigits()).isEqualTo(0);
++
++    }
++}
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
+index 2e0fbaac..1cf406d8 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
+@@ -21,12 +21,21 @@
+ import java.util.Locale;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
++
++import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.model.Money;
++import org.gnucash.android.test.unit.util.GnucashTestRunner;
++import org.gnucash.android.test.unit.util.ShadowCrashlytics;
++import org.gnucash.android.test.unit.util.ShadowUserVoice;
+ import org.junit.Before;
+ import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
+ 
+ import static org.junit.Assert.*;
+ 
++@RunWith(GnucashTestRunner.class)
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
+ public class MoneyTest{
+ 
+ 	private static final String CURRENCY_CODE = "EUR";
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+index 647cc15c..c6b88efa 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+@@ -1,10 +1,16 @@
+ package org.gnucash.android.test.unit.model;
+ 
++import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.test.unit.util.GnucashTestRunner;
++import org.gnucash.android.test.unit.util.ShadowCrashlytics;
++import org.gnucash.android.test.unit.util.ShadowUserVoice;
+ import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
+ 
+ import java.math.BigDecimal;
+ import java.util.Currency;
+@@ -16,6 +22,8 @@
+  *
+  * @author Ngewi
+  */
++@RunWith(GnucashTestRunner.class)
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
+ public class SplitTest {
+ 
+     @Test

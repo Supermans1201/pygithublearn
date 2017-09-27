@@ -1,0 +1,247 @@
+From 9ede6c763dcf2ff755a6ae6d1097cad58ca0f0a3 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sun, 7 Sep 2014 15:35:48 +0800
+Subject: [PATCH] rewrite Qif Export
+
+Conflicts:
+	app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  51 ++++++++++
+ .../gnucash/android/export/ExporterAsyncTask.java  |  14 ++-
+ .../gnucash/android/export/qif/QifExporter.java    | 106 +++++++++++++++++++++
+ .../org/gnucash/android/export/qif/QifHelper.java  |   3 +
+ 4 files changed, 173 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index c532f716..b1096870 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -239,6 +239,53 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+         return transactions;
+     }
+ 
++    public Cursor fetchTransactionsWithSplits(String [] columns, String condition, String orderBy) {
++        return mDb.query(TransactionEntry.TABLE_NAME + " , " + SplitEntry.TABLE_NAME +
++                        " ON " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
++                        " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID,
++                columns, condition, null, null, null,
++                orderBy);
++
++    }
++
++    public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] columns, String condition, String orderBy) {
++        // table is :
++        // transactions, splits ON transactions.uid = splits.transaction_uid ,
++        // ( SELECT transactions.uid AS trans_acct_t_uid , MAX ( splits.account_uid ) as trans_acct_a_uid FROM
++        //     transactions, splits ON transactions.uid = splits.transaction_uid GROUP BY transactions.uid ) AS trans_acct ON
++        // trans_acct.trans_acct_t_uid = transactions.uid , accounts AS account1 ON account1.uid = trans_acct.trans_acct_a_uid ,
++        // accounts AS account2 ON account2.uid = splits.split_account_uid
++        //
++        // This is multi table/sub-query join. The third select would pick one Account_UID for each
++        // Transaction, which can be used to order all transactions.
++        // This is used in QIF export, when all transactions are grouped by accounts.
++        // account1 provides information for the grouped account. Splits from the grouped account
++        // can be eliminated with a WHERE clause. Transactions in QIF can be auto balanced.
++        // account2 provides information for the account associated with the split.
++        //
++        // Account, transaction and split Information can be retrieve in a single query.
++        //
++        // Another approach is not to group transactions by account, be prefix each transaction with an account.
++        // It is easier and should also work, never tried though.
++        // By Yongxin Wang
++        return mDb.query(
++                TransactionEntry.TABLE_NAME + " , " + SplitEntry.TABLE_NAME +
++                " ON " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
++                " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID +
++                " , ( SELECT " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
++                " AS trans_acct_t_uid , MAX ( " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID +
++                " ) AS trans_acct_a_uid FROM " + TransactionEntry.TABLE_NAME + " , " + SplitEntry.TABLE_NAME +
++                " ON " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
++                " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID +
++                " GROUP BY " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
++                " )  AS trans_acct ON trans_acct.trans_acct_t_uid = " +
++                TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " , " +
++                AccountEntry.TABLE_NAME + " AS account1 ON account1." + AccountEntry.COLUMN_UID +
++                " = trans_acct.trans_acct_a_uid , " + AccountEntry.TABLE_NAME + " AS account2 ON account2." +
++                AccountEntry.COLUMN_UID + " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID,
++                columns, condition, null, null, null , orderBy);
++    }
++
+     /**
+      * Return number of transactions in the database which are non recurring
+      * @return Number of transactions
+@@ -487,6 +534,10 @@ public int updateTransaction(String transactionUID, String columnKey, String new
+         return updateRecord(TransactionEntry.TABLE_NAME, getID(transactionUID), columnKey, newValue);
+     }
+ 
++    public int updateTransaction(ContentValues contentValues, String whereClause, String[] whereArgs){
++        return mDb.update(TransactionEntry.TABLE_NAME, contentValues, whereClause, whereArgs);
++    }
++
+     /**
+      * Schedules <code>recurringTransaction</code> to be executed at specific intervals.
+      * The interval period is packaged within the transaction
+diff --git a/app/src/org/gnucash/android/export/ExporterAsyncTask.java b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+index c6593dc0..1fa78aad 100644
+--- a/app/src/org/gnucash/android/export/ExporterAsyncTask.java
++++ b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -107,7 +107,19 @@ protected Boolean doInBackground(ExportParams... params) {
+             }
+ 
+         try {
+-            writeOutput(mExporter.generateExport());
++            if (mExportParams.getExportFormat() == ExportFormat.QIF) {
++                File file = new File(mExportParams.getTargetFilepath());
++                BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
++                try {
++                    ((QifExporter)mExporter).generateExport(writer);
++                }
++                finally {
++                    writer.close();
++                }
++            }
++            else {
++                writeOutput(mExporter.generateExport());
++            }
+         } catch (Exception e) {
+             e.printStackTrace();
+             Log.e(TAG, e.getMessage());
+diff --git a/app/src/org/gnucash/android/export/qif/QifExporter.java b/app/src/org/gnucash/android/export/qif/QifExporter.java
+index bb88c162..5da1be7e 100644
+--- a/app/src/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/org/gnucash/android/export/qif/QifExporter.java
+@@ -15,11 +15,20 @@
+  */
+ package org.gnucash.android.export.qif;
+ 
++import android.content.ContentValues;
++import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
++
++import org.gnucash.android.app.GnuCashApplication;
++import static org.gnucash.android.db.DatabaseSchema.*;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Transaction;
+ 
++import java.io.IOException;
++import java.io.Writer;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -62,4 +71,101 @@ public String generateExport() throws ExporterException {
+ 
+         return generateQIF();
+     }
++
++    public void generateExport(Writer writer) throws ExporterException , IOException {
++        final String newLine = "\n";
++        TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(GnuCashApplication.getAppContext());
++        try {
++            Cursor cursor = transactionsDbAdapter.fetchTransactionsWithSplitsWithTransactionAccount(
++                    new String[]{
++                            TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " AS trans_uid",
++                            TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " AS trans_time",
++                            TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_DESCRIPTION + " AS trans_desc",
++                            SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_AMOUNT + " AS split_amount",
++                            SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TYPE + " AS split_type",
++                            SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_MEMO + " AS split_memo",
++                            "account1." + AccountEntry.COLUMN_UID + " AS acct1_uid",
++                            "account1." + AccountEntry.COLUMN_FULL_NAME + " AS acct1_full_name",
++                            "account1." + AccountEntry.COLUMN_TYPE + " AS acct1_type",
++                            "account2." + AccountEntry.COLUMN_FULL_NAME + " AS acct2_full_name"
++                    },
++                    // no recurrence transactions
++                    TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " == 0 AND " +
++                            // in qif, split from the one account entry is not recorded (will be auto balanced)
++                            SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID + " != account1." + AccountEntry.COLUMN_UID +
++                            (
++                            mParameters.shouldExportAllTransactions() ?
++                                    "" : " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_EXPORTED + "== 0"
++                            ),
++                    "acct1_uid ASC, trans_uid ASC"
++                    );
++            try {
++                String currentAccountUID = "";
++                String currentTransactionUID = "";
++                while (cursor.moveToNext()) {
++                    String accountUID = cursor.getString(cursor.getColumnIndexOrThrow("acct1_uid"));
++                    String transactionUID = cursor.getString(cursor.getColumnIndexOrThrow("trans_uid"));
++                    if (!transactionUID.equals(currentTransactionUID)) {
++                        if (!currentTransactionUID.equals("")) {
++                            writer.append(QifHelper.ENTRY_TERMINATOR).append(newLine);
++                            // end last transaction
++                        }
++                        if (!accountUID.equals(currentAccountUID)) {
++                            // no need to end account
++                            //if (!currentAccountUID.equals("")) {
++                            //    // end last account
++                            //}
++                            // start new account
++                            currentAccountUID = accountUID;
++                            writer.append(QifHelper.ACCOUNT_HEADER).append(newLine);
++                            writer.append(QifHelper.ACCOUNT_NAME_PREFIX)
++                                    .append(cursor.getString(cursor.getColumnIndexOrThrow("acct1_full_name")))
++                                    .append(newLine);
++                            writer.append(QifHelper.ENTRY_TERMINATOR).append(newLine);
++                            writer.append(QifHelper.getQifHeader(cursor.getString(cursor.getColumnIndexOrThrow("acct1_type"))))
++                                    .append(newLine);
++                        }
++                        // start new transaction
++                        currentTransactionUID = transactionUID;
++                        writer.append(QifHelper.DATE_PREFIX)
++                                .append(QifHelper.formatDate(cursor.getLong(cursor.getColumnIndexOrThrow("trans_time"))))
++                                .append(newLine);
++                        writer.append(QifHelper.MEMO_PREFIX)
++                                .append(cursor.getString(cursor.getColumnIndexOrThrow("trans_desc")))
++                                .append(newLine);
++                    }
++                    // all splits
++                    // amount associated with the header account will not be exported.
++                    // It can be auto balanced when importing to GnuCash
++                    writer.append(QifHelper.SPLIT_CATEGORY_PREFIX)
++                            .append(cursor.getString(cursor.getColumnIndexOrThrow("acct2_full_name")))
++                            .append(newLine);
++                    String splitMemo = cursor.getString(cursor.getColumnIndexOrThrow("split_memo"));
++                    if (splitMemo != null && splitMemo.length() > 0) {
++                        writer.append(QifHelper.SPLIT_MEMO_PREFIX)
++                                .append(splitMemo)
++                                .append(newLine);
++                    }
++                    String splitType = cursor.getString(cursor.getColumnIndexOrThrow("split_type"));
++                    writer.append(QifHelper.SPLIT_AMOUNT_PREFIX)
++                            .append(splitType.equals("DEBIT") ? "-" : "")
++                            .append(cursor.getString(cursor.getColumnIndexOrThrow("split_amount")))
++                            .append(newLine);
++                }
++                if (!currentTransactionUID.equals("")) {
++                    // end last transaction
++                    writer.append(QifHelper.ENTRY_TERMINATOR).append(newLine);
++                }
++            }
++            finally {
++                cursor.close();
++            }
++            ContentValues contentValues = new ContentValues();
++            contentValues.put(TransactionEntry.COLUMN_EXPORTED, 1);
++            transactionsDbAdapter.updateTransaction(contentValues, null, null);
++        }
++        finally {
++            transactionsDbAdapter.close();
++        }
++    }
+ }
+diff --git a/app/src/org/gnucash/android/export/qif/QifHelper.java b/app/src/org/gnucash/android/export/qif/QifHelper.java
+index dd5a3f09..9b5deff9 100644
+--- a/app/src/org/gnucash/android/export/qif/QifHelper.java
++++ b/app/src/org/gnucash/android/export/qif/QifHelper.java
+@@ -80,4 +80,7 @@ public static String getQifHeader(AccountType accountType){
+         }
+     }
+ 
++    public static String getQifHeader(String accountType) {
++        return getQifHeader(AccountType.valueOf(accountType));
++    }
+ }

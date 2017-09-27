@@ -1,0 +1,309 @@
+From 318b234e2e2c65dbb6a8cdaa1bead45d8cf28bdf Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 5 Mar 2015 17:53:36 +0100
+Subject: [PATCH] Improved UX display of scheduled transactions
+
+Fixed: crash when displaying scheduled transactions
+Fixed: checkboxes in transaction list are hard to see
+fixes #246
+---
+ .../android/db/ScheduledEventDbAdapter.java        |  6 ++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 20 ++++---
+ .../org/gnucash/android/model/ScheduledEvent.java  | 23 ++++++--
+ .../ScheduledTransactionsListFragment.java         | 28 +++++++---
+ .../ui/transaction/TransactionsListFragment.java   |  4 ++
+ .../main/res/layout/list_item_scheduled_trxn.xml   | 63 +++++++++++++++-------
+ 6 files changed, 103 insertions(+), 41 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+index 7e0da762..acd73f93 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+@@ -18,6 +18,7 @@
+ import android.content.ContentValues;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
++import android.support.annotation.NonNull;
+ import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -115,16 +116,17 @@ public ScheduledEvent getScheduledEvent(String uid){
+      * @param eventUID GUID of the event itself
+      * @return ScheduledEvent object instance
+      */
+-    public ScheduledEvent getScheduledEventWithUID(String eventUID){
++    public ScheduledEvent getScheduledEventWithUID(@NonNull String eventUID){
+         Cursor cursor = mDb.query(ScheduledEventEntry.TABLE_NAME, null,
+                 ScheduledEventEntry.COLUMN_EVENT_UID + "= ?",
+                 new String[]{eventUID}, null, null, null);
+ 
+         ScheduledEvent scheduledEvent = null;
+-        if (cursor != null) {
++        try {
+             if (cursor.moveToFirst()) {
+                 scheduledEvent = buildScheduledEventInstance(cursor);
+             }
++        } finally {
+             cursor.close();
+         }
+         return scheduledEvent;
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 35ce754b..36b7de03 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -234,6 +234,7 @@ public Transaction getTransaction(long rowId) {
+      * @throws java.lang.IllegalArgumentException if the accountUID is null
+ 	 */
+ 	public Cursor fetchAllTransactionsForAccount(String accountUID){
++        //TODO: Remove this legacy code. Database has been upgraded
+         if (mDb.getVersion() < DatabaseSchema.SPLITS_DB_VERSION){ //legacy from previous database format
+             return mDb.query(TransactionEntry.TABLE_NAME, null,
+                     "((" + SplitEntry.COLUMN_ACCOUNT_UID + " = '" + accountUID + "') "
+@@ -259,16 +260,19 @@ public Cursor fetchAllTransactionsForAccount(String accountUID){
+ 
+     /**
+      * Fetches all recurring transactions from the database.
+-     * <p>These transactions are not considered "normal" transactions, but only serve to note recurring transactions.
+-     * They are not considered when computing account balances</p>
++     * <p>Recurring transactions are the transaction templates which have an entry in the scheduled events table</p>
+      * @return Cursor holding set of all recurring transactions
+      */
+-    public Cursor fetchAllRecurringTransactions(){
+-        return mDb.query(TransactionEntry.TABLE_NAME,
+-                null,
+-                TransactionEntry.COLUMN_RECURRENCE_PERIOD + "!= 0",
+-                null, null, null,
+-                AccountEntry.COLUMN_NAME + " ASC, " + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " ASC");
++    public Cursor fetchAllScheduledTransactions(){
++        SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
++        queryBuilder.setTables(TransactionEntry.TABLE_NAME + " INNER JOIN " + ScheduledEventEntry.TABLE_NAME + " ON "
++                + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
++                + ScheduledEventEntry.TABLE_NAME + "." + ScheduledEventEntry.COLUMN_EVENT_UID);
++
++        String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
++        String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_DESCRIPTION + " ASC";
++
++        return queryBuilder.query(mDb, projectionIn, null, null, null, null, sortOrder);
+     }
+ 
+ 	/**
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java b/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+index b0a2763b..d08bd7b5 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+@@ -15,10 +15,12 @@
+  */
+ package org.gnucash.android.model;
+ 
++import org.gnucash.android.R;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ 
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
++import java.util.Locale;
+ import java.util.UUID;
+ 
+ /**
+@@ -116,14 +118,25 @@ public void setTag(String tag) {
+         this.mTag = tag;
+     }
+ 
+-    @Override
+-    public String toString() {
+-        SimpleDateFormat dateFormat = new SimpleDateFormat("dd.MM.yyyy");
+-        String eventString = mEventType.name() + " recurring every " + mPeriod/RecurrenceParser.DAY_MILLIS + " days starting on "
++    /**
++     * Returns the event schedule (start, end and recurrence)
++     * @return String description of repeat schedule
++     */
++    public String getRepeatString(){
++        //TODO: localize the string
++        SimpleDateFormat dateFormat = new SimpleDateFormat("dd.MM.yyyy", Locale.US);
++        String repeatString = "Repeats every " + mPeriod/RecurrenceParser.DAY_MILLIS + " days starting on "
+                 + dateFormat.format(new Date(mStartDate));
+         if (mEndDate > 0){
+-            eventString += " until " + dateFormat.format(mEndDate);
++            repeatString += " until " + dateFormat.format(mEndDate);
+         }
++        return repeatString;
++    }
++
++    @Override
++    public String toString() {
++
++        String eventString = mEventType.name() + " - " + getRepeatString();
+ 
+         return eventString;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index e1c5cbfe..ab7e356f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -18,6 +18,7 @@
+ 
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.res.Resources;
+ import android.database.Cursor;
+ import android.graphics.Rect;
+ import android.os.Bundle;
+@@ -53,6 +54,8 @@
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.ui.UxArgument;
+ 
++import java.util.List;
++
+ /**
+  * Fragment which displays the recurring transactions in the system.
+  * @author Ngewi Fet <ngewif@gmail.com>
+@@ -316,7 +319,11 @@ public TransactionsCursorAdapter(Context context, int layout, Cursor c,
+         public View getView(int position, View convertView, ViewGroup parent) {
+             final View view = super.getView(position, convertView, parent);
+             final int itemPosition = position;
+-            CheckBox checkbox = (CheckBox) view.findViewById(R.id.checkbox_parent_account);
++            CheckBox checkbox = (CheckBox) view.findViewById(R.id.checkbox);
++            //TODO: Revisit this if we ever change the application theme
++            int id = Resources.getSystem().getIdentifier("btn_check_holo_light", "drawable", "android");
++            checkbox.setButtonDrawable(id);
++
+             final TextView secondaryText = (TextView) view.findViewById(R.id.secondary_text);
+ 
+             checkbox.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+@@ -390,15 +397,20 @@ public void bindView(View view, Context context, Cursor cursor) {
+             super.bindView(view, context, cursor);
+ 
+             Transaction transaction = mTransactionsDbAdapter.buildTransactionInstance(cursor);
+-            TextView amountTextView = (TextView) view.findViewById(R.id.transaction_amount);
+-            amountTextView.setText(transaction.getSplits().size() + " splits");
+ 
+-            TextView trNote = (TextView) view.findViewById(R.id.secondary_text);
+-//            trNote.setText(context.getString(R.string.label_repeats) + " " +
+-//                    getRecurrenceAsString(cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_RECURRENCE_PERIOD)))) ;
++            TextView amountTextView = (TextView) view.findViewById(R.id.right_text);
++            if (transaction.getSplits().size() == 2){
++                if (transaction.getSplits().get(0).isPairOf(transaction.getSplits().get(1))){
++                    amountTextView.setText(transaction.getSplits().get(0).getAmount().formattedString());
++                }
++            } else {
++                amountTextView.setText(transaction.getSplits().size() + " splits");
++            }
++            TextView descriptionTextView = (TextView) view.findViewById(R.id.secondary_text);
++
+             ScheduledEventDbAdapter scheduledEventDbAdapter = ScheduledEventDbAdapter.getInstance();
+             ScheduledEvent event = scheduledEventDbAdapter.getScheduledEventWithUID(transaction.getUID());
+-            trNote.setText(event.toString());
++            descriptionTextView.setText(event.getRepeatString());
+ 
+         }
+ 
+@@ -418,7 +430,7 @@ public ScheduledTransactionsCursorLoader(Context context) {
+         public Cursor loadInBackground() {
+             mDatabaseAdapter = TransactionsDbAdapter.getInstance();
+ 
+-            Cursor c = ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllRecurringTransactions();
++            Cursor c = ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllScheduledTransactions();
+ 
+             registerContentObserver(c);
+             return c;
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index c98029e3..da81d34f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -18,6 +18,7 @@
+ 
+ import android.app.Activity;
+ import android.content.Context;
++import android.content.res.Resources;
+ import android.database.Cursor;
+ import android.graphics.Rect;
+ import android.os.Bundle;
+@@ -364,6 +365,9 @@ public View getView(int position, View convertView, ViewGroup parent) {
+ 			CheckBox checkbox = (CheckBox) view.findViewById(R.id.checkbox_parent_account);
+             final TextView secondaryText = (TextView) view.findViewById(R.id.secondary_text);
+ 
++            //TODO: Revisit this if we ever change the application theme
++            int id = Resources.getSystem().getIdentifier("btn_check_holo_light", "drawable", "android");
++            checkbox.setButtonDrawable(id);
+             checkbox.setOnCheckedChangeListener(new OnCheckedChangeListener() {
+ 				
+ 				@Override
+diff --git a/app/src/main/res/layout/list_item_scheduled_trxn.xml b/app/src/main/res/layout/list_item_scheduled_trxn.xml
+index 94686947..d1e3c595 100644
+--- a/app/src/main/res/layout/list_item_scheduled_trxn.xml
++++ b/app/src/main/res/layout/list_item_scheduled_trxn.xml
+@@ -22,29 +22,56 @@
+                                                    android:orientation="horizontal">
+ 
+         <CheckBox
+-                android:id="@+id/checkbox_parent_account"
++                android:id="@+id/checkbox"
+                 android:layout_width="wrap_content"
+                 android:layout_height="wrap_content"
+                 android:focusable="false"
+                 />
+ 
+-        <include
+-                layout="@layout/list_item_2_lines"
+-                android:layout_height="wrap_content"
+-                android:layout_width="0dp"
+-                android:layout_weight="1"
+-                android:layout_marginLeft="5dp"
+-                />
++    <RelativeLayout
++        xmlns:android="http://schemas.android.com/apk/res/android"
++        android:layout_height="wrap_content"
++        android:layout_width="0dp"
++        android:layout_weight="1"
++        android:layout_marginLeft="5dp"
++        android:layout_marginStart="5dp"
++        android:orientation="vertical">
+ 
+         <TextView
+-                android:id="@+id/transaction_amount"
+-                android:layout_width="wrap_content"
+-                android:layout_height="match_parent"
+-                android:singleLine="true"
+-                android:ellipsize="end"
+-                android:text="@string/label_transaction_amount"
+-                android:minWidth="100dp"
+-                android:gravity="right|center_vertical"
+-                android:layout_marginRight="12dp"
+-                style="@style/ListItemText"/>
++            android:id="@+id/primary_text"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:singleLine="true"
++            android:ellipsize="end"
++            android:text="@string/label_transaction_name"
++            style="@style/ListItemText"
++            />
++
++        <TextView
++            android:id="@+id/secondary_text"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:singleLine="false"
++            android:maxLines="2"
++            android:ellipsize="end"
++            android:layout_below="@id/primary_text"
++            android:textAppearance="?android:attr/textAppearanceSmall"
++            android:text="@string/label_transaction_name"/>
++
++        <TextView
++            android:id="@+id/right_text"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:singleLine="true"
++            android:ellipsize="start"
++            android:gravity="right"
++            android:layout_alignParentRight="true"
++            android:layout_alignParentEnd="true"
++            android:layout_toRightOf="@id/primary_text"
++            android:layout_toEndOf="@id/primary_text"
++            android:layout_alignParentTop="true"
++            android:textAppearance="?android:attr/textAppearanceMedium"
++            android:textColor="@android:color/black"
++            android:text="Amount"/>
++    </RelativeLayout>
+ </org.gnucash.android.ui.util.CheckableLinearLayout>
+\ No newline at end of file

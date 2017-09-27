@@ -1,0 +1,176 @@
+From 9e3d453ff02a2d7cdb16cbd9f6d86525349aae8d Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 11 Jun 2012 21:44:01 +0200
+Subject: [PATCH] Fixed alignment of transaction amount in transactions list
+ Added content observer for cursor in loader
+
+---
+ GnucashMobile/res/layout/list_item_transaction.xml  |  2 +-
+ .../gnucash/android/db/DatabaseCursorLoader.java    | 19 ++++++++++++-------
+ .../gnucash/android/ui/AccountsListFragment.java    | 21 +++++++++++----------
+ .../android/ui/TransactionsListFragment.java        |  2 +-
+ 4 files changed, 25 insertions(+), 19 deletions(-)
+
+diff --git a/GnucashMobile/res/layout/list_item_transaction.xml b/GnucashMobile/res/layout/list_item_transaction.xml
+index dc310dfd..1106f113 100644
+--- a/GnucashMobile/res/layout/list_item_transaction.xml
++++ b/GnucashMobile/res/layout/list_item_transaction.xml
+@@ -47,7 +47,7 @@
+             android:ellipsize="end"
+             android:text="@string/label_transaction_amount"         
+             android:minWidth="100dp"   
+-            android:gravity="right"  
++            android:gravity="right|center_vertical"  
+             android:layout_marginRight="12dp"   
+             style="@style/ListItemText" /> 
+ 	
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseCursorLoader.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseCursorLoader.java
+index 977b5642..670b5567 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseCursorLoader.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseCursorLoader.java
+@@ -31,21 +31,26 @@
+ public abstract class DatabaseCursorLoader extends AsyncTaskLoader<Cursor> {
+ 	private Cursor mCursor = null;
+ 	protected DatabaseAdapter mDatabaseAdapter = null;
+-	protected Context mContext = null;
++	protected final ForceLoadContentObserver mObserver;
+ 	
+ 	public DatabaseCursorLoader(Context context) {
+ 		super(context);
+-		mContext = context;
++		mObserver = new ForceLoadContentObserver();
+ 	}
+ 
+ 	public abstract Cursor loadInBackground();
+ 
++	protected void registerContentObserver(Cursor cursor){
++		cursor.registerContentObserver(mObserver);
++	}
++	
+ 	@Override
+ 	public void deliverResult(Cursor data) {
+ 		if (isReset()) {
+ 			if (data != null) {
+ 				onReleaseResources(data);
+ 			}
++			return;
+ 		}
+ 
+ 		Cursor oldCursor = mCursor;
+@@ -55,7 +60,7 @@ public void deliverResult(Cursor data) {
+ 			super.deliverResult(data);
+ 		}
+ 
+-		if (oldCursor != null) {
++		if (oldCursor != null && oldCursor != data && !oldCursor.isClosed()) {
+ 			onReleaseResources(oldCursor);
+ 		}
+ 	}
+@@ -95,10 +100,10 @@ protected void onReset() {
+ 
+         // At this point we can release the resources associated with 'mCursor'
+         // if needed.
+-        if (mCursor != null) {
+-            onReleaseResources(mCursor);
+-            mCursor = null;
++        if (mCursor != null && !mCursor.isClosed()) {
++            onReleaseResources(mCursor);           
+         }	
++        mCursor = null;
+ 	}
+ 	
+ 	/**
+@@ -108,7 +113,7 @@ protected void onReset() {
+      */
+ 	protected void onReleaseResources(Cursor c) {
+ 		if (c != null)
+-			c.close();
++			c.close();		
+ 		
+ 		if (mDatabaseAdapter != null){
+ 			mDatabaseAdapter.close();
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+index ea35495e..9dd14b47 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+@@ -76,7 +76,7 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 		return inflater.inflate(R.layout.fragment_accounts_list, container,
+ 				false);
+ 	}
+-
++	
+ 	@Override
+ 	public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+@@ -90,9 +90,9 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 				R.layout.list_item_account, null,
+ 				new String[] { DatabaseHelper.KEY_NAME },
+ 				new int[] { R.id.account_name });
+-
++						
++		setListAdapter(mCursorAdapter);
+ 		getLoaderManager().initLoader(0, null, this);
+-		setListAdapter(mCursorAdapter);	
+ 	}
+ 	
+ 	@Override
+@@ -142,7 +142,7 @@ public void onDestroyView() {
+ 	
+ 	public void addAccount(String name) {
+ 		mAccountsDbAdapter.addAccount(new Account(name));			
+-		getLoaderManager().restartLoader(0, null, this);
++		getLoaderManager().restartLoader(0, null, this);		
+ 	}
+ 	
+ 	/**
+@@ -220,8 +220,6 @@ public void onClick(View v) {
+ 	}
+ 
+ 	private static final class AccountsCursorLoader extends DatabaseCursorLoader {
+-		//TODO: close this account adapter somewhere
+-//		AccountsDbAdapter accountsDbAdapter;
+ 		
+ 		public AccountsCursorLoader(Context context) {
+ 			super(context);		
+@@ -229,21 +227,24 @@ public AccountsCursorLoader(Context context) {
+ 
+ 		@Override
+ 		public Cursor loadInBackground() {			
+-			mDatabaseAdapter = new AccountsDbAdapter(mContext);			
+-			return ((AccountsDbAdapter) mDatabaseAdapter).fetchAllAccounts();
++			mDatabaseAdapter = new AccountsDbAdapter(getContext());	
++			Cursor cursor = ((AccountsDbAdapter) mDatabaseAdapter).fetchAllAccounts();		
++			if (cursor != null)
++				registerContentObserver(cursor);
++			return cursor;
+ 		}
+ 	}
+ 
+ 	@Override
+ 	public Loader<Cursor> onCreateLoader(int id, Bundle args) {
+ 		Log.d(TAG, "Creating the accounts loader");
+-		return new AccountsCursorLoader(this.getActivity());
++		return new AccountsCursorLoader(this.getActivity().getApplicationContext());		
+ 	}
+ 
+ 	@Override
+ 	public void onLoadFinished(Loader<Cursor> loaderCursor, Cursor cursor) {
+ 		Log.d(TAG, "Accounts loader finished. Swapping in cursor");
+-		mCursorAdapter.swapCursor(cursor);
++		mCursorAdapter.swapCursor(cursor);		
+ 		mCursorAdapter.notifyDataSetChanged();
+ 	}
+ 
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
+index 57689b9a..621be59f 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
+@@ -153,7 +153,7 @@ public TransactionsCursorLoader(Context context, long accountID) {
+ 		
+ 		@Override
+ 		public Cursor loadInBackground() {
+-			mDatabaseAdapter = new TransactionsDbAdapter(mContext);
++			mDatabaseAdapter = new TransactionsDbAdapter(getContext());
+ 			return ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllTransactionsForAccount(accountID);
+ 		}		
+ 	}

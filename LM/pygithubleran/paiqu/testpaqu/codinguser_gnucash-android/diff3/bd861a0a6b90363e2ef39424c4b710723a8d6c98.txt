@@ -1,0 +1,265 @@
+From bd861a0a6b90363e2ef39424c4b710723a8d6c98 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 2 Sep 2015 22:32:07 +0200
+Subject: [PATCH] Fixed: currency exchange dialog triggered upon layout
+
+Currency exchange offered upon saving transaction if not done yet
+---
+ .../ui/transaction/SplitEditorFragment.java        | 14 +++-
+ .../ui/transaction/TransactionFormFragment.java    | 84 ++++++++++++++--------
+ .../dialog/TransferFundsDialogFragment.java        |  4 +-
+ app/src/main/res/layout/activity_transactions.xml  |  1 +
+ app/src/main/res/layout/dialog_transfer_funds.xml  |  5 +-
+ 5 files changed, 72 insertions(+), 36 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+index 2974153f..37401935 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+@@ -226,6 +226,7 @@ private void initArgs() {
+ 
+         View splitView;
+         Money quantity;
++        AmountInputFormatter amountInputFormatter;
+ 
+         public SplitViewHolder(View splitView, Split split){
+             ButterKnife.bind(this, splitView);
+@@ -241,7 +242,8 @@ public void transferComplete(Money amount) {
+         }
+ 
+         private void setListeners(Split split){
+-            splitAmountEditText.addTextChangedListener(new AmountInputFormatter(splitAmountEditText));
++            amountInputFormatter = new AmountInputFormatter(splitAmountEditText);
++            splitAmountEditText.addTextChangedListener(amountInputFormatter);
+ 
+             removeSplitButton.setOnClickListener(new View.OnClickListener() {
+                 @Override
+@@ -263,6 +265,7 @@ public void onClick(View view) {
+ 
+             if (split != null) {
+                 splitAmountEditText.setText(split.getFormattedValue().toPlainString());
++                splitCurrencyTextView.setText(split.getValue().getCurrency().getSymbol());
+                 splitMemoEditText.setText(split.getMemo());
+                 splitUidTextView.setText(split.getUID());
+                 String splitAccountUID = split.getAccountUID();
+@@ -393,6 +396,11 @@ public void afterTextChanged(Editable editable) {
+         TransactionTypeSwitch mTypeToggleButton;
+         SplitViewHolder mSplitViewHolder;
+ 
++        /**
++         * Flag to know when account spinner callback is due to user interaction or layout of components
++         */
++        boolean userInteraction = false;
++
+         public SplitAccountListener(TransactionTypeSwitch typeToggleButton, SplitViewHolder viewHolder){
+             this.mTypeToggleButton = typeToggleButton;
+             this.mSplitViewHolder = viewHolder;
+@@ -406,7 +414,9 @@ public void onItemSelected(AdapterView<?> parentView, View selectedItemView, int
+             String fromCurrencyCode = mAccountsDbAdapter.getCurrencyCode(mAccountUID);
+             String targetCurrencyCode = mAccountsDbAdapter.getCurrencyCode(mAccountsDbAdapter.getUID(id));
+ 
+-            if (fromCurrencyCode.equals(targetCurrencyCode)){
++            if (!userInteraction || fromCurrencyCode.equals(targetCurrencyCode)){
++                //first call is on layout, subsequent calls will be true and transfer will work as usual
++                userInteraction = true;
+                 return;
+             }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 344df2c9..a25eb43f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -243,19 +243,25 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 	}
+ 
+     /**
+-     * Starts the transfer of funds from one currency to another.
+-     * <p>Make sure your fragment implements {@code OnTransferFundsListener}</p>
+-     * @param from Start currency
+-     * @param to Target currency
++     * Starts the transfer of funds from one currency to another
+      */
+-    private void startTransferFunds(Currency from, Currency to) {
++    private void startTransferFunds() {
++        Currency fromCurrency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID));
++        long id = mTransferAccountSpinner.getSelectedItemId();
++        String targetCurrency = mAccountsDbAdapter.getCurrencyCode((mAccountsDbAdapter.getUID(id)));
++
++        if (fromCurrency.equals(Currency.getInstance(targetCurrency))
++                || !mAmountInputFormatter.isInputModified()
++                || mSplitQuantity != null) //if both accounts have same currency
++            return;
++
+         BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
+         if (mSplitQuantity != null || amountBigd.equals(BigDecimal.ZERO))
+             return;
+-        Money amount 	= new Money(amountBigd, from).absolute();
++        Money amount 	= new Money(amountBigd, fromCurrency).absolute();
+ 
+         TransferFundsDialogFragment fragment
+-                = TransferFundsDialogFragment.getInstance(amount, to.getCurrencyCode(), this);
++                = TransferFundsDialogFragment.getInstance(amount, targetCurrency, this);
+         fragment.show(getFragmentManager(), "tranfer_funds_editor");
+     }
+ 
+@@ -282,26 +288,17 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             mTransaction = mTransactionsDbAdapter.getRecord(transactionUID);
+         }
+ 
++        setListeners();
+         //updateTransferAccountsList must only be called after initializing mAccountsDbAdapter
+         // it needs mMultiCurrency to be properly initialized
+         updateTransferAccountsList();
+-
+-        setListeners();
+-        ActionBar actionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
+-        assert actionBar != null;
+-//        actionBar.setSubtitle(mAccountsDbAdapter.getFullyQualifiedAccountName(mAccountUID));
+-
+-        if (mTransaction == null) {
+-            actionBar.setTitle(R.string.title_add_transaction);
+-            initalizeViews();
+-            initTransactionNameAutocomplete();
+-        } else {
+-            actionBar.setTitle(R.string.title_edit_transaction);
+-			initializeViewsWithTransaction();
+-            mEditMode = true;
+-		}
+-
+         mTransferAccountSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
++            /**
++             * Flag for ignoring first call to this listener.
++             * The first call is during layout, but we want it called only in response to user interaction
++             */
++            boolean userInteraction = false;
++
+             @Override
+             public void onItemSelected(AdapterView<?> adapterView, View view, int position, long id) {
+                 if (mSplitsList.size() == 2) { //when handling simple transfer to one account
+@@ -312,14 +309,11 @@ public void onItemSelected(AdapterView<?> adapterView, View view, int position,
+                         // else case is handled when saving the transactions
+                     }
+                 }
+-
+-                Currency currency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID));
+-                String targetCurrency = mAccountsDbAdapter.getCurrencyCode((mAccountsDbAdapter.getUID(id)));
+-
+-                if (currency.equals(Currency.getInstance(targetCurrency))) //if both accounts have same currency
++                if (!userInteraction) {
++                    userInteraction = true;
+                     return;
+-
+-                startTransferFunds(currency, Currency.getInstance(targetCurrency));
++                }
++                startTransferFunds();
+             }
+ 
+             @Override
+@@ -328,6 +322,20 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+             }
+         });
+ 
++        ActionBar actionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
++        assert actionBar != null;
++//        actionBar.setSubtitle(mAccountsDbAdapter.getFullyQualifiedAccountName(mAccountUID));
++
++        if (mTransaction == null) {
++            actionBar.setTitle(R.string.title_add_transaction);
++            initalizeViews();
++            initTransactionNameAutocomplete();
++        } else {
++            actionBar.setTitle(R.string.title_edit_transaction);
++			initializeViewsWithTransaction();
++            mEditMode = true;
++		}
++
+ 	}
+ 
+     /**
+@@ -438,6 +446,15 @@ private void initializeViewsWithTransaction(){
+         mSplitsList = new ArrayList<>(mTransaction.getSplits());
+         toggleAmountInputEntryMode(mSplitsList.size() <= 2);
+ 
++        if (mSplitsList.size() == 2){
++            for (Split split : mSplitsList) {
++                if (split.getAccountUID().equals(mAccountUID)) {
++                    if (!split.getQuantity().getCurrency().equals(mTransaction.getCurrency())){
++                        mSplitQuantity = split.getQuantity();
++                    }
++                }
++            }
++        }
+         //if there are more than two splits (which is the default for one entry), then
+         //disable editing of the transfer account. User should open editor
+         if (mSplitsList.size() == 2 && mSplitsList.get(0).isPairOf(mSplitsList.get(1))) {
+@@ -776,6 +793,13 @@ private void saveNewTransaction() {
+                     Split pair = split.createPair(transferAcctUID);
+                     if (mSplitQuantity != null)
+                         pair.setQuantity(mSplitQuantity);
++                    else {
++                        if (!mAccountsDbAdapter.getCurrencyCode(transferAcctUID).equals(currency.getCurrencyCode())){
++                            startTransferFunds();
++                            mTransaction = null;
++                            return;
++                        }
++                    }
+                     mTransaction.addSplit(pair);
+                 } else { //split editor was used to enter splits
+                     mTransaction.setSplits(mSplitsList);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+index d96cf6b6..b90ab5cd 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+@@ -44,6 +44,8 @@
+ import org.gnucash.android.ui.util.OnTransferFundsListener;
+ 
+ import java.math.BigDecimal;
++import java.math.MathContext;
++import java.math.RoundingMode;
+ import java.util.Currency;
+ 
+ import butterknife.Bind;
+@@ -195,7 +197,7 @@ private void transferFunds(){
+             Price price = new Price(commoditiesDbAdapter.getCommodityUID(mOriginAmount.getCurrency().getCurrencyCode()),
+                     commoditiesDbAdapter.getCommodityUID(mTargetCurrency.getCurrencyCode()));
+             price.setSource(Price.SOURCE_USER);
+-            BigDecimal rateDecimal = mConvertedAmount.asBigDecimal().divide(mOriginAmount.asBigDecimal());
++            BigDecimal rateDecimal = mConvertedAmount.asBigDecimal().divide(mOriginAmount.asBigDecimal(), RoundingMode.HALF_EVEN);
+             Money rate = new Money(rateDecimal, mTargetCurrency); //the currency is irrelevant
+             price.setValueNum(rate.getNumerator());
+             price.setValueDenom(rate.getDenominator());
+diff --git a/app/src/main/res/layout/activity_transactions.xml b/app/src/main/res/layout/activity_transactions.xml
+index 37396810..4893f3a8 100644
+--- a/app/src/main/res/layout/activity_transactions.xml
++++ b/app/src/main/res/layout/activity_transactions.xml
+@@ -59,6 +59,7 @@
+             android:layout_width="match_parent"
+             android:layout_height="wrap_content"
+             android:layout_alignParentBottom="true"
++            android:visibility="gone"
+             app:layout_scrollFlags="scroll|enterAlways" />
+ 
+         <android.support.design.widget.FloatingActionButton
+diff --git a/app/src/main/res/layout/dialog_transfer_funds.xml b/app/src/main/res/layout/dialog_transfer_funds.xml
+index dd05f7e1..65c59081 100644
+--- a/app/src/main/res/layout/dialog_transfer_funds.xml
++++ b/app/src/main/res/layout/dialog_transfer_funds.xml
+@@ -28,7 +28,6 @@
+             android:layout_height="wrap_content" />
+         <TextView android:id="@+id/amount_to_convert"
+             android:textSize="18sp"
+-            android:gravity="right"
+             tools:text="$ 2000.00"
+             android:layout_weight="2"
+             android:layout_width="0dp"
+@@ -71,8 +70,8 @@
+         android:text="Provide either the converted amount or exchange rate in order to transfer funds"
+         />
+     <TableRow android:gravity="center_vertical"
+-        android:paddingTop="@dimen/dialog_padding">
+-        android:paddingLeft="@dimen/dialog_padding">
++        android:paddingTop="@dimen/dialog_padding"
++        android:paddingLeft="@dimen/dialog_padding"
+         android:paddingRight="@dimen/dialog_padding">
+         <RadioButton android:id="@+id/radio_exchange_rate"
+             android:layout_width="0dp"

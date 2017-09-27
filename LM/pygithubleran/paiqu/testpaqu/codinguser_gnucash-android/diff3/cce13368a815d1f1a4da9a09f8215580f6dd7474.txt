@@ -1,0 +1,1125 @@
+From cce13368a815d1f1a4da9a09f8215580f6dd7474 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 24 Mar 2015 17:58:52 +0100
+Subject: [PATCH] Updated the account delete dialog to properly delete accounts
+
+* The sub-accounts and transactions are handled separately, now with options to either delete them, or move them to another account.
+* When an account is deleted, its splits are also automatically assigned to an imbalance account if double-entry mode is activated.
+* Code refactoring
+
+TODO: Localize string resources introduced
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 225 +++++++------------
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  15 +-
+ .../org/gnucash/android/db/DatabaseHelper.java     | 192 +++++++++--------
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  78 +++----
+ .../android/ui/account/AccountsListFragment.java   |  96 +--------
+ .../ui/account/DeleteAccountDialogFragment.java    | 238 +++++++++++++++++++++
+ app/src/main/res/layout/dialog_account_delete.xml  |  32 ++-
+ .../main/res/layout/radio_group_delete_or_move.xml |  54 +++++
+ 8 files changed, 558 insertions(+), 372 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
+ create mode 100644 app/src/main/res/layout/radio_group_delete_or_move.xml
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index d7389fb1..bc2e1f8b 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -22,6 +22,7 @@
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
++import android.support.annotation.NonNull;
+ import android.text.TextUtils;
+ import android.util.Log;
+ 
+@@ -237,171 +238,101 @@ public int updateAccount(long accountId, String columnKey, String newValue){
+         return updateRecord(AccountEntry.TABLE_NAME, accountId, columnKey, newValue);
+     }
+ 
+-	/**
+-	 * Deletes an account with database id <code>rowId</code>
+-	 * All the transactions in the account will also be deleted
+-     * All descendant account will be assigned to the account's parent
+-	 * @param rowId Database id of the account record to be deleted
+-	 * @return <code>true</code> if deletion was successful, <code>false</code> otherwise.
+-	 */
+-	public boolean destructiveDeleteAccount(long rowId){
+-        String accountUID = getUID(rowId);
+-        if (getAccountType(accountUID) == AccountType.ROOT) {
+-            // refuse to delete ROOT
+-            return false;
+-        }
+-		Log.d(TAG, "Delete account with rowId and all its associated splits: " + rowId);
++    /**
++     * This method goes through all the children of {@code accountUID} and updates the parent account
++     * to {@code newParentAccountUID}. The fully qualified account names for all descendant accounts will also be updated.
++     * @param accountUID GUID of the account
++     * @param newParentAccountUID GUID of the new parent account
++     */
++    public void reassignDescendantAccounts(@NonNull String accountUID, @NonNull String newParentAccountUID) {
+         List<String> descendantAccountUIDs = getDescendantAccountUIDs(accountUID, null, null);
+-
+-        mDb.beginTransaction();
+-        try {
+-            if (descendantAccountUIDs.size() > 0) {
+-                List<Account> descendantAccounts = getSimpleAccountList(
+-                        AccountEntry.COLUMN_UID + " IN ('" + TextUtils.join("','", descendantAccountUIDs) + "')",
+-                        null,
+-                        null
+-                );
+-                HashMap<String, Account> mapAccounts = new HashMap<String, Account>();
+-                for (Account account : descendantAccounts)
+-                    mapAccounts.put(account.getUID(), account);
+-                String parentAccountFullName;
+-                String parentAccountUID = getParentAccountUID(accountUID);
+-                if (parentAccountUID == null || getAccountType(parentAccountUID) == AccountType.ROOT) {
+-                    parentAccountFullName = "";
+-                } else {
+-                    parentAccountFullName = getAccountFullName(parentAccountUID);
+-                }
+-                ContentValues contentValues = new ContentValues();
+-                for (String acctUID : descendantAccountUIDs) {
+-                    Account acct = mapAccounts.get(acctUID);
+-                    if (accountUID.equals(acct.getParentUID())) {
+-                        // direct descendant
+-                        acct.setParentUID(parentAccountUID);
+-                        if (parentAccountFullName == null || parentAccountFullName.length() == 0) {
+-                            acct.setFullName(acct.getName());
+-                        } else {
+-                            acct.setFullName(parentAccountFullName + ACCOUNT_NAME_SEPARATOR + acct.getName());
+-                        }
+-                        // update DB
+-                        contentValues.clear();
+-                        contentValues.put(AccountEntry.COLUMN_PARENT_ACCOUNT_UID, parentAccountUID);
+-                        contentValues.put(AccountEntry.COLUMN_FULL_NAME, acct.getFullName());
+-                        mDb.update(
+-                                AccountEntry.TABLE_NAME, contentValues,
+-                                AccountEntry.COLUMN_UID + " = ?",
+-                                new String[]{acct.getUID()}
+-                        );
++        if (descendantAccountUIDs.size() > 0) {
++            List<Account> descendantAccounts = getSimpleAccountList(
++                    AccountEntry.COLUMN_UID + " IN ('" + TextUtils.join("','", descendantAccountUIDs) + "')",
++                    null,
++                    null
++            );
++            HashMap<String, Account> mapAccounts = new HashMap<>();
++            for (Account account : descendantAccounts)
++                mapAccounts.put(account.getUID(), account);
++            String parentAccountFullName;
++            if (newParentAccountUID == null || getAccountType(newParentAccountUID) == AccountType.ROOT) {
++                parentAccountFullName = "";
++            } else {
++                parentAccountFullName = getAccountFullName(newParentAccountUID);
++            }
++            ContentValues contentValues = new ContentValues();
++            for (String acctUID : descendantAccountUIDs) {
++                Account acct = mapAccounts.get(acctUID);
++                if (accountUID.equals(acct.getParentUID())) {
++                    // direct descendant
++                    acct.setParentUID(newParentAccountUID);
++                    if (parentAccountFullName == null || parentAccountFullName.isEmpty()) {
++                        acct.setFullName(acct.getName());
+                     } else {
+-                        // indirect descendant
+-                        acct.setFullName(
+-                                mapAccounts.get(acct.getParentUID()).getFullName() +
+-                                        ACCOUNT_NAME_SEPARATOR + acct.getName()
+-                        );
+-                        // update DB
+-                        contentValues.clear();
+-                        contentValues.put(AccountEntry.COLUMN_FULL_NAME, acct.getFullName());
+-                        mDb.update(
+-                                AccountEntry.TABLE_NAME, contentValues,
+-                                AccountEntry.COLUMN_UID + " = ?",
+-                                new String[]{acct.getUID()}
+-                        );
++                        acct.setFullName(parentAccountFullName + ACCOUNT_NAME_SEPARATOR + acct.getName());
+                     }
++                    // update DB
++                    contentValues.clear();
++                    contentValues.put(AccountEntry.COLUMN_PARENT_ACCOUNT_UID, newParentAccountUID);
++                    contentValues.put(AccountEntry.COLUMN_FULL_NAME, acct.getFullName());
++                    mDb.update(
++                            AccountEntry.TABLE_NAME, contentValues,
++                            AccountEntry.COLUMN_UID + " = ?",
++                            new String[]{acct.getUID()}
++                    );
++                } else {
++                    // indirect descendant
++                    acct.setFullName(
++                            mapAccounts.get(acct.getParentUID()).getFullName() +
++                                    ACCOUNT_NAME_SEPARATOR + acct.getName()
++                    );
++                    // update DB
++                    contentValues.clear();
++                    contentValues.put(AccountEntry.COLUMN_FULL_NAME, acct.getFullName());
++                    mDb.update(
++                            AccountEntry.TABLE_NAME, contentValues,
++                            AccountEntry.COLUMN_UID + " = ?",
++                            new String[]{acct.getUID()}
++                    );
+                 }
+             }
+-            // TODO: with "ON DELETE CASCADE", re-assign to imbalance accounts before delete.
+-            //       deleteRecord(AccountEntry.TABLE_NAME, rowId); will delete related
+-            //       transactions and splits
+-            //delete splits in this account
+-            mDb.delete(SplitEntry.TABLE_NAME,
+-                    SplitEntry.COLUMN_TRANSACTION_UID  + " IN ( SELECT DISTINCT "
+-                    + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID
+-                    + " FROM trans_split_acct WHERE "
+-                    + AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID
+-                    + " = ? )",
+-                    new String[]{getUID(rowId)});
+-            // delete empty transactions
+-            // trans_split_acct is an inner joint, empty transactions will
+-            // not be selected in this view
+-            mDb.delete(TransactionEntry.TABLE_NAME,
+-                    TransactionEntry.COLUMN_UID  + " NOT IN ( SELECT DISTINCT "
+-                            + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID
+-                            + " FROM trans_split_acct )",
+-                    null);
+-            deleteRecord(rowId);
+-            mDb.setTransactionSuccessful();
+-            return true;
+-        }
+-        finally {
+-            mDb.endTransaction();
+         }
+-	}
+-
+-    /**
+-     * Reassigns all accounts with parent UID <code>oldParentUID</code> to <code>newParentUID</code>
+-     * @param oldParentUID Old parent account Unique ID
+-     * @param newParentUID Unique ID of new parent account
+-     * @return Number of records which are modified
+-     */
+-    public int reassignParent(String oldParentUID, String newParentUID){
+-        ContentValues contentValues = new ContentValues();
+-        if (newParentUID == null)
+-            contentValues.putNull(AccountEntry.COLUMN_PARENT_ACCOUNT_UID);
+-        else
+-            contentValues.put(AccountEntry.COLUMN_PARENT_ACCOUNT_UID, newParentUID);
+-
+-        return mDb.update(AccountEntry.TABLE_NAME,
+-                contentValues,
+-                AccountEntry.COLUMN_PARENT_ACCOUNT_UID + "= ?",
+-                new String[]{oldParentUID});
+-    }
+-
+-	/**
+-	 * Deletes an account while preserving the linked transactions
+-	 * Reassigns all transactions belonging to the account with id <code>rowId</code> to 
+-	 * the account with id <code>accountReassignId</code> before deleting the account.
+-	 * @param accountId Database record ID of the account to be deleted
+-	 * @param accountReassignId Record ID of the account to which to reassign the transactions from the previous
+-	 * @return <code>true</code> if deletion was successful, <code>false</code> otherwise.
+-	 */
+-	public boolean transactionPreservingDelete(long accountId, long accountReassignId){
+-        Log.d(TAG, "Migrating transaction splits to new account");
+-        ContentValues contentValues = new ContentValues();
+-        contentValues.put(SplitEntry.COLUMN_ACCOUNT_UID, accountReassignId);
+-        mDb.update(SplitEntry.TABLE_NAME,
+-                contentValues,
+-                SplitEntry.COLUMN_ACCOUNT_UID + "=?",
+-                new String[]{getUID(accountId)});
+-        return destructiveDeleteAccount(accountId);
+     }
+ 
+     /**
+-     * Deletes an account and all its sub-accounts and splits with it
++     * Deletes an account and its transactions, and all its sub-accounts and their transactions.
++     * <p>Not only the splits belonging to the account and its descendants will be deleted, rather,
++     * the complete transactions associated with this account and its descendants
++     * (i.e. as long as the transaction has at least one split belonging to one of the accounts).
++     * This prevents an split imbalance from being caused.</p>
++     * <p>If you want to preserve transactions, make sure to first reassign the children accounts (see {@link #reassignDescendantAccounts(String, String)}
++     * before calling this method. This method will however not delete a root account. </p>
++     * <p><b>This method does a thorough delete, use with caution!!!</b></p>
+      * @param accountId Database record ID of account
+      * @return <code>true</code> if the account and subaccounts were all successfully deleted, <code>false</code> if
+      * even one was not deleted
++     * @see #reassignDescendantAccounts(String, String)
+      */
+-    public boolean recursiveDestructiveDelete(long accountId){
+-        Log.d(TAG, "Delete account with rowId with its transactions and sub-accounts: " + accountId);
++    public boolean recursiveDeleteAccount(long accountId){
+         String accountUID = getUID(accountId);
++        if (getAccountType(accountUID) == AccountType.ROOT) {
++            // refuse to delete ROOT
++            return false;
++        }
++
++        Log.d(TAG, "Delete account with rowId with its transactions and sub-accounts: " + accountId);
++
+         List<String> descendantAccountUIDs = getDescendantAccountUIDs(accountUID, null, null);
+         mDb.beginTransaction();
+         try {
+-            descendantAccountUIDs.add(accountUID);
++            descendantAccountUIDs.add(accountUID); //add account to descendants list just for convenience
++            for (String descendantAccountUID : descendantAccountUIDs) {
++                mTransactionsAdapter.deleteTransactionsForAccount(descendantAccountUID);
++            }
++
+             String accountUIDList = "'" + TextUtils.join("','", descendantAccountUIDs) + "'";
+-            // delete splits
+-            mDb.delete(
+-                    SplitEntry.TABLE_NAME,
+-                    SplitEntry.COLUMN_ACCOUNT_UID + " IN (" + accountUIDList + ")",
+-                    null
+-            );
+-            // delete transactions that do not have any splits associate them any more
+-            mDb.delete(
+-                    TransactionEntry.TABLE_NAME,
+-                    "NOT EXISTS ( SELECT * FROM " + SplitEntry.TABLE_NAME +
+-                    " WHERE " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
+-                    " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID + " ) ",
+-                    null
+-            );
++
+             // delete accounts
+             mDb.delete(
+                     AccountEntry.TABLE_NAME,
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 267d3448..312b06a3 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -367,14 +367,25 @@ protected int updateRecord(String tableName, long recordId, String columnKey, St
+      * @return Number of records affected
+      */
+     public int updateRecord(@NonNull String uid, @NonNull String columnKey, String newValue) {
++        return updateRecords(CommonColumns.COLUMN_UID + "= ?", new String[]{uid}, columnKey, newValue);
++    }
++
++    /**
++     * Updates all records which match the {@code where} clause with the {@code newValue} for the column
++     * @param where SQL where clause
++     * @param whereArgs String arguments for where clause
++     * @param columnKey Name of column to be updated
++     * @param newValue New value to be assigned to the columnKey
++     * @return Number of records affected
++     */
++    public int updateRecords(String where, String[] whereArgs, @NonNull String columnKey, String newValue){
+         ContentValues contentValues = new ContentValues();
+         if (newValue == null) {
+             contentValues.putNull(columnKey);
+         } else {
+             contentValues.put(columnKey, newValue);
+         }
+-        return mDb.update(mTableName, contentValues,
+-                CommonColumns.COLUMN_UID + "= ?", new String[]{uid});
++        return mDb.update(mTableName, contentValues, where, whereArgs);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index bdf0c0a4..632b1b39 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -166,7 +166,7 @@ public void onOpen(SQLiteDatabase db) {
+     @Override
+ 	public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 		Log.i(LOG_TAG, "Upgrading database from version "
+-				+ oldVersion + " to " + newVersion);
++                + oldVersion + " to " + newVersion);
+ 
+ 		if (oldVersion < newVersion){
+ 			//introducing double entry accounting
+@@ -265,95 +265,7 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 6 && newVersion >= DatabaseSchema.SPLITS_DB_VERSION){
+                 Log.i(LOG_TAG, "Upgrading database to version 7");
+-                db.beginTransaction();
+-                try {
+-                    // backup transaction table
+-                    db.execSQL("ALTER TABLE " + TransactionEntry.TABLE_NAME + " RENAME TO " + TransactionEntry.TABLE_NAME + "_bak");
+-                    // create new transaction table
+-                    db.execSQL("create table " + TransactionEntry.TABLE_NAME + " ("
+-                            + TransactionEntry._ID + " integer primary key autoincrement, "
+-                            + TransactionEntry.COLUMN_UID + " varchar(255) not null, "
+-                            + TransactionEntry.COLUMN_DESCRIPTION + " varchar(255), "
+-                            + TransactionEntry.COLUMN_NOTES + " text, "
+-                            + TransactionEntry.COLUMN_TIMESTAMP + " integer not null, "
+-                            + TransactionEntry.COLUMN_EXPORTED + " tinyint default 0, "
+-                            + TransactionEntry.COLUMN_CURRENCY + " varchar(255) not null, "
+-                            + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " integer default 0, "
+-                            + "UNIQUE (" + TransactionEntry.COLUMN_UID + ") "
+-                            + ");");
+-                    // initialize new transaction table wiht data from old table
+-                    db.execSQL("INSERT INTO " + TransactionEntry.TABLE_NAME + " ( "
+-                                    + TransactionEntry._ID + " , "
+-                                    + TransactionEntry.COLUMN_UID + " , "
+-                                    + TransactionEntry.COLUMN_DESCRIPTION + " , "
+-                                    + TransactionEntry.COLUMN_NOTES + " , "
+-                                    + TransactionEntry.COLUMN_TIMESTAMP + " , "
+-                                    + TransactionEntry.COLUMN_EXPORTED + " , "
+-                                    + TransactionEntry.COLUMN_CURRENCY + " , "
+-                                    + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " )  SELECT "
+-                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry._ID + " , "
+-                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_UID + " , "
+-                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_DESCRIPTION + " , "
+-                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_NOTES + " , "
+-                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_TIMESTAMP + " , "
+-                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_EXPORTED + " , "
+-                                    + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_CURRENCY + " , "
+-                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_RECURRENCE_PERIOD
+-                                    + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
+-                                    + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid == " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
+-                    );
+-                    // create split table
+-                    db.execSQL("CREATE TABLE " + SplitEntry.TABLE_NAME + " ("
+-                            + SplitEntry._ID + " integer primary key autoincrement, "
+-                            + SplitEntry.COLUMN_UID + " varchar(255) not null, "
+-                            + SplitEntry.COLUMN_MEMO + " text, "
+-                            + SplitEntry.COLUMN_TYPE + " varchar(255) not null, "
+-                            + SplitEntry.COLUMN_AMOUNT + " varchar(255) not null, "
+-                            + SplitEntry.COLUMN_ACCOUNT_UID + " varchar(255) not null, "
+-                            + SplitEntry.COLUMN_TRANSACTION_UID + " varchar(255) not null, "
+-                            + "FOREIGN KEY (" + SplitEntry.COLUMN_ACCOUNT_UID + ") REFERENCES " + AccountEntry.TABLE_NAME + " (" + AccountEntry.COLUMN_UID + "), "
+-                            + "FOREIGN KEY (" + SplitEntry.COLUMN_TRANSACTION_UID + ") REFERENCES " + TransactionEntry.TABLE_NAME + " (" + TransactionEntry.COLUMN_UID + "), "
+-                            + "UNIQUE (" + SplitEntry.COLUMN_UID + ") "
+-                            + ");");
+-                    // Initialize split table with data from backup transaction table
+-                    // New split table is initialized after the new transaction table as the
+-                    // foreign key constraint will stop any data from being inserted
+-                    // If new split table is created before the backup is made, the foreign key
+-                    // constraint will be rewritten to refer to the backup transaction table
+-                    db.execSQL("INSERT INTO " + SplitEntry.TABLE_NAME + " ( "
+-                            + SplitEntry.COLUMN_UID + " , "
+-                            + SplitEntry.COLUMN_TYPE + " , "
+-                            + SplitEntry.COLUMN_AMOUNT + " , "
+-                            + SplitEntry.COLUMN_ACCOUNT_UID + " , "
+-                            + SplitEntry.COLUMN_TRANSACTION_UID + " ) SELECT "
+-                            + "LOWER(HEX(RANDOMBLOB(16))) , "
+-                            + "CASE WHEN " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_TYPE + " IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
+-                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END ELSE CASE WHEN "
+-                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END END , "
+-                            + "ABS ( " + TransactionEntry.TABLE_NAME + "_bak.amount ) , "
+-                            + TransactionEntry.TABLE_NAME + "_bak.account_uid , "
+-                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_UID
+-                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
+-                            + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
+-                            + " UNION SELECT "
+-                            + "LOWER(HEX(RANDOMBLOB(16))) AS " + SplitEntry.COLUMN_UID + " , "
+-                            + "CASE WHEN " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_TYPE + " IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
+-                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END ELSE CASE WHEN "
+-                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END END , "
+-                            + "ABS ( " + TransactionEntry.TABLE_NAME + "_bak.amount ) , "
+-                            + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " , "
+-                            + TransactionEntry.TABLE_NAME + "_baK." + TransactionEntry.COLUMN_UID
+-                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
+-                            + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
+-                            + " WHERE " + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " IS NOT NULL"
+-                    );
+-                    // drop backup transaction table
+-                    db.execSQL("DROP TABLE " + TransactionEntry.TABLE_NAME + "_bak");
+-                    db.setTransactionSuccessful();
+-                    oldVersion = DatabaseSchema.SPLITS_DB_VERSION;
+-                } finally {
+-                    db.endTransaction();
+-                }
++                oldVersion = upgradeToVersion7(db);
+             }
+ 
+             if (oldVersion == 7 && newVersion >= 8){
+@@ -390,6 +302,106 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 	}
+ 
+     /**
++     * Code for upgrading the database to the {@link DatabaseSchema#SPLITS_DB_VERSION}
++     * Main new featurs is the introduction of multiple-splits for transactions
++     * @param db SQLite Database
++     * @return The new database version is upgrade was successful, or the old db version if it failed
++     */
++    private int upgradeToVersion7(SQLiteDatabase db) {
++        int oldVersion = 6;
++        db.beginTransaction();
++        try {
++            // backup transaction table
++            db.execSQL("ALTER TABLE " + TransactionEntry.TABLE_NAME + " RENAME TO " + TransactionEntry.TABLE_NAME + "_bak");
++            // create new transaction table
++            db.execSQL("create table " + TransactionEntry.TABLE_NAME + " ("
++                    + TransactionEntry._ID + " integer primary key autoincrement, "
++                    + TransactionEntry.COLUMN_UID + " varchar(255) not null, "
++                    + TransactionEntry.COLUMN_DESCRIPTION + " varchar(255), "
++                    + TransactionEntry.COLUMN_NOTES + " text, "
++                    + TransactionEntry.COLUMN_TIMESTAMP + " integer not null, "
++                    + TransactionEntry.COLUMN_EXPORTED + " tinyint default 0, "
++                    + TransactionEntry.COLUMN_CURRENCY + " varchar(255) not null, "
++                    + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " integer default 0, "
++                    + "UNIQUE (" + TransactionEntry.COLUMN_UID + ") "
++                    + ");");
++            // initialize new transaction table wiht data from old table
++            db.execSQL("INSERT INTO " + TransactionEntry.TABLE_NAME + " ( "
++                            + TransactionEntry._ID + " , "
++                            + TransactionEntry.COLUMN_UID + " , "
++                            + TransactionEntry.COLUMN_DESCRIPTION + " , "
++                            + TransactionEntry.COLUMN_NOTES + " , "
++                            + TransactionEntry.COLUMN_TIMESTAMP + " , "
++                            + TransactionEntry.COLUMN_EXPORTED + " , "
++                            + TransactionEntry.COLUMN_CURRENCY + " , "
++                            + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " )  SELECT "
++                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry._ID + " , "
++                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_UID + " , "
++                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_DESCRIPTION + " , "
++                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_NOTES + " , "
++                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_TIMESTAMP + " , "
++                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_EXPORTED + " , "
++                            + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_CURRENCY + " , "
++                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_RECURRENCE_PERIOD
++                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
++                            + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid == " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
++            );
++            // create split table
++            db.execSQL("CREATE TABLE " + SplitEntry.TABLE_NAME + " ("
++                    + SplitEntry._ID + " integer primary key autoincrement, "
++                    + SplitEntry.COLUMN_UID + " varchar(255) not null, "
++                    + SplitEntry.COLUMN_MEMO + " text, "
++                    + SplitEntry.COLUMN_TYPE + " varchar(255) not null, "
++                    + SplitEntry.COLUMN_AMOUNT + " varchar(255) not null, "
++                    + SplitEntry.COLUMN_ACCOUNT_UID + " varchar(255) not null, "
++                    + SplitEntry.COLUMN_TRANSACTION_UID + " varchar(255) not null, "
++                    + "FOREIGN KEY (" + SplitEntry.COLUMN_ACCOUNT_UID + ") REFERENCES " + AccountEntry.TABLE_NAME + " (" + AccountEntry.COLUMN_UID + "), "
++                    + "FOREIGN KEY (" + SplitEntry.COLUMN_TRANSACTION_UID + ") REFERENCES " + TransactionEntry.TABLE_NAME + " (" + TransactionEntry.COLUMN_UID + "), "
++                    + "UNIQUE (" + SplitEntry.COLUMN_UID + ") "
++                    + ");");
++            // Initialize split table with data from backup transaction table
++            // New split table is initialized after the new transaction table as the
++            // foreign key constraint will stop any data from being inserted
++            // If new split table is created before the backup is made, the foreign key
++            // constraint will be rewritten to refer to the backup transaction table
++            db.execSQL("INSERT INTO " + SplitEntry.TABLE_NAME + " ( "
++                    + SplitEntry.COLUMN_UID + " , "
++                    + SplitEntry.COLUMN_TYPE + " , "
++                    + SplitEntry.COLUMN_AMOUNT + " , "
++                    + SplitEntry.COLUMN_ACCOUNT_UID + " , "
++                    + SplitEntry.COLUMN_TRANSACTION_UID + " ) SELECT "
++                    + "LOWER(HEX(RANDOMBLOB(16))) , "
++                    + "CASE WHEN " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_TYPE + " IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
++                            + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END ELSE CASE WHEN "
++                            + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END END , "
++                    + "ABS ( " + TransactionEntry.TABLE_NAME + "_bak.amount ) , "
++                    + TransactionEntry.TABLE_NAME + "_bak.account_uid , "
++                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_UID
++                    + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
++                    + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
++                    + " UNION SELECT "
++                    + "LOWER(HEX(RANDOMBLOB(16))) AS " + SplitEntry.COLUMN_UID + " , "
++                    + "CASE WHEN " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_TYPE + " IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
++                            + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END ELSE CASE WHEN "
++                            + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END END , "
++                    + "ABS ( " + TransactionEntry.TABLE_NAME + "_bak.amount ) , "
++                    + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " , "
++                    + TransactionEntry.TABLE_NAME + "_baK." + TransactionEntry.COLUMN_UID
++                    + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
++                    + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
++                    + " WHERE " + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " IS NOT NULL"
++            );
++            // drop backup transaction table
++            db.execSQL("DROP TABLE " + TransactionEntry.TABLE_NAME + "_bak");
++            db.setTransactionSuccessful();
++            oldVersion = DatabaseSchema.SPLITS_DB_VERSION;
++        } finally {
++            db.endTransaction();
++        }
++        return oldVersion;
++    }
++
++    /**
+      * Creates the tables in the database
+      * @param db Database instance
+      */
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 89ab4790..9b4cc474 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -215,29 +215,47 @@ public Transaction getTransaction(long rowId) {
+      * @throws java.lang.IllegalArgumentException if the accountUID is null
+ 	 */
+ 	public Cursor fetchAllTransactionsForAccount(String accountUID){
+-        //TODO: Remove this legacy code. Database has been upgraded
+-        if (mDb.getVersion() < DatabaseSchema.SPLITS_DB_VERSION){ //legacy from previous database format
+-            return mDb.query(TransactionEntry.TABLE_NAME, null,
+-                    "((" + SplitEntry.COLUMN_ACCOUNT_UID + " = '" + accountUID + "') "
+-                            + "OR (" + DatabaseHelper.KEY_DOUBLE_ENTRY_ACCOUNT_UID + " = '" + accountUID + "' ))"
+-                            + " AND " + TransactionEntry.COLUMN_TEMPLATE + " = 0",
+-                    null, null, null, TransactionEntry.COLUMN_TIMESTAMP + " DESC");
+-        } else {
+-            SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
+-            queryBuilder.setTables(TransactionEntry.TABLE_NAME
+-                    + " INNER JOIN " + SplitEntry.TABLE_NAME + " ON "
+-                    + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
+-                    + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID);
+-            queryBuilder.setDistinct(true);
+-            String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
+-            String selection = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID + " = ?"
+-                    + " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TEMPLATE + " = 0";
+-            String[] selectionArgs = new String[]{accountUID};
+-            String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " DESC";
+-
+-            return queryBuilder.query(mDb, projectionIn, selection, selectionArgs, null, null, sortOrder);
+-        }
+-	}
++        SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
++        queryBuilder.setTables(TransactionEntry.TABLE_NAME
++                + " INNER JOIN " + SplitEntry.TABLE_NAME + " ON "
++                + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
++                + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID);
++        queryBuilder.setDistinct(true);
++        String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
++        String selection = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID + " = ?"
++                + " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TEMPLATE + " = 0";
++        String[] selectionArgs = new String[]{accountUID};
++        String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " DESC";
++
++        return queryBuilder.query(mDb, projectionIn, selection, selectionArgs, null, null, sortOrder);
++    }
++
++    /**
++     * Deletes all transactions which contain a split in the account.
++     * <p><b>Note:</b>As long as the transaction has one split which belongs to the account {@code accountUID},
++     * it will be deleted. The other splits belonging to the transaction will also go away</p>
++     * @param accountUID GUID of the account
++     */
++    public void deleteTransactionsForAccount(String accountUID){
++        String rawDeleteQuery = "DELETE FROM " + TransactionEntry.TABLE_NAME + " WHERE " + TransactionEntry.COLUMN_UID + " IN "
++                + " (SELECT " + SplitEntry.COLUMN_TRANSACTION_UID + " FROM " + SplitEntry.TABLE_NAME + " WHERE "
++                + SplitEntry.COLUMN_ACCOUNT_UID + " = ?)";
++        mDb.execSQL(rawDeleteQuery, new String[]{accountUID});
++    }
++
++    /**
++     * Deletes all transactions which have no splits associated with them
++     * @return Number of records deleted
++     */
++    public int deleteTransactionsWithNoSplits(){
++        return mDb.delete(
++                TransactionEntry.TABLE_NAME,
++                "NOT EXISTS ( SELECT * FROM " + SplitEntry.TABLE_NAME +
++                        " WHERE " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
++                        " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID + " ) ",
++                null
++        );
++    }
+ 
+     /**
+      * Fetches all recurring transactions from the database.
+@@ -413,20 +431,6 @@ public Money getBalance(String transactionUID, String accountUID){
+         return Transaction.computeBalance(accountUID, splitList);
+     }
+ 
+-    //TODO: When "on delete cascade" is successfully migrated, we can remove this method and use the base implementation
+-	/**
+-	 * Deletes transaction record with id <code>rowId</code> and all it's splits
+-	 * @param rowId Long database record id
+-	 * @return <code>true</code> if deletion was successful, <code>false</code> otherwise
+-	 */
+-    @Override
+-	public boolean deleteRecord(long rowId){
+-		Log.d(TAG, "Delete transaction with record Id: " + rowId);
+-        //the splits db adapter handles deletion of the transaction
+-		mSplitsDbAdapter.deleteSplitsForTransaction(rowId);
+-        return mDb.delete(TransactionEntry.TABLE_NAME, TransactionEntry._ID + "=" + rowId, null) > 0;
+-	}
+-
+     /**
+ 	 * Assigns transaction with id <code>rowId</code> to account with id <code>accountId</code>
+ 	 * @param transactionUID GUID of the transaction
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 427f722a..c5a8aaa1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -17,11 +17,8 @@
+ package org.gnucash.android.ui.account;
+ 
+ import android.app.Activity;
+-import android.app.AlertDialog;
+-import android.app.Dialog;
+ import android.app.SearchManager;
+ import android.content.Context;
+-import android.content.DialogInterface;
+ import android.content.Intent;
+ import android.database.Cursor;
+ import android.graphics.Color;
+@@ -38,15 +35,12 @@
+ import android.view.ViewGroup;
+ import android.widget.AdapterView;
+ import android.widget.AdapterView.OnItemLongClickListener;
+-import android.widget.CheckBox;
+ import android.widget.ImageButton;
+ import android.widget.ListAdapter;
+ import android.widget.ListView;
+ import android.widget.TextView;
+-import android.widget.Toast;
+ 
+ import com.actionbarsherlock.app.ActionBar;
+-import com.actionbarsherlock.app.SherlockDialogFragment;
+ import com.actionbarsherlock.app.SherlockListFragment;
+ import com.actionbarsherlock.view.ActionMode;
+ import com.actionbarsherlock.view.ActionMode.Callback;
+@@ -65,7 +59,6 @@
+ import org.gnucash.android.ui.util.AccountBalanceTask;
+ import org.gnucash.android.ui.util.OnAccountClickedListener;
+ import org.gnucash.android.ui.util.Refreshable;
+-import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ /**
+  * Fragment for displaying the list of accounts in the database
+@@ -324,36 +317,21 @@ public void tryDeleteAccount(long rowId) {
+         if (acc.getTransactionCount() > 0 || mAccountsDbAdapter.getSubAccountCount(acc.getUID()) > 0) {
+             showConfirmationDialog(rowId);
+         } else {
+-            deleteAccount(rowId, false);
++            mAccountsDbAdapter.deleteRecord(rowId);
++            refresh();
+         }
+     }
+ 
+     /**
+-     * Deletes an account and show a {@link Toast} notification on success.
+-     * When an account is deleted, all it's child accounts will be reassigned as children to its parent account
+-     * @param rowId Record ID of the account to be deleted
+-     */
+-    protected void deleteAccount(long rowId, boolean deleteSubAccounts) {
+-        boolean deleted     = deleteSubAccounts ?
+-                mAccountsDbAdapter.recursiveDestructiveDelete(rowId)
+-                : mAccountsDbAdapter.destructiveDeleteAccount(rowId);
+-        if (deleted) {
+-            Toast.makeText(getActivity(), R.string.toast_account_deleted, Toast.LENGTH_SHORT).show();
+-            WidgetConfigurationActivity.updateAllWidgets(getActivity().getApplicationContext());
+-        }
+-        refresh();
+-    }
+-
+-    /**
+      * Shows the delete confirmation dialog
+      *
+      * @param id Record ID of account to be deleted after confirmation
+      */
+     public void showConfirmationDialog(long id) {
+-        DeleteConfirmationDialogFragment alertFragment =
+-                DeleteConfirmationDialogFragment.newInstance(R.string.title_confirm_delete, mAccountsDbAdapter.getUID(id));
++        DeleteAccountDialogFragment alertFragment =
++                DeleteAccountDialogFragment.newInstance(mAccountsDbAdapter.getUID(id));
+         alertFragment.setTargetFragment(this, 0);
+-        alertFragment.show(getSherlockActivity().getSupportFragmentManager(), "dialog");
++        alertFragment.show(getSherlockActivity().getSupportFragmentManager(), "delete_confirmation_dialog");
+     }
+ 
+     /**
+@@ -499,70 +477,6 @@ public boolean onClose() {
+     }
+ 
+     /**
+-     * Delete confirmation dialog
+-     * Is displayed when deleting an account which has transactions.
+-     * If an account has no transactions, it is deleted immediately with no confirmation required
+-     *
+-     * @author Ngewi Fet <ngewif@gmail.com>
+-     */
+-    public static class DeleteConfirmationDialogFragment extends SherlockDialogFragment {
+-
+-        /**
+-         * Creates new instance of the delete confirmation dialog and provides parameters for it
+-         * @param title Title to use for the dialog
+-         * @param uid GUID of the account to be deleted
+-         * @return New instance of the delete confirmation dialog
+-         */
+-        public static DeleteConfirmationDialogFragment newInstance(int title, String uid) {
+-            DeleteConfirmationDialogFragment frag = new DeleteConfirmationDialogFragment();
+-            Bundle args = new Bundle();
+-            args.putInt("title", title);
+-            args.putString(UxArgument.SELECTED_ACCOUNT_UID, uid);
+-            frag.setArguments(args);
+-            return frag;
+-        }
+-
+-            @Override
+-        public Dialog onCreateDialog(Bundle savedInstanceState) {
+-            int title = getArguments().getInt("title");
+-            final String uid = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
+-
+-            LayoutInflater layoutInflater = getSherlockActivity().getLayoutInflater();
+-            final View dialogLayout = layoutInflater.inflate(R.layout.dialog_account_delete, (ViewGroup) getView());
+-            AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(getActivity())
+-                    .setIcon(android.R.drawable.ic_delete)
+-                    .setTitle(title).setMessage(R.string.delete_account_confirmation_message)
+-                    .setView(dialogLayout)
+-                    .setPositiveButton(R.string.alert_dialog_ok_delete,
+-                            new DialogInterface.OnClickListener() {
+-                                public void onClick(DialogInterface dialog, int whichButton) {
+-                                    Context context = getDialog().getContext();
+-                                    AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
+-                                    if (uid == null) {
+-                                        accountsDbAdapter.deleteAllRecords();
+-                                        Toast.makeText(context, R.string.toast_all_accounts_deleted, Toast.LENGTH_SHORT).show();
+-                                    } else {
+-                                        CheckBox deleteSubAccountsCheckBox = (CheckBox) dialogLayout
+-                                                .findViewById(R.id.checkbox_delete_sub_accounts);
+-                                        long rowId = accountsDbAdapter.getID(uid);
+-                                        ((AccountsListFragment) getTargetFragment()).deleteAccount(rowId, deleteSubAccountsCheckBox.isChecked());
+-                                    }
+-                                }
+-                            })
+-                    .setNegativeButton(R.string.alert_dialog_cancel,
+-                            new DialogInterface.OnClickListener() {
+-                                public void onClick(DialogInterface dialog, int whichButton) {
+-                                    dismiss();
+-                                }
+-                            }
+-
+-                    );
+-            return dialogBuilder.create();
+-        }
+-
+-        }
+-
+-    /**
+      * Extends {@link DatabaseCursorLoader} for loading of {@link Account} from the
+      * database asynchronously.
+      * <p>By default it loads only top-level accounts (accounts which have no parent or have GnuCash ROOT account as parent.
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
+new file mode 100644
+index 00000000..126f24c2
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
+@@ -0,0 +1,238 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.ui.account;
++
++import android.database.Cursor;
++import android.os.Bundle;
++import android.support.annotation.Nullable;
++import android.support.v4.widget.SimpleCursorAdapter;
++import android.text.TextUtils;
++import android.view.LayoutInflater;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.Button;
++import android.widget.CompoundButton;
++import android.widget.RadioButton;
++import android.widget.Spinner;
++import android.widget.TextView;
++
++import com.actionbarsherlock.app.SherlockDialogFragment;
++
++import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.SplitsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.ui.util.Refreshable;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
++import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
++
++import java.util.Currency;
++import java.util.List;
++
++/**
++ * Delete confirmation dialog for accounts.
++ * It is displayed when deleting an account which has transactions or sub-accounts, and the user
++ * has the option to either move the transactions/sub-accounts, or delete them.
++ * If an account has no transactions, it is deleted immediately with no confirmation required
++ *
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
++public class DeleteAccountDialogFragment extends SherlockDialogFragment {
++
++    /**
++     * Spinner for selecting the account to move the transactions to
++     */
++    Spinner mTransactionsDestinationAccountSpinner;
++
++    Spinner mAccountsDestinationAccountSpinner;
++
++    /**
++     * Dialog positive button. Ok to moving the transactions
++     */
++    Button mOkButton;
++
++    /**
++     * Cancel button
++     */
++    Button mCancelButton;
++
++    /**
++     * GUID of account from which to move the transactions
++     */
++    String mOriginAccountUID = null;
++
++    View mAccountOptionsView;
++    View mTransactionOptionsView;
++    RadioButton mMoveAccountsRadioButton;
++    RadioButton mMoveTransactionsRadioButton;
++    RadioButton mDeleteAccountsRadioButton;
++    RadioButton mDeleteTransactionsRadioButton;
++
++    private int mTransactionCount;
++    private int mSubAccountCount;
++
++    /**
++     * Creates new instance of the delete confirmation dialog and provides parameters for it
++     * @param accountUID GUID of the account to be deleted
++     * @return New instance of the delete confirmation dialog
++     */
++    public static DeleteAccountDialogFragment newInstance(String accountUID) {
++        DeleteAccountDialogFragment frag = new DeleteAccountDialogFragment();
++        frag.mOriginAccountUID = accountUID;
++        frag.mSubAccountCount = AccountsDbAdapter.getInstance().getSubAccountCount(accountUID);
++        frag.mTransactionCount = TransactionsDbAdapter.getInstance().getTransactionsCount(accountUID);
++        return frag;
++    }
++
++    @Override
++    public View onCreateView(LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
++        View view = inflater.inflate(R.layout.dialog_account_delete, container, false);
++        mTransactionOptionsView = view.findViewById(R.id.transactions_options);
++        ((TextView)mTransactionOptionsView.findViewById(R.id.title_content)).setText(R.string.section_header_transactions);
++        ((TextView)mTransactionOptionsView.findViewById(R.id.description)).setText("This account contains transactions. \nWhat would you like to do with these transactions");
++        mDeleteTransactionsRadioButton = (RadioButton) mTransactionOptionsView.findViewById(R.id.radio_delete);
++        mDeleteTransactionsRadioButton.setText("Delete transactions");
++        mMoveTransactionsRadioButton = ((RadioButton)mTransactionOptionsView.findViewById(R.id.radio_move));
++        mTransactionsDestinationAccountSpinner = (Spinner) mTransactionOptionsView.findViewById(R.id.target_accounts_spinner);
++
++        mAccountOptionsView = view.findViewById(R.id.accounts_options);
++        ((TextView)mAccountOptionsView.findViewById(R.id.title_content)).setText(R.string.section_header_subaccounts);
++        ((TextView)mAccountOptionsView.findViewById(R.id.description)).setText("This account contains sub-accounts. \nWhat would you like to do with these sub-accounts");
++        mDeleteAccountsRadioButton = (RadioButton) mAccountOptionsView.findViewById(R.id.radio_delete);
++        mDeleteAccountsRadioButton.setText(R.string.label_delete_sub_accounts);
++        mMoveAccountsRadioButton = (RadioButton)mAccountOptionsView.findViewById(R.id.radio_move);
++
++        mAccountsDestinationAccountSpinner = (Spinner) mAccountOptionsView.findViewById(R.id.target_accounts_spinner);
++
++
++        mTransactionOptionsView.setVisibility(mTransactionCount > 0 ? View.VISIBLE : View.GONE);
++        mAccountOptionsView.setVisibility(mSubAccountCount > 0 ? View.VISIBLE : View.GONE);
++
++        mCancelButton = (Button) view.findViewById(R.id.btn_cancel);
++        mOkButton = (Button) view.findViewById(R.id.btn_save);
++        mOkButton.setText(R.string.alert_dialog_ok_delete);
++        mOkButton.setCompoundDrawables(getResources().getDrawable(R.drawable.content_discard_holo_light),
++                null, null, null);
++        return view;
++    }
++
++    @Override
++    public void onActivityCreated(Bundle savedInstanceState) {
++        super.onActivityCreated(savedInstanceState);
++        String accountName = AccountsDbAdapter.getInstance().getAccountName(mOriginAccountUID);
++        getDialog().setTitle("Delete: " + accountName);
++        AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++        List<String> descendantAccountUIDs = accountsDbAdapter.getDescendantAccountUIDs(mOriginAccountUID, null, null);
++
++        String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID    + " != ? AND "
++                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY               + " = ? AND "
++                + DatabaseSchema.AccountEntry.COLUMN_TYPE         + " = ? AND "
++                + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0 AND "
++                + DatabaseSchema.AccountEntry.COLUMN_UID + " NOT IN ('" + TextUtils.join("','", descendantAccountUIDs) + "')"
++                + ")";
++        Cursor cursor = accountsDbAdapter.fetchAccountsOrderedByFullName(conditions,
++                new String[]{mOriginAccountUID,
++                        accountsDbAdapter.getCurrencyCode(mOriginAccountUID),
++                        accountsDbAdapter.getAccountType(mOriginAccountUID).name()
++                });
++
++        SimpleCursorAdapter mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
++                android.R.layout.simple_spinner_item, cursor);
++        mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        mTransactionsDestinationAccountSpinner.setAdapter(mCursorAdapter);
++        mAccountsDestinationAccountSpinner.setAdapter(mCursorAdapter);
++
++        setListeners();
++
++        //this comes after the listeners because of some useful bindings done there
++        if (cursor.getCount() == 0){
++            mMoveAccountsRadioButton.setEnabled(false);
++            mMoveAccountsRadioButton.setChecked(false);
++            mDeleteAccountsRadioButton.setChecked(true);
++            mMoveTransactionsRadioButton.setEnabled(false);
++            mMoveTransactionsRadioButton.setChecked(false);
++            mDeleteTransactionsRadioButton.setChecked(true);
++            mAccountsDestinationAccountSpinner.setVisibility(View.GONE);
++            mTransactionsDestinationAccountSpinner.setVisibility(View.GONE);
++        }
++    }
++
++    /**
++     * Binds click listeners for the dialog buttons
++     */
++    protected void setListeners(){
++        mMoveAccountsRadioButton.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
++            @Override
++            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
++                mAccountsDestinationAccountSpinner.setEnabled(isChecked);
++            }
++        });
++
++        mMoveTransactionsRadioButton.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
++            @Override
++            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
++                mTransactionsDestinationAccountSpinner.setEnabled(isChecked);
++            }
++        });
++
++        mCancelButton.setOnClickListener(new View.OnClickListener() {
++
++            @Override
++            public void onClick(View v) {
++                dismiss();
++            }
++        });
++
++        mOkButton.setOnClickListener(new View.OnClickListener() {
++
++            @Override
++            public void onClick(View v) {
++
++                AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++
++                if (mMoveTransactionsRadioButton.isChecked()){
++                    long targetAccountId = mTransactionsDestinationAccountSpinner.getSelectedItemId();
++                    //move all the splits
++                    SplitsDbAdapter.getInstance().updateRecords(DatabaseSchema.SplitEntry.COLUMN_ACCOUNT_UID + " = ?",
++                            new String[]{mOriginAccountUID}, DatabaseSchema.SplitEntry.COLUMN_ACCOUNT_UID, accountsDbAdapter.getUID(targetAccountId));
++                }
++
++                if (mMoveAccountsRadioButton.isChecked()){
++                    long targetAccountId = mAccountsDestinationAccountSpinner.getSelectedItemId();
++                    AccountsDbAdapter.getInstance().reassignDescendantAccounts(mOriginAccountUID, accountsDbAdapter.getUID(targetAccountId));
++                }
++
++                if (GnuCashApplication.isDoubleEntryEnabled()){ //reassign splits to imbalance
++                    Currency accountCurrency = Currency.getInstance(accountsDbAdapter.getCurrencyCode(mOriginAccountUID));
++                    String imbalanceAccountUID = accountsDbAdapter.getOrCreateImbalanceAccountUID(accountCurrency);
++                    SplitsDbAdapter.getInstance().updateRecords(
++                            DatabaseSchema.SplitEntry.COLUMN_ACCOUNT_UID + "=?",
++                            new String[]{mOriginAccountUID},
++                            DatabaseSchema.SplitEntry.COLUMN_ACCOUNT_UID,
++                            imbalanceAccountUID);
++                } else { //kill them all!!
++                    accountsDbAdapter.recursiveDeleteAccount(accountsDbAdapter.getID(mOriginAccountUID));
++                }
++                WidgetConfigurationActivity.updateAllWidgets(getActivity());
++                ((Refreshable)getTargetFragment()).refresh();
++                dismiss();
++            }
++        });
++    }
++
++}
+diff --git a/app/src/main/res/layout/dialog_account_delete.xml b/app/src/main/res/layout/dialog_account_delete.xml
+index 0638ae49..92db8461 100644
+--- a/app/src/main/res/layout/dialog_account_delete.xml
++++ b/app/src/main/res/layout/dialog_account_delete.xml
+@@ -1,7 +1,29 @@
+ <?xml version="1.0" encoding="utf-8"?>
++<!--
++ Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
+ 
+-<CheckBox xmlns:android="http://schemas.android.com/apk/res/android"
+-          android:id="@+id/checkbox_delete_sub_accounts"
+-          android:layout_width="match_parent"
+-          android:layout_height="match_parent"
+-          android:text="@string/label_delete_sub_accounts" />
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:orientation="vertical"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent">
++
++    <include android:id="@+id/transactions_options" layout="@layout/radio_group_delete_or_move" />
++    <include android:id="@+id/accounts_options" layout="@layout/radio_group_delete_or_move" />
++
++    <include layout="@layout/default_buttons"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"/>
++</LinearLayout>
+diff --git a/app/src/main/res/layout/radio_group_delete_or_move.xml b/app/src/main/res/layout/radio_group_delete_or_move.xml
+new file mode 100644
+index 00000000..b2c003ce
+--- /dev/null
++++ b/app/src/main/res/layout/radio_group_delete_or_move.xml
+@@ -0,0 +1,54 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++ Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++<RadioGroup xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:orientation="vertical"
++    android:padding="@dimen/dialog_padding"
++    android:layout_height="wrap_content"
++    android:layout_width="match_parent">
++
++    <TextView android:id="@+id/title_content"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:textStyle="bold"
++        tools:text="Transactions" />
++
++    <TextView android:id="@+id/description"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:textSize="12sp"
++        tools:text="This account contains transactions. \nWhat would you like to do with these transactions"/>
++
++    <RadioButton
++        android:id="@+id/radio_delete"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:text="@string/label_delete_sub_accounts" />
++
++    <RadioButton
++        android:id="@+id/radio_move"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:gravity="center_vertical"
++        android:checked="true"
++        android:text="Move to:" />
++
++    <Spinner android:id="@+id/target_accounts_spinner"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"/>
++
++</RadioGroup>

@@ -1,0 +1,429 @@
+From 6d29fee4eba2d49498c380e16dae901cd64c6b39 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 11 May 2015 17:17:25 +0200
+Subject: [PATCH] Ignore credit-formula and debit-formula slots when parsing
+ scheduled transactions from XML
+
+Template split amounts are exported with credit-numeric and debit-numeric
+Shortened file name of dev build
+---
+ app/build.gradle                                   |   2 +-
+ .../gnucash/android/export/xml/GncXmlExporter.java |  31 +++---
+ .../gnucash/android/export/xml/GncXmlHelper.java   |  31 ++++--
+ .../gnucash/android/importer/GncXmlHandler.java    | 123 ++++++++++-----------
+ .../gnucash/android/importer/GncXmlImporter.java   |   3 +-
+ .../main/java/org/gnucash/android/model/Split.java |   4 +-
+ 6 files changed, 104 insertions(+), 90 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 31d205b4..18c53cc3 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -9,7 +9,7 @@ def versionPatch = 0
+ def versionBuild = 4
+ 
+ def buildTime() {
+-    def df = new SimpleDateFormat("yyyyMMdd_HHmm'UTC'")
++    def df = new SimpleDateFormat("yyyyMMdd")
+     df.setTimeZone(TimeZone.getTimeZone("UTC"))
+     return df.format(new Date())
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 50bf361e..7d798c5e 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -274,10 +274,8 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " ASC , " +
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " ASC ");
+         String lastTrxUID = "";
+-        Currency trxCurrency;
+-        int fractionDigits;
+-        BigDecimal denom = new BigDecimal(100);
+-        String denomString = "100"; //FIXME: Should this be currency dependent?
++        Currency trxCurrency = null;
++        String denomString = "100";
+ 
+         if (exportTemplates) {
+             mRootTemplateAccount = new Account("Template Root");
+@@ -314,11 +312,6 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 // currency
+                 String currency = cursor.getString(cursor.getColumnIndexOrThrow("trans_currency"));
+                 trxCurrency = Currency.getInstance(currency);
+-                fractionDigits = trxCurrency.getDefaultFractionDigits();
+-                int denomInt;
+-                denomInt = (int) Math.pow(10, fractionDigits);
+-                denom = new BigDecimal(denomInt);
+-                denomString = Integer.toString(denomInt);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_TRX_CURRENCY);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
+                 xmlSerializer.text("ISO4217");
+@@ -402,7 +395,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             BigDecimal splitAmount = new BigDecimal(cursor.getString(cursor.getColumnIndexOrThrow("split_amount")));
+             String strValue = "0/" + denomString;
+             if (!exportTemplates) { //when doing normal transaction export
+-                strValue = (trxType.equals("CREDIT") ? "-" : "") + splitAmount.multiply(denom).stripTrailingZeros().toPlainString() + "/" + denomString;
++                strValue = (trxType.equals("CREDIT") ? "-" : "") + GncXmlHelper.formatSplitAmount(splitAmount, trxCurrency);
+             }
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_VALUE);
+             xmlSerializer.text(strValue);
+@@ -442,9 +435,21 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 slotTypes.add(GncXmlHelper.ATTR_VALUE_GUID);
+                 slotValues.add(cursor.getString(cursor.getColumnIndexOrThrow("split_acct_uid")));
+                 TransactionType type = TransactionType.valueOf(trxType);
+-                slotKeys.add(type == TransactionType.CREDIT ? GncXmlHelper.KEY_CREDIT_FORMULA : GncXmlHelper.KEY_DEBIT_FORMULA);
+-                slotTypes.add(GncXmlHelper.ATTR_VALUE_STRING);
+-                slotValues.add(GncXmlHelper.formatTemplateSplitAmount(splitAmount));
++                if (type == TransactionType.CREDIT){
++                    slotKeys.add(GncXmlHelper.KEY_CREDIT_FORMULA);
++                    slotTypes.add(GncXmlHelper.ATTR_VALUE_STRING);
++                    slotValues.add(GncXmlHelper.formatTemplateSplitAmount(splitAmount));
++                    slotKeys.add(GncXmlHelper.KEY_CREDIT_NUMERIC);
++                    slotTypes.add(GncXmlHelper.ATTR_VALUE_NUMERIC);
++                    slotValues.add(GncXmlHelper.formatSplitAmount(splitAmount, trxCurrency));
++                } else {
++                    slotKeys.add(GncXmlHelper.KEY_DEBIT_FORMULA);
++                    slotTypes.add(GncXmlHelper.ATTR_VALUE_STRING);
++                    slotValues.add(GncXmlHelper.formatTemplateSplitAmount(splitAmount));
++                    slotKeys.add(GncXmlHelper.KEY_DEBIT_NUMERIC);
++                    slotTypes.add(GncXmlHelper.ATTR_VALUE_NUMERIC);
++                    slotValues.add(GncXmlHelper.formatSplitAmount(splitAmount, trxCurrency));
++                }
+ 
+                 exportSlots(xmlSerializer, slotKeys, slotTypes, slotValues);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index d3953120..9c4bad32 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -28,6 +28,7 @@
+ import java.text.NumberFormat;
+ import java.text.ParseException;
+ import java.text.SimpleDateFormat;
++import java.util.Currency;
+ import java.util.Date;
+ import java.util.Locale;
+ import java.util.regex.Matcher;
+@@ -46,6 +47,7 @@
+     public static final String ATTR_KEY_TYPE        = "type";
+     public static final String ATTR_KEY_VERSION     = "version";
+     public static final String ATTR_VALUE_STRING    = "string";
++    public static final String ATTR_VALUE_NUMERIC   = "numeric";
+     public static final String ATTR_VALUE_GUID      = "guid";
+     public static final String ATTR_VALUE_BOOK      = "book";
+     public static final String TAG_GDATE            = "gdate";
+@@ -134,6 +136,8 @@
+     public static final String KEY_SPLIT_ACCOUNT_SLOT       = "account";
+     public static final String KEY_DEBIT_FORMULA            = "debit-formula";
+     public static final String KEY_CREDIT_FORMULA           = "credit-formula";
++    public static final String KEY_DEBIT_NUMERIC            = "debit-numeric";
++    public static final String KEY_CREDIT_NUMERIC           = "credit-numeric";
+     public static final String KEY_FROM_SCHED_ACTION        = "from-sched-xaction";
+     public static final String KEY_DEFAULT_TRANSFER_ACCOUNT = "default_transfer_account";
+ 
+@@ -158,17 +162,6 @@ public static long parseDate(String dateString) throws ParseException {
+     }
+ 
+     /**
+-     * Formats the money amounts into the GnuCash XML format. GnuCash stores debits as positive and credits as negative
+-     * @param split Split for which the amount is to be formatted
+-     * @return GnuCash XML representation of amount
+-     */
+-    public static String formatMoney(Split split){
+-        Money amount = split.getType() == TransactionType.DEBIT ? split.getAmount() : split.getAmount().negate();
+-        BigDecimal decimal = amount.asBigDecimal().multiply(new BigDecimal(100));
+-        return decimal.stripTrailingZeros().toPlainString() + "/100";
+-    }
+-
+-    /**
+      * Parses the amounts in template transaction splits.
+      * <p>GnuCash desktop formats the amounts based on the locale of the computer. That poses a problem here as the input can vary per user.<br/>
+      *     The solution is to parse the string irrespective of comma or thousands separators as follows:
+@@ -206,6 +199,7 @@ public static BigDecimal parseTemplateSplitAmount(@NonNull String amountString){
+      * Parses amount strings from GnuCash XML into {@link java.math.BigDecimal}s
+      * @param amountString String containing the amount
+      * @return BigDecimal with numerical value
++     * @throws ParseException if the amount could not be parsed
+      */
+     public static BigDecimal parseSplitAmount(String amountString) throws ParseException {
+         int pos = amountString.indexOf("/");
+@@ -219,6 +213,21 @@ public static BigDecimal parseSplitAmount(String amountString) throws ParseExcep
+     }
+ 
+     /**
++     * Formats money amounts for splits in the format 2550/100
++     * @param amount Split amount as BigDecimal
++     * @param trxCurrency Currency of the transaction
++     * @return Formatted split amount
++     */
++    public static String formatSplitAmount(BigDecimal amount, Currency trxCurrency){
++        int fractionDigits = trxCurrency.getDefaultFractionDigits();
++        int denomInt = (int) Math.pow(10, fractionDigits);
++        BigDecimal denom = new BigDecimal(denomInt);
++        String denomString = Integer.toString(denomInt);
++
++        return amount.multiply(denom).stripTrailingZeros().toPlainString() + "/" + denomString;
++    }
++
++    /**
+      * Format the amount in template transaction splits.
+      * <p>GnuCash desktop always formats with a locale dependent format, and that varies per user.<br>
+      * So we will use the device locale here and hope that the user has the same locale on the desktop GnuCash</p>
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 03cfe708..c2b12a52 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -173,24 +173,23 @@
+     boolean mInExported         = false;
+     boolean mInTemplates        = false;
+     boolean mInSplitAccountSlot = false;
+-    boolean mInCreditFormulaSlot = false;
+-    boolean mInDebitFormulaSlot = false;
++    boolean mInCreditNumericSlot = false;
++    boolean mInDebitNumericSlot = false;
+     boolean mIsScheduledStart   = false;
+     boolean mIsScheduledEnd     = false;
+     boolean mIsLastRun          = false;
+     boolean mIsRecurrenceStart  = false;
+ 
+     /**
+-     * Flag to determine if to ignore template transactions.
+-     * If this flag is set, both template transactions and scheduled actions will be ignored.
+-     * This flag is mostly set when an error occurs in parsing the template transaction amount.
++     * Multiplier for the recurrence period type. e.g. period type of week and multiplier of 2 means bi-weekly
+      */
+-    boolean mIgnoreTemplateTransactions = false;
++    int mRecurrenceMultiplier   = 1;
+ 
+     /**
+-     * Multiplier for the recurrence period type. e.g. period type of week and multiplier of 2 means bi-weekly
++     * Flag which says to ignore template transactions until we successfully parse a split amount
++     * Is updated for each transaction template split parsed
+      */
+-    int mRecurrenceMultiplier   = 1;
++    boolean mIgnoreTemplateTransaction = true;
+ 
+     /**
+      * Used for parsing old backup files where recurrence was saved inside the transaction.
+@@ -373,11 +372,11 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     case GncXmlHelper.KEY_SPLIT_ACCOUNT_SLOT:
+                         mInSplitAccountSlot = true;
+                         break;
+-                    case GncXmlHelper.KEY_CREDIT_FORMULA:
+-                        mInCreditFormulaSlot = true;
++                    case GncXmlHelper.KEY_CREDIT_NUMERIC:
++                        mInCreditNumericSlot = true;
+                         break;
+-                    case GncXmlHelper.KEY_DEBIT_FORMULA:
+-                        mInDebitFormulaSlot = true;
++                    case GncXmlHelper.KEY_DEBIT_NUMERIC:
++                        mInDebitNumericSlot = true;
+                         break;
+                 }
+                 break;
+@@ -424,38 +423,10 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 } else if (mInTemplates && mInSplitAccountSlot) {
+                     mSplit.setAccountUID(characterString);
+                     mInSplitAccountSlot = false;
+-                } else if (mInTemplates && mInCreditFormulaSlot) {
+-                    try {
+-                        Money amount = new Money(GncXmlHelper.parseTemplateSplitAmount(characterString),
+-                                mTransaction.getCurrency());
+-                        mSplit.setAmount(amount.absolute());
+-                        mSplit.setType(TransactionType.CREDIT);
+-                    } catch (NumberFormatException e) {
+-                        String msg = "Error parsing template credit split amount " + characterString;
+-                        Log.e(LOG_TAG, msg + "\n" + e.getMessage());
+-                        Crashlytics.log(msg);
+-                        Crashlytics.logException(e);
+-                        mIgnoreTemplateTransactions = true;
+-                        //throw new SAXException(msg, e); //if we fail to parse the split amount, terminate import - data integrity compromised
+-                    } finally {
+-                        mInCreditFormulaSlot = false;
+-                    }
+-                } else if (mInTemplates && mInDebitFormulaSlot) {
+-                    try {
+-                        Money amount = new Money(GncXmlHelper.parseTemplateSplitAmount(characterString),
+-                                mTransaction.getCurrency());
+-                        mSplit.setAmount(amount.absolute());
+-                        mSplit.setType(TransactionType.DEBIT);
+-                    } catch (NumberFormatException e) {
+-                        String msg = "Error parsing template debit split amount " + characterString;
+-                        Log.e(LOG_TAG, msg + "\n" + e.getMessage());
+-                        Crashlytics.log(msg);
+-                        Crashlytics.logException(e);
+-                        mIgnoreTemplateTransactions = true;
+-                        //throw new SAXException(msg, e); //if we fail to parse the split amount, terminate import - data integrity compromised
+-                    } finally {
+-                        mInDebitFormulaSlot = false;
+-                    }
++                } else if (mInTemplates && mInCreditNumericSlot) {
++                    handleEndOfTemplateNumericSlot(characterString, TransactionType.CREDIT);
++                } else if (mInTemplates && mInDebitNumericSlot) {
++                    handleEndOfTemplateNumericSlot(characterString, TransactionType.DEBIT);
+                 }
+                 break;
+             //================  PROCESSING OF TRANSACTION TAGS =====================================
+@@ -506,7 +477,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     }
+                     mQuantity = GncXmlHelper.parseSplitAmount(q);
+                 } catch (ParseException e) {
+-                    String msg = "Error to parsing split quantity - " + characterString;
++                    String msg = "Error parsing split quantity - " + characterString;
+                     Crashlytics.log(msg);
+                     Crashlytics.logException(e);
+                     throw new SAXException(msg, e);
+@@ -521,7 +492,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     mSplit.setAmount(amount);
+                     mSplit.setAccountUID(characterString);
+                 } else {
+-                    mTemplateAccountToTransactionMap.put(characterString, mTransaction.getUID());
++                    if (!mIgnoreTemplateTransaction)
++                        mTemplateAccountToTransactionMap.put(characterString, mTransaction.getUID());
+                 }
+                 break;
+             case GncXmlHelper.TAG_TRN_SPLIT:
+@@ -534,17 +506,18 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     mAutoBalanceSplits.add(imbSplit);
+                 }
+                 if (mInTemplates){
+-                    mTemplateTransactions.add(mTransaction);
++                    if (!mIgnoreTemplateTransaction)
++                        mTemplateTransactions.add(mTransaction);
+                 } else {
+                     mTransactionList.add(mTransaction);
+                 }
+-
+                 if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
+                     mTransaction.setTemplate(true);
+                     ScheduledAction scheduledAction = ScheduledAction.parseScheduledAction(mTransaction, mRecurrencePeriod);
+                     mScheduledActionsList.add(scheduledAction);
+                 }
+                 mRecurrencePeriod = 0;
++                mIgnoreTemplateTransaction = true;
+                 mTransaction = null;
+                 break;
+             case GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS:
+@@ -616,11 +589,10 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 }
+                 break;
+             case GncXmlHelper.TAG_SCHEDULED_ACTION:
+-                mScheduledActionsList.add(mScheduledAction);
+-                if (!mIgnoreTemplateTransactions) {
+-                    int count = generateMissedScheduledTransactions(mScheduledAction);
+-                    Log.i(LOG_TAG, String.format("Generated %d transactions from scheduled action", count));
+-                }
++                if (mScheduledAction.getActionUID() != null)
++                    mScheduledActionsList.add(mScheduledAction);
++                int count = generateMissedScheduledTransactions(mScheduledAction);
++                Log.i(LOG_TAG, String.format("Generated %d transactions from scheduled action", count));
+                 mRecurrenceMultiplier = 1; //reset it, even though it will be parsed from XML each time
+                 break;
+         }
+@@ -722,21 +694,23 @@ public void endDocument() throws SAXException {
+         mAccountsDbAdapter.beginTransaction();
+         try {
+             mAccountsDbAdapter.deleteAllRecords();
++
+             long nAccounts = mAccountsDbAdapter.bulkAddAccounts(mAccountList);
+             Log.d("Handler:", String.format("%d accounts inserted", nAccounts));
+-            //this flag is set when we have issues with parsing the template transaction amount
+-            if (!mIgnoreTemplateTransactions) {
+-                //We need to add scheduled actions first because there is a foreign key constraint on transactions
+-                //which are generated from scheduled actions (we do auto-create some transactions during import)
+-                int nSchedActions = mScheduledActionsDbAdapter.bulkAddScheduledActions(mScheduledActionsList);
+-                Log.d("Handler:", String.format("%d scheduled actions inserted", nSchedActions));
+-                long nTempTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTemplateTransactions);
+-                Log.d("Handler:", String.format("%d template transactions inserted", nTempTransactions));
+-            }
++            //We need to add scheduled actions first because there is a foreign key constraint on transactions
++            //which are generated from scheduled actions (we do auto-create some transactions during import)
++            int nSchedActions = mScheduledActionsDbAdapter.bulkAddScheduledActions(mScheduledActionsList);
++            Log.d("Handler:", String.format("%d scheduled actions inserted", nSchedActions));
++
++            long nTempTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTemplateTransactions);
++            Log.d("Handler:", String.format("%d template transactions inserted", nTempTransactions));
++
+             long nTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTransactionList);
+             Log.d("Handler:", String.format("%d transactions inserted", nTransactions));
++
+             long endTime = System.nanoTime();
+             Log.d("Handler:", String.format(" bulk insert time: %d", endTime - startTime));
++
+             mAccountsDbAdapter.setTransactionSuccessful();
+         } finally {
+             mAccountsDbAdapter.endTransaction();
+@@ -758,6 +732,31 @@ private Currency getCurrencyForAccount(String accountUID){
+         }
+     }
+ 
++
++    /**
++     * Handles the case when we reach the end of the template numeric slot
++     * @param characterString Parsed characters containing split amount
++     */
++    private void handleEndOfTemplateNumericSlot(String characterString, TransactionType splitType) {
++        try {
++            BigDecimal amountBigD = GncXmlHelper.parseSplitAmount(characterString);
++            Money amount = new Money(amountBigD, getCurrencyForAccount(mSplit.getAccountUID()));
++            mSplit.setAmount(amount.absolute());
++            mSplit.setType(splitType);
++            mIgnoreTemplateTransaction = false; //we have successfully parsed an amount
++        } catch (NumberFormatException | ParseException e) {
++            String msg = "Error parsing template credit split amount " + characterString;
++            Log.e(LOG_TAG, msg + "\n" + e.getMessage());
++            Crashlytics.log(msg);
++            Crashlytics.logException(e);
++        } finally {
++            if (splitType == TransactionType.CREDIT)
++                mInCreditNumericSlot = false;
++            else
++                mInDebitNumericSlot = false;
++        }
++    }
++
+     /**
+      * Generates the runs of the scheduled action which have been missed since the file was last opened.
+      * @param scheduledAction Scheduled action for transaction
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index 92b9de74..0ebefd85 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -16,7 +16,6 @@
+  */
+ package org.gnucash.android.importer;
+ 
+-import android.content.Context;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.util.Log;
+ 
+@@ -44,7 +43,7 @@
+     /**
+      * Parses XML into an already open database.
+      * <p>This method is used mainly by the {@link org.gnucash.android.db.DatabaseHelper} for database migrations.<br>
+-     *     You should probably use {@link #parse(android.content.Context, java.io.InputStream)} instead</p>
++     *     You should probably use {@link #parse(java.io.InputStream)} instead</p>
+      * @param db SQLite Database
+      * @param gncXmlInputStream Input stream of GnuCash XML
+      */
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 92a184f5..297b83df 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -1,6 +1,8 @@
+ package org.gnucash.android.model;
+ 
+ 
++import android.support.annotation.NonNull;
++
+ /**
+  * A split amount in a transaction.
+  * Every transaction is made up of at least two splits (representing a double entry transaction)
+@@ -42,7 +44,7 @@
+      * @param amount Money amount of this split
+      * @param accountUID String UID of transfer account
+      */
+-    public Split(Money amount, String accountUID){
++    public Split(@NonNull Money amount, String accountUID){
+         setAmount(amount);
+         setAccountUID(accountUID);
+         //NOTE: This is a rather simplististic approach to the split type.

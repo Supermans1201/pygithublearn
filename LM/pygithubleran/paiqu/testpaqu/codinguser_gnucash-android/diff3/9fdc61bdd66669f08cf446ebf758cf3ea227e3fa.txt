@@ -1,0 +1,928 @@
+From 9fdc61bdd66669f08cf446ebf758cf3ea227e3fa Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 14 Feb 2015 21:32:44 +0100
+Subject: [PATCH] - Added service for executing the scheduled tasks - Upgraded
+ minimum required version to GINGERBREAD (API level 9 - also need by
+ betterpickers library) - Modified ExporterAsyncTask to be executable without
+ UI context - Added TargetApi annotations for classes requiring API level 11
+ and above
+
+---
+ app/build.gradle                                   |  14 ++-
+ app/src/main/AndroidManifest.xml                   |   8 +-
+ .../org/gnucash/android/db/DatabaseHelper.java     |  18 ++--
+ .../org/gnucash/android/db/DatabaseSchema.java     |   5 +-
+ .../android/db/ScheduledEventDbAdapter.java        |  21 +++-
+ .../org/gnucash/android/export/ExportParams.java   |  43 +++++++-
+ .../gnucash/android/export/ExporterAsyncTask.java  | 108 ++++++++++++---------
+ .../gnucash/android/importer/ImportAsyncTask.java  |   2 +
+ .../org/gnucash/android/model/ScheduledEvent.java  |  14 ++-
+ .../org/gnucash/android/model/Transaction.java     |   2 +-
+ .../android/receivers/SchedulerReceiver.java       |  38 ++++++++
+ .../gnucash/android/service/SchedulerService.java  | 105 ++++++++++++++++++++
+ .../org/gnucash/android/ui/BaseDrawerActivity.java |  19 +++-
+ .../ui/settings/AboutPreferenceFragment.java       |   2 +
+ .../ui/settings/AccountPreferencesFragment.java    |   2 +
+ .../DeleteAllAccountsConfirmationDialog.java       |   2 +
+ .../DeleteAllTransacationsConfirmationDialog.java  |   2 +
+ .../ui/settings/GeneralPreferenceFragment.java     |   2 +
+ .../ui/settings/PasscodePreferenceFragment.java    |   2 +
+ .../android/ui/settings/SettingsActivity.java      |   3 +
+ .../settings/TransactionsPreferenceFragment.java   |   2 +
+ .../android/ui/util/CheckableLinearLayout.java     |   2 +
+ 22 files changed, 346 insertions(+), 70 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/receivers/SchedulerReceiver.java
+ create mode 100644 app/src/main/java/org/gnucash/android/service/SchedulerService.java
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 183ae5fa..be532509 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -1,15 +1,15 @@
+ apply plugin: 'com.android.application'
+ 
+ android {
+-    compileSdkVersion 19
++    compileSdkVersion 18
+     buildToolsVersion "21.1.2"
+ 
+     defaultConfig {
+         applicationId "org.gnucash.android"
+-        minSdkVersion 15
+-        targetSdkVersion 19
+-        versionCode 47
+-        versionName "1.5.3"
++        minSdkVersion 9
++        targetSdkVersion 18
++        versionCode 48
++        versionName "1.5.4"
+     }
+ 
+     buildTypes {
+@@ -21,6 +21,10 @@ android {
+             debuggable true
+         }
+     }
++
++    lintOptions {
++        abortOnError false
++    }
+ }
+ 
+ dependencies {
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 224a6d18..b1a5ea4d 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -44,7 +44,8 @@
+         android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+     <uses-permission android:name="android.permission.VIBRATE"
+                      android:label="Allow device to vibrate with notifications" />
+-	    
++    <uses-permission android:name="android.permission.WAKE_LOCK" />
++
+     <application android:name="org.gnucash.android.app.GnuCashApplication"
+         android:icon="@drawable/ic_launcher"
+         android:label="@string/app_name" 
+@@ -75,6 +76,11 @@
+ 		        <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE"/>
+ 		    </intent-filter>
+ 		</activity>
++        <service android:name=".service.SchedulerService"
++            android:exported="false"
++            android:label="GnuCash Android Scheduler Execution Service"/>
++        <receiver android:name=".receivers.SchedulerReceiver"
++            android:exported="false"/>
+         <receiver android:name=".receivers.TransactionRecorder"
+             android:label="Records transactions received through intents"
+             android:permission="org.gnucash.android.permission.RECORD_TRANSACTION">
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 0db65bde..b91a6dd8 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -22,11 +22,13 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteOpenHelper;
+ import android.util.Log;
+-import android.widget.Toast;
++
+ import org.gnucash.android.model.AccountType;
+-import org.gnucash.android.model.Transaction;
+ 
+-import static org.gnucash.android.db.DatabaseSchema.*;
++import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
++import static org.gnucash.android.db.DatabaseSchema.ScheduledEventEntry;
++import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+ 
+ /**
+  * Helper class for managing the SQLite database.
+@@ -113,22 +115,18 @@
+             + ScheduledEventEntry.COLUMN_LAST_RUN       + " integer default 0, "
+             + ScheduledEventEntry.COLUMN_START_TIME     + " integer not null, "
+             + ScheduledEventEntry.COLUMN_END_TIME       + " integer default 0, "
+-            + "UNIQUE (" 		+ ScheduledEventEntry.COLUMN_UID + ") "
++            + ScheduledEventEntry.COLUMN_TAG            + " text, "
++            + "UNIQUE (" + ScheduledEventEntry.COLUMN_UID + ") "
+             + ");";
+ 
+ 
+     /**
+-     * Context passed in for database upgrade. Keep reference so as to be able to display UI dialogs
+-     */
+-    private Context mContext;
+-
+-    /**
+ 	 * Constructor
+ 	 * @param context Application context
+ 	 */
+ 	public DatabaseHelper(Context context){
+ 		super(context, DATABASE_NAME, null, DatabaseSchema.DATABASE_VERSION);
+-        mContext = context;
++
+ 	}
+ 	
+ 	@Override
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index a4cd48a4..f2fe28e1 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -105,6 +105,9 @@ private DatabaseSchema(){}
+         public static final String COLUMN_END_TIME      = "end_time";
+         public static final String COLUMN_LAST_RUN      = "last_run";
+         public static final String COLUMN_PERIOD        = "period";
+-
++        /**
++         * Tags for any scheduled event specific information
++         */
++        public static final String COLUMN_TAG           = "tag";
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+index 60d6c695..187edca0 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -23,6 +23,9 @@
+ import org.gnucash.android.db.DatabaseSchema.ScheduledEventEntry;
+ import org.gnucash.android.model.ScheduledEvent;
+ 
++import java.util.ArrayList;
++import java.util.List;
++
+ /**
+  * Database adapter for fetching/saving/modifying scheduled events
+  *
+@@ -48,6 +51,7 @@ public long addScheduledEvent(ScheduledEvent scheduledEvent){
+         contentValues.put(ScheduledEventEntry.COLUMN_END_TIME,  scheduledEvent.getEndTime());
+         contentValues.put(ScheduledEventEntry.COLUMN_LAST_RUN,  scheduledEvent.getLastRun());
+         contentValues.put(ScheduledEventEntry.COLUMN_TYPE,      scheduledEvent.getEventType().name());
++        contentValues.put(ScheduledEventEntry.COLUMN_TAG,       scheduledEvent.getTag());
+ 
+         Log.d(TAG, "Replace scheduled event in the db");
+         return mDb.replace(ScheduledEventEntry.TABLE_NAME, null, contentValues);
+@@ -67,6 +71,7 @@ private ScheduledEvent buildScheduledEventInstance(final Cursor cursor){
+         long endTime    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_END_TIME));
+         long lastRun    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_LAST_RUN));
+         String typeString = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_TYPE));
++        String tag      = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_TAG));
+ 
+         ScheduledEvent event = new ScheduledEvent(ScheduledEvent.EventType.valueOf(typeString));
+         event.setPeriod(period);
+@@ -75,6 +80,7 @@ private ScheduledEvent buildScheduledEventInstance(final Cursor cursor){
+         event.setEventUID(eventUid);
+         event.setUID(uid);
+         event.setLastRun(lastRun);
++        event.setTag(tag);
+ 
+         return event;
+     }
+@@ -97,6 +103,19 @@ public ScheduledEvent getScheduledEvent(String uid){
+         return scheduledEvent;
+     }
+ 
++    /**
++     * Returns all scheduled events in the database
++     * @return List with all scheduled events
++     */
++    public List<ScheduledEvent> getAllScheduledEvents(){
++        Cursor cursor = fetchAllRecords();
++        List<ScheduledEvent> scheduledEvents = new ArrayList<ScheduledEvent>();
++        while (cursor.moveToNext()){
++            scheduledEvents.add(buildScheduledEventInstance(cursor));
++        }
++        return scheduledEvents;
++    }
++
+     @Override
+     public Cursor fetchRecord(long rowId) {
+         return fetchRecord(ScheduledEventEntry.TABLE_NAME, rowId);
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index 821fde13..2aeef6ee 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2013 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2013 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -149,4 +149,45 @@ public void setTargetFilepath(String mTargetFilepath) {
+         this.mTargetFilepath = mTargetFilepath;
+     }
+ 
++    @Override
++    public String toString() {
++        return "Export " + mExportFormat.name() + " to " + mExportTarget.name() + " at "
++                + mTargetFilepath;
++    }
++
++    /**
++     * Returns the export parameters formatted as CSV.
++     * <p>The CSV format is: exportformat;exportTarget;shouldExportAllTransactions;shouldDeleteAllTransactions</p>
++     * @return String containing CSV format of ExportParams
++     */
++    public String toCsv(){
++        String separator = ";";
++        String csv = mExportFormat.name() + separator + mExportTarget.name() + separator
++                + Boolean.toString(mExportAllTransactions) + separator
++                + Boolean.toString(mDeleteTransactionsAfterExport);
++
++        if (mTargetFilepath != null && mTargetFilepath.length() > 0){
++            csv +=  separator + mTargetFilepath;
++        }
++
++        return csv;
++    }
++
++    /**
++     * Parses csv generated by {@link #toCsv()} to create
++     * @param csvParams String containing csv of params
++     * @return ExportParams from the csv
++     */
++    public static ExportParams parseCsv(String csvParams){
++        String[] tokens = csvParams.split(";");
++        ExportParams params = new ExportParams(ExportFormat.valueOf(tokens[0]));
++        params.setExportTarget(ExportTarget.valueOf(tokens[1]));
++        params.setExportAllTransactions(Boolean.parseBoolean(tokens[2]));
++        params.setDeleteTransactionsAfterExport(Boolean.parseBoolean(tokens[3]));
++
++        if (tokens.length == 5)
++            params.setTargetFilepath(tokens[4]);
++
++        return params;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/ExporterAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExporterAsyncTask.java
+index 00401bc8..6763aa0d 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExporterAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2013 - 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2013 - 2015 Ngewi Fet <ngewif@gmail.com>
+  * Copyright (c) 2014 Yongxin Wang <fefe.wyx@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -17,6 +17,7 @@
+ 
+ package org.gnucash.android.export;
+ 
++import android.annotation.TargetApi;
+ import android.app.Activity;
+ import android.app.ProgressDialog;
+ import android.content.Context;
+@@ -53,7 +54,7 @@
+     /**
+      * App context
+      */
+-    private final Activity mContext;
++    private final Context mContext;
+ 
+     private ProgressDialog mProgressDialog;
+ 
+@@ -67,22 +68,25 @@
+      */
+     private ExportParams mExportParams;
+ 
+-    public ExporterAsyncTask(Activity context){
++    public ExporterAsyncTask(Context context){
+         this.mContext = context;
+     }
+ 
+     @Override
++    @TargetApi(11)
+     protected void onPreExecute() {
+         super.onPreExecute();
+-        mProgressDialog = new ProgressDialog(mContext);
+-        mProgressDialog.setTitle(R.string.title_progress_exporting_transactions);
+-        mProgressDialog.setIndeterminate(true);
+-        mProgressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
+-        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.HONEYCOMB){
+-            mProgressDialog.setProgressNumberFormat(null);
+-            mProgressDialog.setProgressPercentFormat(null);
++        if (mContext instanceof Activity) {
++            mProgressDialog = new ProgressDialog(mContext);
++            mProgressDialog.setTitle(R.string.title_progress_exporting_transactions);
++            mProgressDialog.setIndeterminate(true);
++            mProgressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
++            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.HONEYCOMB) {
++                mProgressDialog.setProgressNumberFormat(null);
++                mProgressDialog.setProgressPercentFormat(null);
++            }
++            mProgressDialog.show();
+         }
+-        mProgressDialog.show();
+     }
+ 
+     /**
+@@ -123,16 +127,18 @@ protected Boolean doInBackground(ExportParams... params) {
+             e.printStackTrace();
+             Log.e(TAG, "" + e.getMessage());
+             final String err_msg = e.getLocalizedMessage();
+-            mContext.runOnUiThread(new Runnable() {
+-                @Override
+-                public void run() {
+-                    Toast.makeText(mContext, R.string.toast_export_error,
+-                            Toast.LENGTH_SHORT).show();
+-                    if (err_msg != null) {
+-                        Toast.makeText(mContext, err_msg, Toast.LENGTH_LONG).show();
++            if (mContext instanceof Activity) {
++                ((Activity)mContext).runOnUiThread(new Runnable() {
++                    @Override
++                    public void run() {
++                        Toast.makeText(mContext, R.string.toast_export_error,
++                                Toast.LENGTH_SHORT).show();
++                        if (err_msg != null) {
++                            Toast.makeText(mContext, err_msg, Toast.LENGTH_LONG).show();
++                        }
+                     }
+-                }
+-            });
++                });
++            }
+             return false;
+         }
+         return true;
+@@ -144,11 +150,13 @@ public void run() {
+      */
+     @Override
+     protected void onPostExecute(Boolean exportResult) {
+-        if (!exportResult){
+-            Toast.makeText(mContext,
+-                    mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name()),
+-                    Toast.LENGTH_LONG).show();
+-            return;
++        if (mContext instanceof Activity) {
++            if (!exportResult) {
++                Toast.makeText(mContext,
++                        mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name()),
++                        Toast.LENGTH_LONG).show();
++                return;
++            }
+         }
+ 
+         switch (mExportParams.getExportTarget()) {
+@@ -163,39 +171,46 @@ protected void onPostExecute(Boolean exportResult) {
+                 try {
+                     copyFile(src, dst);
+                 } catch (IOException e) {
++                    if (mContext instanceof Activity) {
++                        Toast.makeText(mContext,
++                                mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name())
++                                        + dst.getAbsolutePath(),
++                                Toast.LENGTH_LONG).show();
++                        Log.e(TAG, e.getMessage());
++                    } else {
++                        Log.e(TAG, e.getMessage());
++                    }
++                    break;
++                }
++
++                if (mContext instanceof Activity) {
++                    //file already exists, just let the user know
+                     Toast.makeText(mContext,
+-                            mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name())
++                            mContext.getString(R.string.toast_format_exported_to, mExportParams.getExportFormat().name())
+                                     + dst.getAbsolutePath(),
+                             Toast.LENGTH_LONG).show();
+-                    Log.e(TAG, e.getMessage());
+-                    break;
+                 }
+-
+-                //file already exists, just let the user know
+-                Toast.makeText(mContext,
+-                        mContext.getString(R.string.toast_format_exported_to, mExportParams.getExportFormat().name())
+-                                + dst.getAbsolutePath(),
+-                        Toast.LENGTH_LONG).show();
+                 break;
+ 
+             default:
+                 break;
+         }
+ 
+-        if (mExportParams.shouldDeleteTransactionsAfterExport()){
+-            android.support.v4.app.FragmentManager fragmentManager = ((FragmentActivity)mContext).getSupportFragmentManager();
+-            Fragment currentFragment = ((AccountsActivity)mContext).getCurrentAccountListFragment();
++        if (mContext instanceof Activity) {
++            if (mExportParams.shouldDeleteTransactionsAfterExport()) {
++                android.support.v4.app.FragmentManager fragmentManager = ((FragmentActivity) mContext).getSupportFragmentManager();
++                Fragment currentFragment = ((AccountsActivity) mContext).getCurrentAccountListFragment();
+ 
+-            TransactionsDeleteConfirmationDialogFragment alertFragment =
+-                    TransactionsDeleteConfirmationDialogFragment.newInstance(R.string.title_confirm_delete, 0);
+-            alertFragment.setTargetFragment(currentFragment, 0);
++                TransactionsDeleteConfirmationDialogFragment alertFragment =
++                        TransactionsDeleteConfirmationDialogFragment.newInstance(R.string.title_confirm_delete, 0);
++                alertFragment.setTargetFragment(currentFragment, 0);
+ 
+-            alertFragment.show(fragmentManager, "transactions_delete_confirmation_dialog");
+-        }
+-
+-        if (mProgressDialog != null && mProgressDialog.isShowing())
+-            mProgressDialog.dismiss();
++                alertFragment.show(fragmentManager, "transactions_delete_confirmation_dialog");
++            }
+ 
++            if (mProgressDialog != null && mProgressDialog.isShowing())
++                mProgressDialog.dismiss();
++        }
+     }
+ 
+     /**
+@@ -236,7 +251,8 @@ private void shareFile(String path) {
+                 + " " + formatter.format(new Date(System.currentTimeMillis())));
+         shareIntent.putExtra(Intent.EXTRA_TEXT, extraText);
+ 
+-        mContext.startActivity(Intent.createChooser(shareIntent, mContext.getString(R.string.title_select_export_destination)));
++        if (mContext instanceof Activity)
++            mContext.startActivity(Intent.createChooser(shareIntent, mContext.getString(R.string.title_select_export_destination)));
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+index e24f376f..a144c078 100644
+--- a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -15,6 +15,7 @@
+  */
+ package org.gnucash.android.importer;
+ 
++import android.annotation.TargetApi;
+ import android.app.Activity;
+ import android.app.ProgressDialog;
+ import android.content.Context;
+@@ -46,6 +47,7 @@ public ImportAsyncTask(Activity context, TaskDelegate delegate){
+         this.mDelegate = delegate;
+     }
+ 
++    @TargetApi(11)
+     @Override
+     protected void onPreExecute() {
+         super.onPreExecute();
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java b/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+index 54a034fe..1bd956ff 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -32,11 +32,12 @@
+     private long mPeriod;
+     private long mStartDate;
+     private long mEndDate;
++    private String mTag;
+ 
+     /**
+      * Types of events which can be scheduled
+      */
+-    public enum EventType {TRANSACTION};
++    public enum EventType {TRANSACTION, EXPORT}
+ 
+     /**
+      * Unique ID of scheduled event
+@@ -63,6 +64,7 @@ public ScheduledEvent(EventType eventType){
+         mUID = UUID.randomUUID().toString().replaceAll("-", "");
+         mEventType = eventType;
+         mStartDate = System.currentTimeMillis();
++        mEndDate = 0;
+     }
+ 
+     public String getUID(){
+@@ -121,6 +123,14 @@ public void setEndTime(long endDate) {
+         this.mEndDate = endDate;
+     }
+ 
++    public String getTag() {
++        return mTag;
++    }
++
++    public void setTag(String tag) {
++        this.mTag = tag;
++    }
++
+     @Override
+     public String toString() {
+         SimpleDateFormat dateFormat = new SimpleDateFormat("dd.MM.yyyy");
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index de592c1d..5fdd30dc 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -146,7 +146,7 @@ public Transaction(Transaction transaction, boolean generateNewUID){
+         //exported flag is left at default value of false
+ 
+         for (Split split : transaction.mSplitList) {
+-            addSplit(new Split(split, true));
++            addSplit(new Split(split, generateNewUID));
+         }
+ 
+         if (!generateNewUID){
+diff --git a/app/src/main/java/org/gnucash/android/receivers/SchedulerReceiver.java b/app/src/main/java/org/gnucash/android/receivers/SchedulerReceiver.java
+new file mode 100644
+index 00000000..41c1643c
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/receivers/SchedulerReceiver.java
+@@ -0,0 +1,38 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.receivers;
++
++import android.content.Context;
++import android.content.Intent;
++import android.os.SystemClock;
++import android.support.v4.content.WakefulBroadcastReceiver;
++import android.util.Log;
++
++import org.gnucash.android.service.SchedulerService;
++
++/**
++ * Broadcast receiver which starts the schedule execution service
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
++public class SchedulerReceiver extends WakefulBroadcastReceiver {
++
++    @Override
++    public void onReceive(Context context, Intent intent) {
++        Log.i("SchedulerReceiver", "Starting service @ " + SystemClock.elapsedRealtime());
++        Intent service = new Intent(context, SchedulerService.class);
++        startWakefulService(context, service);
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+new file mode 100644
+index 00000000..0cd507a7
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -0,0 +1,105 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.gnucash.android.service;
++
++import android.app.IntentService;
++import android.content.Intent;
++import android.os.SystemClock;
++import android.util.Log;
++
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.ScheduledEventDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.export.ExporterAsyncTask;
++import org.gnucash.android.model.ScheduledEvent;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.receivers.SchedulerReceiver;
++
++import java.util.List;
++import java.util.concurrent.ExecutionException;
++
++/**
++ * Service for running scheduled events
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
++public class SchedulerService extends IntentService {
++
++    public static final String LOG_TAG = "SchedulerService";
++
++    /**
++     * Creates an IntentService
++     *
++     */
++    public SchedulerService() {
++        super("SchedulerService");
++    }
++
++    @Override
++    protected void onHandleIntent(Intent intent) {
++        ScheduledEventDbAdapter scheduledEventDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
++        List<ScheduledEvent> scheduledEvents = scheduledEventDbAdapter.getAllScheduledEvents();
++
++        for (ScheduledEvent scheduledEvent : scheduledEvents) {
++            long lastRun    = scheduledEvent.getLastRun();
++            long period     = scheduledEvent.getPeriod();
++            long endTime    = scheduledEvent.getEndTime();
++
++            long now = System.currentTimeMillis();
++            //if we did not exceed the endtime, and one execution period has passed since last run
++            if (endTime > 0 && now < endTime && (lastRun + period) < now ){
++                executeScheduledEvent(scheduledEvent);
++            }
++        }
++
++        Log.i(LOG_TAG, "Completed service @ " + SystemClock.elapsedRealtime());
++        SchedulerReceiver.completeWakefulIntent(intent);
++    }
++
++    /**
++     * Executes a scheduled event according to the specified parameters
++     * @param scheduledEvent ScheduledEvent to be executed
++     */
++    private void executeScheduledEvent(ScheduledEvent scheduledEvent){
++        switch (scheduledEvent.getEventType()){
++            case TRANSACTION:
++                String eventUID = scheduledEvent.getEventUID();
++                TransactionsDbAdapter transactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
++                Transaction trxnTemplate = transactionsDbAdapter.getTransaction(eventUID);
++                Transaction recurringTrxn = new Transaction(trxnTemplate, true);
++                recurringTrxn.setTime(System.currentTimeMillis());
++
++                transactionsDbAdapter.addTransaction(recurringTrxn);
++                break;
++
++            case EXPORT:
++                ExportParams params = ExportParams.parseCsv(scheduledEvent.getTag());
++                try {
++                    new ExporterAsyncTask(GnuCashApplication.getAppContext()).execute(params).get();
++                } catch (InterruptedException e) {
++                    //TODO: Create special log for scheduler service
++                    Log.e(LOG_TAG, e.getMessage());
++                } catch (ExecutionException e) {
++                    //TODO: Log to crashlytics
++                    e.printStackTrace();
++                    Log.e(LOG_TAG, e.getMessage());
++                }
++                break;
++        }
++
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
+index 34e2b9f4..9fb318ec 100644
+--- a/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
+@@ -1,3 +1,18 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
+ package org.gnucash.android.ui;
+ 
+ import android.os.Bundle;
+@@ -14,9 +29,9 @@
+ 
+ 
+ /**
+- * Date: 25.01.14
++ * Base activity implementing the navigation drawer, to be extended by all activities requiring one
+  *
+- * @author Ngewi
++ * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class BaseDrawerActivity extends SherlockFragmentActivity {
+     protected DrawerLayout  mDrawerLayout;
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/AboutPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/AboutPreferenceFragment.java
+index caf97708..717d5836 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/AboutPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/AboutPreferenceFragment.java
+@@ -18,6 +18,7 @@
+ 
+ import org.gnucash.android.R;
+ 
++import android.annotation.TargetApi;
+ import android.content.SharedPreferences;
+ import android.os.Bundle;
+ import android.preference.Preference;
+@@ -34,6 +35,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  *
+  */
++@TargetApi(11)
+ public class AboutPreferenceFragment extends PreferenceFragment{
+ 	
+ 	@Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/AccountPreferencesFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
+index e9b137c1..29d7baf7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
+@@ -16,6 +16,7 @@
+ 
+ package org.gnucash.android.ui.settings;
+ 
++import android.annotation.TargetApi;
+ import android.app.Activity;
+ import android.app.AlertDialog;
+ import android.content.DialogInterface;
+@@ -38,6 +39,7 @@
+  * @author Ngewi Fet <ngewi.fet@gmail.com>
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  */
++@TargetApi(11)
+ public class AccountPreferencesFragment extends PreferenceFragment {
+ 
+     private Activity activity;
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
+index ad408de9..9784d46d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
+@@ -16,6 +16,7 @@
+ 
+ package org.gnucash.android.ui.settings;
+ 
++import android.annotation.TargetApi;
+ import android.app.AlertDialog;
+ import android.app.Dialog;
+ import android.app.DialogFragment;
+@@ -35,6 +36,7 @@
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
++@TargetApi(11)
+ public class DeleteAllAccountsConfirmationDialog extends DialogFragment {
+ 
+     public static DeleteAllAccountsConfirmationDialog newInstance() {
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+index d83639d3..29987919 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+@@ -16,6 +16,7 @@
+  */
+ package org.gnucash.android.ui.settings;
+ 
++import android.annotation.TargetApi;
+ import android.app.AlertDialog;
+ import android.app.Dialog;
+ import android.app.DialogFragment;
+@@ -40,6 +41,7 @@
+  * @author ngewif <ngewif@gmail.com>
+  * @author Yongxin Wang <fefe.wyx@gmail.com>
+  */
++@TargetApi(11)
+ public class DeleteAllTransacationsConfirmationDialog extends DialogFragment {
+ 
+     public static DeleteAllTransacationsConfirmationDialog newInstance() {
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
+index 23f1ea38..a60a99ef 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
+@@ -19,6 +19,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.model.Money;
+ 
++import android.annotation.TargetApi;
+ import android.content.SharedPreferences;
+ import android.os.Bundle;
+ import android.preference.Preference;
+@@ -35,6 +36,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  *
+  */
++@TargetApi(11)
+ public class GeneralPreferenceFragment extends PreferenceFragment implements OnPreferenceChangeListener{
+ 	
+ 	@Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+index e4ccc7db..9caf94e2 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+@@ -16,6 +16,7 @@
+ 
+ package org.gnucash.android.ui.settings;
+ 
++import android.annotation.TargetApi;
+ import android.app.Activity;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+@@ -38,6 +39,7 @@
+  * Fragment for configuring passcode to the application
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  */
++@TargetApi(11)
+ public class PasscodePreferenceFragment extends PreferenceFragment {
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index b14ea97a..0a01b031 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -17,6 +17,7 @@
+ 
+ package org.gnucash.android.ui.settings;
+ 
++import android.annotation.TargetApi;
+ import android.app.Activity;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+@@ -89,6 +90,7 @@
+ 	 * Constructs the headers to display in the header list when the Settings activity is first opened
+ 	 * Only available on Honeycomb and above
+ 	 */
++    @TargetApi(11)
+ 	@Override
+ 	public void onBuildHeaders(List<Header> target) {
+ 		loadHeadersFromResource(R.xml.preference_headers, target);
+@@ -167,6 +169,7 @@ protected void onPause() {
+         GnuCashApplication.PASSCODE_SESSION_INIT_TIME = System.currentTimeMillis();
+     }
+ 
++    @TargetApi(11)
+     @Override
+ 	public boolean onOptionsItemSelected(MenuItem item) {
+ 		switch (item.getItemId()) {
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
+index a2f8da9e..5198c82d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
+@@ -16,6 +16,7 @@
+ 
+ package org.gnucash.android.ui.settings;
+ 
++import android.annotation.TargetApi;
+ import android.content.SharedPreferences;
+ import android.os.Bundle;
+ import android.preference.Preference;
+@@ -31,6 +32,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  *
+  */
++@TargetApi(11)
+ public class TransactionsPreferenceFragment extends PreferenceFragment implements OnPreferenceChangeListener{
+ 
+ 	@Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/CheckableLinearLayout.java b/app/src/main/java/org/gnucash/android/ui/util/CheckableLinearLayout.java
+index 534c873c..10916365 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/CheckableLinearLayout.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/CheckableLinearLayout.java
+@@ -15,6 +15,7 @@
+  */
+ package org.gnucash.android.ui.util;
+ 
++import android.annotation.TargetApi;
+ import android.content.Context;
+ import android.util.AttributeSet;
+ import android.view.View;
+@@ -50,6 +51,7 @@ public CheckableLinearLayout(Context context, AttributeSet attrs) {
+         super(context, attrs);
+     }
+ 
++    @TargetApi(11)
+     public CheckableLinearLayout(Context context, AttributeSet attrs, int defStyle) {
+         super(context, attrs, defStyle);
+     }

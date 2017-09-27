@@ -1,0 +1,715 @@
+From 48303964ccb364bf1d097eb6ebcaa71e1dcef666 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 8 Oct 2015 14:10:47 +0200
+Subject: [PATCH] Use separate view for split editor button
+
+Fix: starting new transaction from widget causes crash when passcode is set
+Fix: split amount fields are hidden behind keyboard in split editor
+Fix: non-locale formatted amount shown in Calculator edittext when editing transaction
+Fix: editing an account causes splits belonging to it in template transactions to be deleted
+Update tests
+---
+ .../android/test/ui/ExportTransactionsTest.java    | 27 ++++++++++++--
+ .../android/test/ui/TransactionsActivityTest.java  | 25 +------------
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 23 ++++++++----
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  2 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 39 ++++++++++++++++++++
+ .../main/java/org/gnucash/android/model/Money.java | 19 ++++++++--
+ .../android/ui/export/ExportFormFragment.java      |  5 +--
+ .../android/ui/passcode/PasscodeLockActivity.java  | 12 ++++---
+ .../ui/passcode/PasscodeLockScreenActivity.java    |  2 +-
+ .../ui/transaction/SplitEditorFragment.java        |  5 ++-
+ .../ui/transaction/TransactionFormFragment.java    | 42 ++++++++--------------
+ .../android/ui/util/widget/CalculatorEditText.java | 29 +++++++++------
+ .../android/ui/util/widget/CalculatorKeyboard.java |  8 ++---
+ app/src/main/res/layout/fragment_split_editor.xml  | 26 ++++++--------
+ .../main/res/layout/fragment_transaction_form.xml  | 10 ++++--
+ 15 files changed, 162 insertions(+), 112 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 24489417..1e56a232 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -22,14 +22,12 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.Build;
+ import android.preference.PreferenceManager;
+-import android.support.design.widget.Snackbar;
+ import android.support.test.InstrumentationRegistry;
+ import android.support.test.espresso.contrib.DrawerActions;
++import android.support.test.espresso.matcher.ViewMatchers;
+ import android.support.test.runner.AndroidJUnit4;
+-import android.support.v7.app.AlertDialog;
+ import android.test.ActivityInstrumentationTestCase2;
+ import android.util.Log;
+-import android.view.View;
+ import android.widget.CompoundButton;
+ 
+ import org.gnucash.android.R;
+@@ -59,9 +57,11 @@
+ 
+ import static android.support.test.espresso.Espresso.onView;
+ import static android.support.test.espresso.action.ViewActions.click;
++import static android.support.test.espresso.assertion.ViewAssertions.matches;
+ import static android.support.test.espresso.matcher.ViewMatchers.isAssignableFrom;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
+ import static android.support.test.espresso.matcher.ViewMatchers.isEnabled;
++import static android.support.test.espresso.matcher.ViewMatchers.withEffectiveVisibility;
+ import static android.support.test.espresso.matcher.ViewMatchers.withId;
+ import static android.support.test.espresso.matcher.ViewMatchers.withText;
+ import static org.assertj.core.api.Assertions.assertThat;
+@@ -126,7 +126,28 @@ public void setUp() throws Exception {
+ 	 */
+ 	@Test
+ 	public void testOfxExport(){
++		PreferenceManager.getDefaultSharedPreferences(mAcccountsActivity)
++				.edit().putBoolean(mAcccountsActivity.getString(R.string.key_use_double_entry), false)
++				.commit();
+         testExport(ExportFormat.OFX);
++		PreferenceManager.getDefaultSharedPreferences(mAcccountsActivity)
++				.edit().putBoolean(mAcccountsActivity.getString(R.string.key_use_double_entry), true)
++				.commit();
++	}
++
++	@Test
++	public void shouldNotOfferXmlExportInSingleEntryMode(){
++		PreferenceManager.getDefaultSharedPreferences(mAcccountsActivity)
++				.edit().putBoolean(mAcccountsActivity.getString(R.string.key_use_double_entry), false)
++				.commit();
++
++		DrawerActions.openDrawer(R.id.drawer_layout);
++		onView(withText(R.string.nav_menu_export)).perform(click());
++		onView(withId(R.id.radio_xml_format)).check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
++
++		PreferenceManager.getDefaultSharedPreferences(mAcccountsActivity)
++				.edit().putBoolean(mAcccountsActivity.getString(R.string.key_use_double_entry), true)
++				.commit();
+ 	}
+ 
+ 	/**
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 9722f47a..51d3a481 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -25,16 +25,9 @@
+ import android.preference.PreferenceManager;
+ import android.support.test.InstrumentationRegistry;
+ import android.support.test.espresso.Espresso;
+-import android.support.test.espresso.ViewAction;
+-import android.support.test.espresso.action.CoordinatesProvider;
+-import android.support.test.espresso.action.GeneralClickAction;
+-import android.support.test.espresso.action.Press;
+-import android.support.test.espresso.action.Tap;
+ import android.support.test.runner.AndroidJUnit4;
+ import android.test.ActivityInstrumentationTestCase2;
+ import android.util.Log;
+-import android.view.View;
+-import android.widget.EditText;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
+@@ -334,7 +327,7 @@ public void testSplitEditor(){
+ 		onView(withId(R.id.input_transaction_name)).perform(typeText("Autobalance"));
+ 		onView(withId(R.id.input_transaction_amount)).perform(typeText("499"));
+ 
+-		onView(withId(R.id.input_transaction_amount)).perform(clickSplitIcon());
++		onView(withId(R.id.btn_split_editor)).perform(click());
+ 
+ 		onView(withId(R.id.split_list_layout)).check(matches(allOf(isDisplayed(), hasDescendant(withId(R.id.input_split_amount)))));
+ 
+@@ -519,22 +512,6 @@ private void clickOnView(int viewId){
+ 		onView(withId(viewId)).perform(click());
+ 	}
+ 
+-	public static ViewAction clickSplitIcon(){
+-		return new GeneralClickAction(Tap.SINGLE,
+-				new CoordinatesProvider() {
+-					@Override
+-					public float[] calculateCoordinates(View view) {
+-						int[] xy = new int[2];
+-						view.getLocationOnScreen(xy);
+-
+-						float x = xy[0] + view.getWidth()* 0.9f;
+-						float y = xy[1] + view.getHeight() * 0.5f;
+-
+-						return new float[]{x + 5, y};
+-					}
+-				}, Press.FINGER);
+-	}
+-
+ 	@Override
+ 	@After
+ 	public void tearDown() throws Exception {
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 3d8aad52..30fc1093 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -93,14 +93,15 @@ public static AccountsDbAdapter getInstance(){
+ 
+     /**
+ 	 * Adds an account to the database. 
+-	 * If an account already exists in the database with the same unique ID, 
+-	 * then just update that account. 
++	 * If an account already exists in the database with the same GUID, it is replaced.
+ 	 * @param account {@link Account} to be inserted to database
+ 	 * @return Database row ID of the inserted account
+ 	 */
+     @Override
+ 	public void addRecord(@NonNull Account account){
+         Log.d(LOG_TAG, "Replace account to db");
++        //in-case the account already existed, we want to update the templates based on it as well
++        List<Transaction> templateTransactions = mTransactionsAdapter.getScheduledTransactionsForAccount(account.getUID());
+         super.addRecord(account);
+         String accountUID = account.getUID();
+ 		//now add transactions if there are any
+@@ -112,26 +113,34 @@ public void addRecord(@NonNull Account account){
+                 t.setCommodityUID(commodityUID);
+ 		        mTransactionsAdapter.addRecord(t);
+ 			}
+-		}
++            for (Transaction transaction : templateTransactions) {
++                mTransactionsAdapter.addRecord(transaction);
++            }
++        }
+ 	}
+ 
+     /**
+      * Adds some accounts and their transactions to the database in bulk.
+-     * If an account already exists in the database with the same unique ID,
+-     * then just update that account. This function will NOT try to determine the full name
++     * <p>If an account already exists in the database with the same GUID, it is replaced.
++     * This function will NOT try to determine the full name
+      * of the accounts inserted, full names should be generated prior to the insert.
+-     * All or none of the accounts will be inserted;
++     * <br>All or none of the accounts will be inserted;</p>
+      * @param accountList {@link Account} to be inserted to database
+      * @return number of rows inserted
+      */
+     @Override
+     public long bulkAddRecords(@NonNull List<Account> accountList){
+-        long nRow = super.bulkAddRecords(accountList);
++        //scheduled transactions are not fetched from the database when getting account transactions
++        //so we retrieve those which affect this account and then re-save them later
++        //this is necessary because the database has ON DELETE CASCADE between accounts and splits
++        //and all accounts are editing via SQL REPLACE
+ 
+         List<Transaction> transactionList = new ArrayList<>(accountList.size()*2);
+         for (Account account : accountList) {
+             transactionList.addAll(account.getTransactions());
++            transactionList.addAll(mTransactionsAdapter.getScheduledTransactionsForAccount(account.getUID()));
+         }
++        long nRow = super.bulkAddRecords(accountList);
+ 
+         if (nRow > 0 && !transactionList.isEmpty()){
+             mTransactionsAdapter.bulkAddRecords(transactionList);
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 33e4ca75..5281404f 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -208,7 +208,7 @@ public long bulkAddRecords(@NonNull List<Model> modelList) {
+         }
+ 
+         Log.i(LOG_TAG, String.format("Bulk adding %d %s records to the database", modelList.size(),
+-                modelList.size() == 0 ? "null": modelList.get(0).getClass().getName()));
++                modelList.size() == 0 ? "null": modelList.get(0).getClass().getSimpleName()));
+         long nRow = 0;
+         try {
+             mDb.beginTransaction();
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 4fa53152..c235b75b 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -220,6 +220,28 @@ public Cursor fetchAllTransactionsForAccount(String accountUID){
+     }
+ 
+     /**
++     * Returns a cursor to all scheduled transactions which have at least one split in the account
++     * <p>This is basically a set of all template transactions for this account</p>
++     * @param accountUID GUID of account
++     * @return Cursor with set of transactions
++     */
++    public Cursor fetchScheduledTransactionsForAccount(String accountUID){
++        SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
++        queryBuilder.setTables(TransactionEntry.TABLE_NAME
++                + " INNER JOIN " + SplitEntry.TABLE_NAME + " ON "
++                + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
++                + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID);
++        queryBuilder.setDistinct(true);
++        String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
++        String selection = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID + " = ?"
++                + " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TEMPLATE + " = 1";
++        String[] selectionArgs = new String[]{accountUID};
++        String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " DESC";
++
++        return queryBuilder.query(mDb, projectionIn, selection, selectionArgs, null, null, sortOrder);
++    }
++
++    /**
+      * Deletes all transactions which contain a split in the account.
+      * <p><b>Note:</b>As long as the transaction has one split which belongs to the account {@code accountUID},
+      * it will be deleted. The other splits belonging to the transaction will also go away</p>
+@@ -486,6 +508,23 @@ public long getTemplateTransactionsCount(){
+     }
+ 
+     /**
++     * Returns a list of all scheduled transactions in the database
++     * @return List of all scheduled transactions
++     */
++    public List<Transaction> getScheduledTransactionsForAccount(String accountUID){
++        Cursor cursor = fetchScheduledTransactionsForAccount(accountUID);
++        List<Transaction> scheduledTransactions = new ArrayList<>();
++        try {
++            while (cursor.moveToNext()) {
++                scheduledTransactions.add(buildModelInstance(cursor));
++            }
++            return scheduledTransactions;
++        } finally {
++            cursor.close();
++        }
++    }
++
++    /**
+      * Returns the number of splits for the transaction in the database
+      * @param transactionUID GUID of the transaction
+      * @return Number of splits belonging to the transaction
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 7965da0e..20024b1c 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -26,7 +26,6 @@
+ 
+ import java.math.BigDecimal;
+ import java.math.BigInteger;
+-import java.math.MathContext;
+ import java.math.RoundingMode;
+ import java.security.InvalidParameterException;
+ import java.text.DecimalFormat;
+@@ -468,13 +467,27 @@ public boolean isNegative(){
+ 	}
+ 	
+ 	/**
+-	 * Returns the string representation of the amount (without currency) of the Money object
++	 * Returns the string representation of the amount (without currency) of the Money object.
++	 * <p>This string is not locale-formatted. The decimal operator is a period (.)</p>
+ 	 * @return String representation of the amount (without currency) of the Money object
+ 	 */
+ 	public String toPlainString(){
+ 		return mAmount.setScale(mCurrency.getDefaultFractionDigits(), ROUNDING_MODE).toPlainString();
+ 	}
+-	
++
++	/**
++	 * Returns the formatted amount in the default locale
++	 * <p>This prints the money amount with locale formatting like the decimal separation character</p>
++	 * @return Locale-formatted amount
++	 */
++	public String formattedAmount(){
++		NumberFormat formatter = NumberFormat.getInstance();
++		formatter.setMinimumFractionDigits(mCurrency.getDefaultFractionDigits());
++		formatter.setMaximumFractionDigits(mCurrency.getDefaultFractionDigits());
++		formatter.setGroupingUsed(false);
++		return formatter.format(asDouble());
++	}
++
+ 	/**
+ 	 * Returns the string representation of the Money object (value + currency) formatted according
+ 	 * to the default locale
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+index eafca8b7..29b6b0e2 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+@@ -62,13 +62,14 @@
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ 
+ import java.util.List;
+-import java.util.UUID;
+ 
+ import butterknife.Bind;
+ import butterknife.ButterKnife;
+ 
+ /**
+- * Dialog fragment for exporting account information as OFX files.
++ * Dialog fragment for exporting accounts and transactions in various formats
++ * <p>The dialog is used for collecting information on the export options and then passing them
++ * to the {@link org.gnucash.android.export.Exporter} responsible for exporting</p>
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class
+diff --git a/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockActivity.java b/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockActivity.java
+index 824b765b..25120ffe 100644
+--- a/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockActivity.java
+@@ -20,6 +20,7 @@
+ import android.content.SharedPreferences;
+ import android.preference.PreferenceManager;
+ import android.support.v7.app.AppCompatActivity;
++import android.util.Log;
+ import android.view.WindowManager.LayoutParams;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -59,13 +60,14 @@ protected void onResume() {
+         boolean skipPasscode = prefs.getBoolean(UxArgument.SKIP_PASSCODE_SCREEN, false);
+         prefs.edit().remove(UxArgument.SKIP_PASSCODE_SCREEN).apply();
+         String passCode = prefs.getString(UxArgument.PASSCODE, "");
++
+         if (isPassEnabled && !isSessionActive() && !passCode.trim().isEmpty() && !skipPasscode) {
++            Log.v(TAG, "Show passcode screen");
+             startActivity(new Intent(this, PasscodeLockScreenActivity.class)
+-                    .setAction(getIntent().getAction())
+-                    .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK)
+-                    .putExtra(UxArgument.PASSCODE_CLASS_CALLER, this.getClass().getName())
+-                    .putExtra(UxArgument.SELECTED_ACCOUNT_UID,
+-                            getIntent().getStringExtra(UxArgument.SELECTED_ACCOUNT_UID))
++                            .setAction(getIntent().getAction())
++                            .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK)
++                            .putExtra(UxArgument.PASSCODE_CLASS_CALLER, this.getClass().getName())
++                            .putExtras(getIntent().getExtras())
+             );
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java b/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
+index a784d195..607ac8b9 100644
+--- a/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
+@@ -59,7 +59,7 @@ public void onPasscodeEntered(String pass) {
+                     .setClassName(this, getIntent().getStringExtra(UxArgument.PASSCODE_CLASS_CALLER))
+                     .setAction(getIntent().getAction())
+                     .setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK)
+-                    .putExtra(UxArgument.SELECTED_ACCOUNT_UID, getIntent().getStringExtra(UxArgument.SELECTED_ACCOUNT_UID))
++                    .putExtras(getIntent().getExtras())
+             );
+         } else {
+             Toast.makeText(this, R.string.toast_wrong_passcode, Toast.LENGTH_SHORT).show();
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+index 7888d917..ce07ed2b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+@@ -51,9 +51,9 @@
+ import org.gnucash.android.ui.common.FormActivity;
+ import org.gnucash.android.ui.common.UxArgument;
+ import org.gnucash.android.ui.transaction.dialog.TransferFundsDialogFragment;
++import org.gnucash.android.ui.util.OnTransferFundsListener;
+ import org.gnucash.android.ui.util.widget.CalculatorEditText;
+ import org.gnucash.android.ui.util.widget.CalculatorKeyboard;
+-import org.gnucash.android.ui.util.OnTransferFundsListener;
+ import org.gnucash.android.ui.util.widget.TransactionTypeSwitch;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+@@ -61,7 +61,6 @@
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.List;
+-import java.util.UUID;
+ 
+ import butterknife.Bind;
+ import butterknife.ButterKnife;
+@@ -266,7 +265,7 @@ public void onClick(View view) {
+ 
+             if (split != null) {
+                 splitAmountEditText.setCurrency(split.getValue().getCurrency());
+-                splitAmountEditText.setText(split.getFormattedValue().toPlainString());
++                splitAmountEditText.setText(split.getFormattedValue().formattedAmount());
+                 splitCurrencyTextView.setText(split.getValue().getCurrency().getSymbol());
+                 splitMemoEditText.setText(split.getMemo());
+                 splitUidTextView.setText(split.getUID());
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 994ad7e0..758b8646 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -27,7 +27,6 @@
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.FragmentManager;
+-import android.support.v4.app.FragmentTransaction;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.support.v7.app.ActionBar;
+ import android.support.v7.app.AppCompatActivity;
+@@ -38,7 +37,6 @@
+ import android.view.Menu;
+ import android.view.MenuInflater;
+ import android.view.MenuItem;
+-import android.view.MotionEvent;
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.view.inputmethod.InputMethodManager;
+@@ -47,6 +45,7 @@
+ import android.widget.CheckBox;
+ import android.widget.EditText;
+ import android.widget.FilterQueryProvider;
++import android.widget.ImageView;
+ import android.widget.Spinner;
+ import android.widget.TextView;
+ import android.widget.Toast;
+@@ -59,7 +58,6 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -194,6 +192,11 @@
+     @Bind(R.id.calculator_keyboard) KeyboardView mKeyboardView;
+ 
+     /**
++     * Open the split editor
++     */
++    @Bind(R.id.btn_split_editor) ImageView mOpenSplitEditor;
++
++    /**
+      * Flag to note if double entry accounting is in use or not
+      */
+ 	private boolean mUseDoubleEntry;
+@@ -228,27 +231,6 @@
+      * Split quantity which will be set from the funds transfer dialog
+      */
+     private Money mSplitQuantity;
+-    private View.OnTouchListener mAmountEditTextTouchListener = new View.OnTouchListener() {
+-        @Override
+-        public boolean onTouch(View v, MotionEvent event) {
+-            final int DRAWABLE_LEFT = 0;
+-            final int DRAWABLE_TOP = 1;
+-            final int DRAWABLE_RIGHT = 2;
+-            final int DRAWABLE_BOTTOM = 3;
+-
+-            if (event.getAction() == MotionEvent.ACTION_UP) {
+-                if (event.getRawX() >= (mAmountEditText.getRight() - mAmountEditText.getCompoundDrawables()[DRAWABLE_RIGHT].getBounds().width())) {
+-                    openSplitEditor();
+-                    return true;
+-                } else if (!mAmountEditText.getCalculatorKeyboard().isCustomKeyboardVisible()) {
+-                    mAmountEditText.getCalculatorKeyboard().showCustomKeyboard(v);
+-                }
+-            }
+-
+-            mAmountEditText.onTouchEvent(event);
+-            return false;
+-        }
+-    };;
+ 
+     /**
+ 	 * Create the view and retrieve references to the UI elements
+@@ -259,6 +241,12 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 		View v = inflater.inflate(R.layout.fragment_transaction_form, container, false);
+         ButterKnife.bind(this, v);
+         mAmountEditText.bindListeners(mKeyboardView);
++        mOpenSplitEditor.setOnClickListener(new View.OnClickListener() {
++            @Override
++            public void onClick(View v) {
++                openSplitEditor();
++            }
++        });
+         return v;
+ 	}
+ 
+@@ -289,7 +277,6 @@ private void startTransferFunds() {
+     public void onConfigurationChanged(Configuration newConfig) {
+         super.onConfigurationChanged(newConfig);
+         mAmountEditText.bindListeners(mKeyboardView);
+-        mAmountEditText.setOnTouchListener(mAmountEditTextTouchListener);
+     }
+ 
+     @Override
+@@ -457,7 +444,7 @@ private void initializeViewsWithTransaction(){
+ 
+ 		if (!mAmountEditText.isInputModified()){
+             //when autocompleting, only change the amount if the user has not manually changed it already
+-            mAmountEditText.setText(mTransaction.getBalance(mAccountUID).toPlainString());
++            mAmountEditText.setText(mTransaction.getBalance(mAccountUID).formattedAmount());
+         }
+ 		mCurrencyTextView.setText(mTransaction.getCurrency().getSymbol(Locale.getDefault()));
+ 		mNotesEditText.setText(mTransaction.getNote());
+@@ -512,6 +499,7 @@ private void initializeViewsWithTransaction(){
+     private void setAmountEditViewVisible(int visibility) {
+         getView().findViewById(R.id.layout_double_entry).setVisibility(visibility);
+         mTransactionTypeSwitch.setVisibility(visibility);
++        mOpenSplitEditor.setVisibility(visibility);
+     }
+ 
+     private void toggleAmountInputEntryMode(boolean enabled){
+@@ -626,8 +614,6 @@ private void openSplitEditor(){
+ 	 * Sets click listeners for the dialog buttons
+ 	 */
+ 	private void setListeners() {
+-        mAmountEditText.setOnTouchListener(mAmountEditTextTouchListener);
+-
+ 		mTransactionTypeSwitch.setAmountFormattingListener(mAmountEditText, mCurrencyTextView);
+ 
+ 		mDateTextView.setOnClickListener(new View.OnClickListener() {
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+index d14af870..0cce2a09 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+@@ -126,8 +126,7 @@ public void onFocusChange(View v, boolean hasFocus) {
+                 if (hasFocus) {
+                     setSelection(getText().length());
+                     mCalculatorKeyboard.showCustomKeyboard(v);
+-                }
+-                else {
++                } else {
+                     mCalculatorKeyboard.hideCustomKeyboard();
+                     evaluate();
+                 }
+@@ -261,19 +260,18 @@ public void setCurrency(Currency currency) {
+      * @return Result of arithmetic evaluation which is same as text displayed in edittext
+      */
+     public String evaluate(){
+-        String amountText = getText().toString();
+-        amountText = amountText.replaceAll(",", ".");
+-        if (amountText.trim().isEmpty())
+-            return amountText.trim();
++        String amountString = getCleanString();
++        if (amountString.isEmpty())
++            return amountString;
+ 
+-        ExpressionBuilder expressionBuilder = new ExpressionBuilder(amountText);
++        ExpressionBuilder expressionBuilder = new ExpressionBuilder(amountString);
+         Expression expression;
+ 
+         try {
+             expression = expressionBuilder.build();
+         } catch (RuntimeException e) {
+             setError(getContext().getString(R.string.label_error_invalid_expression));
+-            String msg = "Invalid expression: " + amountText;
++            String msg = "Invalid expression: " + amountString;
+             Log.e(this.getClass().getSimpleName(), msg);
+             Crashlytics.log(msg);
+             return "";
+@@ -308,6 +306,15 @@ public boolean isInputValid(){
+     }
+ 
+     /**
++     * Returns the amount string formatted as a decimal in Locale.US and trimmed.
++     * This also converts decimal operators from other locales into a period (.)
++     * @return String with the amount in the EditText or empty string if there is no input
++     */
++    public String getCleanString(){
++        return getText().toString().replaceAll(",", ".").trim();
++    }
++
++    /**
+      * Returns true if the content of this view has been modified
+      * @return {@code true} if content has changed, {@code false} otherwise
+      */
+@@ -322,9 +329,9 @@ public boolean isInputModified(){
+      */
+     public BigDecimal getValue(){
+         evaluate();
+-        String amountText = getText().toString();
+-        if (amountText.isEmpty())
++        String amountString = getCleanString();
++        if (amountString.isEmpty())
+             return null;
+-        return new BigDecimal(amountText.replaceAll(",", ".").trim());
++        return new BigDecimal(amountString);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorKeyboard.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorKeyboard.java
+index 3b1af237..bb9f5d9f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorKeyboard.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorKeyboard.java
+@@ -36,8 +36,6 @@
+ import android.view.WindowManager;
+ import android.view.inputmethod.InputMethodManager;
+ 
+-import org.gnucash.android.ui.util.widget.CalculatorEditText;
+-
+ import java.text.DecimalFormatSymbols;
+ 
+ 
+@@ -65,7 +63,7 @@
+     private Context mContext;
+     private boolean hapticFeedback;
+ 
+-    final String mDecimalSeparator = Character.toString(DecimalFormatSymbols.getInstance().getDecimalSeparator());
++    public static final String LOCALE_DECIMAL_SEPARATOR = Character.toString(DecimalFormatSymbols.getInstance().getDecimalSeparator());
+ 
+     private OnKeyboardActionListener mOnKeyboardActionListener = new OnKeyboardActionListener() {
+         @Override
+@@ -89,7 +87,7 @@ public void onKey(int primaryCode, int[] keyCodes) {
+ 
+             switch (primaryCode) {
+                 case KEY_CODE_DECIMAL_SEPARATOR:
+-                    editable.insert(start, mDecimalSeparator);
++                    editable.insert(start, LOCALE_DECIMAL_SEPARATOR);
+                     break;
+                 case 42:
+                 case 43:
+@@ -157,7 +155,7 @@ public CalculatorKeyboard(Context context, KeyboardView keyboardView, @XmlRes in
+         Keyboard keyboard = new Keyboard(mContext, keyboardLayoutResId);
+         for (Keyboard.Key key : keyboard.getKeys()) {
+             if (key.codes[0] == KEY_CODE_DECIMAL_SEPARATOR){
+-                key.label = mDecimalSeparator;
++                key.label = LOCALE_DECIMAL_SEPARATOR;
+                 break;
+             }
+         }
+diff --git a/app/src/main/res/layout/fragment_split_editor.xml b/app/src/main/res/layout/fragment_split_editor.xml
+index 7e7bbb6f..4a539bca 100644
+--- a/app/src/main/res/layout/fragment_split_editor.xml
++++ b/app/src/main/res/layout/fragment_split_editor.xml
+@@ -20,26 +20,20 @@ limitations under the License.
+     android:layout_height="match_parent"
+     tools:context=".ui.FormActivity">
+ 
+-    <LinearLayout
+-        android:orientation="vertical"
++    <ScrollView
+         android:layout_width="match_parent"
+-        android:layout_height="match_parent">
+-
+-        <ScrollView
++        android:layout_height="match_parent"
++        android:layout_above="@+id/calculator_keyboard"
++        android:padding="@dimen/dialog_padding">
++        <LinearLayout android:id="@+id/split_list_layout"
+             android:layout_width="match_parent"
+             android:layout_height="wrap_content"
+-            android:padding="@dimen/dialog_padding"
+-            android:layout_above="@+id/footer">
+-            <LinearLayout android:id="@+id/split_list_layout"
+-                android:layout_width="match_parent"
+-                android:layout_height="wrap_content"
+-                android:minHeight="200dp"
+-                android:orientation="vertical">
+-                <!-- Split edit views will be added here at runtime-->
+-            </LinearLayout>
+-        </ScrollView>
++            android:minHeight="200dp"
++            android:orientation="vertical">
++            <!-- Split edit views will be added here at runtime-->
++        </LinearLayout>
++    </ScrollView>
+ 
+-    </LinearLayout>
+     <android.inputmethodservice.KeyboardView android:id="@+id/calculator_keyboard"
+         android:layout_width="match_parent"
+         android:layout_height="wrap_content"
+diff --git a/app/src/main/res/layout/fragment_transaction_form.xml b/app/src/main/res/layout/fragment_transaction_form.xml
+index 3bd36d3a..c60a7969 100644
+--- a/app/src/main/res/layout/fragment_transaction_form.xml
++++ b/app/src/main/res/layout/fragment_transaction_form.xml
+@@ -63,17 +63,21 @@
+                     android:hint="@string/label_transaction_amount"
+                     android:inputType="none"
+                     android:nextFocusDown="@+id/input_description"
+-                    android:drawableRight="@drawable/content_split_holo_light"
+-                    android:drawableEnd="@drawable/content_split_holo_light"
+                     android:background="@android:color/transparent"
+                     android:textColor="@color/debit_red"
+                     android:textSize="20sp"
+                     gnucash:keyboardKeysLayout="@xml/calculator_keyboard"/>
+ 
++                <ImageView android:id="@+id/btn_split_editor"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:contentDescription="Open split editor"
++                    android:src="@drawable/content_split_holo_light" />
++
+                 <org.gnucash.android.ui.util.widget.TransactionTypeSwitch
+                     android:id="@+id/input_transaction_type"
+                     android:layout_width="0dp"
+-                    android:layout_weight="2"
++                    android:layout_weight="2.5"
+                     android:layout_height="wrap_content"
+                     android:textOn="@string/label_debit"
+                     android:textOff="@string/label_credit"

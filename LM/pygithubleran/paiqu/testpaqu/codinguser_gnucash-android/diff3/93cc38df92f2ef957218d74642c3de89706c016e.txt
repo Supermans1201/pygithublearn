@@ -1,0 +1,212 @@
+From 93cc38df92f2ef957218d74642c3de89706c016e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 13:54:54 +0100
+Subject: [PATCH] Improve time formatting in transactions list
+
+Fix random crashes when saving transactions
+Closes #431
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  6 ++++-
+ .../java/org/gnucash/android/export/Exporter.java  |  4 +--
+ .../ui/transaction/TransactionFormFragment.java    |  4 +--
+ .../ui/transaction/TransactionsActivity.java       | 31 +++++++++++++++++++++-
+ .../ui/transaction/TransactionsListFragment.java   | 11 ++++----
+ 5 files changed, 45 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 63b189a3..7da4727b 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -794,9 +794,13 @@ private Money computeBalance(String accountUID, long startTimestamp, long endTim
+      * @param endTimestamp the end timestamp of the time range
+      * @return Money balance of account list
+      */
+-    public Money getAccountsBalance(List<String> accountUIDList, long startTimestamp, long endTimestamp) {
++    public Money getAccountsBalance(@NonNull List<String> accountUIDList, long startTimestamp, long endTimestamp) {
+         String currencyCode = GnuCashApplication.getDefaultCurrencyCode();
+         Money balance = Money.createZeroInstance(currencyCode);
++
++        if (accountUIDList.isEmpty())
++            return balance;
++
+         boolean hasDebitNormalBalance = getAccountType(accountUIDList.get(0)).hasDebitNormalBalance();
+ 
+         SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 9727f101..7e2878a8 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -201,11 +201,11 @@ public String getExportMimeType(){
+     public static class ExporterException extends RuntimeException{
+ 
+         public ExporterException(ExportParams params){
+-            super("Failed to generate " + params.getExportFormat().toString());
++            super("Failed to generate export with parameters:  " + params.toString());
+         }
+ 
+         public ExporterException(@NonNull ExportParams params, @NonNull String msg) {
+-            super("Failed to generate " + params.getExportFormat().toString() + "-" + msg);
++            super("Failed to generate export with parameters: " + params.toString() + " - " + msg);
+         }
+ 
+         public ExporterException(ExportParams params, Throwable throwable){
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 49042df7..48db0b81 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -785,8 +785,8 @@ private void saveNewTransaction() {
+                     mTransaction.addSplit(split);
+ 
+                     String transferAcctUID;
+-                    if (mUseDoubleEntry) {
+-                        long transferAcctId = mTransferAccountSpinner.getSelectedItemId();
++                    long transferAcctId = mTransferAccountSpinner.getSelectedItemId();
++                    if (mUseDoubleEntry || transferAcctId < 0) {
+                         transferAcctUID = mAccountsDbAdapter.getUID(transferAcctId);
+                     } else {
+                         transferAcctUID = mAccountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 350f0a50..b2beebf7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -24,6 +24,7 @@
+ import android.os.AsyncTask;
+ import android.os.Build;
+ import android.os.Bundle;
++import android.support.annotation.NonNull;
+ import android.support.design.widget.FloatingActionButton;
+ import android.support.design.widget.TabLayout;
+ import android.support.v4.app.Fragment;
+@@ -32,6 +33,7 @@
+ import android.support.v4.view.PagerAdapter;
+ import android.support.v4.view.ViewPager;
+ import android.support.v7.widget.Toolbar;
++import android.text.format.DateUtils;
+ import android.util.Log;
+ import android.util.SparseArray;
+ import android.view.Menu;
+@@ -60,8 +62,12 @@
+ import org.gnucash.android.ui.util.OnTransactionClickedListener;
+ import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
++import org.joda.time.LocalDate;
+ 
+ import java.math.BigDecimal;
++import java.text.DateFormat;
++import java.text.SimpleDateFormat;
++import java.util.Date;
+ 
+ import butterknife.Bind;
+ import butterknife.ButterKnife;
+@@ -92,6 +98,7 @@
+      * Number of pages to show
+      */
+     private static final int DEFAULT_NUM_PAGES = 2;
++    private static SimpleDateFormat mDayMonthDateFormat = new SimpleDateFormat("EEE, d MMM");
+ 
+     /**
+      * GUID of {@link Account} whose transactions are displayed
+@@ -153,7 +160,6 @@ public void onNothingSelected(AdapterView<?> parent) {
+     private PagerAdapter mPagerAdapter;
+ 
+ 
+-
+     /**
+      * Adapter for managing the sub-account and transaction fragment pages in the accounts view
+      */
+@@ -486,6 +492,29 @@ public static void displayBalance(TextView balanceTextView, Money balance){
+         balanceTextView.setTextColor(fontColor);
+     }
+ 
++    /**
++     * Formats the date to show the the day of the week if the {@code dateMillis} is within 7 days
++     * of today. Else it shows the actual date formatted as short string. <br>
++     * It also shows "today", "yesterday" or "tomorrow" if the date is on any of those days
++     * @param dateMillis
++     * @return
++     */
++    @NonNull
++    public static String getPrettyDateFormat(Context context, long dateMillis) {
++        LocalDate transactionTime = new LocalDate(dateMillis);
++        LocalDate today = new LocalDate();
++        String prettyDateText = null;
++        if (transactionTime.compareTo(today.minusDays(1)) >= 0 && transactionTime.compareTo(today.plusDays(1)) <= 0){
++            prettyDateText = DateUtils.getRelativeTimeSpanString(dateMillis, System.currentTimeMillis(), DateUtils.DAY_IN_MILLIS).toString();
++        } else if (transactionTime.getYear() == today.getYear()){
++            prettyDateText = mDayMonthDateFormat.format(new Date(dateMillis));
++        } else {
++            prettyDateText = DateUtils.formatDateTime(context, dateMillis, DateUtils.FORMAT_ABBREV_MONTH | DateUtils.FORMAT_SHOW_YEAR);
++        }
++
++        return prettyDateText;
++    }
++
+ 	@Override
+ 	public void createNewTransaction(String accountUID) {
+         Intent createTransactionIntent = new Intent(this.getApplicationContext(), FormActivity.class);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index e59155ea..9b0a8c41 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -21,6 +21,7 @@
+ import android.content.res.Configuration;
+ import android.database.Cursor;
+ import android.os.Bundle;
++import android.support.annotation.NonNull;
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.LoaderManager.LoaderCallbacks;
+ import android.support.v4.content.Loader;
+@@ -42,6 +43,7 @@
+ import android.widget.TextView;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseSchema;
+@@ -57,8 +59,10 @@
+ import org.gnucash.android.ui.util.CursorRecyclerAdapter;
+ import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.util.widget.EmptyRecyclerView;
++import org.joda.time.LocalDate;
+ 
+ import java.text.DateFormat;
++import java.text.SimpleDateFormat;
+ import java.util.Date;
+ import java.util.List;
+ 
+@@ -196,7 +200,6 @@ public void onLoaderReset(Loader<Cursor> loader) {
+ 		mTransactionRecyclerAdapter.swapCursor(null);
+ 	}
+ 
+-	
+ 	/**
+ 	 * {@link DatabaseCursorLoader} for loading transactions asynchronously from the database
+ 	 * @author Ngewi Fet <ngewif@gmail.com>
+@@ -221,8 +224,6 @@ public Cursor loadInBackground() {
+ 
+ 	public class TransactionRecyclerAdapter extends CursorRecyclerAdapter<TransactionRecyclerAdapter.ViewHolder>{
+ 
+-		DateFormat simpleDateFormat = DateFormat.getDateInstance(DateFormat.MEDIUM);
+-
+ 		public TransactionRecyclerAdapter(Cursor cursor) {
+ 			super(cursor);
+ 		}
+@@ -264,7 +265,8 @@ public void onBindViewHolderCursor(ViewHolder holder, Cursor cursor) {
+ 			holder.transactionNote.setText(text);
+ 
+ 			long dateMillis = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_TIMESTAMP));
+-			String dateText = DateUtils.getRelativeTimeSpanString(dateMillis, System.currentTimeMillis(), DateUtils.DAY_IN_MILLIS).toString();
++			String dateText = TransactionsActivity.getPrettyDateFormat(getActivity(), dateMillis);
++
+ 			holder.transactionDate.setText(dateText);
+ 
+ 			final long id = holder.transactionId;
+@@ -288,7 +290,6 @@ public void onClick(View v) {
+ 
+ 		}
+ 
+-
+ 		public class ViewHolder extends RecyclerView.ViewHolder implements PopupMenu.OnMenuItemClickListener{
+ 			@Bind(R.id.primary_text) 		public TextView transactionDescription;
+ 			@Bind(R.id.secondary_text) 		public TextView transactionNote;

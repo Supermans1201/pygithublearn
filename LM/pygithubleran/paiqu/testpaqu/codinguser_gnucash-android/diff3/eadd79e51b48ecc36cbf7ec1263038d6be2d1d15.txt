@@ -1,0 +1,294 @@
+From eadd79e51b48ecc36cbf7ec1263038d6be2d1d15 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 19 Nov 2015 20:02:31 +0100
+Subject: [PATCH] Show current imbalance in split editor
+
+Open keyboard immediately when starting a new transaction
+---
+ .../ui/transaction/SplitEditorFragment.java        | 75 ++++++++++++++++++----
+ .../ui/transaction/TransactionFormFragment.java    |  3 +
+ .../android/ui/util/widget/CalculatorEditText.java |  2 -
+ app/src/main/res/layout/fragment_split_editor.xml  | 28 ++++++++
+ .../main/res/layout/fragment_transaction_form.xml  |  4 +-
+ 5 files changed, 98 insertions(+), 14 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+index a3a141a3..0b641606 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+@@ -25,6 +25,8 @@
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.support.v7.app.ActionBar;
+ import android.support.v7.app.AppCompatActivity;
++import android.text.Editable;
++import android.text.TextWatcher;
+ import android.view.LayoutInflater;
+ import android.view.Menu;
+ import android.view.MenuInflater;
+@@ -32,6 +34,7 @@
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.widget.AdapterView;
++import android.widget.CompoundButton;
+ import android.widget.EditText;
+ import android.widget.ImageView;
+ import android.widget.LinearLayout;
+@@ -41,6 +44,7 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.BaseModel;
+@@ -60,7 +64,6 @@
+ 
+ import java.math.BigDecimal;
+ import java.util.ArrayList;
+-import java.util.Currency;
+ import java.util.List;
+ 
+ import butterknife.Bind;
+@@ -75,12 +78,14 @@
+ 
+     @Bind(R.id.split_list_layout)   LinearLayout mSplitsLinearLayout;
+     @Bind(R.id.calculator_keyboard) KeyboardView mKeyboardView;
++    @Bind(R.id.imbalance_textview)  TextView mImbalanceTextView;
+ 
+     private AccountsDbAdapter mAccountsDbAdapter;
+     private Cursor mCursor;
+     private SimpleCursorAdapter mCursorAdapter;
+     private List<View> mSplitItemViewList;
+     private String mAccountUID;
++    private Commodity mCommodity;
+ 
+     private BigDecimal mBaseAmount = BigDecimal.ZERO;
+ 
+@@ -88,6 +93,8 @@
+ 
+     CalculatorKeyboard mCalculatorKeyboard;
+ 
++    BalanceTextWatcher mImbalanceWatcher = new BalanceTextWatcher();
++
+     /**
+      * Create and return a new instance of the fragment with the appropriate paramenters
+      * @param args Arguments to be set to the fragment. <br>
+@@ -143,6 +150,8 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             view.findViewById(R.id.input_accounts_spinner).setEnabled(false);
+             view.findViewById(R.id.btn_remove_split).setVisibility(View.GONE);
+         }
++
++        TransactionsActivity.displayBalance(mImbalanceTextView, new Money(mBaseAmount.negate(), mCommodity));
+     }
+ 
+     @Override
+@@ -214,6 +223,7 @@ private void initArgs() {
+                 + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                 + ")";
+         mCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions, null);
++        mCommodity = CommoditiesDbAdapter.getInstance().getCommodity(mAccountsDbAdapter.getCurrencyCode(mAccountUID));
+     }
+ 
+     /**
+@@ -226,7 +236,7 @@ private void initArgs() {
+         @Bind(R.id.input_accounts_spinner)  Spinner accountsSpinner;
+         @Bind(R.id.split_currency_symbol)   TextView splitCurrencyTextView;
+         @Bind(R.id.split_uid)               TextView splitUidTextView;
+-        @Bind(R.id.btn_split_type)          TransactionTypeSwitch splitTypeButton;
++        @Bind(R.id.btn_split_type)          TransactionTypeSwitch splitTypeSwitch;
+ 
+         View splitView;
+         Money quantity;
+@@ -253,15 +263,15 @@ public void onClick(View view) {
+                     mRemovedSplitUIDs.add(splitUidTextView.getText().toString());
+                     mSplitsLinearLayout.removeView(splitView);
+                     mSplitItemViewList.remove(splitView);
++                    mImbalanceWatcher.afterTextChanged(null);
+                 }
+             });
+ 
+             updateTransferAccountsList(accountsSpinner);
+ 
+-            Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountUID));
+-            splitCurrencyTextView.setText(accountCurrency.getSymbol());
+-            splitTypeButton.setAmountFormattingListener(splitAmountEditText, splitCurrencyTextView);
+-            splitTypeButton.setChecked(mBaseAmount.signum() > 0);
++            splitCurrencyTextView.setText(mCommodity.getSymbol());
++            splitTypeSwitch.setAmountFormattingListener(splitAmountEditText, splitCurrencyTextView);
++            splitTypeSwitch.setChecked(mBaseAmount.signum() > 0);
+             splitUidTextView.setText(BaseModel.generateUID());
+ 
+             if (split != null) {
+@@ -272,12 +282,18 @@ public void onClick(View view) {
+                 splitUidTextView.setText(split.getUID());
+                 String splitAccountUID = split.getAccountUID();
+                 setSelectedTransferAccount(mAccountsDbAdapter.getID(splitAccountUID), accountsSpinner);
+-                splitTypeButton.setAccountType(mAccountsDbAdapter.getAccountType(splitAccountUID));
+-                splitTypeButton.setChecked(split.getType());
++                splitTypeSwitch.setAccountType(mAccountsDbAdapter.getAccountType(splitAccountUID));
++                splitTypeSwitch.setChecked(split.getType());
+             }
+ 
+-            accountsSpinner.setOnItemSelectedListener(new SplitAccountListener(splitTypeButton, this));
+-
++            accountsSpinner.setOnItemSelectedListener(new SplitAccountListener(splitTypeSwitch, this));
++            splitTypeSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
++                @Override
++                public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
++                    mImbalanceWatcher.afterTextChanged(null);
++                }
++            });
++            splitAmountEditText.addTextChangedListener(mImbalanceWatcher);
+         }
+     }
+ 
+@@ -360,7 +376,7 @@ private void saveSplits() {
+             String accountUID = mAccountsDbAdapter.getUID(viewHolder.accountsSpinner.getSelectedItemId());
+             Split split = new Split(valueAmount, accountUID);
+             split.setMemo(viewHolder.splitMemoEditText.getText().toString());
+-            split.setType(viewHolder.splitTypeButton.getTransactionType());
++            split.setType(viewHolder.splitTypeSwitch.getTransactionType());
+             split.setUID(viewHolder.splitUidTextView.getText().toString().trim());
+             if (viewHolder.quantity != null)
+                 split.setQuantity(viewHolder.quantity.absolute());
+@@ -370,6 +386,43 @@ private void saveSplits() {
+     }
+ 
+     /**
++     * Updates the displayed balance of the accounts when the amount of a split is changed
++     */
++    private class BalanceTextWatcher implements TextWatcher {
++
++        @Override
++        public void beforeTextChanged(CharSequence charSequence, int i, int i2, int i3) {
++            //nothing to see here, move along
++        }
++
++        @Override
++        public void onTextChanged(CharSequence charSequence, int i, int i2, int i3) {
++            //nothing to see here, move along
++        }
++
++        @Override
++        public void afterTextChanged(Editable editable) {
++            BigDecimal imbalance = BigDecimal.ZERO;
++
++            for (View splitItem : mSplitItemViewList) {
++                SplitViewHolder viewHolder = (SplitViewHolder) splitItem.getTag();
++                viewHolder.splitAmountEditText.removeTextChangedListener(this);
++                BigDecimal amount = viewHolder.splitAmountEditText.getValue();
++                if (amount != null) {
++                    if (viewHolder.splitTypeSwitch.isChecked()) {
++                        imbalance = imbalance.subtract(amount);
++                    } else {
++                        imbalance = imbalance.add(amount);
++                    }
++                }
++                viewHolder.splitAmountEditText.addTextChangedListener(this);
++            }
++
++            TransactionsActivity.displayBalance(mImbalanceTextView, new Money(imbalance.negate(), mCommodity));
++        }
++    }
++
++    /**
+      * Listens to changes in the transfer account and updates the currency symbol, the label of the
+      * transaction type and if neccessary
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index ed4c48f1..6cd8d00b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -39,6 +39,7 @@
+ import android.view.MenuItem;
+ import android.view.View;
+ import android.view.ViewGroup;
++import android.view.WindowManager;
+ import android.view.inputmethod.InputMethodManager;
+ import android.widget.AdapterView;
+ import android.widget.AutoCompleteTextView;
+@@ -355,6 +356,8 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+ 			initializeViewsWithTransaction();
+             mEditMode = true;
+ 		}
++
++        getActivity().getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+ 	}
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+index 2b6bb455..cad60a0b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+@@ -37,14 +37,12 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.ui.common.FormActivity;
+ 
+ import java.math.BigDecimal;
+ import java.text.DecimalFormat;
+ import java.text.NumberFormat;
+-import java.util.Currency;
+ import java.util.Locale;
+ 
+ /**
+diff --git a/app/src/main/res/layout/fragment_split_editor.xml b/app/src/main/res/layout/fragment_split_editor.xml
+index 884d8aeb..ebc5337a 100644
+--- a/app/src/main/res/layout/fragment_split_editor.xml
++++ b/app/src/main/res/layout/fragment_split_editor.xml
+@@ -21,9 +21,37 @@ limitations under the License.
+     android:layout_height="match_parent"
+     tools:context=".ui.FormActivity">
+ 
++    <LinearLayout android:id="@+id/imbalance_layout"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_alignParentTop="true"
++        android:padding="@dimen/dialog_padding">
++        <TextView
++            android:layout_width="wrap_content"
++            android:layout_height="match_parent"
++            android:textAppearance="?android:attr/textAppearanceSmall"
++            android:gravity="center_vertical"
++            android:text="@string/label_imbalance"/>
++
++        <TextView android:id="@+id/imbalance_textview"
++            android:layout_width="0dp"
++            android:layout_height="match_parent"
++            android:layout_weight="1"
++            android:textAppearance="?android:attr/textAppearanceSmall"
++            android:gravity="right|center_vertical"
++            tools:text="$200"/>
++    </LinearLayout>
++
++    <include
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:layout_below="@id/imbalance_layout"
++        layout="@layout/horizontal_line" />
++
+     <ScrollView
+         android:layout_width="match_parent"
+         android:layout_height="match_parent"
++        android:layout_below="@id/imbalance_layout"
+         android:layout_above="@+id/calculator_keyboard"
+         android:padding="@dimen/dialog_padding">
+         <LinearLayout android:id="@+id/split_list_layout"
+diff --git a/app/src/main/res/layout/fragment_transaction_form.xml b/app/src/main/res/layout/fragment_transaction_form.xml
+index ec8f9004..30052c9c 100644
+--- a/app/src/main/res/layout/fragment_transaction_form.xml
++++ b/app/src/main/res/layout/fragment_transaction_form.xml
+@@ -44,7 +44,9 @@
+                     android:singleLine="true"
+                     android:nextFocusDown="@+id/input_transaction_amount"
+                     android:background="@android:color/transparent"
+-                    android:textSize="22sp" />
++                    android:textSize="22sp">
++                    <requestFocus/>
++                    </AutoCompleteTextView>
+             </TableRow>
+ 
+             <View style="@style/Divider" android:layout_marginLeft="0dp" />

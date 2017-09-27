@@ -1,0 +1,219 @@
+From 7a37a70f5907d12168a3054c69c43a63fb1efa94 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 23 Apr 2015 13:57:46 +0200
+Subject: [PATCH] Set as default handler for .gnucash and .gnca files
+
+Fixed: crash when importing backup scheduled actions
+---
+ app/src/main/AndroidManifest.xml                   | 19 ++++++++++++
+ .../gnucash/android/export/xml/GncXmlExporter.java |  2 +-
+ .../gnucash/android/importer/GncXmlHandler.java    |  9 ++++--
+ .../gnucash/android/importer/GncXmlImporter.java   |  3 +-
+ .../gnucash/android/importer/ImportAsyncTask.java  |  2 +-
+ .../android/ui/account/AccountsActivity.java       | 36 ++++++++++++++++++++--
+ 6 files changed, 62 insertions(+), 9 deletions(-)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index ee6fe345..9a7ff630 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -57,11 +57,30 @@
+         android:theme="@style/Theme.Sherlock.Light.DarkActionBar">
+         <activity
+             android:name=".ui.account.AccountsActivity"
++            android:launchMode="singleTask"
+             android:label="@string/app_name">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+                 <category android:name="android.intent.category.LAUNCHER" />
+             </intent-filter>
++            <intent-filter>
++                <action android:name="android.intent.action.VIEW" />
++                <action android:name="android.intent.action.EDIT" />
++                <category android:name="android.intent.category.DEFAULT" />
++                <data android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.gnucash" />
++            </intent-filter>
++            <intent-filter>
++                <action android:name="android.intent.action.VIEW" />
++                <action android:name="android.intent.action.EDIT" />
++                <category android:name="android.intent.category.DEFAULT" />
++                <data android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.gnca" />
++            </intent-filter>
++            <intent-filter>
++                <action android:name="android.intent.action.VIEW" />
++                <action android:name="android.intent.action.EDIT" />
++                <category android:name="android.intent.category.DEFAULT" />
++                <data android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.gnca.zip" />
++            </intent-filter>
+         </activity>
+         <activity
+             android:name=".ui.passcode.PasscodeLockScreenActivity"
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index aa56b82f..5b56abb3 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -396,7 +396,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             // value, in the transaction's currency
+             String trxType = cursor.getString(cursor.getColumnIndexOrThrow("split_type"));
+             BigDecimal splitAmount = new BigDecimal(cursor.getString(cursor.getColumnIndexOrThrow("split_amount")));
+-            String strValue = "0";
++            String strValue = "0/" + denomString;
+             if (!exportTemplates) { //when doing normal transaction export
+                 strValue = (trxType.equals("CREDIT") ? "-" : "") + splitAmount.multiply(denom).stripTrailingZeros().toPlainString() + "/" + denomString;
+             }
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 9531ea68..d293e453 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -40,15 +40,14 @@
+ 
+ import java.math.BigDecimal;
+ import java.sql.Timestamp;
+-import java.text.NumberFormat;
+ import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.HashMap;
+ import java.util.List;
+-import java.util.Locale;
+ import java.util.Map;
+ import java.util.Stack;
++import java.util.UUID;
+ import java.util.regex.Pattern;
+ 
+ /**
+@@ -575,7 +574,11 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 }
+                 break;
+             case GncXmlHelper.TAG_SX_TEMPL_ACCOUNT:
+-                mScheduledAction.setActionUID(mTemplateAccountToTransactionMap.get(characterString));
++                if (mScheduledAction.getActionType() == ScheduledAction.ActionType.TRANSACTION) {
++                    mScheduledAction.setActionUID(mTemplateAccountToTransactionMap.get(characterString));
++                } else {
++                    mScheduledAction.setActionUID(UUID.randomUUID().toString().replaceAll("-",""));
++                }
+                 break;
+             case GncXmlHelper.TAG_SCHEDULED_ACTION:
+                 mScheduledActionsList.add(mScheduledAction);
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index fbf2ce6b..92b9de74 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -65,10 +65,9 @@ public static void parse(SQLiteDatabase db, InputStream gncXmlInputStream) throw
+ 
+     /**
+      * Parse GnuCash XML input and populates the database
+-     * @param context Application context
+      * @param gncXmlInputStream InputStream source of the GnuCash XML file
+      */
+-    public static void parse(Context context, InputStream gncXmlInputStream) throws ParserConfigurationException, SAXException, IOException {
++    public static void parse(InputStream gncXmlInputStream) throws ParserConfigurationException, SAXException, IOException {
+         SAXParserFactory spf = SAXParserFactory.newInstance();
+         SAXParser sp = spf.newSAXParser();
+         XMLReader xr = sp.getXMLReader();
+diff --git a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+index 864d076d..c7230441 100644
+--- a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -67,7 +67,7 @@ protected void onPreExecute() {
+     @Override
+     protected Boolean doInBackground(InputStream... inputStreams) {
+         try {
+-            GncXmlImporter.parse(context, inputStreams[0]);
++            GncXmlImporter.parse(inputStreams[0]);
+         } catch (Exception exception){
+             exception.printStackTrace();
+             final String err_msg = exception.getLocalizedMessage();
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index d505f361..b4079bcc 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -27,6 +27,7 @@
+ import android.content.pm.PackageInfo;
+ import android.content.pm.PackageManager.NameNotFoundException;
+ import android.content.res.Resources;
++import android.net.Uri;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.DialogFragment;
+@@ -52,6 +53,8 @@
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.export.ExportDialogFragment;
++import org.gnucash.android.export.xml.GncXmlExporter;
++import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.service.SchedulerService;
+@@ -65,6 +68,7 @@
+ import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.util.TaskDelegate;
+ 
++import java.io.FileNotFoundException;
+ import java.io.InputStream;
+ import java.util.Arrays;
+ import java.util.Currency;
+@@ -221,12 +225,15 @@ public void onCreate(Bundle savedInstanceState) {
+         setContentView(R.layout.activity_accounts);
+         super.onCreate(savedInstanceState);
+ 
++        final Intent intent = getIntent();
++        handleOpenFileIntent(intent);
++
+         init();
+ 
+         mPager = (ViewPager) findViewById(R.id.pager);
+         TitlePageIndicator titlePageIndicator = (TitlePageIndicator) findViewById(R.id.titles);
+ 
+-        final Intent intent = getIntent();
++
+         String action = intent.getAction();
+         if (action != null && action.equals(Intent.ACTION_INSERT_OR_EDIT)) {
+             //enter account creation/edit mode if that was specified
+@@ -254,11 +261,36 @@ public void onCreate(Bundle savedInstanceState) {
+ 
+ 	}
+ 
++    /**
++     * Handles the case where another application has selected to open a (.gnucash or .gnca) file with this app
++     * @param intent
++     */
++    private void handleOpenFileIntent(Intent intent) {
++        //when someone launches the app to view a (.gnucash or .gnca) file
++        Uri data = intent.getData();
++        if (data != null){
++            GncXmlExporter.createBackup();
++
++            intent.setData(null);
++            InputStream accountInputStream = null;
++            try {
++                accountInputStream = getContentResolver().openInputStream(data);
++                new ImportAsyncTask(this).execute(accountInputStream);
++            } catch (FileNotFoundException e) {
++                e.printStackTrace();
++            } finally {
++                removeFirstRunFlag();
++            }
++        }
++    }
++
+     @Override
+     protected void onNewIntent(Intent intent) {
+         super.onNewIntent(intent);
+         int index = intent.getIntExtra(EXTRA_TAB_INDEX, INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
+         setTab(index);
++
++        handleOpenFileIntent(intent);
+     }
+ 
+     /**
+@@ -583,7 +615,7 @@ public void accountSelected(String accountUID) {
+ 	private void removeFirstRunFlag(){
+ 		Editor editor = PreferenceManager.getDefaultSharedPreferences(this).edit();
+ 		editor.putBoolean(getString(R.string.key_first_run), false);
+-		editor.commit();
++		editor.apply();
+ 	}
+ 
+ }
+\ No newline at end of file

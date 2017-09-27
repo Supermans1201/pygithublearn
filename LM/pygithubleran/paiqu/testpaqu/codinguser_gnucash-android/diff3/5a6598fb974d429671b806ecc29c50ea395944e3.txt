@@ -1,0 +1,546 @@
+From 5a6598fb974d429671b806ecc29c50ea395944e3 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 12 May 2015 13:15:51 +0200
+Subject: [PATCH] Fixed: Hidden account should not be shown as options for
+ parent account Improved: Display destination of export after successful
+ export
+
+Improved testing on emulator
+Crashlytics now only started for beta builds
+---
+ app/build.gradle                                   |  7 +-
+ .../android/test/ui/AccountsActivityTest.java      | 75 +++++++++++++---------
+ .../android/test/ui/ExportTransactionsTest.java    | 34 ++++++----
+ .../android/test/ui/TransactionsActivityTest.java  | 14 ++--
+ .../gnucash/android/app/GnuCashApplication.java    |  3 +-
+ .../gnucash/android/export/ExportAsyncTask.java    | 18 ++++++
+ .../android/ui/account/AccountFormFragment.java    |  2 +-
+ .../ui/widget/WidgetConfigurationActivity.java     |  2 +-
+ app/src/main/res/values-de/strings.xml             |  1 +
+ app/src/main/res/values-el/strings.xml             |  1 +
+ app/src/main/res/values-es-rMX/strings.xml         |  1 +
+ app/src/main/res/values-es/strings.xml             |  1 +
+ app/src/main/res/values-fr/strings.xml             |  1 +
+ app/src/main/res/values-hu/strings.xml             |  1 +
+ app/src/main/res/values-it/strings.xml             |  1 +
+ app/src/main/res/values-nb/strings.xml             |  1 +
+ app/src/main/res/values-nl/strings.xml             |  1 +
+ app/src/main/res/values-pt-rBR/strings.xml         |  1 +
+ app/src/main/res/values-ru/strings.xml             |  1 +
+ app/src/main/res/values-zh/strings.xml             |  1 +
+ app/src/main/res/values/strings.xml                |  1 +
+ 21 files changed, 113 insertions(+), 55 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index af5665bf..60160b8a 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -31,6 +31,7 @@ android {
+         versionName "${versionMajor}.${versionMinor}.${versionPatch}"
+         resValue "string", "app_version_name", "${versionName}"
+         resValue "string", "app_minor_version", "${versionMinor}"
++        buildConfigField "boolean", "USE_CRASHLYTICS", "false"
+         if (project.hasProperty("RELEASE_DROPBOX_APP_KEY")){
+             resValue "string", "dropbox_app_key", RELEASE_DROPBOX_APP_KEY
+             resValue "string", "dropbox_app_secret", RELEASE_DROPBOX_APP_SECRET
+@@ -70,11 +71,13 @@ android {
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+             if (project.hasProperty("RELEASE_STORE_FILE")){
+                 signingConfig signingConfigs.release
++            } else {
++                signingConfig signingConfigs.debug
+             }
+         }
+         debug {
+             debuggable true
+-            ext.enableCrashlytics = false
++            signingConfig signingConfigs.debug
+         }
+     }
+     lintOptions {
+@@ -94,11 +97,11 @@ android {
+             resValue "string", "app_name", "GnuCash - beta"
+             versionName "${versionMajor}.${versionMinor}.${versionPatch}-beta${versionBuild}_r${gitSha()}"
+             resValue "string", "app_version_name", "${versionName}"
++            buildConfigField "boolean", "USE_CRASHLYTICS", "true"
+         }
+ 
+         production {
+             resValue "string", "app_name", "GnuCash"
+-            ext.enableCrashlytics = false //TODO: enable for production builds
+         }
+ 
+     }
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index da815131..f4097a51 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -18,6 +18,7 @@
+ 
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
+ import android.database.SQLException;
+ import android.database.sqlite.SQLiteDatabase;
+@@ -64,10 +65,7 @@ public AccountsActivityTest() {
+ 
+ 	protected void setUp() throws Exception {
+ 		Context context = getInstrumentation().getTargetContext();
+-		Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
+-		editor.putBoolean(context.getString(R.string.key_first_run), false);
+-        editor.putInt(AccountsActivity.LAST_OPEN_TAB_INDEX, AccountsActivity.INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
+-		editor.commit();
++        preventFirstRunDialogs(context);
+ 
+         mDbHelper = new DatabaseHelper(context);
+         try {
+@@ -88,34 +86,48 @@ protected void setUp() throws Exception {
+ 		mAccountsDbAdapter.addAccount(account);
+ 
+         //the What's new dialog is usually displayed on first run
+-        String dismissDialog = getActivity().getString(R.string.label_dismiss);
+-        if (mSolo.waitForText(dismissDialog)){
+-            mSolo.clickOnText(dismissDialog);
+-            mSolo.waitForDialogToClose();
+-        }
+-
++//        String dismissDialog = getActivity().getString(R.string.label_dismiss);
++//        if (mSolo.waitForText(dismissDialog)){
++//            mSolo.clickOnText(dismissDialog);
++//            mSolo.waitForDialogToClose();
++//        }
++//        mSolo.sleep(2000);
+         //drawer is opened when the app is installed for the first time
+-        mSolo.setNavigationDrawer(Solo.CLOSED);
++//        mSolo.setNavigationDrawer(Solo.CLOSED);
+ 	}
+ 
+-/*
+-	public void testDisplayAccountsList(){
+-        final int NUMBER_OF_ACCOUNTS = 15;
+-        for (int i = 0; i < NUMBER_OF_ACCOUNTS; i++) {
+-            Account account = new Account("Acct " + i);
+-            mAccountsDbAdapter.addAccount(account);
+-        }
++    public static void preventFirstRunDialogs(Context context) {
++        Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
+ 
+-        //there should exist a listview of accounts
+-        refreshAccountsList();
+-        mSolo.waitForText("Acct");
+-        mSolo.scrollToBottom();
++        //do not show first run dialog
++        editor.putBoolean(context.getString(R.string.key_first_run), false);
++        editor.putInt(AccountsActivity.LAST_OPEN_TAB_INDEX, AccountsActivity.INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
+ 
+-        ListView accountsListView = (ListView) mSolo.getView(android.R.id.list);
+-		assertNotNull(accountsListView);
+-        assertEquals(NUMBER_OF_ACCOUNTS + 1, accountsListView.getCount());
+-	}
+-*/
++        //do not show "What's new" dialog
++        String minorVersion = context.getString(R.string.app_minor_version);
++        int currentMinor = Integer.parseInt(minorVersion);
++        editor.putInt(context.getString(R.string.key_previous_minor_version), currentMinor);
++        editor.commit();
++    }
++
++    /*
++        public void testDisplayAccountsList(){
++            final int NUMBER_OF_ACCOUNTS = 15;
++            for (int i = 0; i < NUMBER_OF_ACCOUNTS; i++) {
++                Account account = new Account("Acct " + i);
++                mAccountsDbAdapter.addAccount(account);
++            }
++
++            //there should exist a listview of accounts
++            refreshAccountsList();
++            mSolo.waitForText("Acct");
++            mSolo.scrollToBottom();
++
++            ListView accountsListView = (ListView) mSolo.getView(android.R.id.list);
++            assertNotNull(accountsListView);
++            assertEquals(NUMBER_OF_ACCOUNTS + 1, accountsListView.getCount());
++        }
++    */
+     public void testSearchAccounts(){
+         String SEARCH_ACCOUNT_NAME = "Search Account";
+ 
+@@ -178,13 +190,14 @@ public void testChangeParentAccount(){
+         mSolo.waitForText(accountName);
+ 
+         mSolo.clickLongOnText(accountName);
+-        mSolo.clickOnView(getActivity().findViewById(R.id.context_menu_edit_accounts));
++        mSolo.clickOnView(mSolo.getView(R.id.context_menu_edit_accounts));
+         mSolo.waitForView(EditText.class);
+ 
+         mSolo.clickOnCheckBox(1);
+         mSolo.pressSpinnerItem(2, 0);
+ 
+-        mSolo.clickOnView(getActivity().findViewById(R.id.menu_save));
++//        mSolo.clickOnView(mSolo.getView(R.id.menu_save));
++        mSolo.clickOnActionBarItem(R.id.menu_save);
+ 
+         mSolo.waitForText(getActivity().getString(R.string.title_accounts));
+         Account editedAccount = mAccountsDbAdapter.getAccount(accountUID);
+@@ -196,6 +209,7 @@ public void testChangeParentAccount(){
+ 
+ 	public void testEditAccount(){
+         refreshAccountsList();
++        mSolo.sleep(2000);
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		
+ 		String editedAccountName = "Edited Account";
+@@ -292,7 +306,8 @@ public void testIntentAccountCreation(){
+ 	
+ 	protected void tearDown() throws Exception {
+         mSolo.finishOpenedActivities();
+-        mSolo.waitForEmptyActivityStack(10000);
++        mSolo.waitForEmptyActivityStack(20000);
++        mSolo.sleep(5000);
+         mAccountsDbAdapter.deleteAllRecords();
+ 
+ 		super.tearDown();
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 136a3855..ddcd5dae 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -61,7 +61,7 @@ public ExportTransactionsTest() {
+ 	
+ 	@Override
+ 	protected void setUp() throws Exception {
+-		super.setUp();
++		AccountsActivityTest.preventFirstRunDialogs(getInstrumentation().getTargetContext());
+ 		mSolo = new Solo(getInstrumentation(), getActivity());
+ 
+         mDbHelper = new DatabaseHelper(getActivity());
+@@ -111,25 +111,27 @@ public void testXmlExport(){
+ 
+ 	/**
+ 	 * Generates export for the specified format and tests that the file actually is created
+-	 * @param format
++	 * @param format Export format to use
+ 	 */
+     public void testExport(ExportFormat format){
+ 		File folder = new File(Exporter.EXPORT_FOLDER_PATH);
+ 		folder.mkdirs();
++		assertThat(folder).exists();
++
+ 		for (File file : folder.listFiles()) {
+ 			file.delete();
+ 		}
+ 
+-		mSolo.setNavigationDrawer(Solo.OPENED);
+-		mSolo.clickOnText(mSolo.getString(R.string.nav_menu_export));
++		mSolo.clickOnActionBarItem(R.id.menu_export);
++		mSolo.waitForDialogToOpen(5000);
++
++        mSolo.waitForText(getActivity().getString(R.string.title_export_dialog));
+ 
+-        mSolo.waitForText(getActivity().getString(R.string.menu_export_transactions));
+-		mSolo.waitForDialogToOpen();
+ 		mSolo.clickOnText(format.name());
+ 		mSolo.clickOnButton(mSolo.getString(R.string.btn_export));
+ 
+-        mSolo.waitForDialogToClose();
+-		mSolo.sleep(2000); //sleep so that emulators can save the file
++        mSolo.waitForDialogToClose(10000);
++		mSolo.sleep(5000); //sleep so that emulators can save the file
+ 
+ 		assertThat(folder.listFiles().length).isEqualTo(1);
+ 		File exportFile = folder.listFiles()[0];
+@@ -153,14 +155,17 @@ public void testDeleteTransactionsAfterExport(){
+ 	 * Test creating a scheduled export
+ 	 */
+ 	public void testCreateExportSchedule(){
+-		mSolo.setNavigationDrawer(Solo.OPENED);
+-		mSolo.clickOnText(mSolo.getString(R.string.nav_menu_export));
+-		mSolo.waitForText(getActivity().getString(R.string.menu_export_transactions));
++//		mSolo.setNavigationDrawer(Solo.OPENED);
++//		mSolo.clickOnText(mSolo.getString(R.string.nav_menu_export));
++		mSolo.clickOnActionBarItem(R.id.menu_export);
++		mSolo.waitForDialogToOpen(5000);
+ 
+ 		mSolo.clickOnText(ExportFormat.XML.name());
+ 		mSolo.clickOnView(mSolo.getView(R.id.input_recurrence));
+-		
+-		mSolo.clickOnButton(0);
++		mSolo.waitForDialogToOpen();
++		mSolo.sleep(1000);
++		mSolo.clickOnButton(0); //switch on the recurrence dialog
++		mSolo.sleep(1000);
+ 		mSolo.clickOnText("Done");
+ 		mSolo.waitForDialogToClose();
+ 
+@@ -184,7 +189,8 @@ public void testCreateExportSchedule(){
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		mSolo.finishOpenedActivities();
+-		mSolo.waitForEmptyActivityStack(10000);
++		mSolo.waitForEmptyActivityStack(20000);
++		mSolo.sleep(5000);
+ 		mAccountsDbAdapter.deleteAllRecords();
+         mDbHelper.close();
+         mDb.close();
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 0d62b337..ea266b4e 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -329,9 +329,9 @@ public void testChildAccountsShouldUseParentTransferAccountSetting(){
+ 		intent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+ 		intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, childAccount.getUID());
+ 		getActivity().startActivity(intent);
+-		mSolo.sleep(1000);
++		mSolo.waitForActivity(TransactionsActivity.class);
++		mSolo.sleep(3000);
+ 		Spinner spinner = (Spinner) mSolo.getView(R.id.input_double_entry_accounts_spinner);
+-
+ 		long transferAccountID = mAccountsDbAdapter.getID(transferAccount.getUID());
+ 		assertThat(transferAccountID).isEqualTo(spinner.getSelectedItemId());
+ 	}
+@@ -432,7 +432,7 @@ public void testBulkMoveTransactions(){
+ 		//initiate bulk move
+ 		clickSherlockActionBarItem(R.id.context_menu_move_transactions);
+ 		
+-		mSolo.waitForDialogToClose(2000);
++		mSolo.waitForDialogToClose();
+ 		
+ 		Spinner spinner = mSolo.getCurrentViews(Spinner.class).get(0);
+ 		mSolo.clickOnView(spinner);
+@@ -441,7 +441,7 @@ public void testBulkMoveTransactions(){
+ 		mSolo.clickOnButton(1);
+ //		mSolo.clickOnText(getActivity().getString(R.string.btn_move));
+ 		
+-		mSolo.waitForDialogToClose(2000);
++		mSolo.waitForDialogToClose();
+ 		
+ 		int targetCount = mAccountsDbAdapter.getAccount(account.getUID()).getTransactionCount();
+ 		assertEquals(1, targetCount);
+@@ -449,7 +449,8 @@ public void testBulkMoveTransactions(){
+ 		int afterOriginCount = mAccountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
+ 		assertEquals(beforeOriginCount-1, afterOriginCount);
+ 	}
+-	
++
++	//TODO: add normal transaction recording
+ 	public void testLegacyIntentTransactionRecording(){
+ 		int beforeCount = mTransactionsDbAdapter.getTransactionsCount(DUMMY_ACCOUNT_UID);
+ 		Intent transactionIntent = new Intent(Intent.ACTION_INSERT);
+@@ -481,7 +482,8 @@ public void testLegacyIntentTransactionRecording(){
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		mSolo.finishOpenedActivities();
+-		mSolo.waitForEmptyActivityStack(10000);
++		mSolo.waitForEmptyActivityStack(20000);
++		mSolo.sleep(5000);
+ 		mAccountsDbAdapter.deleteAllRecords();
+ 		super.tearDown();
+ 	}
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index b09fa6a5..ecfe9b0d 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -23,6 +23,7 @@
+ import android.content.SharedPreferences;
+ import android.database.SQLException;
+ import android.database.sqlite.SQLiteDatabase;
++import android.os.Build;
+ import android.preference.PreferenceManager;
+ import android.util.Log;
+ import com.crashlytics.android.Crashlytics;
+@@ -76,7 +77,7 @@ public void onCreate(){
+         GnuCashApplication.context = getApplicationContext();
+         //TODO: in production, only start logging if user gave consent
+ 
+-        if (!BuildConfig.DEBUG)
++        if (BuildConfig.USE_CRASHLYTICS)
+             Crashlytics.start(this);
+ 
+         mDbHelper = new DatabaseHelper(getApplicationContext());
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index da716c3a..ba20e610 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -206,6 +206,24 @@ protected void onPostExecute(Boolean exportResult) {
+                         mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name()),
+                         Toast.LENGTH_LONG).show();
+                 return;
++            } else {
++                String targetLocation;
++                switch (mExportParams.getExportTarget()){
++                    case SD_CARD:
++                        targetLocation = "SD card";
++                        break;
++                    case DROPBOX:
++                        targetLocation = "DropBox -> Apps -> GnuCash";
++                        break;
++                    case GOOGLE_DRIVE:
++                        targetLocation = "Google Drive -> " + mContext.getString(R.string.app_name);
++                        break;
++                    default:
++                        targetLocation = "external service";
++                }
++                Toast.makeText(mContext,
++                        String.format(mContext.getString(R.string.toast_exported_to), targetLocation),
++                        Toast.LENGTH_LONG).show();
+             }
+         }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 80fc9260..466e6d75 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -563,7 +563,7 @@ private void loadDefaultTransferAccountList(){
+      */
+ 	private void loadParentAccountList(AccountType accountType){
+         String condition = DatabaseSchema.SplitEntry.COLUMN_TYPE + " IN ("
+-                + getAllowedParentAccountTypes(accountType) + ") ";
++                + getAllowedParentAccountTypes(accountType) + ") AND " + DatabaseSchema.AccountEntry.COLUMN_HIDDEN + "!=1 ";
+ 
+         if (mAccount != null){  //if editing an account
+             mDescendantAccountUIDs = mAccountsDbAdapter.getDescendantAccountUIDs(mAccount.getUID(), null, null);
+diff --git a/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 190c165d..df30e071 100644
+--- a/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -189,7 +189,7 @@ public static void updateWidget(Context context, int appWidgetId, String account
+ 		
+ 		Intent newTransactionIntent = new Intent(context, TransactionsActivity.class);
+ 		newTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-		newTransactionIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_CLEAR_TASK);
++		newTransactionIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+ 		newTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+ 		PendingIntent pendingIntent = PendingIntent
+ 				.getActivity(context, appWidgetId, newTransactionIntent, 0);	            
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index 06b25d09..4f2550d8 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -496,4 +496,5 @@ No user-identifiable information will be collected as part of this process!</str
+ 	<string name="title_scheduled_exports">Scheduled Exports</string>
+ 	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+ 	<string name="title_create_export_schedule">Create export schedule</string>
++	<string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index 83f02143..130c6032 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -515,4 +515,5 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="title_scheduled_exports">Scheduled Exports</string>
+ 	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+ 	<string name="title_create_export_schedule">Create export schedule</string>
++	<string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 04043549..b8b23616 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -500,4 +500,5 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_scheduled_exports">Scheduled Exports</string>
+     <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+     <string name="title_create_export_schedule">Create export schedule</string>
++    <string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 4e3e4a90..b0927f36 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -497,4 +497,5 @@ Este proceso solo recoge informaci&#243;n que no permite identificar al usuario<
+ 	<string name="title_scheduled_exports">Scheduled Exports</string>
+ 	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+ 	<string name="title_create_export_schedule">Create export schedule</string>
++	<string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 447f6447..236066e1 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -497,4 +497,5 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_scheduled_exports">Scheduled Exports</string>
+     <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+     <string name="title_create_export_schedule">Create export schedule</string>
++    <string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index baf67383..82db53ba 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -501,4 +501,5 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_scheduled_exports">Scheduled Exports</string>
+     <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+     <string name="title_create_export_schedule">Create export schedule</string>
++    <string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index 5fd9d1ac..14ffe299 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -501,4 +501,5 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_scheduled_exports">Scheduled Exports</string>
+     <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+     <string name="title_create_export_schedule">Create export schedule</string>
++    <string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index d70dc3d7..f8043adf 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -498,4 +498,5 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="title_scheduled_exports">Scheduled Exports</string>
+ 	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+ 	<string name="title_create_export_schedule">Create export schedule</string>
++	<string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index ec915353..bdb8b92b 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -502,4 +502,5 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_scheduled_exports">Scheduled Exports</string>
+     <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+     <string name="title_create_export_schedule">Create export schedule</string>
++    <string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index ec5d75aa..81cf1f46 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -500,4 +500,5 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="title_scheduled_exports">Scheduled Exports</string>
+ 	<string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+ 	<string name="title_create_export_schedule">Create export schedule</string>
++	<string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 6380d2d2..21e06eba 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -506,4 +506,5 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_scheduled_exports">Scheduled Exports</string>
+     <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+     <string name="title_create_export_schedule">Create export schedule</string>
++    <string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index f321303b..dab2c416 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -498,4 +498,5 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_scheduled_exports">Scheduled Exports</string>
+     <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+     <string name="title_create_export_schedule">Create export schedule</string>
++    <string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 5abed413..3180d84f 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -505,4 +505,5 @@ No user-identifiable information will be collected as part of this process!</str
+     <string name="title_scheduled_exports">Scheduled Exports</string>
+     <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+     <string name="title_create_export_schedule">Create export schedule</string>
++    <string name="toast_exported_to">Exported to: %1$s</string>
+ </resources>

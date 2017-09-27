@@ -1,0 +1,731 @@
+From 3cb65fc5a4e8bffc95f6b689e3378bc2778e602a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 28 Apr 2016 14:38:03 +0200
+Subject: [PATCH] Start work on improving tests in a multi-book world
+
+Fix disabling of animation during execution of tests
+Fix execution of tests on multiple devices in parallel
+---
+ app/build.gradle                                   |  47 +++---
+ .../android/test/ui/AccountsActivityTest.java      | 187 ++++++++++++---------
+ .../test/ui/util/DisableAnimationsRule.java        |  59 +++++++
+ .../ui/{ => util}/GnucashAndroidTestRunner.java    |   2 +-
+ .../android/db/adapter/AccountsDbAdapter.java      |   1 +
+ .../android/ui/account/AccountFormFragment.java    |  10 +-
+ .../android/ui/account/AccountsActivity.java       |   8 +-
+ app/src/main/res/layout/cardview_account.xml       |   2 +-
+ scripts/adb_all.bat                                |  24 +++
+ scripts/adb_all.sh                                 |  20 +++
+ 10 files changed, 257 insertions(+), 103 deletions(-)
+ create mode 100644 app/src/androidTest/java/org/gnucash/android/test/ui/util/DisableAnimationsRule.java
+ rename app/src/androidTest/java/org/gnucash/android/test/ui/{ => util}/GnucashAndroidTestRunner.java (99%)
+ create mode 100644 scripts/adb_all.bat
+ create mode 100644 scripts/adb_all.sh
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 95ad628c..f0d0bed0 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -1,4 +1,5 @@
+ import java.text.SimpleDateFormat
++import org.apache.tools.ant.taskdefs.condition.Os
+ 
+ apply plugin: 'com.android.application'
+ apply plugin: 'io.fabric'
+@@ -43,7 +44,7 @@ android {
+             resValue "string", "dropbox_app_secret", "h2t9fphj3nr4wkw"
+             resValue "string", "manifest_dropbox_app_key", "db-dhjh8ke9wf05948"
+         }
+-        testInstrumentationRunner "org.gnucash.android.test.ui.GnucashAndroidTestRunner"
++        testInstrumentationRunner "org.gnucash.android.test.ui.util.GnucashAndroidTestRunner"
+ 
+     }
+ 
+@@ -145,27 +146,32 @@ def initCrashlyticsPropertiesIfNeeded() {
+     }
+ }
+ 
+-def adb = android.getAdbExe().toString()
++def adb = Os.isFamily(Os.FAMILY_WINDOWS) ? "..\\scripts\\adb_all.bat" : "../scripts/adb_all.sh"
++//def adb = android.getAdbExe().toString()
+ 
+ afterEvaluate {
+     initCrashlyticsPropertiesIfNeeded()
+ 
+     task grantTestPermissionsDevel(type: Exec, dependsOn: 'installDevelopmentDebug') { // or install{productFlavour}{buildType}
+-        commandLine "$adb", 'devices'
+-        standardOutput = new ByteArrayOutputStream()
+-
+-        String output = standardOutput.toString()
+-        output.eachLine {
+-            def serial = it.split("\\s")[0]
+-            commandLine "$adb -s $serial shell pm grant $android.productFlavors.development.applicationId android.permission.SET_ANIMATION_SCALE".split(' ')
+-            commandLine "$adb -s $serial shell pm grant $android.productFlavors.development.applicationId android.permission.WRITE_EXTERNAL_STORAGE".split(' ')
++        if (Os.isFamily(Os.FAMILY_WINDOWS)){
++            commandLine "cmd", "/c", "$adb", "shell pm grant $android.productFlavors.development.applicationId android.permission.SET_ANIMATION_SCALE"
++//            commandLine "cmd", "/c", "$adb", "shell pm grant $android.productFlavors.development.applicationId android.permission.WRITE_EXTERNAL_STORAGE"
++        } else {
++            commandLine "$adb shell pm grant $android.productFlavors.development.applicationId android.permission.SET_ANIMATION_SCALE".split(' ')
++//            commandLine "$adb shell pm grant $android.productFlavors.development.applicationId android.permission.WRITE_EXTERNAL_STORAGE".split(' ')
+         }
+     }
+ 
+     task grantTestPermissionsProduction(type: Exec, dependsOn: 'installProductionDebug'){
+-        commandLine "$adb -e shell pm grant $android.defaultConfig.applicationId android.permission.SET_ANIMATION_SCALE".split(' ')
+-        commandLine "$adb -e shell pm grant $android.defaultConfig.applicationId android.permission.WRITE_EXTERNAL_STORAGE".split(' ')
++        if (Os.isFamily(Os.FAMILY_WINDOWS)) {
++            commandLine "cmd", "/c", "$adb", "shell pm grant $android.productFlavors.development.applicationId android.permission.SET_ANIMATION_SCALE"
++            commandLine "cmd", "/c", "$adb", "shell pm grant $android.productFlavors.development.applicationId android.permission.WRITE_EXTERNAL_STORAGE"
++        } else {
++            commandLine "$adb shell pm grant $android.defaultConfig.applicationId android.permission.SET_ANIMATION_SCALE".split(' ')
++            commandLine "$adb shell pm grant $android.defaultConfig.applicationId android.permission.WRITE_EXTERNAL_STORAGE".split(' ')
++        }
+     }
++
+     // When launching individual tests from Android Studio, it seems that only the assemble tasks
+     // get called directly, not the install* versions
+     tasks.each { task ->
+@@ -179,9 +185,9 @@ afterEvaluate {
+     }
+ }
+ 
+-def androidSupportVersion       = "23.1.1"
+-def androidEspressoVersion      = "2.2.1"
+-def androidSupportTestVersion   = "0.4.1"
++def androidSupportVersion       = "23.3.0"
++def androidEspressoVersion      = "2.2.2"
++def androidSupportTestVersion   = "0.5"
+ 
+ repositories{
+     flatDir{
+@@ -199,14 +205,14 @@ dependencies {
+             'com.android.support:preference-v7:'    + androidSupportVersion,
+             'com.android.support:recyclerview-v7:'  + androidSupportVersion,
+             'com.viewpagerindicator:library:2.4.1@aar',
+-            'com.code-troopers.betterpickers:library:2.2.1',
++            'com.code-troopers.betterpickers:library:2.5.3',
+             'org.jraf:android-switch-backport:2.0.1@aar',
+             'com.github.PhilJay:MPAndroidChart:v2.1.3',
+             'joda-time:joda-time:2.7',
+             'com.google.android.gms:play-services-drive:8.3.0',
+             'com.jakewharton:butterknife:7.0.1',
+-            'com.kobakei:ratethisapp:0.0.4',
+-            'com.squareup:android-times-square:1.6.4@aar',
++            'io.github.kobakei:ratethisapp:1.0.3',
++            'com.squareup:android-times-square:1.6.5@aar',
+             'com.github.techfreak:wizardpager:1.0.3',
+             'net.objecthunter:exp4j:0.4.5',
+             'org.apache.jackrabbit:jackrabbit-webdav:2.11.1'
+@@ -230,7 +236,10 @@ dependencies {
+     androidTestCompile ('com.android.support:support-annotations:'  + androidSupportVersion,
+                         'com.android.support.test:runner:'          + androidSupportTestVersion,
+                         'com.android.support.test:rules:'           + androidSupportTestVersion,
+-                        'com.android.support.test.espresso:espresso-core:'      + androidEspressoVersion)
++                        'com.android.support.test.espresso:espresso-core:'      + androidEspressoVersion,
++            //the following are only added so that the app and test version both us the same versions
++                        'com.android.support:appcompat-v7:'     + androidSupportVersion,
++                        'com.android.support:design:'           + androidSupportVersion)
+     androidTestCompile ('com.android.support.test.espresso:espresso-contrib:'   + androidEspressoVersion) {
+         exclude group: 'com.android.support', module: 'support-v4'
+         exclude module: 'recyclerview-v7'
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 237a569e..2f84027a 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -27,6 +27,7 @@
+ import android.support.test.InstrumentationRegistry;
+ import android.support.test.espresso.Espresso;
+ import android.support.test.espresso.matcher.ViewMatchers;
++import android.support.test.rule.ActivityTestRule;
+ import android.support.test.runner.AndroidJUnit4;
+ import android.support.v4.app.Fragment;
+ import android.test.ActivityInstrumentationTestCase2;
+@@ -35,9 +36,11 @@
+ import com.kobakei.ratethisapp.RateThisApp;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
++import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.db.adapter.DatabaseAdapter;
+ import org.gnucash.android.db.adapter.SplitsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+@@ -48,10 +51,14 @@
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.receivers.AccountCreator;
++import org.gnucash.android.test.ui.util.DisableAnimationsRule;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.account.AccountsListFragment;
+ import org.junit.After;
+ import org.junit.Before;
++import org.junit.BeforeClass;
++import org.junit.ClassRule;
++import org.junit.Rule;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ 
+@@ -70,8 +77,10 @@
+ import static android.support.test.espresso.assertion.ViewAssertions.doesNotExist;
+ import static android.support.test.espresso.assertion.ViewAssertions.matches;
+ import static android.support.test.espresso.matcher.ViewMatchers.hasDescendant;
++import static android.support.test.espresso.matcher.ViewMatchers.hasSibling;
+ import static android.support.test.espresso.matcher.ViewMatchers.isChecked;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
++import static android.support.test.espresso.matcher.ViewMatchers.isEnabled;
+ import static android.support.test.espresso.matcher.ViewMatchers.isNotChecked;
+ import static android.support.test.espresso.matcher.ViewMatchers.withEffectiveVisibility;
+ import static android.support.test.espresso.matcher.ViewMatchers.withId;
+@@ -79,13 +88,15 @@
+ import static android.support.test.espresso.matcher.ViewMatchers.withText;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.hamcrest.Matchers.allOf;
++import static org.hamcrest.Matchers.equalTo;
++import static org.hamcrest.Matchers.hasEntry;
+ import static org.hamcrest.Matchers.instanceOf;
+ import static org.hamcrest.Matchers.is;
+ import static org.hamcrest.Matchers.not;
+ 
+ 
+ @RunWith(AndroidJUnit4.class)
+-public class AccountsActivityTest extends ActivityInstrumentationTestCase2<AccountsActivity> {
++public class AccountsActivityTest {
+     private static final String ACCOUNTS_CURRENCY_CODE = "USD";
+     // Don't add static here, otherwise it gets set to null by super.tearDown()
+     private final Commodity ACCOUNTS_CURRENCY = Commodity.getInstance(ACCOUNTS_CURRENCY_CODE);
+@@ -99,75 +110,79 @@
+     private static final String CHILD_ACCOUNT_NAME = "Child account";
+     public static final String TEST_DB_NAME = "test_gnucash_db.sqlite";
+ 
+-    private DatabaseHelper mDbHelper;
+-    private SQLiteDatabase mDb;
+-    private AccountsDbAdapter mAccountsDbAdapter;
+-    private TransactionsDbAdapter mTransactionsDbAdapter;
+-    private SplitsDbAdapter mSplitsDbAdapter;
++    private static DatabaseHelper mDbHelper;
++    private static SQLiteDatabase mDb;
++    private static AccountsDbAdapter mAccountsDbAdapter;
++    private static TransactionsDbAdapter mTransactionsDbAdapter;
++    private static SplitsDbAdapter mSplitsDbAdapter;
+     private AccountsActivity mAccountsActivity;
+ 
+     public AccountsActivityTest() {
+-        super(AccountsActivity.class);
++//        super(AccountsActivity.class);
+     }
+ 
+-    @Before
+-    public void setUp() throws Exception {
+-        super.setUp();
+-        injectInstrumentation(InstrumentationRegistry.getInstrumentation());
+-        preventFirstRunDialogs(getInstrumentation().getTargetContext());
+-        mAccountsActivity = getActivity();
++    @ClassRule public static DisableAnimationsRule disableAnimationsRule = new DisableAnimationsRule();
++
++    @Rule
++    public ActivityTestRule<AccountsActivity> mActivityRule = new ActivityTestRule<>(AccountsActivity.class);
++
++    @BeforeClass
++    public static void prepTest(){
++        preventFirstRunDialogs(GnuCashApplication.getAppContext());
+ 
+         String activeBookUID = BooksDbAdapter.getInstance().getActiveBookUID();
+-        mDbHelper = new DatabaseHelper(mAccountsActivity, activeBookUID);
++        mDbHelper = new DatabaseHelper(GnuCashApplication.getAppContext(), activeBookUID);
+         try {
+             mDb = mDbHelper.getWritableDatabase();
+         } catch (SQLException e) {
+-            Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
++            Log.e("AccountsActivityTest", "Error getting database: " + e.getMessage());
+             mDb = mDbHelper.getReadableDatabase();
+         }
+         mSplitsDbAdapter        = new SplitsDbAdapter(mDb);
+         mTransactionsDbAdapter  = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
+         mAccountsDbAdapter      = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
++        CommoditiesDbAdapter commoditiesDbAdapter = new CommoditiesDbAdapter(mDb); //initialize commodity constants
++    }
++
++    @Before
++    public void setUp() throws Exception {
++        mAccountsActivity = mActivityRule.getActivity();
++//        testPreconditions();
++
+         mAccountsDbAdapter.deleteAllRecords(); //clear the data
+ 
+-		Account simpleAccount = new Account(SIMPLE_ACCOUNT_NAME);
++        Account simpleAccount = new Account(SIMPLE_ACCOUNT_NAME);
+         simpleAccount.setUID(SIMPLE_ACCOUNT_UID);
+-		simpleAccount.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY_CODE));
+-		mAccountsDbAdapter.addRecord(simpleAccount, DatabaseAdapter.UpdateMethod.insert);
+-
+-        Account rootAccount = new Account(ROOT_ACCOUNT_NAME);
+-        rootAccount.setUID(ROOT_ACCOUNT_UID);
+-        rootAccount.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY_CODE));
+-        rootAccount.setPlaceHolderFlag(true);
+-        rootAccount.setAccountType(AccountType.LIABILITY);
+-        mAccountsDbAdapter.addRecord(rootAccount);
+-
+-        Account parentAccount = new Account(PARENT_ACCOUNT_NAME);
+-        parentAccount.setUID(PARENT_ACCOUNT_UID);
+-        parentAccount.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY_CODE));
+-        parentAccount.setAccountType(AccountType.LIABILITY);
+-        parentAccount.setParentUID(ROOT_ACCOUNT_UID);
+-        mAccountsDbAdapter.addRecord(parentAccount);
+-
+-        Account childAccount = new Account(CHILD_ACCOUNT_NAME);
+-        childAccount.setUID(CHILD_ACCOUNT_UID);
+-        childAccount.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY_CODE));
+-        childAccount.setAccountType(AccountType.LIABILITY);
+-        childAccount.setParentUID(PARENT_ACCOUNT_UID);
+-        mAccountsDbAdapter.addRecord(childAccount);
+-
+-        refreshAccountsList();
++        simpleAccount.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY_CODE));
++        mAccountsDbAdapter.addRecord(simpleAccount, DatabaseAdapter.UpdateMethod.insert);
++
++//        Account rootAccount = new Account(ROOT_ACCOUNT_NAME);
++//        rootAccount.setUID(ROOT_ACCOUNT_UID);
++//        rootAccount.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY_CODE));
++//        rootAccount.setPlaceHolderFlag(true);
++//        rootAccount.setAccountType(AccountType.ROOT);
++//        rootAccount.setHidden(true);
++//        mAccountsDbAdapter.addRecord(rootAccount);
++//
++//        Account parentAccount = new Account(PARENT_ACCOUNT_NAME);
++//        parentAccount.setUID(PARENT_ACCOUNT_UID);
++//        parentAccount.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY_CODE));
++//        parentAccount.setAccountType(AccountType.LIABILITY);
++//        parentAccount.setParentUID(ROOT_ACCOUNT_UID);
++//        mAccountsDbAdapter.addRecord(parentAccount);
++//
++//        Account childAccount = new Account(CHILD_ACCOUNT_NAME);
++//        childAccount.setUID(CHILD_ACCOUNT_UID);
++//        childAccount.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY_CODE));
++//        childAccount.setAccountType(AccountType.LIABILITY);
++//        childAccount.setParentUID(PARENT_ACCOUNT_UID);
++//        mAccountsDbAdapter.addRecord(childAccount);
++//
++//        refreshAccountsList();
++//        List<Account> accounts = mAccountsDbAdapter.getAllRecords();
++//        assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(5L);
+     }
+ 
+-    @Test
+-    public void testPreconditions() {
+-        assertNotNull(mAccountsActivity);
+-        assertNotNull(mDbHelper);
+-        assertNotNull(mDb);
+-        assertNotNull(mSplitsDbAdapter);
+-        assertNotNull(mTransactionsDbAdapter);
+-        assertNotNull(ACCOUNTS_CURRENCY);
+-    }
+ 
+     /**
+      * Prevents the first-run dialogs (Whats new, Create accounts etc) from being displayed when testing
+@@ -224,6 +239,7 @@ public void testSearchAccounts(){
+      */
+     @Test
+     public void testCreateAccount(){
++        assertThat(mAccountsDbAdapter.getAllRecords()).hasSize(1);
+         onView(allOf(isDisplayed(), withId(R.id.fab_create_account))).perform(click());
+ 
+         String NEW_ACCOUNT_NAME = "A New Account";
+@@ -233,15 +249,15 @@ public void testCreateAccount(){
+                 .check(matches(isNotChecked()))
+                 .perform(click());
+ 
+-        onView(withId(R.id.checkbox_parent_account)).perform(scrollTo())
+-                .check(matches(allOf(isDisplayed(), isNotChecked())))
+-                .perform(click());
++//        onView(withId(R.id.checkbox_parent_account)).perform(scrollTo())
++//                .check(matches(allOf(isDisplayed(), isNotChecked())))
++//                .perform(click());
+ 
+         onView(withId(R.id.menu_save)).perform(click());
+ 
+         List<Account> accounts = mAccountsDbAdapter.getAllRecords();
+         assertThat(accounts).isNotNull();
+-        assertThat(accounts).hasSize(5);
++        assertThat(accounts).hasSize(2);
+         Account newestAccount = accounts.get(0); //because of alphabetical sorting
+ 
+         assertThat(newestAccount.getName()).isEqualTo(NEW_ACCOUNT_NAME);
+@@ -267,13 +283,17 @@ public void testChangeParentAccount() {
+                 .perform(click());
+         // FIXME: explicitly select the parent account
+ 
++        onView(withId(R.id.input_parent_account)).check(matches(isEnabled())).perform(click());
++
++        onView(withText(SIMPLE_ACCOUNT_NAME)).perform(click());
++
+         onView(withId(R.id.menu_save)).perform(click());
+ 
+         Account editedAccount = mAccountsDbAdapter.getRecord(account.getUID());
+         String parentUID = editedAccount.getParentUID();
+ 
+         assertThat(parentUID).isNotNull();
+-        assertThat(ROOT_ACCOUNT_UID).isEqualTo(parentUID);
++        assertThat(parentUID).isEqualTo(SIMPLE_ACCOUNT_UID);
+     }
+ 
+     /**
+@@ -372,11 +392,13 @@ private void sleep(long millis) {
+     //TODO: Add test for moving content of accounts before deleting it
+     @Test(expected = IllegalArgumentException.class)
+     public void testDeleteSimpleAccount() {
+-        sleep(2000);
++        //sleep(2000);
+         onView(allOf(withParent(hasDescendant(withText(SIMPLE_ACCOUNT_NAME))),
+                 withId(R.id.options_menu))).perform(click());
+-        onView(withText(R.string.menu_delete)).perform(click());
++//        onView(allOf(hasSibling(withText(SIMPLE_ACCOUNT_NAME)), withId(R.id.options_menu))).perform(click());
+ 
++        onView(withText(R.string.menu_delete)).perform(click());
++        sleep(2000);
+         //the account has no sub-accounts
+ //        onView(withId(R.id.accounts_options)).check(matches(not(isDisplayed())));
+ //        onView(withId(R.id.transactions_options)).check(matches(isDisplayed()));
+@@ -391,8 +413,8 @@ public void testDeleteSimpleAccount() {
+     @Test
+     public void testDeleteAccountWithSubaccounts() {
+         sleep(2000);
+-        onView(withText(ROOT_ACCOUNT_NAME)).perform(click());
+-        onView(allOf(withParent(hasDescendant(withText(PARENT_ACCOUNT_NAME))),
++        onView(withText(SIMPLE_ACCOUNT_NAME)).perform(click());
++        onView(allOf(withParent(hasDescendant(withText(SIMPLE_ACCOUNT_NAME))),
+                      withId(R.id.options_menu))).perform(click());
+         onView(withText(R.string.menu_delete)).perform(click());
+ 
+@@ -400,25 +422,36 @@ public void testDeleteAccountWithSubaccounts() {
+                      withId(R.id.radio_delete))).perform(click());
+         onView(withText(R.string.alert_dialog_ok_delete)).perform(click());
+ 
+-        assertTrue("Parent account has not been deleted.", !accountExists(PARENT_ACCOUNT_UID));
+-        assertTrue("Child account has not been deleted after deleting its parent account.",
+-                   !accountExists(CHILD_ACCOUNT_UID));
++        assertThat(!accountExists(PARENT_ACCOUNT_UID)).isTrue();
++        assertThat(!accountExists(CHILD_ACCOUNT_UID)).isTrue();
+     }
+ 
+     @Test
+     public void testDeleteAccountMovingSubaccounts() {
+         sleep(2000);
+-        onView(withText(ROOT_ACCOUNT_NAME)).perform(click());
+-        onView(allOf(withParent(hasDescendant(withText(PARENT_ACCOUNT_NAME))),
++        Account subAccount = new Account("Child account");
++        subAccount.setParentUID(SIMPLE_ACCOUNT_UID);
++
++        Account tranferAcct = new Account("Other account");
++        mAccountsDbAdapter.addRecord(subAccount, DatabaseAdapter.UpdateMethod.insert);
++        mAccountsDbAdapter.addRecord(tranferAcct, DatabaseAdapter.UpdateMethod.insert);
++
++        refreshAccountsList();
++
++//        onView(withText(SIMPLE_ACCOUNT_NAME)).perform(click());
++        onView(allOf(withParent(hasDescendant(withText(SIMPLE_ACCOUNT_NAME))),
+                 withId(R.id.options_menu))).perform(click());
+         onView(withText(R.string.menu_delete)).perform(click());
+ 
+         onView(allOf(withParent(withId(R.id.accounts_options)),
+-                withId(R.id.radio_move))).perform(click());
++                withId(R.id.radio_move))).check(matches(isEnabled())).perform(click());
++
+         onView(withText(R.string.alert_dialog_ok_delete)).perform(click());
+ 
+-        assertTrue("Parent account has not been deleted.", !accountExists(PARENT_ACCOUNT_UID));
+-        assertTrue("Child account should not have been deleted.", accountExists(CHILD_ACCOUNT_UID));
++        assertThat(!accountExists(SIMPLE_ACCOUNT_UID)).isTrue();
++//        assertTrue("Parent account has not been deleted.", );
++        assertThat(accountExists(subAccount.getUID())).isTrue();
++//        assertTrue("Child account should not have been deleted.", );
+     }
+ 
+     private boolean accountExists(String accountId) {
+@@ -455,12 +488,13 @@ public void testIntentAccountCreation(){
+     @TargetApi(Build.VERSION_CODES.HONEYCOMB)
+     @Test
+     public void shouldShowWizardOnFirstRun() throws Throwable {
+-        PreferenceManager.getDefaultSharedPreferences(mAccountsActivity)
+-                .edit()
+-                .remove(mAccountsActivity.getString(R.string.key_first_run))
+-                .commit();
++        Editor editor = PreferenceManager.getDefaultSharedPreferences(mAccountsActivity)
++                .edit();
++        //commit for immediate effect
++        editor.remove(mAccountsActivity.getString(R.string.key_first_run)).commit();
+ 
+-        runTestOnUiThread(new Runnable() {
++
++        mActivityRule.runOnUiThread(new Runnable() {
+             @Override
+             public void run() {
+                 mAccountsActivity.recreate();
+@@ -470,12 +504,15 @@ public void run() {
+         //check that wizard is shown
+         onView(withText(mAccountsActivity.getString(R.string.title_setup_gnucash)))
+                 .check(matches(isDisplayed()));
++
++        editor.putBoolean(mAccountsActivity.getString(R.string.key_first_run), false).apply();
+     }
+ 
+     @After
+     public void tearDown() throws Exception {
+-        mAccountsActivity.finish();
+-        super.tearDown();
++        if (mAccountsActivity != null) {
++            mAccountsActivity.finish();
++        }
+     }
+ 
+     /**
+@@ -483,7 +520,7 @@ public void tearDown() throws Exception {
+      */
+     private void refreshAccountsList(){
+         try {
+-            runTestOnUiThread(new Runnable() {
++            mActivityRule.runOnUiThread(new Runnable() {
+                 @Override
+                 public void run() {
+                     Fragment fragment = mAccountsActivity.getCurrentAccountListFragment();
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/util/DisableAnimationsRule.java b/app/src/androidTest/java/org/gnucash/android/test/ui/util/DisableAnimationsRule.java
+new file mode 100644
+index 00000000..03fdbdef
+--- /dev/null
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/util/DisableAnimationsRule.java
+@@ -0,0 +1,59 @@
++package org.gnucash.android.test.ui.util;
++
++import android.os.IBinder;
++
++import org.junit.rules.TestRule;
++import org.junit.runner.Description;
++import org.junit.runners.model.Statement;
++
++import java.lang.reflect.Method;
++import java.util.Arrays;
++
++/**
++ * Created by Ngewi on 19.04.2016.
++ * Credit: https://product.reverb.com/2015/06/06/disabling-animations-in-espresso-for-android-testing/
++ */
++public class DisableAnimationsRule implements TestRule {
++    private Method mSetAnimationScalesMethod;
++    private Method mGetAnimationScalesMethod;
++    private Object mWindowManagerObject;
++
++    public DisableAnimationsRule() {
++        try {
++            Class<?> windowManagerStubClazz = Class.forName("android.view.IWindowManager$Stub");
++            Method asInterface = windowManagerStubClazz.getDeclaredMethod("asInterface", IBinder.class);
++
++            Class<?> serviceManagerClazz = Class.forName("android.os.ServiceManager");
++            Method getService = serviceManagerClazz.getDeclaredMethod("getService", String.class);
++
++            Class<?> windowManagerClazz = Class.forName("android.view.IWindowManager");
++
++            mSetAnimationScalesMethod = windowManagerClazz.getDeclaredMethod("setAnimationScales", float[].class);
++            mGetAnimationScalesMethod = windowManagerClazz.getDeclaredMethod("getAnimationScales");
++
++            IBinder windowManagerBinder = (IBinder) getService.invoke(null, "window");
++            mWindowManagerObject = asInterface.invoke(null, windowManagerBinder);
++        }
++        catch (Exception e) {
++            throw new RuntimeException("Failed to access animation methods", e);
++        }
++    }
++
++    @Override
++    public Statement apply(final Statement statement, Description description) {
++        return new Statement() {
++            @Override
++            public void evaluate() throws Throwable {
++                setAnimationScaleFactors(0.0f);
++                try { statement.evaluate(); }
++                finally { setAnimationScaleFactors(1.0f); }
++            }
++        };
++    }
++
++    private void setAnimationScaleFactors(float scaleFactor) throws Exception {
++        float[] scaleFactors = (float[]) mGetAnimationScalesMethod.invoke(mWindowManagerObject);
++        Arrays.fill(scaleFactors, scaleFactor);
++        mSetAnimationScalesMethod.invoke(mWindowManagerObject, scaleFactors);
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/GnucashAndroidTestRunner.java b/app/src/androidTest/java/org/gnucash/android/test/ui/util/GnucashAndroidTestRunner.java
+similarity index 99%
+rename from app/src/androidTest/java/org/gnucash/android/test/ui/GnucashAndroidTestRunner.java
+rename to app/src/androidTest/java/org/gnucash/android/test/ui/util/GnucashAndroidTestRunner.java
+index 3418f879..939b7bb4 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/GnucashAndroidTestRunner.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/util/GnucashAndroidTestRunner.java
+@@ -14,7 +14,7 @@
+  * limitations under the License.
+  */
+ 
+-package org.gnucash.android.test.ui;
++package org.gnucash.android.test.ui.util;
+ 
+ import android.content.pm.PackageManager;
+ import android.os.Bundle;
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+index 13ad514f..3c840614 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+@@ -150,6 +150,7 @@ public long bulkAddRecords(@NonNull List<Account> accountList, UpdateMethod upda
+         //this is necessary because the database has ON DELETE CASCADE between accounts and splits
+         //and all accounts are editing via SQL REPLACE
+ 
++        //// TODO: 20.04.2016 Investigate if we can safely remove updating the transactions when bulk updating accounts
+         List<Transaction> transactionList = new ArrayList<>(accountList.size()*2);
+         for (Account account : accountList) {
+             transactionList.addAll(account.getTransactions());
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 18cf6657..2a90bdcc 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -725,6 +725,8 @@ public void onDestroy() {
+      */
+ 	private void saveAccount() {
+         Log.i("AccountFormFragment", "Saving account");
++        if (mAccountsDbAdapter == null)
++            mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+         // accounts to update, in case we're updating full names of a sub account tree
+         ArrayList<Account> accountsToUpdate = new ArrayList<>();
+         boolean nameChanged = false;
+@@ -736,6 +738,7 @@ private void saveAccount() {
+ 				return;				
+ 			}
+ 			mAccount = new Account(getEnteredName());
++            mAccountsDbAdapter.addRecord(mAccount, DatabaseAdapter.UpdateMethod.insert); //new account, insert it
+ 		}
+ 		else {
+             nameChanged = !mAccount.getName().equals(getEnteredName());
+@@ -794,9 +797,7 @@ private void saveAccount() {
+                     // parent change, update all full names of descent accounts
+                     accountsToUpdate.addAll(mAccountsDbAdapter.getSimpleAccountList(
+                             DatabaseSchema.AccountEntry.COLUMN_UID + " IN ('" +
+-                                    TextUtils.join("','", mDescendantAccountUIDs) + "')",
+-                            null,
+-                            null
++                                    TextUtils.join("','", mDescendantAccountUIDs) + "')", null, null
+                     ));
+                 }
+                 HashMap<String, Account> mapAccount = new HashMap<>();
+@@ -819,8 +820,7 @@ private void saveAccount() {
+             }
+         }
+         accountsToUpdate.add(mAccount);
+-		if (mAccountsDbAdapter == null)
+-			mAccountsDbAdapter = AccountsDbAdapter.getInstance();
++
+         // bulk update, will not update transactions
+ 		mAccountsDbAdapter.bulkAddRecords(accountsToUpdate, DatabaseAdapter.UpdateMethod.update);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 521a85c4..48a1b871 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -145,6 +145,7 @@
+      * Configuration for rating the app
+      */
+     public static RateThisApp.Config rateAppConfig = new RateThisApp.Config(14, 100);
++    private AccountViewPagerAdapter mPagerAdapter;
+ 
+     /**
+      * Adapter for managing the sub-account and transaction fragment pages in the accounts view
+@@ -207,7 +208,10 @@ public int getCount() {
+ 
+     public AccountsListFragment getCurrentAccountListFragment(){
+         int index = mViewPager.getCurrentItem();
+-        return (AccountsListFragment)(mFragmentPageReferenceMap.get(index));
++        Fragment fragment = (Fragment) mFragmentPageReferenceMap.get(index);
++        if (fragment == null)
++            fragment = mPagerAdapter.getItem(index);
++        return (AccountsListFragment) fragment;
+     }
+ 
+     @Override
+@@ -236,7 +240,7 @@ public void onCreate(Bundle savedInstanceState) {
+         tabLayout.setTabGravity(TabLayout.GRAVITY_FILL);
+ 
+         //show the simple accounts list
+-        PagerAdapter mPagerAdapter = new AccountViewPagerAdapter(getSupportFragmentManager());
++        mPagerAdapter = new AccountViewPagerAdapter(getSupportFragmentManager());
+         mViewPager.setAdapter(mPagerAdapter);
+ 
+         mViewPager.addOnPageChangeListener(new TabLayout.TabLayoutOnPageChangeListener(tabLayout));
+diff --git a/app/src/main/res/layout/cardview_account.xml b/app/src/main/res/layout/cardview_account.xml
+index 36a1452c..7eb1ae8e 100644
+--- a/app/src/main/res/layout/cardview_account.xml
++++ b/app/src/main/res/layout/cardview_account.xml
+@@ -26,7 +26,7 @@
+     android:focusable="true"
+     android:clickable="true"
+     android:layout_width="match_parent"
+-    android:layout_height="match_parent">
++    android:layout_height="wrap_content">
+ 
+     <RelativeLayout
+         android:layout_width="match_parent"
+diff --git a/scripts/adb_all.bat b/scripts/adb_all.bat
+new file mode 100644
+index 00000000..b38971b4
+--- /dev/null
++++ b/scripts/adb_all.bat
+@@ -0,0 +1,24 @@
++:: Inspired by Linux version of the same https://gist.github.com/christopherperry/3208109
++
++@echo off
++SET ARGUMENTS=%~1
++
++if "%ARGUMENTS%" == "" (
++    GOTO EOF
++)
++
++SET "ARGUMENTS=%ARGUMENTS:""="%"
++
++SETLOCAL ENABLEDELAYEDEXPANSION 
++:: INSTALL ON ALL ATTACHED DEVICES ::
++FOR /F "tokens=1,2 skip=1" %%A IN ('adb devices') DO (
++    SET IS_DEV=%%B
++	if "!IS_DEV!" == "device" (
++	    SET SERIAL=%%A
++	    echo "adb -s !SERIAL! %ARGUMENTS%"
++	    call adb -s !SERIAL! %ARGUMENTS%
++	)
++)
++ENDLOCAL
++
++:EOF
+\ No newline at end of file
+diff --git a/scripts/adb_all.sh b/scripts/adb_all.sh
+new file mode 100644
+index 00000000..fbfedd90
+--- /dev/null
++++ b/scripts/adb_all.sh
+@@ -0,0 +1,20 @@
++#!/bin/bash
++# Script adb+
++# Usage
++# You can run any command adb provides on all your currently connected devices
++# ./adb+ <command> is the equivalent of ./adb -s <serial number> <command>
++#
++# Examples
++# ./adb+ version
++# ./adb+ install apidemo.apk
++# ./adb+ uninstall com.example.android.apis
++
++adb devices | while read line
++do
++    if [ ! "$line" = "" ] && [ `echo $line | awk '{print $2}'` = "device" ]
++    then
++        device=`echo $line | awk '{print $1}'`
++        echo "$device $@ ..."
++        adb -s $device $@
++    fi
++done
+\ No newline at end of file

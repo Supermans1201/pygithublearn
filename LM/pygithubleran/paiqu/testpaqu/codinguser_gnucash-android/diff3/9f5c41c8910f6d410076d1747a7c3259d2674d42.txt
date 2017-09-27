@@ -1,0 +1,1093 @@
+From 9f5c41c8910f6d410076d1747a7c3259d2674d42 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sun, 12 Aug 2012 23:01:50 +0200
+Subject: [PATCH] Fixed: Currency symbol not updated in "new transactions"
+ fragment when account is changed Print locale-sensitive currency symbols
+ Added code documentation
+
+---
+ .../src/org/gnucash/android/data/Money.java        |   2 +-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |   9 ++
+ .../android/ui/accounts/AccountsListFragment.java  |  49 +++++++
+ .../android/ui/accounts/ExportDialogFragment.java  |  71 ++++++++++
+ .../ui/accounts/NewAccountDialogFragment.java      |  76 ++++++++++-
+ .../ui/transactions/BulkMoveDialogFragment.java    |  39 +++++-
+ .../ui/transactions/NewTransactionFragment.java    | 152 ++++++++++++++++++++-
+ .../ui/transactions/TransactionsActivity.java      |  27 +++-
+ .../ui/transactions/TransactionsListFragment.java  |  71 ++++++++++
+ .../org/gnucash/android/test/unit/MoneyTest.java   |   6 +-
+ 10 files changed, 482 insertions(+), 20 deletions(-)
+
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Money.java b/GnucashMobile/src/org/gnucash/android/data/Money.java
+index 84e6c0ab..7447a9c2 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Money.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Money.java
+@@ -218,7 +218,7 @@ public String formattedString(Locale locale){
+ 		formatter.setMinimumFractionDigits(DECIMAL_PLACES);
+ 		formatter.setMaximumFractionDigits(DECIMAL_PLACES);
+ 		
+-		return formatter.format(asDouble()) + " " + mCurrency.getSymbol();
++		return formatter.format(asDouble()) + " " + mCurrency.getSymbol(locale);
+ 	}
+ 	
+ 	/**
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 9eefb355..19495630 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -283,6 +283,15 @@ public long getId(String accountUID){
+ 	}
+ 	
+ 	/**
++	 * Returns currency code of account with database ID <code>id</code>
++	 * @param id Record ID of the account to be removed
++	 * @return Currency code of the account
++	 */
++	public String getCurrency(long id){
++		return mTransactionsAdapter.getCurrencyCode(id);
++	}
++	
++	/**
+ 	 * Deletes all accounts and their transactions from the database
+ 	 */
+ 	public void deleteAllAccounts(){
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 17dc0e22..edbcc021 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -293,6 +293,12 @@ public boolean onItemLongClick(AdapterView<?> parent, View view, int position,
+ 	        return true;
+ 		}
+ 
++	/**
++	 * Delete the account with record ID <code>rowId</code>
++	 * It shows the delete confirmation dialog if the account has transactions,
++	 * else deletes the account immediately
++	 * @param rowId The record ID of the account
++	 */
+ 	public void tryDeleteAccount(long rowId){
+ 		Account acc = mAccountsDbAdapter.getAccount(rowId);
+ 		if (acc.getTransactionCount() > 0){
+@@ -302,6 +308,10 @@ public void tryDeleteAccount(long rowId){
+ 		}
+ 	}
+ 	
++	/**
++	 * Deletes an account and show a {@link Toast} notification on success
++	 * @param rowId Record ID of the account to be deleted
++	 */
+ 	protected void deleteAccount(long rowId){		
+ 
+ 		boolean deleted = mAccountsDbAdapter.destructiveDeleteAccount(rowId);
+@@ -311,12 +321,20 @@ protected void deleteAccount(long rowId){
+ 		refreshList();	
+ 	}
+ 
++	/**
++	 * Shows the delete confirmation dialog
++	 * @param id Record ID of account to be deleted after confirmation
++	 */
+ 	public void showConfirmationDialog(long id){
+ 		MyAlertDialogFragment alertFragment = MyAlertDialogFragment.newInstance(R.string.title_confirm_delete, id);
+ 		alertFragment.setTargetFragment(this, 0);
+ 		alertFragment.show(getSherlockActivity().getSupportFragmentManager(), "dialog");
+ 	}
+ 	
++	/**
++	 * Finish the edit mode and dismisses the Contextual ActionBar
++	 * Any selected (highlighted) accounts are deselected
++	 */
+ 	public void finishEditMode(){
+ 		mInEditMode = false;
+ 		deselectPreviousSelectedItem();
+@@ -324,6 +342,12 @@ public void finishEditMode(){
+ 		mSelectedItemId = -1;
+ 	}
+ 	
++	/**
++	 * Highlights the item at <code>position</code> in the ListView.
++	 * Android has facilities for managing list selection but the highlighting 
++	 * is not reliable when using the ActionBar on pre-Honeycomb devices-
++	 * @param position Position of item to be highlighted
++	 */
+ 	private void selectItem(int position){
+ 		deselectPreviousSelectedItem();		
+ 		ListView lv = getListView();	
+@@ -334,6 +358,11 @@ private void selectItem(int position){
+         mSelectedViewPosition = position;
+ 	}
+ 	
++	/**
++	 * De-selects the previously selected item in a ListView.
++	 * Only one account entry can be highlighted at a time, so the previously selected
++	 * one is deselected. 
++	 */
+ 	private void deselectPreviousSelectedItem(){
+ 		if (mSelectedViewPosition >= 0){
+ 			getListView().setItemChecked(mSelectedViewPosition, false);
+@@ -373,10 +402,17 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 		}
+ 	}
+ 	
++	/**
++	 * Refreshes the list by restarting the {@link DatabaseCursorLoader} associated
++	 * with the ListView
++	 */
+ 	public void refreshList(){
+ 		getLoaderManager().restartLoader(0, null, this);
+ 	}
+ 	
++	/**
++	 * Closes any open database adapters used by the list
++	 */
+ 	@Override
+ 	public void onDestroy() {
+ 		super.onDestroy();
+@@ -411,6 +447,9 @@ public void showAddAccountDialog(long accountId) {
+ 		mAddAccountFragment.show(ft, AccountsActivity.FRAGMENT_NEW_ACCOUNT);
+ 	}
+ 
++	/**
++	 * Displays the dialog for exporting transactions in OFX
++	 */
+ 	public void showExportDialog(){
+ 		FragmentManager manager = getSherlockActivity().getSupportFragmentManager();
+ 		FragmentTransaction ft = manager.beginTransaction();
+@@ -425,6 +464,11 @@ public void showExportDialog(){
+ 	    exportFragment.show(ft, AccountsActivity.FRAGMENT_EXPORT_OFX);
+ 	}
+ 	
++	/**
++	 * Overrides the {@link SimpleCursorAdapter} to provide custom binding of the 
++	 * information from the database to the views
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 */
+ 	private class AccountsCursorAdapter extends SimpleCursorAdapter {
+ 		TransactionsDbAdapter transactionsDBAdapter;
+ 		
+@@ -468,6 +512,11 @@ public void onClick(View v) {
+ 		}
+ 	}
+ 
++	/**
++	 * Extends {@link DatabaseCursorLoader} for loading of {@link Account} from the 
++	 * database asynchronously
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 */
+ 	private static final class AccountsCursorLoader extends DatabaseCursorLoader {
+ 		
+ 		public AccountsCursorLoader(Context context) {
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+index 7cc9c8f4..eeb193a2 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+@@ -61,16 +61,49 @@
+ import android.widget.Spinner;
+ import android.widget.Toast;
+ 
++/**
++ * Dialog fragment for exporting account information as OFX files.
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
+ public class ExportDialogFragment extends DialogFragment {
+ 		
++	/**
++	 * Spinner for selecting destination for the exported file.
++	 * The destination could either be SD card, or another application which
++	 * accepts files, like Google Drive.
++	 */
+ 	Spinner mDestinationSpinner;
++	
++	/**
++	 * Checkbox indicating that all transactions should be exported,
++	 * regardless of whether they have been exported previously or not
++	 */
+ 	CheckBox mExportAllCheckBox;
++	
++	/**
++	 * Checkbox for deleting all transactions after exporting them
++	 */
+ 	CheckBox mDeleteAllCheckBox;
++	
++	/**
++	 * Save button for saving the exported files
++	 */
+ 	Button mSaveButton;
++	
++	/**
++	 * Cancels the export dialog
++	 */
+ 	Button mCancelButton;
+ 	
++	/**
++	 * File path for saving the OFX files
++	 */
+ 	String mFilePath;
+ 	
++	/**
++	 * Click listener for positive button in the dialog.
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 */
+ 	protected class ExportClickListener implements View.OnClickListener {
+ 
+ 		@Override
+@@ -149,6 +182,9 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		bindViews();
+ 	}
+ 
++	/**
++	 * Collects references to the UI elements and binds click listeners
++	 */
+ 	private void bindViews(){
+ 		View v = getView();
+ 		mDestinationSpinner = (Spinner) v.findViewById(R.id.spinner_export_destination);
+@@ -175,6 +211,11 @@ public void onClick(View v) {
+ 		mSaveButton.setOnClickListener(new ExportClickListener());
+ 	}
+ 	
++	/**
++	 * Writes the OFX document <code>doc</code> to external storage
++	 * @param Document containing OFX file data
++	 * @throws IOException if file could not be saved
++	 */
+ 	private void writeToExternalStorage(Document doc) throws IOException{
+ 		File file = new File(mFilePath);
+ 		
+@@ -183,6 +224,9 @@ private void writeToExternalStorage(Document doc) throws IOException{
+ 		
+ 	}
+ 	
++	/**
++	 * Callback for when the activity chooser dialog is completed
++	 */
+ 	@Override
+ 	public void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 		//TODO: fix the exception which is thrown on return
+@@ -193,6 +237,11 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 		}
+ 	}
+ 	
++	/**
++	 * Starts an intent chooser to allow the user to select an activity to receive
++	 * the exported OFX file
++	 * @param path String path to the file on disk
++	 */
+ 	private void shareFile(String path){
+ 		Intent shareIntent = new Intent(Intent.ACTION_SEND);
+ 		shareIntent.setType("multipart/xml");
+@@ -204,6 +253,12 @@ private void shareFile(String path){
+ 		startActivity(Intent.createChooser(shareIntent, getString(R.string.title_share_ofx_with)));	
+ 	}
+ 	
++	/**
++	 * Copies a file from <code>src</code> to <code>dst</code>
++	 * @param src Absolute path to the source file
++	 * @param dst Absolute path to the destination file 
++	 * @throws IOException if the file could not be copied
++	 */
+ 	public static void copyFile(File src, File dst) throws IOException
+ 	{
+ 		//TODO: Make this asynchronous at some time, t in the future.
+@@ -222,6 +277,10 @@ public static void copyFile(File src, File dst) throws IOException
+ 	    }
+ 	}
+ 	
++	/**
++	 * Builds a file name based on the current time stamp for the exported file
++	 * @return String containing the file name
++	 */
+ 	public static String buildExportFilename(){
+ 		SimpleDateFormat formatter = new SimpleDateFormat("yyyyMMdd_HHmm");
+ 		String filename = formatter.format(
+@@ -230,6 +289,13 @@ public static String buildExportFilename(){
+ 		return filename;
+ 	}
+ 	
++	/**
++	 * Exports transactions in the database to the OFX format.
++	 * The accounts are written to a DOM document and returned
++	 * @param exportAll Flag to export all transactions or only the new ones since last export
++	 * @return DOM {@link Document} containing the OFX file information
++	 * @throws ParserConfigurationException
++	 */
+ 	protected Document exportOfx(boolean exportAll) throws ParserConfigurationException{		
+ 		DocumentBuilderFactory docFactory = DocumentBuilderFactory
+ 				.newInstance();
+@@ -248,6 +314,11 @@ protected Document exportOfx(boolean exportAll) throws ParserConfigurationExcept
+ 		return document;
+ 	}
+ 	
++	/**
++	 * Writes out the file held in <code>document</code> to <code>outputWriter</code>
++	 * @param document {@link Document} containing the OFX document structure
++	 * @param outputWriter {@link Writer} to use in writing the file to stream
++	 */
+ 	public void write(Document document, Writer outputWriter){
+ 		try {
+ 			TransformerFactory transformerFactory = TransformerFactory
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
+index 14829b09..28f5f644 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
+@@ -41,22 +41,66 @@
+ 
+ import com.actionbarsherlock.app.SherlockDialogFragment;
+ 
++/**
++ * Dialog fragment used for creating and editing accounts
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
+ public class NewAccountDialogFragment extends SherlockDialogFragment {
++	/**
++	 * Really? You want documentation for this too?
++	 */
+ 	private Button mSaveButton;
++	
++	/**
++	 * Come on! It's a button, what else should I say?
++	 */
+ 	private Button mCancelButton;
++	
++	/**
++	 * EditText for the name of the account to be created/edited
++	 */
+ 	private EditText mNameEditText;
++	
++	/**
++	 * Spinner for selecting the currency of the account
++	 * Currencies listed are those specified by ISO 4217
++	 */
+ 	private Spinner mCurrencySpinner;
+ 	
++	/**
++	 * Accounts database adapter
++	 */
+ 	private AccountsDbAdapter mDbAdapter;
++	
++	/**
++	 * List of all currency codes (ISO 4217) supported by the app
++	 */
+ 	private List<String> mCurrencyCodes;
+ 	
+-	private long mSelectedId = 0;
++	/**
++	 * Record ID of the account which was selected
++	 * This is used if we are editing an account instead of creating one
++	 */
++	private long mSelectedAccountId = 0;
++	
++	/**
++	 * Reference to account object which will be created at end of dialog
++	 */
+ 	private Account mAccount = null;
+ 	
++	/**
++	 * Default constructor
++	 * Required, else the app crashes on screen rotation
++	 */
+ 	public NewAccountDialogFragment() {
+-		
++		//nothing to see here, move along
+ 	}
+ 	
++	/**
++	 * Construct a new instance of the dialog
++	 * @param dbAdapter {@link AccountsDbAdapter} for saving the account
++	 * @return New instance of the dialog fragment
++	 */
+ 	static public NewAccountDialogFragment newInstance(AccountsDbAdapter dbAdapter){
+ 		NewAccountDialogFragment f = new NewAccountDialogFragment();
+ 		f.mDbAdapter = dbAdapter;
+@@ -66,10 +110,12 @@ static public NewAccountDialogFragment newInstance(AccountsDbAdapter dbAdapter){
+ 	@Override
+ 	public void onCreate(Bundle savedInstanceState) {
+ 		super.onCreate(savedInstanceState);
+-		mSelectedId = getArguments().getLong(TransactionsListFragment.SELECTED_ACCOUNT_ID);
+-				
++		mSelectedAccountId = getArguments().getLong(TransactionsListFragment.SELECTED_ACCOUNT_ID);				
+ 	}
+ 	
++	/**
++	 * Inflates the dialog view and retrieves references to the dialog elements
++	 */
+ 	@Override
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+@@ -86,8 +132,8 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+         
+         mNameEditText.addTextChangedListener(new NameFieldWatcher());
+ 		       
+-        if (mSelectedId != 0) {
+-        	mAccount = mDbAdapter.getAccount(mSelectedId);
++        if (mSelectedAccountId != 0) {
++        	mAccount = mDbAdapter.getAccount(mSelectedAccountId);
+         	mNameEditText.setText(mAccount.getName());        	
+         }
+ 		
+@@ -122,6 +168,9 @@ public void onClick(View v) {
+ 		return v;
+ 	}
+ 	
++	/**
++	 * Initializes the values of the views in the dialog
++	 */
+ 	@Override
+ 	public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+@@ -133,7 +182,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		
+ 		String currencyCode = Money.DEFAULT_CURRENCY_CODE;
+ 		
+-		if (mSelectedId != 0){
++		if (mSelectedAccountId != 0){
+ 			//if we are editing an account instead of creating one
+ 			currencyCode = mAccount.getCurrency().getCurrencyCode();
+ 		}
+@@ -144,12 +193,25 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		}		
+ 	}
+ 	
++	/**
++	 * Retrieves the name of the account which has been entered in the EditText
++	 * @return
++	 */
+ 	public String getEnteredName(){
+ 		return mNameEditText.getText().toString();
+ 	}
+ 	
++	/**
++	 * Validation text field watcher which enables the save button only when an account
++	 * name has been provided
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 *
++	 */
+ 	private class NameFieldWatcher implements TextWatcher {
+ 
++		/**
++		 * Enable text if an account name has been entered, disable it otherwise
++		 */
+ 		@Override
+ 		public void afterTextChanged(Editable s) {
+ 			if (s.length() > 0)
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
+index 6a1858d5..12566359 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
+@@ -35,16 +35,45 @@
+ import android.widget.Spinner;
+ import android.widget.Toast;
+ 
++/**
++ * Dialog fragment for moving transactions from one account to another
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
+ public class BulkMoveDialogFragment extends DialogFragment {
+ 
++	/**
++	 * Spinner for selecting the account to move the transactions to
++	 */
+ 	Spinner mDestinationAccountSpinner; 
++	
++	/**
++	 * Dialog positive button. Ok to moving the transactions
++	 */
+ 	Button mOkButton; 
++	
++	/**
++	 * Cancel button
++	 */
+ 	Button mCancelButton; 
+ 	
++	/**
++	 * Record IDs of the transactions to be moved
++	 */
+ 	long[] mTransactionIds = null;
++	
++	/**
++	 * Account from which to move the transactions
++	 */
+ 	long mOriginAccountId = -1;
++	
++	/**
++	 * Accounts database adapter
++	 */
+ 	private AccountsDbAdapter mAccountsDbAdapter;
+ 	
++	/**
++	 * Creates the view and retrieves references to the dialog elements
++	 */
+ 	@Override
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {		
+@@ -63,13 +92,14 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+ 		getDialog().getWindow().setLayout(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+ 		
+-		mTransactionIds = getArguments().getLongArray(TransactionsListFragment.SELECTED_TRANSACTION_IDS);
+-		mOriginAccountId = getArguments().getLong(TransactionsListFragment.ORIGIN_ACCOUNT_ID);
++		Bundle args = getArguments();
++		mTransactionIds = args.getLongArray(TransactionsListFragment.SELECTED_TRANSACTION_IDS);
++		mOriginAccountId = args.getLong(TransactionsListFragment.ORIGIN_ACCOUNT_ID);
+ 		
+ 		String title = getActivity().getString(R.string.title_move_transactions, 
+ 				mTransactionIds.length);
+ 		getDialog().setTitle(title);
+-	
++		
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+ 		Cursor cursor = mAccountsDbAdapter.fetchAllAccounts();
+ 		
+@@ -86,6 +116,9 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		setListeners();
+ 	}
+ 	
++	/**
++	 * Binds click listeners for the dialog buttons
++	 */
+ 	protected void setListeners(){
+ 		mCancelButton.setOnClickListener(new View.OnClickListener() {
+ 			
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index 63d444d4..197ee1c4 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -39,7 +39,9 @@
+ import org.gnucash.android.ui.TimePickerDialogFragment;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
++import android.app.DatePickerDialog;
+ import android.app.DatePickerDialog.OnDateSetListener;
++import android.app.TimePickerDialog;
+ import android.app.TimePickerDialog.OnTimeSetListener;
+ import android.content.Context;
+ import android.database.Cursor;
+@@ -54,6 +56,8 @@
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.view.inputmethod.InputMethodManager;
++import android.widget.AdapterView;
++import android.widget.AdapterView.OnItemSelectedListener;
+ import android.widget.CompoundButton;
+ import android.widget.CompoundButton.OnCheckedChangeListener;
+ import android.widget.DatePicker;
+@@ -69,34 +73,120 @@
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ 
++/**
++ * Fragment for creating or editing transactions
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
+ public class NewTransactionFragment extends SherlockFragment implements 
+ 	OnDateSetListener, OnTimeSetListener {
+ 	
++	/**
++	 * Transactions database adapter
++	 */
+ 	private TransactionsDbAdapter mTransactionsDbAdapter;
++	
++	/**
++	 * Holds database ID of transaction to be edited (if in edit mode)
++	 */
+ 	private long mTransactionId = 0;
++	
++	/**
++	 * Transaction to be created/updated
++	 */
+ 	private Transaction mTransaction;
+ 	
++	/**
++	 * Arguments key for database ID of transaction. 
++	 * Is used to pass a transaction ID into a bundle or intent
++	 */
+ 	public static final String SELECTED_TRANSACTION_ID = "selected_transaction_id";
+ 	
++	/**
++	 * Formats a {@link Date} object into a date string of the format dd MMM yyyy e.g. 18 July 2012
++	 */
+ 	public final static SimpleDateFormat DATE_FORMATTER = new SimpleDateFormat("dd MMM yyyy");
++	
++	/**
++	 * Formats a {@link Date} object to time string of format HH:mm e.g. 15:25
++	 */
+ 	public final static SimpleDateFormat TIME_FORMATTER = new SimpleDateFormat("HH:mm");
+ 	
++	/**
++	 * Button for setting the transaction type, either credit or debit
++	 */
+ 	private ToggleButton mTransactionTypeButton;
++	
++	/**
++	 * Input field for the transaction name (description)
++	 */
+ 	private EditText mNameEditText;
++	
++	/**
++	 * Input field for the transaction amount
++	 */
+ 	private EditText mAmountEditText;
++	
++	/**
++	 * Field for the transaction currency.
++	 * The transaction uses the currency of the account
++	 */
+ 	private TextView mCurrencyTextView;
++	
++	/**
++	 * Input field for the transaction description (note)
++	 */
+ 	private EditText mDescriptionEditText;
++	
++	/**
++	 * Input field for the transaction date
++	 */
+ 	private TextView mDateTextView;
++	
++	/**
++	 * Input field for the transaction time
++	 */
+ 	private TextView mTimeTextView;		
++	
++	/**
++	 * {@link Calendar} for holding the set date
++	 */
+ 	private Calendar mDate;
++	
++	/**
++	 * {@link Calendar} object holding the set time
++	 */
+ 	private Calendar mTime;
++	
++	/**
++	 * Spinner for selecting the account for the transaction
++	 */
+ 	private Spinner mAccountsSpinner;
++	
++	/**
++	 * Accounts database adapter. 
++	 * Used for getting list of transactions to populate the {@link #mAccountsSpinner}
++	 */
+ 	private AccountsDbAdapter mAccountsDbAdapter;
++	
++	/**
++	 * Cursor adapter for {@link #mAccountsSpinner}
++	 */
+ 	private SimpleCursorAdapter mCursorAdapter; 
+ 	
++	/**
++	 * ActionBar Menu item for saving the transaction
++	 * A transaction needs atleast a name and amount, only then is the save menu item enabled
++	 */
+ 	private MenuItem mSaveMenuItem;
++	
++	/**
++	 * Cursor for accounts list spinner
++	 */
+ 	private Cursor mCursor;
+ 	
++	/**
++	 * Create the view and retrieve references to the UI elements
++	 */
+ 	@Override
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+@@ -136,7 +226,21 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 				0);
+ 		mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+ 		mAccountsSpinner.setAdapter(mCursorAdapter);
+-		
++		mAccountsSpinner.setOnItemSelectedListener(new OnItemSelectedListener() {
++
++			@Override
++			public void onItemSelected(AdapterView<?> parent, View view,
++					int position, long id) {
++				String currencyCode = mAccountsDbAdapter.getCurrency(id);
++				Currency currency = Currency.getInstance(currencyCode);
++				mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
++			}
++
++			@Override
++			public void onNothingSelected(AdapterView<?> parent) {
++				// nothing to see here, move along				
++			}
++		});
+ 		mTransactionId = getArguments().getLong(SELECTED_TRANSACTION_ID);
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+ 		mTransaction = mTransactionsDbAdapter.getTransaction(mTransactionId);
+@@ -149,12 +253,16 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		
+ 	}
+ 
++	/**
++	 * Initialize views in the fragment with information from a transaction.
++	 * This method is called if the fragment is used for editing a transaction
++	 */
+ 	private void initializeViewsWithTransaction(){
+ 				
+ 		mNameEditText.setText(mTransaction.getName());
+ 		mTransactionTypeButton.setChecked(mTransaction.getTransactionType() == TransactionType.DEBIT);
+ 		mAmountEditText.setText(mTransaction.getAmount().toPlainString());
+-		mCurrencyTextView.setText(mTransaction.getAmount().getCurrency().getSymbol());
++		mCurrencyTextView.setText(mTransaction.getAmount().getCurrency().getSymbol(Locale.getDefault()));
+ 		mDescriptionEditText.setText(mTransaction.getDescription());
+ 		mDateTextView.setText(DATE_FORMATTER.format(mTransaction.getTimeMillis()));
+ 		mTimeTextView.setText(TIME_FORMATTER.format(mTransaction.getTimeMillis()));
+@@ -180,7 +288,7 @@ private void initializeViewsWithTransaction(){
+ 	}
+ 	
+ 	/**
+-	 * Binds the various views to the appropriate text
++	 * Initialize views with default data for new transactions
+ 	 */
+ 	private void initalizeViews() {
+ 		Date time = new Date(System.currentTimeMillis()); 
+@@ -201,11 +309,11 @@ private void initalizeViews() {
+ 		
+ 			
+ 		Currency accountCurrency = Currency.getInstance(code);
+-		mCurrencyTextView.setText(accountCurrency.getSymbol());
++		mCurrencyTextView.setText(accountCurrency.getSymbol(Locale.getDefault()));
+ 	}
+ 	
+ 	/**
+-	 * Sets click listeners for the dismiss buttons
++	 * Sets click listeners for the dialog buttons
+ 	 */
+ 	private void setListeners() {
+ 		ValidationsWatcher validations = new ValidationsWatcher();
+@@ -274,6 +382,10 @@ public void onClick(View v) {
+ 		});
+ 	}	
+ 	
++	/**
++	 * Collects information from the fragment views and uses it to create 
++	 * and save a transaction
++	 */
+ 	private void saveNewTransaction() {
+ 		Calendar cal = new GregorianCalendar(
+ 				mDate.get(Calendar.YEAR), 
+@@ -348,6 +460,9 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 		}
+ 	}
+ 
++	/**
++	 * Callback when the date is set in the {@link DatePickerDialog}
++	 */
+ 	@Override
+ 	public void onDateSet(DatePicker view, int year, int monthOfYear,
+ 			int dayOfMonth) {
+@@ -358,6 +473,9 @@ public void onDateSet(DatePicker view, int year, int monthOfYear,
+ 		mDate.set(Calendar.DAY_OF_MONTH, dayOfMonth);
+ 	}
+ 
++	/**
++	 * Callback when the time is set in the {@link TimePickerDialog}
++	 */
+ 	@Override
+ 	public void onTimeSet(TimePicker view, int hourOfDay, int minute) {
+ 		Calendar cal = new GregorianCalendar(0, 0, 0, hourOfDay, minute);
+@@ -366,11 +484,22 @@ public void onTimeSet(TimePicker view, int hourOfDay, int minute) {
+ 		mTime.set(Calendar.MINUTE, minute);
+ 	}
+ 	
++	/**
++	 * Strips formatting from a currency string.
++	 * All non-digit information is removed
++	 * @param s String to be stripped
++	 * @return Stripped string with all non-digits removed
++	 */
+ 	public static String stripCurrencyFormatting(String s){
+ 		//remove all currency formatting and anything else which is not a number
+ 		return s.trim().replaceAll("\\D*", "");
+ 	}
+ 	
++	/**
++	 * Parse an input string into a {@link BigDecimal}
++	 * @param amountString String with amount information
++	 * @return BigDecimal with the amount parsed from <code>amountString</code>
++	 */
+ 	public BigDecimal parseInputToDecimal(String amountString){
+ 		String clean = stripCurrencyFormatting(amountString);
+ 		BigDecimal amount = new BigDecimal(clean).setScale(2,
+@@ -381,6 +510,12 @@ public BigDecimal parseInputToDecimal(String amountString){
+ 		return amount;
+ 	}
+ 
++	/**
++	 * Validates that the name and amount of the transaction is provided
++	 * before enabling the save button
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 *
++	 */
+ 	private class ValidationsWatcher implements TextWatcher {
+ 
+ 		@Override
+@@ -406,6 +541,13 @@ public void onTextChanged(CharSequence s, int start, int before,
+ 		
+ 	}
+ 	
++	/**
++	 * Captures input string in the amount input field and parses it into a formatted amount
++	 * The amount input field allows numbers to be input sequentially and they are parsed
++	 * into a string with 2 decimal places. This means inputting 245 will result in the amount
++	 * of 2.45
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 */
+ 	private class AmountInputFormatter implements TextWatcher {
+ 		private String current = "0";
+ 		
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsActivity.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+index b976fa85..d5aab794 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+@@ -17,6 +17,7 @@
+ package org.gnucash.android.ui.transactions;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.data.Account;
+ import org.gnucash.android.util.OnTransactionClickedListener;
+ 
+ import android.content.Intent;
+@@ -29,13 +30,32 @@
+ import com.actionbarsherlock.app.SherlockFragmentActivity;
+ import com.actionbarsherlock.view.MenuItem;
+ 
+-public class TransactionsActivity extends SherlockFragmentActivity implements OnTransactionClickedListener{
++/**
++ * Activing for displaying, creating and editing transactions
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
++public class TransactionsActivity extends SherlockFragmentActivity implements 
++	OnTransactionClickedListener{
+ 
++	/**
++	 * Logging tag
++	 */
+ 	protected static final String TAG = "AccountsActivity";
+ 	
++	/**
++	 * Tag for {@link TransactionsListFragment}
++	 * Can be used to check if the fragment is currently loaded
++	 */
+ 	public static final String FRAGMENT_TRANSACTIONS_LIST 	= "transactions_list";
++	
++	/**
++	 * Tag for {@link NewTransactionFragment}
++	 */
+ 	public static final String FRAGMENT_NEW_TRANSACTION 	= "new_transaction";	
+ 	
++	/**
++	 * Database ID of {@link Account} whose transactions are displayed 
++	 */
+ 	private long mAccountId 	= 0;
+ 	
+ 	@Override
+@@ -84,7 +104,10 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	public void onNewTransactionClick(View v){
+ 		createNewTransaction(mAccountId);
+ 	}
+-		
++	
++	/**
++	 * Show list of transactions. Loads {@link TransactionsListFragment} 
++	 */
+ 	protected void showTransactionsList(){
+ 		FragmentManager fragmentManager = getSupportFragmentManager();
+ 
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+index 2d05f469..dfb5d25b 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+@@ -57,16 +57,38 @@
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ 
++/**
++ * List Fragment for displaying list of transactions for an account
++ * @author Ngewi Fet <ngewif@gmail.com>
++ *
++ */
+ public class TransactionsListFragment extends SherlockListFragment implements 
+ 	LoaderCallbacks<Cursor> {
+ 
++	/**
++	 * Logging tag
++	 */
+ 	protected static final String TAG = "TransactionsListFragment";
+ 
++	/**
++	 * Key for passing list of selected items as an argument in a bundle or intent
++	 */
+ 	private static final String SAVED_SELECTED_ITEMS 	= "selected_items";	
++	
++	/**
++	 * Key for passing the selected account ID as an argument in a bundle or intent
++	 * This is the account whose transactions are to be displayed
++	 */
+ 	public static final String SELECTED_ACCOUNT_ID 		= "selected_account_id";
+ 	
++	/**
++	 * Key for passing list of IDs selected transactions as an argument in a bundle or intent
++	 */
+ 	public static final String SELECTED_TRANSACTION_IDS = "selected_transactions";
+ 
++	/**
++	 * Key for the origin account as argument when moving accounts
++	 */
+ 	public static final String ORIGIN_ACCOUNT_ID = "origin_acccount_id";
+ 	
+ 	private TransactionsDbAdapter mTransactionsDbAdapter;
+@@ -75,10 +97,19 @@
+ 	private boolean mInEditMode = false;
+ 	private long mAccountID;
+ 	
++	/**
++	 * Selected (checked) transactions in the list when entering ActionMode
++	 */
+ 	private HashMap<Integer, Long> mSelectedIds = new HashMap<Integer, Long>();
+ 
++	/**
++	 * Callback listener for editing transactions
++	 */
+ 	private OnTransactionClickedListener mTransactionEditListener;
+ 	
++	/**
++	 * Callbacks for the menu items in the Context ActionBar (CAB) in action mode
++	 */
+ 	private ActionMode.Callback mActionModeCallbacks = new ActionMode.Callback() {
+ 		
+ 		@Override
+@@ -123,6 +154,9 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+ 		}
+ 	};
+ 
++	/**
++	 * Text view displaying the sum of the accounts
++	 */
+ 	private TextView mSumTextView;
+ 	
+ 	@Override
+@@ -254,6 +288,10 @@ public void onLoaderReset(Loader<Cursor> loader) {
+ 		mCursorAdapter.swapCursor(null);		
+ 	}
+ 
++	/**
++	 * Finishes the edit mode in the transactions list. 
++	 * Edit mode is started when at least one transaction is selected
++	 */
+ 	public void finishEditMode(){
+ 		mInEditMode = false;
+ 		deselectAllItems();
+@@ -261,6 +299,10 @@ public void finishEditMode(){
+ 		mSelectedIds.clear();
+ 	}
+ 	
++	/**
++	 * Sets the title of the Context ActionBar when in action mode. 
++	 * It sets the number highlighted items
++	 */
+ 	public void setActionModeTitle(){
+ 		int count = mSelectedIds.size();
+ 		if (count > 0){			
+@@ -268,6 +310,10 @@ public void setActionModeTitle(){
+ 		}
+ 	}
+ 	
++	/**
++	 * Selects a transaction in the list of transaction
++	 * @param position Position of the item which was selected
++	 */
+ 	private void selectItem(int position){		
+ 		ListView lv = getListView();	
+ 		lv.setItemChecked(position, true);
+@@ -279,6 +325,9 @@ private void selectItem(int position){
+         mSelectedIds.put(position, id);
+ 	}
+ 	
++	/**
++	 * Deselects all selected items
++	 */
+ 	private void deselectAllItems() {
+ 		Integer[] selectedItemPositions = new Integer[mSelectedIds.size()];
+ 		mSelectedIds.keySet().toArray(selectedItemPositions);
+@@ -287,6 +336,10 @@ private void deselectAllItems() {
+ 		}
+ 	}
+ 	
++	/**
++	 * Deselects an item at <code>position</code>
++	 * @param position
++	 */
+ 	private void deselectItem(int position){
+ 		if (position >= 0){
+ 			getListView().setItemChecked(position, false);
+@@ -302,6 +355,10 @@ private void deselectItem(int position){
+ 		}
+ 	}
+ 	
++	/**
++	 * Starts action mode and activates the Context ActionBar (CAB)
++	 * Action mode is initiated as soon as at least one transaction is selected (highlighted)
++	 */
+ 	private void startActionMode(){
+ 		if (mActionMode != null) {
+             return;
+@@ -311,6 +368,9 @@ private void startActionMode(){
+         mActionMode = getSherlockActivity().startActionMode(mActionModeCallbacks);
+ 	}
+ 	
++	/**
++	 * Stops action mode and deselects all selected transactions
++	 */
+ 	private void stopActionMode(){
+ 		if (mSelectedIds.size() > 0)
+ 			return;
+@@ -318,6 +378,9 @@ private void stopActionMode(){
+ 			mActionMode.finish();
+ 	}
+ 		
++	/**
++	 * Prepares and displays the dialog for bulk moving transactions to another account
++	 */
+ 	protected void showBulkMoveDialog(){
+ 		FragmentManager manager = getActivity().getSupportFragmentManager();
+ 		FragmentTransaction ft = manager.beginTransaction();
+@@ -341,6 +404,10 @@ protected void showBulkMoveDialog(){
+ 	    bulkMoveFragment.show(ft, "bulk_move_dialog");
+ 	}
+ 	
++	/**
++	 * Extends a simple cursor adapter to bind transaction attributes to views 
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 */
+ 	protected class TransactionsCursorAdapter extends SimpleCursorAdapter {
+ 		
+ 		public TransactionsCursorAdapter(Context context, int layout, Cursor c,
+@@ -391,6 +458,10 @@ public void bindView(View view, Context context, Cursor cursor) {
+ 		}
+ 	}
+ 	
++	/**
++	 * {@link DatabaseCursorLoader} for loading transactions asynchronously from the database
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 */
+ 	protected static class TransactionsCursorLoader extends DatabaseCursorLoader {
+ 		private long accountID; 
+ 		
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java b/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+index ee533d79..b4769d47 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+@@ -155,8 +155,10 @@ public void testPrinting(){
+ 		assertEquals("15.75", money.asString());
+ 		
+ 		// the unicode for Euro symbol is \u20AC
+-		assertEquals("15,75 \u20AC", money.formattedString(Locale.GERMAN));		
+-		assertEquals("15.75 \u20AC", money.formattedString(Locale.US));
++		String symbol = Currency.getInstance("EUR").getSymbol(Locale.GERMAN);
++		String symbolUS = Currency.getInstance("EUR").getSymbol(Locale.US);
++		assertEquals("15,75 " + symbol, money.formattedString(Locale.GERMAN));		
++		assertEquals("15.75 " + symbolUS, money.formattedString(Locale.US));
+ 		
+ 		//always prints with 2 decimal places only
+ 		Money some = new Money(9.7469);

@@ -1,0 +1,808 @@
+From 776c68e931daf9f03558e0550c70e175161ee990 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 23 Feb 2015 16:37:44 +0100
+Subject: [PATCH] Added created_at and modified_at columns for all tables in
+ the database
+
+Account GUID does not contain the account name anymore and is not limited to 22 characters
+Refactored data models to all inherit from one base model
+---
+ .../gnucash/android/test/model/AccountTest.java    | 15 ------
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 17 +++----
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 35 ++++++++++++++
+ .../org/gnucash/android/db/DatabaseHelper.java     | 55 +++++++++++++++------
+ .../org/gnucash/android/db/DatabaseSchema.java     |  2 +
+ .../org/gnucash/android/db/MigrationHelper.java    | 20 ++++++++
+ .../android/db/ScheduledEventDbAdapter.java        |  6 +--
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 15 +++---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 22 +++++----
+ .../java/org/gnucash/android/model/Account.java    | 47 +-----------------
+ .../java/org/gnucash/android/model/BaseModel.java  | 56 ++++++++++++++++++++++
+ .../org/gnucash/android/model/ScheduledEvent.java  | 17 +------
+ .../main/java/org/gnucash/android/model/Split.java | 18 +------
+ .../org/gnucash/android/model/Transaction.java     | 34 +------------
+ 14 files changed, 188 insertions(+), 171 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/model/BaseModel.java
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/model/AccountTest.java b/app/src/androidTest/java/org/gnucash/android/test/model/AccountTest.java
+index 3979d927..0b867103 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/model/AccountTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/model/AccountTest.java
+@@ -10,19 +10,4 @@ public AccountTest(String name) {
+ 		super(name);
+ 	}
+ 
+-	public void testUIDContainsName(){
+-        //TODO: modify this test when migrating to GnuCash file exports
+-		Account account = new Account("dummy");
+-		assertTrue(account.getUID().contains("dummy"));
+-				
+-		Account another = new Account("tele pathy x-men");
+-		String uid = another.getUID();
+-		
+-		//only first ten characters are used in uid
+-		assertTrue(uid.contains("telepathy"));
+-		
+-		//no spaces allowed
+-		assertFalse(uid.contains(" "));
+-		assertFalse(uid.contains("tele pathy x-men"));
+-	}
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 87d77d50..9b9c72e7 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -76,10 +76,9 @@ public static AccountsDbAdapter getInstance(){
+ 	 * @return Database row ID of the inserted account
+ 	 */
+ 	public long addAccount(Account account){
+-		ContentValues contentValues = new ContentValues();
++		ContentValues contentValues = getContentValues(account);
+ 		contentValues.put(AccountEntry.COLUMN_NAME,         account.getName());
+ 		contentValues.put(AccountEntry.COLUMN_TYPE,         account.getAccountType().name());
+-		contentValues.put(AccountEntry.COLUMN_UID,          account.getUID());
+ 		contentValues.put(AccountEntry.COLUMN_CURRENCY,     account.getCurrency().getCurrencyCode());
+         contentValues.put(AccountEntry.COLUMN_PLACEHOLDER,  account.isPlaceholderAccount() ? 1 : 0);
+         if (account.getColorHexCode() != null) {
+@@ -135,9 +134,10 @@ public long bulkAddAccounts(List<Account> accountList){
+                     + AccountEntry.COLUMN_COLOR_CODE        + " , "
+                     + AccountEntry.COLUMN_FAVORITE 		    + " , "
+                     + AccountEntry.COLUMN_FULL_NAME 	    + " , "
+-                    + AccountEntry.COLUMN_PLACEHOLDER           + " , "
++                    + AccountEntry.COLUMN_PLACEHOLDER       + " , "
++                    + AccountEntry.COLUMN_CREATED_AT        + " , "
+                     + AccountEntry.COLUMN_PARENT_ACCOUNT_UID    + " , "
+-                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
++                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ?, ? )");
+             for (Account account:accountList) {
+                 replaceStatement.clearBindings();
+                 replaceStatement.bindString(1, account.getUID());
+@@ -150,11 +150,12 @@ public long bulkAddAccounts(List<Account> accountList){
+                 replaceStatement.bindLong(6, account.isFavorite() ? 1 : 0);
+                 replaceStatement.bindString(7, account.getFullName());
+                 replaceStatement.bindLong(8, account.isPlaceholderAccount() ? 1 : 0);
++                replaceStatement.bindString(9, account.getCreatedTimestamp().toString());
+                 if (account.getParentUID() != null) {
+-                    replaceStatement.bindString(9, account.getParentUID());
++                    replaceStatement.bindString(10, account.getParentUID());
+                 }
+                 if (account.getDefaultTransferAccountUID() != null) {
+-                    replaceStatement.bindString(10, account.getDefaultTransferAccountUID());
++                    replaceStatement.bindString(11, account.getDefaultTransferAccountUID());
+                 }
+                 //Log.d(TAG, "Replacing account in db");
+                 replaceStatement.execute();
+@@ -424,8 +425,8 @@ public Account buildAccountInstance(Cursor c){
+      */
+     private Account buildSimpleAccountInstance(Cursor c) {
+         Account account = new Account(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_NAME)));
+-        String uid = c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_UID));
+-        account.setUID(uid);
++        populateModel(c, account);
++
+         account.setParentUID(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_PARENT_ACCOUNT_UID)));
+         account.setAccountType(AccountType.valueOf(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_TYPE))));
+         Currency currency = Currency.getInstance(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_CURRENCY)));
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 89664bad..f522f191 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -23,6 +23,9 @@
+ import android.util.Log;
+ import org.gnucash.android.db.DatabaseSchema.*;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.BaseModel;
++
++import java.sql.Timestamp;
+ 
+ /**
+  * Adapter to be used for creating and opening the database for read/write operations.
+@@ -160,6 +163,38 @@ public boolean isOpen(){
+         return mDb.isOpen();
+     }
+ 
++    /**
++     * Returns a ContentValues object which has the data of the base model
++     * @param model {@link org.gnucash.android.model.BaseModel} from which to extract values
++     * @return {@link android.content.ContentValues} with the data to be inserted into the db
++     */
++    protected ContentValues getContentValues(BaseModel model){
++        ContentValues contentValues = new ContentValues();
++        contentValues.put(CommonColumns.COLUMN_UID, model.getUID());
++        contentValues.put(CommonColumns.COLUMN_CREATED_AT, model.getCreatedTimestamp().toString());
++        //there is a trigger in the database for updated the modified_at column
++        /* Due to the use of SQL REPLACE syntax, we insert the created_at values each time
++        * (maintain the original creation time and not the time of creation of the replacement)
++        * The updated_at column has a trigger in the database which will update the column
++         */
++        return contentValues;
++    }
++
++    /**
++     * Initializes the model with values from the database record common to all models (i.e. in the BaseModel)
++     * @param cursor Cursor pointing to database record
++     * @param model Model instance to be initialized
++     */
++    protected static void populateModel(Cursor cursor, BaseModel model){
++        String uid = cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_UID));
++        String created = cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_CREATED_AT));
++        String modified= cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_MODIFIED_AT));
++
++        model.setUID(uid);
++        model.setCreatedTimestamp(Timestamp.valueOf(created));
++        model.setModifiedTimestamp(Timestamp.valueOf(modified));
++    }
++
+ 	/**
+ 	 * Retrieves record with id <code>rowId</code> from database table
+ 	 * @param rowId ID of record to be retrieved
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 55c87428..fabff780 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -63,7 +63,7 @@
+ 	 */
+ 	private static final String ACCOUNTS_TABLE_CREATE = "create table " + AccountEntry.TABLE_NAME + " ("
+ 			+ AccountEntry._ID                      + " integer primary key autoincrement, "
+-			+ AccountEntry.COLUMN_UID 	            + " varchar(255) not null, "
++			+ AccountEntry.COLUMN_UID 	            + " varchar(255) not null UNIQUE, "
+ 			+ AccountEntry.COLUMN_NAME 	            + " varchar(255) not null, "
+ 			+ AccountEntry.COLUMN_TYPE              + " varchar(255) not null, "
+ 			+ AccountEntry.COLUMN_CURRENCY          + " varchar(255) not null, "
+@@ -73,44 +73,47 @@
+             + AccountEntry.COLUMN_PLACEHOLDER           + " tinyint default 0, "
+             + AccountEntry.COLUMN_PARENT_ACCOUNT_UID    + " varchar(255), "
+             + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID   + " varchar(255), "
+-            + "UNIQUE (" + AccountEntry.COLUMN_UID       + ")"
+-			+ ");";
++            + AccountEntry.COLUMN_CREATED_AT       + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++            + AccountEntry.COLUMN_MODIFIED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
++			+ ");" + createUpdatedAtTrigger(AccountEntry.TABLE_NAME);
+ 	
+ 	/**
+ 	 * SQL statement to create the transactions table in the database
+ 	 */
+ 	private static final String TRANSACTIONS_TABLE_CREATE = "create table " + TransactionEntry.TABLE_NAME + " ("
+ 			+ TransactionEntry._ID 		            + " integer primary key autoincrement, "
+-			+ TransactionEntry.COLUMN_UID 		    + " varchar(255) not null, "
++			+ TransactionEntry.COLUMN_UID 		    + " varchar(255) not null UNIQUE, "
+ 			+ TransactionEntry.COLUMN_DESCRIPTION   + " varchar(255), "
+ 			+ TransactionEntry.COLUMN_NOTES         + " text, "
+ 			+ TransactionEntry.COLUMN_TIMESTAMP     + " integer not null, "
+ 			+ TransactionEntry.COLUMN_EXPORTED      + " tinyint default 0, "
+             + TransactionEntry.COLUMN_CURRENCY      + " varchar(255) not null, "
+             + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " integer default 0, "
+-			+ "UNIQUE (" 		+ TransactionEntry.COLUMN_UID + ") "
+-			+ ");";
++            + TransactionEntry.COLUMN_CREATED_AT       + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++            + TransactionEntry.COLUMN_MODIFIED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
++			+ ");" + createUpdatedAtTrigger(TransactionEntry.TABLE_NAME);
+ 
+     /**
+      * SQL statement to create the transaction splits table
+      */
+     private static final String SPLITS_TABLE_CREATE = "CREATE TABLE " + SplitEntry.TABLE_NAME + " ("
+             + SplitEntry._ID                    + " integer primary key autoincrement, "
+-            + SplitEntry.COLUMN_UID             + " varchar(255) not null, "
++            + SplitEntry.COLUMN_UID             + " varchar(255) not null UNIQUE, "
+             + SplitEntry.COLUMN_MEMO 	        + " text, "
+             + SplitEntry.COLUMN_TYPE            + " varchar(255) not null, "
+             + SplitEntry.COLUMN_AMOUNT          + " varchar(255) not null, "
+             + SplitEntry.COLUMN_ACCOUNT_UID 	+ " varchar(255) not null, "
+             + SplitEntry.COLUMN_TRANSACTION_UID + " varchar(255) not null, "
++            + SplitEntry.COLUMN_CREATED_AT       + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++            + SplitEntry.COLUMN_MODIFIED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + "FOREIGN KEY (" 	+ SplitEntry.COLUMN_ACCOUNT_UID + ") REFERENCES " + AccountEntry.TABLE_NAME + " (" + AccountEntry.COLUMN_UID + "), "
+-            + "FOREIGN KEY (" 	+ SplitEntry.COLUMN_TRANSACTION_UID + ") REFERENCES " + TransactionEntry.TABLE_NAME + " (" + TransactionEntry.COLUMN_UID + "), "
+-            + "UNIQUE (" 		+ SplitEntry.COLUMN_UID + ") "
+-            + ");";
++            + "FOREIGN KEY (" 	+ SplitEntry.COLUMN_TRANSACTION_UID + ") REFERENCES " + TransactionEntry.TABLE_NAME + " (" + TransactionEntry.COLUMN_UID + ") ON DELETE CASCADE "
++            + ");" + createUpdatedAtTrigger(SplitEntry.TABLE_NAME);
+ 
+ 
+     public static final String SCHEDULED_EVENTS_TABLE_CREATE = "CREATE TABLE " + ScheduledEventEntry.TABLE_NAME + " ("
+             + ScheduledEventEntry._ID                   + " integer primary key autoincrement, "
+-            + ScheduledEventEntry.COLUMN_UID            + " varchar(255) not null, "
++            + ScheduledEventEntry.COLUMN_UID            + " varchar(255) not null UNIQUE, "
+             + ScheduledEventEntry.COLUMN_EVENT_UID      + " varchar(255) not null, "
+             + ScheduledEventEntry.COLUMN_TYPE           + " varchar(255) not null, "
+             + ScheduledEventEntry.COLUMN_PERIOD         + " integer not null, "
+@@ -118,8 +121,9 @@
+             + ScheduledEventEntry.COLUMN_START_TIME     + " integer not null, "
+             + ScheduledEventEntry.COLUMN_END_TIME       + " integer default 0, "
+             + ScheduledEventEntry.COLUMN_TAG            + " text, "
+-            + "UNIQUE (" + ScheduledEventEntry.COLUMN_UID + ") "
+-            + ");";
++            + ScheduledEventEntry.COLUMN_CREATED_AT     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++            + ScheduledEventEntry.COLUMN_MODIFIED_AT    + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
++            + ");" + createUpdatedAtTrigger(ScheduledEventEntry.TABLE_NAME);
+ 
+ 
+     /**
+@@ -130,7 +134,21 @@ public DatabaseHelper(Context context){
+ 		super(context, DATABASE_NAME, null, DatabaseSchema.DATABASE_VERSION);
+ 
+ 	}
+-	
++
++    /**
++     * Creates an update trigger to update the updated_at column for all records in the database.
++     * This has to be run per table, and is currently appended to the create table statement.
++     * @param tableName Name of table on which to create trigger
++     * @return SQL statement for creating trigger
++     */
++    static String createUpdatedAtTrigger(String tableName){
++        return "CREATE TRIGGER update_time_trigger "
++                + "  AFTER UPDATE ON " + tableName + " FOR EACH ROW"
++                + "  BEGIN " + "UPDATE " + tableName
++                + "  SET " + DatabaseSchema.CommonColumns.COLUMN_MODIFIED_AT + " = CURRENT_TIMESTAMP;"
++                + "  END;";
++    }
++
+ 	@Override
+ 	public void onCreate(SQLiteDatabase db) {
+ 		createDatabaseTables(db);
+@@ -331,8 +349,15 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 7 && newVersion >= 8){
+                 Log.i(LOG_TAG, "Upgrading database to version 8");
+-                Log.i(LOG_TAG, "Creating scheduled events table");
+ 
++                //TODO: consider just backing up, recreating database and reimporting
++
++                Log.i(LOG_TAG, "Adding created_at and modified_at columns to database tables");
++                MigrationHelper.createUpdatedAndModifiedColumns(db, AccountEntry.TABLE_NAME);
++                MigrationHelper.createUpdatedAndModifiedColumns(db, TransactionEntry.TABLE_NAME);
++                MigrationHelper.createUpdatedAndModifiedColumns(db, SplitEntry.TABLE_NAME);
++
++                Log.i(LOG_TAG, "Creating scheduled events table");
+                 db.execSQL(SCHEDULED_EVENTS_TABLE_CREATE);
+                 //TODO: Migrate existing scheduled transactions (cancel pending intents)
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 1cacf9ab..e1ba49df 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -40,6 +40,8 @@ private DatabaseSchema(){}
+ 
+     public interface CommonColumns extends BaseColumns {
+         public static final String COLUMN_UID       = "uid";
++        public static final String COLUMN_CREATED_AT    = "created_at";
++        public static final String COLUMN_MODIFIED_AT   = "modified_at";
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 87a76a3f..fc67e358 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -149,4 +149,24 @@ static void importGnucashXML(SQLiteDatabase db, String filepath) throws Exceptio
+         FileInputStream inputStream = new FileInputStream(filepath);
+         GncXmlImporter.parse(db, inputStream);
+     }
++
++    /**
++     * Add created_at and modified_at columns to a table in the database and create a trigger
++     * for updating the modified_at columns
++     * @param db SQLite database
++     * @param tableName Name of the table
++     */
++    static void createUpdatedAndModifiedColumns(SQLiteDatabase db, String tableName){
++        String addCreatedColumn = "ALTER TABLE " + tableName
++                + " ADD COLUMN " + DatabaseSchema.CommonColumns.COLUMN_CREATED_AT
++                + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP";
++
++        String addModifiedColumn = "ALTER TABLE " + tableName
++                + " ADD COLUMN " + DatabaseSchema.CommonColumns.COLUMN_MODIFIED_AT
++                + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP";
++
++        db.execSQL(addCreatedColumn);
++        db.execSQL(addModifiedColumn);
++        db.execSQL(DatabaseHelper.createUpdatedAtTrigger(tableName));
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+index 07702dc0..7e0da762 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+@@ -52,8 +52,7 @@ public static ScheduledEventDbAdapter getInstance(){
+      * @return Database row ID of the newly created/replaced instance
+      */
+     public long addScheduledEvent(ScheduledEvent scheduledEvent){
+-        ContentValues contentValues = new ContentValues();
+-        contentValues.put(ScheduledEventEntry.COLUMN_UID,       scheduledEvent.getUID());
++        ContentValues contentValues = getContentValues(scheduledEvent);
+         contentValues.put(ScheduledEventEntry.COLUMN_EVENT_UID, scheduledEvent.getEventUID());
+         contentValues.put(ScheduledEventEntry.COLUMN_PERIOD,    scheduledEvent.getPeriod());
+         contentValues.put(ScheduledEventEntry.COLUMN_START_TIME, scheduledEvent.getStartTime());
+@@ -73,7 +72,6 @@ public long addScheduledEvent(ScheduledEvent scheduledEvent){
+      * @return ScheduledEvent object instance
+      */
+     private ScheduledEvent buildScheduledEventInstance(final Cursor cursor){
+-        String uid      = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_UID));
+         String eventUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_EVENT_UID));
+         long period     = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_PERIOD));
+         long startTime  = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_START_TIME));
+@@ -83,11 +81,11 @@ private ScheduledEvent buildScheduledEventInstance(final Cursor cursor){
+         String tag      = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_TAG));
+ 
+         ScheduledEvent event = new ScheduledEvent(ScheduledEvent.EventType.valueOf(typeString));
++        populateModel(cursor, event);
+         event.setPeriod(period);
+         event.setStartTime(startTime);
+         event.setEndTime(endTime);
+         event.setEventUID(eventUid);
+-        event.setUID(uid);
+         event.setLastRun(lastRun);
+         event.setTag(tag);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index 51998ef7..82f84f63 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -29,7 +29,6 @@
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+-import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+ 
+ import java.math.BigDecimal;
+@@ -69,8 +68,7 @@ public static SplitsDbAdapter getInstance(){
+      * @return Record ID of the newly saved split
+      */
+     public long addSplit(Split split){
+-        ContentValues contentValues = new ContentValues();
+-        contentValues.put(SplitEntry.COLUMN_UID,        split.getUID());
++        ContentValues contentValues = getContentValues(split);
+         contentValues.put(SplitEntry.COLUMN_AMOUNT,     split.getAmount().absolute().toPlainString());
+         contentValues.put(SplitEntry.COLUMN_TYPE,       split.getType().name());
+         contentValues.put(SplitEntry.COLUMN_MEMO,       split.getMemo());
+@@ -103,8 +101,9 @@ public long bulkAddSplits(List<Split> splitList) {
+                     + SplitEntry.COLUMN_MEMO 	        + " , "
+                     + SplitEntry.COLUMN_TYPE            + " , "
+                     + SplitEntry.COLUMN_AMOUNT          + " , "
++                    + SplitEntry.COLUMN_CREATED_AT      + " , "
+                     + SplitEntry.COLUMN_ACCOUNT_UID 	+ " , "
+-                    + SplitEntry.COLUMN_TRANSACTION_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? ) ");
++                    + SplitEntry.COLUMN_TRANSACTION_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? ) ");
+             for (Split split : splitList) {
+                 replaceStatement.clearBindings();
+                 replaceStatement.bindString(1, split.getUID());
+@@ -113,8 +112,9 @@ public long bulkAddSplits(List<Split> splitList) {
+                 }
+                 replaceStatement.bindString(3, split.getType().name());
+                 replaceStatement.bindString(4, split.getAmount().absolute().toPlainString());
+-                replaceStatement.bindString(5, split.getAccountUID());
+-                replaceStatement.bindString(6, split.getTransactionUID());
++                replaceStatement.bindString(5, split.getCreatedTimestamp().toString());
++                replaceStatement.bindString(6, split.getAccountUID());
++                replaceStatement.bindString(7, split.getTransactionUID());
+ 
+                 //Log.d(TAG, "Replacing transaction split in db");
+                 replaceStatement.execute();
+@@ -136,7 +136,6 @@ public long bulkAddSplits(List<Split> splitList) {
+      * @return {@link org.gnucash.android.model.Split} instance
+      */
+     public Split buildSplitInstance(Cursor cursor){
+-        String uid          = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_UID));
+         String amountString = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_AMOUNT));
+         String typeName     = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_TYPE));
+         String accountUID   = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_ACCOUNT_UID));
+@@ -147,7 +146,7 @@ public Split buildSplitInstance(Cursor cursor){
+         Money amount = new Money(amountString, currencyCode);
+ 
+         Split split = new Split(amount, accountUID);
+-        split.setUID(uid);
++        populateModel(cursor, split);
+         split.setTransactionUID(transxUID);
+         split.setType(TransactionType.valueOf(typeName));
+         split.setMemo(memo);
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 20c4cd03..7e58286b 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -35,6 +35,7 @@
+ import static org.gnucash.android.db.DatabaseSchema.*;
+ 
+ import java.util.ArrayList;
++import java.util.Currency;
+ import java.util.List;
+ 
+ /**
+@@ -76,9 +77,8 @@ public SplitsDbAdapter getSplitDbAdapter() {
+ 	 * @return Database row ID of the inserted transaction
+ 	 */
+ 	public long addTransaction(Transaction transaction){
+-		ContentValues contentValues = new ContentValues();
++		ContentValues contentValues = getContentValues(transaction);
+ 		contentValues.put(TransactionEntry.COLUMN_DESCRIPTION, transaction.getDescription());
+-		contentValues.put(TransactionEntry.COLUMN_UID,          transaction.getUID());
+ 		contentValues.put(TransactionEntry.COLUMN_TIMESTAMP,    transaction.getTimeMillis());
+ 		contentValues.put(TransactionEntry.COLUMN_NOTES,        transaction.getNote());
+ 		contentValues.put(TransactionEntry.COLUMN_EXPORTED,     transaction.isExported() ? 1 : 0);
+@@ -94,8 +94,7 @@ public long addTransaction(Transaction transaction){
+             Log.d(TAG, "Adding splits for transaction");
+             ArrayList<String> splitUIDs = new ArrayList<String>(transaction.getSplits().size());
+             for (Split split : transaction.getSplits()) {
+-                contentValues.clear();
+-                contentValues.put(SplitEntry.COLUMN_UID,        split.getUID());
++                contentValues = getContentValues(split);
+                 contentValues.put(SplitEntry.COLUMN_AMOUNT,     split.getAmount().absolute().toPlainString());
+                 contentValues.put(SplitEntry.COLUMN_TYPE,       split.getType().name());
+                 contentValues.put(SplitEntry.COLUMN_MEMO,       split.getMemo());
+@@ -143,7 +142,8 @@ public long bulkAddTransactions(List<Transaction> transactionList){
+                 + TransactionEntry.COLUMN_TIMESTAMP     + " , "
+                 + TransactionEntry.COLUMN_EXPORTED      + " , "
+                 + TransactionEntry.COLUMN_CURRENCY      + " , "
+-                + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " ) VALUES ( ? , ? , ? , ? , ? , ? , ?)");
++                + TransactionEntry.COLUMN_CREATED_AT    + " , "
++                + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ?)");
+             for (Transaction transaction : transactionList) {
+                 if (transaction.getRecurrencePeriod() > 0) {
+                     scheduleTransaction(transaction);
+@@ -151,12 +151,13 @@ public long bulkAddTransactions(List<Transaction> transactionList){
+                 //Log.d(TAG, "Replacing transaction in db");
+                 replaceStatement.clearBindings();
+                 replaceStatement.bindString(1, transaction.getUID());
+-                replaceStatement.bindString(2, transaction.getDescription());
+-                replaceStatement.bindString(3, transaction.getNote());
++                replaceStatement.bindString(2,  transaction.getDescription());
++                replaceStatement.bindString(3,  transaction.getNote());
+                 replaceStatement.bindLong(4, transaction.getTimeMillis());
+-                replaceStatement.bindLong(5, transaction.isExported() ? 1 : 0);
++                replaceStatement.bindLong(5,    transaction.isExported() ? 1 : 0);
+                 replaceStatement.bindString(6, transaction.getCurrencyCode());
+-                replaceStatement.bindLong(7, transaction.getRecurrencePeriod());
++                replaceStatement.bindString(7,  transaction.getCreatedTimestamp().toString());
++                replaceStatement.bindLong(8,    transaction.getRecurrencePeriod());
+                 replaceStatement.execute();
+                 rowInserted ++;
+                 splitList.addAll(transaction.getSplits());
+@@ -367,7 +368,8 @@ public int getTotalTransactionsCount() {
+     public Transaction buildTransactionInstance(Cursor c){
+ 		String name   = c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_DESCRIPTION));
+ 		Transaction transaction = new Transaction(name);
+-		transaction.setUID(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_UID)));
++        populateModel(c, transaction);
++
+ 		transaction.setTime(c.getLong(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TIMESTAMP)));
+ 		transaction.setNote(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_NOTES)));
+ 		transaction.setExported(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_EXPORTED)) == 1);
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index 2b86be7a..6745b12c 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -36,7 +36,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  * @see AccountType
+  */
+-public class Account {
++public class Account extends BaseModel{
+ 
+ 	/**
+ 	 * The MIME type for accounts in GnucashMobile
+@@ -67,12 +67,6 @@
+      */
+ 	public enum OfxAccountType {CHECKING, SAVINGS, MONEYMRKT, CREDITLINE }
+ 
+-    /**
+-	 * Unique Identifier of the account
+-	 * It is generated when the account is created and can be set a posteriori as well
+-	 */
+-	private String mUID;
+-	
+ 	/**
+ 	 * Name of this account
+ 	 */
+@@ -146,7 +140,6 @@
+ 	public Account(String name) {
+ 		setName(name);
+         this.mFullName  = mName;
+-		this.mUID       = generateUID();
+ 		this.mCurrency  = Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
+ 	}
+ 	
+@@ -158,7 +151,6 @@ public Account(String name) {
+ 	public Account(String name, Currency currency){
+ 		setName(name);
+         this.mFullName  = mName;
+-		this.mUID       = generateUID();
+ 		this.mCurrency  = currency;
+ 	}
+ 
+@@ -195,43 +187,6 @@ public void setFullName(String fullName) {
+         this.mFullName = fullName;
+     }
+ 
+-    /**
+-	 * Generates a unique ID for the account based on the name and a random string. 
+-	 * This represents the ACCTID in the exported OFX and should have a maximum of 22 alphanumeric characters
+-	 * @return Generated Unique ID string
+-	 */
+-	protected String generateUID(){
+-		String uuid = UUID.randomUUID().toString();
+-		
+-		if (mName.length() == 0){
+-			//if we do not have a name, return pure random
+-			return uuid.substring(0, 22);
+-		}
+-		
+-		uuid = uuid.substring(uuid.lastIndexOf("-"));
+-		String name = mName.replaceAll("[^A-Za-z0-9]", "").toLowerCase(Locale.US);
+-		if (name.length() > 9)
+-			name = name.substring(0, 10);
+-		uuid = name + uuid;		
+-		return uuid;
+-	}
+-	
+-	/**
+-	 * Returns the unique ID of this account
+-	 * @return String containing unique ID for the account
+-	 */
+-	public String getUID(){
+-		return mUID;
+-	}
+-	
+-	/**
+-	 * Sets the unique identifier of this acocunt
+-	 * @param uid Unique identifier to be set
+-	 */
+-	public void setUID(String uid){
+-		this.mUID = uid;
+-	}
+-	
+ 	/**
+ 	 * Get the type of account
+ 	 * @return {@link AccountType} type of account
+diff --git a/app/src/main/java/org/gnucash/android/model/BaseModel.java b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+new file mode 100644
+index 00000000..dc08a9c3
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+@@ -0,0 +1,56 @@
++package org.gnucash.android.model;
++
++import java.sql.Timestamp;
++import java.util.UUID;
++
++/**
++ * Represents the base data model which is persisted to the database.
++ * All other models should extend this base model and add entries.
++ */
++public abstract class BaseModel {
++    protected String mUID;
++    protected Timestamp mCreatedTimestamp;
++    protected Timestamp mModifiedTimestamp;
++
++    /**
++     * Initializes the model attributes and generates a GUID
++     */
++    public BaseModel(){
++        mUID = generateUID();
++        mCreatedTimestamp = new Timestamp(System.currentTimeMillis());
++        mModifiedTimestamp = new Timestamp(System.currentTimeMillis());
++    }
++
++    /**
++     * Method for generating the Global Unique ID for the object.
++     * Subclasses can override this method to provide a different implementation
++     * @return Random GUID for the model object
++     */
++    protected String generateUID(){
++        return UUID.randomUUID().toString().replaceAll("-", "");
++    }
++
++    public String getUID() {
++        return mUID;
++    }
++
++    public void setUID(String uid) {
++        this.mUID = uid;
++    }
++
++    public Timestamp getCreatedTimestamp() {
++        return mCreatedTimestamp;
++    }
++
++    public void setCreatedTimestamp(Timestamp createdTimestamp) {
++        this.mCreatedTimestamp = createdTimestamp;
++    }
++
++    public Timestamp getModifiedTimestamp() {
++        return mModifiedTimestamp;
++    }
++
++    public void setModifiedTimestamp(Timestamp modifiedTimestamp) {
++        this.mModifiedTimestamp = modifiedTimestamp;
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java b/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+index da05aedc..b0a2763b 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+@@ -26,8 +26,7 @@
+ *
+ * @author Ngewi Fet <ngewif@gmail.com>
+ */
+-public class ScheduledEvent {
+-
++public class ScheduledEvent extends BaseModel{
+ 
+     private long mPeriod;
+     private long mStartDate;
+@@ -40,11 +39,6 @@
+     public enum EventType {TRANSACTION, EXPORT}
+ 
+     /**
+-     * Unique ID of scheduled event
+-     */
+-    private String mUID;
+-
+-    /**
+      * Next scheduled run of Event
+      */
+     private long mLastRun;
+@@ -61,20 +55,11 @@
+     private EventType mEventType;
+ 
+     public ScheduledEvent(EventType eventType){
+-        mUID = UUID.randomUUID().toString().replaceAll("-", "");
+         mEventType = eventType;
+         mStartDate = System.currentTimeMillis();
+         mEndDate = 0;
+     }
+ 
+-    public String getUID(){
+-        return mUID;
+-    }
+-
+-    public void setUID(String uid){
+-        this.mUID = uid;
+-    }
+-
+     public EventType getEventType() {
+         return mEventType;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index a1b87162..04c76cda 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -17,18 +17,13 @@
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class Split {
++public class Split extends BaseModel{
+     /**
+      * Amount value of this split
+      */
+     private Money mAmount;
+ 
+     /**
+-     * Unique ID of this split
+-     */
+-    private String mUID;
+-
+-    /**
+      * Transaction UID which this split belongs to
+      */
+     private String mTransactionUID = "";
+@@ -56,7 +51,6 @@
+     public Split(Money amount, String accountUID){
+         setAmount(amount);
+         setAccountUID(accountUID);
+-        mUID = UUID.randomUUID().toString().replaceAll("-","");
+         mSplitType = amount.isNegative() ? TransactionType.DEBIT : TransactionType.CREDIT;
+     }
+ 
+@@ -73,7 +67,7 @@ public Split(Split sourceSplit, boolean generateUID){
+         this.mAmount        = sourceSplit.mAmount.absolute();
+ 
+         if (generateUID){
+-            mUID = UUID.randomUUID().toString().replaceAll("-","");
++            mUID = generateUID();
+         } else {
+             this.mUID           = sourceSplit.mUID;
+         }
+@@ -87,14 +81,6 @@ public void setAmount(Money amount) {
+         this.mAmount = amount;
+     }
+ 
+-    public String getUID() {
+-        return mUID;
+-    }
+-
+-    public void setUID(String uid) {
+-        this.mUID = uid;
+-    }
+-
+     public String getTransactionUID() {
+         return mTransactionUID;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 5deb2fc6..a44cd4b2 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -34,7 +34,7 @@
+  * The default type is a debit, unless otherwise specified.
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class Transaction {
++public class Transaction extends BaseModel{
+ 
+ 	/**
+ 	 * Mime type for transactions in Gnucash.
+@@ -85,12 +85,6 @@
+     private List<Split> mSplitList = new ArrayList<Split>();
+ 
+ 	/**
+-	 * Unique identifier of the transaction.
+-	 * This is automatically generated when the transaction is created.
+-	 */
+-	private String mUID;
+-
+-	/**
+ 	 * Name describing the transaction
+ 	 */
+ 	private String mDescription;
+@@ -159,7 +153,6 @@ public Transaction(Transaction transaction, boolean generateNewUID){
+ 	 */
+ 	private void initDefaults(){
+ 		this.mTimestamp = System.currentTimeMillis();
+-		mUID = UUID.randomUUID().toString().replaceAll("-", "");
+ 	}
+ 
+     /**
+@@ -357,31 +350,6 @@ public long getTimeMillis(){
+ 		return mTimestamp;
+ 	}
+ 
+-	/**
+-	 * Set Unique Identifier for this transaction.
+-     * <p>Remember that the unique ID is auto-generated when transaction is created.
+-     * So this method is only for cases like building an object instance of a persisted transaction.</p>
+-	 * @param transactionUID Unique ID string
+-     * @see #resetUID()
+-	 */
+-	public void setUID(String transactionUID) {
+-		this.mUID = transactionUID;
+-	}
+-
+-    /**
+-     * Resets the UID of this transaction to a newly generated one
+-     */
+-    public void resetUID(){
+-        this.mUID = UUID.randomUUID().toString();
+-    }
+-	/**
+-	 * Returns unique ID string for transaction
+-	 * @return String with Unique ID of transaction
+-	 */
+-    public String getUID() {
+-		return mUID;
+-	}
+-
+     /**
+      * Returns the corresponding {@link TransactionType} given the accounttype and the effect which the transaction
+      * type should have on the account balance

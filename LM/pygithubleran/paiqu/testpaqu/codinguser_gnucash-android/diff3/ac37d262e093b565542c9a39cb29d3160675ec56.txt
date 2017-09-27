@@ -1,0 +1,1174 @@
+From ac37d262e093b565542c9a39cb29d3160675ec56 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 26 Jul 2012 16:48:06 +0200
+Subject: [PATCH] Refactored to use different activities for accounts and
+ transactions Fixed: Homescreen widget not updated when new transactions are
+ saved Fixed: Widget views go blank when app is reinstalled Fixed: broken
+ tests due to refactorings
+
+---
+ GnucashMobile/AndroidManifest.xml                  |   7 +-
+ GnucashMobile/res/layout/activity_transactions.xml |  36 +-----
+ GnucashMobile/res/values/strings.xml               |   2 +-
+ .../res/xml/transaction_appwidget_info.xml         |   2 +-
+ .../src/org/gnucash/android/data/Account.java      |   4 +-
+ .../src/org/gnucash/android/data/Money.java        |   4 +-
+ .../receivers/TransactionAppWidgetProvider.java    |  17 ++-
+ .../android/receivers/TransactionRecorder.java     |  10 +-
+ .../AccountsActivity.java}                         |  84 +++----------
+ .../android/ui/accounts/AccountsListFragment.java  |  17 ++-
+ .../android/ui/accounts/ExportDialogFragment.java  |   3 +-
+ .../ui/accounts/NewAccountDialogFragment.java      |   7 +-
+ .../ui/transactions/BulkMoveDialogFragment.java    |   7 +-
+ .../ui/transactions/NewTransactionFragment.java    |  39 +++---
+ .../ui/transactions/TransactionsActivity.java      | 133 +++++++++++++++++++++
+ .../ui/transactions/TransactionsListFragment.java  |  14 +--
+ ...ation.java => WidgetConfigurationActivity.java} |  31 +++--
+ .../android/util/OnAccountClickedListener.java     |   7 ++
+ ...ener.java => OnTransactionClickedListener.java} |   4 +-
+ .../gnucash/android/test/AccountsActivityTest.java |  17 +--
+ .../org/gnucash/android/test/OfxExportTest.java    |   6 +-
+ ...mentTest.java => TransactionsActivityTest.java} |  61 ++++------
+ 22 files changed, 293 insertions(+), 219 deletions(-)
+ rename GnucashMobile/src/org/gnucash/android/ui/{MainActivity.java => accounts/AccountsActivity.java} (55%)
+ create mode 100644 GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+ rename GnucashMobile/src/org/gnucash/android/ui/widget/{Configuration.java => WidgetConfigurationActivity.java} (87%)
+ create mode 100644 GnucashMobile/src/org/gnucash/android/util/OnAccountClickedListener.java
+ rename GnucashMobile/src/org/gnucash/android/util/{OnItemClickedListener.java => OnTransactionClickedListener.java} (56%)
+ rename GnucashMobileTest/src/org/gnucash/android/test/{TransactionsFragmentTest.java => TransactionsActivityTest.java} (84%)
+
+diff --git a/GnucashMobile/AndroidManifest.xml b/GnucashMobile/AndroidManifest.xml
+index 8199b389..b15a84f4 100644
+--- a/GnucashMobile/AndroidManifest.xml
++++ b/GnucashMobile/AndroidManifest.xml
+@@ -56,8 +56,8 @@
+         android:label="@string/app_name" 
+         android:theme="@style/Theme.Sherlock.Light">
+         <activity
+-            android:name=".ui.MainActivity"
+-            android:label="@string/app_name" >
++            android:name=".ui.accounts.AccountsActivity"
++            android:label="@string/app_name" android:launchMode="singleTop">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+ 				<category android:name="android.intent.category.HOME"/>
+@@ -65,7 +65,7 @@
+             </intent-filter>
+         </activity>
+         <activity android:name=".ui.settings.SettingsActivity"></activity>
+-        <activity android:name=".ui.widget.Configuration"
++        <activity android:name=".ui.transactions.TransactionsActivity" android:launchMode="singleTop"></activity><activity android:name=".ui.widget.WidgetConfigurationActivity"
+             android:theme="@style/Theme.Sherlock.Light.Dialog"
+             android:excludeFromRecents="true">
+ 		    <intent-filter>
+@@ -98,6 +98,7 @@
+ 		    <meta-data android:name="android.appwidget.provider"
+ 		               android:resource="@xml/transaction_appwidget_info" />
+ 		</receiver>
++        
+     </application>
+ 
+ </manifest>
+\ No newline at end of file
+diff --git a/GnucashMobile/res/layout/activity_transactions.xml b/GnucashMobile/res/layout/activity_transactions.xml
+index fbf54663..a4769430 100644
+--- a/GnucashMobile/res/layout/activity_transactions.xml
++++ b/GnucashMobile/res/layout/activity_transactions.xml
+@@ -23,37 +23,9 @@
+  Boston, MA  02110-1301,  USA       gnu@gnu.org
+ -->
+ 
+-<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
++<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/fragment_container"
+     android:layout_width="match_parent"
+     android:layout_height="match_parent" >
+-
+-    <LinearLayout
+-        android:id="@+id/transactions_summary_bar"
+-        android:layout_width="fill_parent"
+-        android:layout_height="wrap_content"
+-        android:layout_alignParentBottom="true" >
+-
+-        <Button
+-            android:id="@+id/add_preference_button"
+-            android:layout_width="fill_parent"
+-            android:layout_height="wrap_content"
+-            android:onClick="onAddNewPreferenceClick"
+-            android:text="" />
+-    </LinearLayout>
+-
+-    <ListView
+-        android:id="@id/android:list"
+-        android:layout_width="fill_parent"
+-        android:layout_height="0dip"
+-        android:layout_above="@id/transactions_summary_bar"
+-        android:drawSelectorOnTop="false" />
+-
+-    <TextView
+-        android:id="@id/android:empty"
+-        android:layout_width="fill_parent"
+-        android:layout_height="wrap_content"
+-        android:layout_above="@id/transactions_summary_bar"
+-        android:gravity="center_horizontal|center_vertical"
+-        android:text="@string/no_transactions_to_display" />
+-
+-</RelativeLayout>
+\ No newline at end of file
++    
++</FrameLayout>
+\ No newline at end of file
+diff --git a/GnucashMobile/res/values/strings.xml b/GnucashMobile/res/values/strings.xml
+index b49b781d..3574f076 100644
+--- a/GnucashMobile/res/values/strings.xml
++++ b/GnucashMobile/res/values/strings.xml
+@@ -86,7 +86,7 @@
+     <string name="label_permission_record_transactions">Enables recording transactions in Gnucash for Android</string>
+     <string name="label_permission_create_accounts">Enables creation of accounts in Gnucash for Android</string>
+     <string name="label_permission_group">Your GnuCash data</string>
+-    <string name="description_permission_group">Record transactions in GnuCash, read GnuCash data</string>
++    <string name="description_permission_group">Read and modify GnuCash data</string>
+     <string name="label_permission_record_transaction">record transactions</string>
+     <string name="label_permission_create_account">create accounts</string>
+     <string name="label_display_account">Display account</string>
+diff --git a/GnucashMobile/res/xml/transaction_appwidget_info.xml b/GnucashMobile/res/xml/transaction_appwidget_info.xml
+index 4b1f8c13..abb76ce4 100644
+--- a/GnucashMobile/res/xml/transaction_appwidget_info.xml
++++ b/GnucashMobile/res/xml/transaction_appwidget_info.xml
+@@ -29,6 +29,6 @@
+     android:updatePeriodMillis="86400000"
+     android:previewImage="@drawable/widget_preview"
+     android:initialLayout="@layout/widget_4x1"
+-    android:configure="org.gnucash.android.ui.widget.Configuration"
++    android:configure="org.gnucash.android.ui.widget.WidgetConfigurationActivity"
+     android:resizeMode="horizontal">    
+ </appwidget-provider>
+\ No newline at end of file
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index c859f6d5..7d8f6892 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -30,7 +30,7 @@
+ import java.util.List;
+ import java.util.UUID;
+ 
+-import org.gnucash.android.ui.MainActivity;
++import org.gnucash.android.ui.accounts.AccountsActivity;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ 
+@@ -77,7 +77,7 @@
+ 	public Account(String name) {
+ 		setName(name);
+ 		this.mUID = generateUID();
+-		this.mCurrency = Currency.getInstance(MainActivity.DEFAULT_CURRENCY_CODE);
++		this.mCurrency = Currency.getInstance(AccountsActivity.DEFAULT_CURRENCY_CODE);
+ 	}
+ 
+ 	public Account(String name, Currency currency){
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Money.java b/GnucashMobile/src/org/gnucash/android/data/Money.java
+index 6a061636..7bc6bd91 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Money.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Money.java
+@@ -33,7 +33,7 @@
+ import java.util.Currency;
+ import java.util.Locale;
+ 
+-import org.gnucash.android.ui.MainActivity;
++import org.gnucash.android.ui.accounts.AccountsActivity;
+ 
+ import android.util.Log;
+ 
+@@ -89,7 +89,7 @@ public Money(double amount){
+ 	}
+ 	
+ 	private void init(){
+-		mCurrency = Currency.getInstance(MainActivity.DEFAULT_CURRENCY_CODE);
++		mCurrency = Currency.getInstance(AccountsActivity.DEFAULT_CURRENCY_CODE);
+ 		mAmount = new BigDecimal(0).setScale(DEFAULT_DECIMAL_PLACES, DEFAULT_ROUNDING_MODE);
+ 	}
+ 
+diff --git a/GnucashMobile/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java b/GnucashMobile/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+index f83a72dd..3124bf1d 100644
+--- a/GnucashMobile/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
++++ b/GnucashMobile/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+@@ -25,11 +25,12 @@
+ package org.gnucash.android.receivers;
+ 
+ import org.gnucash.android.ui.transactions.TransactionsListFragment;
+-import org.gnucash.android.ui.widget.Configuration;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import android.appwidget.AppWidgetManager;
+ import android.appwidget.AppWidgetProvider;
+ import android.content.Context;
++import android.content.SharedPreferences.Editor;
+ import android.preference.PreferenceManager;
+ 
+ public class TransactionAppWidgetProvider extends AppWidgetProvider {
+@@ -37,6 +38,7 @@
+ 	@Override
+ 	public void onUpdate(Context context, AppWidgetManager appWidgetManager,
+ 			int[] appWidgetIds) {
++		super.onUpdate(context, appWidgetManager, appWidgetIds);
+ 		final int N = appWidgetIds.length;
+ 
+         // Perform this loop procedure for each App Widget that belongs to this provider
+@@ -50,7 +52,18 @@ public void onUpdate(Context context, AppWidgetManager appWidgetManager,
+             if (accountId <= 0)
+             	return;
+             
+-            Configuration.updateWidget(context, appWidgetId, accountId);            
++            WidgetConfigurationActivity.updateWidget(context, appWidgetId, accountId);            
+         }
+ 	}
++	
++	@Override
++	public void onDeleted(Context context, int[] appWidgetIds) {
++		super.onDeleted(context, appWidgetIds);		
++		Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
++		
++		for (int appWidgetId : appWidgetIds) {
++			editor.remove(TransactionsListFragment.SELECTED_ACCOUNT_ID + appWidgetId);
++			editor.commit();
++		}
++	}
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/receivers/TransactionRecorder.java b/GnucashMobile/src/org/gnucash/android/receivers/TransactionRecorder.java
+index 46fddc06..f96f5144 100644
+--- a/GnucashMobile/src/org/gnucash/android/receivers/TransactionRecorder.java
++++ b/GnucashMobile/src/org/gnucash/android/receivers/TransactionRecorder.java
+@@ -31,7 +31,8 @@
+ import org.gnucash.android.data.Money;
+ import org.gnucash.android.data.Transaction;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.ui.MainActivity;
++import org.gnucash.android.ui.accounts.AccountsActivity;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import android.content.BroadcastReceiver;
+ import android.content.Context;
+@@ -50,7 +51,7 @@ public void onReceive(Context context, Intent intent) {
+ 		double amountDouble = args.getDouble(Transaction.EXTRA_AMOUNT, 0);
+ 		String currencyCode = args.getString(Account.EXTRA_CURRENCY_CODE);
+ 		if (currencyCode == null)
+-			currencyCode = MainActivity.DEFAULT_CURRENCY_CODE;
++			currencyCode = AccountsActivity.DEFAULT_CURRENCY_CODE;
+ 		
+ 		String accountUID = args.getString(Transaction.EXTRA_ACCOUNT_UID);
+ 		if (accountUID == null)
+@@ -64,6 +65,11 @@ public void onReceive(Context context, Intent intent) {
+ 		
+ 		TransactionsDbAdapter transacionsDbAdapter = new TransactionsDbAdapter(context);
+ 		transacionsDbAdapter.addTransaction(transaction);
++		
++		long accountId = transacionsDbAdapter.getAccountID(accountUID);
++		if (accountId > 0)
++			WidgetConfigurationActivity.updateAllWidgets(context, accountId);
++
+ 		transacionsDbAdapter.close();
+ 	}
+ 
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/MainActivity.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+similarity index 55%
+rename from GnucashMobile/src/org/gnucash/android/ui/MainActivity.java
+rename to GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+index 8c9ab6a9..8f91b13f 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/MainActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+@@ -22,23 +22,21 @@
+  * Boston, MA  02110-1301,  USA       gnu@gnu.org
+  */
+ 
+-package org.gnucash.android.ui;
++package org.gnucash.android.ui.accounts;
+ 
+ import java.util.Currency;
+ import java.util.Locale;
+ 
+ import org.gnucash.android.R;
+-import org.gnucash.android.ui.accounts.AccountsListFragment;
+-import org.gnucash.android.ui.transactions.NewTransactionFragment;
++import org.gnucash.android.ui.transactions.TransactionsActivity;
+ import org.gnucash.android.ui.transactions.TransactionsListFragment;
+-import org.gnucash.android.util.OnItemClickedListener;
++import org.gnucash.android.util.OnAccountClickedListener;
+ 
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.os.Bundle;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.app.FragmentTransaction;
+-import android.util.Log;
+ import android.view.View;
+ 
+ import com.actionbarsherlock.app.SherlockFragmentActivity;
+@@ -52,16 +50,14 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  * 
+  */
+-public class MainActivity extends SherlockFragmentActivity implements OnItemClickedListener {
++public class AccountsActivity extends SherlockFragmentActivity implements OnAccountClickedListener {
+ 
+-	public static final String FRAGMENT_ACCOUNTS_LIST 		= "accounts_list";
+-	public static final String FRAGMENT_TRANSACTIONS_LIST 	= "transactions_list";
+-	public static final String FRAGMENT_NEW_TRANSACTION 	= "new_transaction";
+-
+-	public static String DEFAULT_CURRENCY_CODE;
+-	static final int DIALOG_ADD_ACCOUNT = 0x01;
++	public static final String FRAGMENT_ACCOUNTS_LIST 	= "accounts_list";
++	
++	public static String DEFAULT_CURRENCY_CODE 	= "USD";
++	static final int DIALOG_ADD_ACCOUNT 		= 0x01;
+ 
+-	protected static final String TAG = "MainActivity";	
++	protected static final String TAG = "AccountsActivity";	
+ 
+ 	@Override
+ 	public void onCreate(Bundle savedInstanceState) {
+@@ -126,64 +122,16 @@ public void onNewAccountClick(View v) {
+ 			accountFragment.showAddAccountDialog(0);
+ 	}
+ 
+-	/**
+-	 * Opens a fragment to create a new transaction. 
+-	 * Is called from the XML views
+-	 * @param v View which triggered this method
+-	 */
+-	public void onNewTransactionClick(View v){
+-		createNewTransaction(0);
+-	}
+-	
+ 	@Override
+ 	public void accountSelected(long accountRowId, String accountName) {
+-		FragmentManager fragmentManager = getSupportFragmentManager();
+-		FragmentTransaction fragmentTransaction = fragmentManager
+-				.beginTransaction();
+-		TransactionsListFragment transactionsFragment = new TransactionsListFragment();
+-		Bundle args = new Bundle();
+-		args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID, accountRowId);		
+-		args.putString(TransactionsListFragment.SELECTED_ACCOUNT_NAME, accountName);
+-		transactionsFragment.setArguments(args);
+-		Log.i(TAG, "Opening transactions for account " + accountName);
+-		fragmentTransaction.replace(R.id.fragment_container,
+-				transactionsFragment, FRAGMENT_TRANSACTIONS_LIST);
+-
+-		fragmentTransaction.addToBackStack(null);
+-		fragmentTransaction.commit();
+-	}
+-	
+-	@Override
+-	public void createNewTransaction(long accountRowId) {
+-		FragmentManager fragmentManager = getSupportFragmentManager();
+-		FragmentTransaction fragmentTransaction = fragmentManager
+-				.beginTransaction();
+-		NewTransactionFragment newTransactionFragment = new NewTransactionFragment();
+-		Bundle args = new Bundle();
+-		args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID, accountRowId);		
+-		newTransactionFragment.setArguments(args);
++		Intent intent = new Intent(this, TransactionsActivity.class);
++		intent.setAction(Intent.ACTION_VIEW);
++		intent.putExtra(TransactionsListFragment.SELECTED_ACCOUNT_ID, accountRowId);
++		intent.putExtra(TransactionsListFragment.SELECTED_ACCOUNT_NAME, accountName);
+ 		
+-		fragmentTransaction.replace(R.id.fragment_container,
+-				newTransactionFragment, FRAGMENT_NEW_TRANSACTION);
+-
+-		fragmentTransaction.addToBackStack(null);
+-		fragmentTransaction.commit();
+-	}
+-
+-	public void editTransaction(long transactionId){
+-		FragmentManager fragmentManager = getSupportFragmentManager();
+-		FragmentTransaction fragmentTransaction = fragmentManager
+-				.beginTransaction();
+-		NewTransactionFragment newTransactionFragment = new NewTransactionFragment();
+-		Bundle args = new Bundle();
+-		args.putLong(NewTransactionFragment.SELECTED_TRANSACTION_ID, transactionId);		
+-		newTransactionFragment.setArguments(args);
+-		
+-		fragmentTransaction.replace(R.id.fragment_container,
+-				newTransactionFragment, FRAGMENT_NEW_TRANSACTION);
+-
+-		fragmentTransaction.addToBackStack(null);
+-		fragmentTransaction.commit();
++		startActivity(intent);
+ 	}
++	
++	
+ 
+ }
+\ No newline at end of file
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 289f67b7..e8dadaf1 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -35,8 +35,9 @@
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.ui.settings.SettingsActivity;
++import org.gnucash.android.ui.transactions.TransactionsActivity;
+ import org.gnucash.android.ui.transactions.TransactionsListFragment;
+-import org.gnucash.android.util.OnItemClickedListener;
++import org.gnucash.android.util.OnAccountClickedListener;
+ 
+ import android.app.Activity;
+ import android.app.AlertDialog;
+@@ -85,7 +86,7 @@
+ 	AccountsCursorAdapter mCursorAdapter;
+ 	NewAccountDialogFragment mAddAccountFragment;
+ 	private AccountsDbAdapter mAccountsDbAdapter;	
+-	private OnItemClickedListener mAccountSelectedListener;	
++	private OnAccountClickedListener mAccountSelectedListener;	
+ 	private boolean mInEditMode = false;
+ 	private ActionMode mActionMode = null;
+ 	private int mSelectedViewPosition = -1;
+@@ -205,15 +206,14 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		
+ 		ListView lv = getListView();
+ 		lv.setOnItemLongClickListener(this);	
+-		getLoaderManager().initLoader(0, null, this);
+-		
++		getLoaderManager().initLoader(0, null, this);		
+ 	}
+ 	
+ 	@Override
+ 	public void onAttach(Activity activity) {
+ 		super.onAttach(activity);
+ 		try {
+-			mAccountSelectedListener = (OnItemClickedListener) activity;
++			mAccountSelectedListener = (OnAccountClickedListener) activity;
+ 		} catch (ClassCastException e) {
+ 			throw new ClassCastException(activity.toString() + " must implement OnAccountSelectedListener");
+ 		}	
+@@ -401,6 +401,7 @@ public void bindView(View v, Context context, Cursor cursor) {
+ 			TextView summary = (TextView) v
+ 					.findViewById(R.id.transactions_summary);
+ 			final long accountId = cursor.getLong(DatabaseAdapter.COLUMN_ROW_ID);
++			final String accountName = cursor.getString(DatabaseAdapter.COLUMN_NAME);
+ 			
+ 			Money balance = transactionsDBAdapter.getTransactionsSum(accountId);
+ 			summary.setText(balance.formattedString(Locale.getDefault()));
+@@ -413,7 +414,11 @@ public void bindView(View v, Context context, Cursor cursor) {
+ 				
+ 				@Override
+ 				public void onClick(View v) {
+-					mAccountSelectedListener.createNewTransaction(accountId);
++					Intent intent = new Intent(getActivity(), TransactionsActivity.class);
++					intent.setAction(Intent.ACTION_INSERT_OR_EDIT);
++					intent.putExtra(TransactionsListFragment.SELECTED_ACCOUNT_ID, accountId);
++					intent.putExtra(TransactionsListFragment.SELECTED_ACCOUNT_NAME, accountName);
++					getActivity().startActivity(intent);
+ 				}
+ 			});
+ 		}
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+index f33988f1..7f64a64f 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+@@ -47,7 +47,6 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.ui.MainActivity;
+ import org.gnucash.android.util.OfxFormatter;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+@@ -136,7 +135,7 @@ public void onClick(View v) {
+ 			
+ 			Fragment f = getActivity()
+ 			.getSupportFragmentManager()
+-			.findFragmentByTag(MainActivity.FRAGMENT_ACCOUNTS_LIST);
++			.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
+ 		
+ 			((AccountsListFragment)f).refreshList();
+ 			dismiss();
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
+index 4a3431c1..b10abd10 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
+@@ -31,9 +31,8 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Account;
+ import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.ui.MainActivity;
+ import org.gnucash.android.ui.transactions.TransactionsListFragment;
+-import org.gnucash.android.ui.widget.Configuration;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+@@ -116,7 +115,7 @@ public void onClick(View v) {
+ 				
+ 				((AccountsListFragment)getTargetFragment()).refreshList();
+ 				
+-				Configuration.updateAllWidgets(getActivity().getApplicationContext(), id);
++				WidgetConfigurationActivity.updateAllWidgets(getActivity().getApplicationContext(), id);
+ 				dismiss();				
+ 			}
+ 		});
+@@ -146,7 +145,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		arrayAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+ 		mCurrencySpinner.setAdapter(arrayAdapter);
+ 		
+-		String currencyCode = PreferenceManager.getDefaultSharedPreferences(getActivity()).getString(getString(R.string.pref_default_currency), MainActivity.DEFAULT_CURRENCY_CODE);
++		String currencyCode = PreferenceManager.getDefaultSharedPreferences(getActivity()).getString(getString(R.string.pref_default_currency), AccountsActivity.DEFAULT_CURRENCY_CODE);
+ 		if (mSelectedId != 0){
+ 			//if we are editing an account instead of creating one
+ 			currencyCode = mAccount.getCurrency().getCurrencyCode();
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
+index bc2095e5..fe22ac3e 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
+@@ -28,8 +28,7 @@
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.ui.MainActivity;
+-import org.gnucash.android.ui.widget.Configuration;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import android.database.Cursor;
+ import android.os.Bundle;
+@@ -124,9 +123,9 @@ public void onClick(View v) {
+ 				
+ 				Fragment f = getActivity()
+ 						.getSupportFragmentManager()
+-						.findFragmentByTag(MainActivity.FRAGMENT_TRANSACTIONS_LIST);
++						.findFragmentByTag(TransactionsActivity.FRAGMENT_TRANSACTIONS_LIST);
+ 					
+-				Configuration.updateAllWidgets(getActivity(), mOriginAccountId);
++				WidgetConfigurationActivity.updateAllWidgets(getActivity(), mOriginAccountId);
+ 				((TransactionsListFragment)f).refreshList();
+ 				dismiss();
+ 			}			
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index c05367ab..0dc350cf 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -44,9 +44,9 @@
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.ui.DatePickerDialogFragment;
+-import org.gnucash.android.ui.MainActivity;
+ import org.gnucash.android.ui.TimePickerDialogFragment;
+-import org.gnucash.android.ui.widget.Configuration;
++import org.gnucash.android.ui.accounts.AccountsActivity;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import android.app.DatePickerDialog.OnDateSetListener;
+ import android.app.TimePickerDialog.OnTimeSetListener;
+@@ -108,7 +108,18 @@
+ 	@Override
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+-		return inflater.inflate(R.layout.fragment_new_transaction, container, false);
++		View v = inflater.inflate(R.layout.fragment_new_transaction, container, false);
++		
++		mNameEditText = (EditText) v.findViewById(R.id.input_transaction_name);
++		mDescriptionEditText = (EditText) v.findViewById(R.id.input_description);
++		mDateTextView = (TextView) v.findViewById(R.id.input_date);
++		mTimeTextView = (TextView) v.findViewById(R.id.input_time);
++		mAmountEditText = (EditText) v.findViewById(R.id.input_transaction_amount);		
++		mCurrencyTextView = (TextView) v.findViewById(R.id.currency_symbol);
++		mAccountsSpinner = (Spinner) v.findViewById(R.id.input_accounts_spinner);
++		mTransactionTypeButton = (ToggleButton) v.findViewById(R.id.input_transaction_type);
++		
++		return v;
+ 	}
+ 	
+ 	@Override
+@@ -120,17 +131,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		actionBar.setTitle(R.string.add_transaction);
+ 		
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+-		View v = getView();
+-		
+-		mNameEditText = (EditText)getView().findViewById(R.id.input_transaction_name);
+-		mDescriptionEditText = (EditText)getView().findViewById(R.id.input_description);
+-		mDateTextView = (TextView) v.findViewById(R.id.input_date);
+-		mTimeTextView = (TextView) v.findViewById(R.id.input_time);
+-		mAmountEditText = (EditText) v.findViewById(R.id.input_transaction_amount);		
+-		mCurrencyTextView = (TextView) v.findViewById(R.id.currency_symbol);
+-		mAccountsSpinner = (Spinner) v.findViewById(R.id.input_accounts_spinner);
+-		mTransactionTypeButton = (ToggleButton) v.findViewById(R.id.input_transaction_type);
+-		
++				
+ 		String[] from = new String[] {DatabaseHelper.KEY_NAME};
+ 		int[] to = new int[] {android.R.id.text1};
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+@@ -201,10 +202,8 @@ private void initalizeViews() {
+ 				mAccountsSpinner.setSelection(pos);
+ 		}
+ 		
+-		String code;
+-		if (accountId == 0)
+-			code = MainActivity.DEFAULT_CURRENCY_CODE;
+-		else
++		String code = AccountsActivity.DEFAULT_CURRENCY_CODE;
++		if (accountId != 0)
+ 			code = mTransactionsDbAdapter.getCurrencyCode(accountId);
+ 		
+ 			
+@@ -316,11 +315,11 @@ private void saveNewTransaction() {
+ 		mTransactionsDbAdapter.close();
+ 		
+ 		//update widgets if any
+-		Configuration.updateAllWidgets(getActivity().getApplicationContext(), accountID);
++		WidgetConfigurationActivity.updateAllWidgets(getActivity().getApplicationContext(), accountID);
+ 		
+-		getSherlockActivity().getSupportFragmentManager().popBackStack();
+ 		InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
+ 		imm.hideSoftInputFromWindow(mNameEditText.getWindowToken(), 0);
++		getSherlockActivity().getSupportFragmentManager().popBackStack();
+ 	}
+ 
+ 	@Override
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsActivity.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+new file mode 100644
+index 00000000..79d0375f
+--- /dev/null
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+@@ -0,0 +1,133 @@
++package org.gnucash.android.ui.transactions;
++
++import org.gnucash.android.R;
++import org.gnucash.android.util.OnTransactionClickedListener;
++
++import android.content.Intent;
++import android.os.Bundle;
++import android.support.v4.app.FragmentManager;
++import android.support.v4.app.FragmentTransaction;
++import android.util.Log;
++import android.view.View;
++
++import com.actionbarsherlock.app.SherlockFragmentActivity;
++import com.actionbarsherlock.view.MenuItem;
++
++public class TransactionsActivity extends SherlockFragmentActivity implements OnTransactionClickedListener{
++
++	protected static final String TAG = "AccountsActivity";
++	
++	public static final String FRAGMENT_TRANSACTIONS_LIST 	= "transactions_list";
++	public static final String FRAGMENT_NEW_TRANSACTION 	= "new_transaction";	
++	
++	private long mAccountId 	= 0;
++	private String mAccountName = "";
++	
++	@Override
++	protected void onCreate(Bundle savedInstanceState) {
++		super.onCreate(savedInstanceState);
++		setContentView(R.layout.activity_transactions);
++
++		final Intent intent = getIntent();
++		mAccountId = intent.getLongExtra(
++				TransactionsListFragment.SELECTED_ACCOUNT_ID, -1);
++		mAccountName = intent
++				.getStringExtra(TransactionsListFragment.SELECTED_ACCOUNT_NAME);		
++		
++		showTransactionsList();
++		setTitle(mAccountName);
++		
++		if (intent.getAction().equals(Intent.ACTION_INSERT_OR_EDIT)) {			
++			long transactionId = intent.getLongExtra(
++					NewTransactionFragment.SELECTED_TRANSACTION_ID, -1);
++			if (transactionId <= 0) {
++				createNewTransaction(mAccountId);
++			} else {
++				editTransaction(transactionId);
++			}
++		}
++	}	
++
++	@Override
++	public boolean onOptionsItemSelected(MenuItem item) {
++		switch (item.getItemId()) {
++		case android.R.id.home:
++	        FragmentManager fm = getSupportFragmentManager();
++	        if (fm.getBackStackEntryCount() > 0) {
++	            fm.popBackStack();
++	        }
++	        return true;
++
++		default:
++			return false;
++		}
++	}
++	
++	/**
++	 * Opens a fragment to create a new transaction. 
++	 * Is called from the XML views
++	 * @param v View which triggered this method
++	 */
++	public void onNewTransactionClick(View v){
++		createNewTransaction(mAccountId);
++	}
++		
++	protected void showTransactionsList(){
++		FragmentManager fragmentManager = getSupportFragmentManager();
++
++		TransactionsListFragment transactionsListFragment = (TransactionsListFragment) fragmentManager
++				.findFragmentByTag(FRAGMENT_TRANSACTIONS_LIST);
++
++		if (transactionsListFragment == null) {
++			FragmentTransaction fragmentTransaction = fragmentManager
++					.beginTransaction();
++			transactionsListFragment = new TransactionsListFragment();
++			Bundle args = new Bundle();
++			args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID,
++					mAccountId);
++			args.putString(TransactionsListFragment.SELECTED_ACCOUNT_NAME,
++					mAccountName);
++			transactionsListFragment.setArguments(args);
++			Log.i(TAG, "Opening transactions for account " + mAccountName);
++
++			fragmentTransaction.add(R.id.fragment_container,
++					transactionsListFragment, FRAGMENT_TRANSACTIONS_LIST);
++						
++			fragmentTransaction.commit();
++		}
++	}
++	
++	@Override
++	public void createNewTransaction(long accountRowId) {
++		FragmentManager fragmentManager = getSupportFragmentManager();
++		FragmentTransaction fragmentTransaction = fragmentManager
++				.beginTransaction();
++		NewTransactionFragment newTransactionFragment = new NewTransactionFragment();
++		Bundle args = new Bundle();
++		args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID, accountRowId);		
++		newTransactionFragment.setArguments(args);
++		
++		fragmentTransaction.replace(R.id.fragment_container,
++				newTransactionFragment, TransactionsActivity.FRAGMENT_NEW_TRANSACTION);
++
++		fragmentTransaction.addToBackStack(null);
++		fragmentTransaction.commit();
++	}
++
++	@Override
++	public void editTransaction(long transactionId){
++		FragmentManager fragmentManager = getSupportFragmentManager();
++		FragmentTransaction fragmentTransaction = fragmentManager
++				.beginTransaction();
++		NewTransactionFragment newTransactionFragment = new NewTransactionFragment();
++		Bundle args = new Bundle();
++		args.putLong(NewTransactionFragment.SELECTED_TRANSACTION_ID, transactionId);		
++		newTransactionFragment.setArguments(args);
++		
++		fragmentTransaction.replace(R.id.fragment_container,
++				newTransactionFragment, TransactionsActivity.FRAGMENT_NEW_TRANSACTION);
++
++		fragmentTransaction.addToBackStack(null);	
++		fragmentTransaction.commit();
++	}
++}
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+index 32b7fea2..98a8115a 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+@@ -33,8 +33,8 @@
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.ui.widget.Configuration;
+-import org.gnucash.android.util.OnItemClickedListener;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
++import org.gnucash.android.util.OnTransactionClickedListener;
+ 
+ import android.app.Activity;
+ import android.content.Context;
+@@ -85,7 +85,7 @@
+ 	
+ 	private HashMap<Integer, Long> mSelectedIds = new HashMap<Integer, Long>();
+ 
+-	private OnItemClickedListener mTransactionEditListener;
++	private OnTransactionClickedListener mTransactionEditListener;
+ 	
+ 	private ActionMode.Callback mActionModeCallbacks = new ActionMode.Callback() {
+ 		
+@@ -113,7 +113,7 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+ 			case R.id.context_menu_move_transactions:
+ 				showBulkMoveDialog();
+ 				mode.finish();
+-				Configuration.updateAllWidgets(getActivity(), mAccountID);
++				WidgetConfigurationActivity.updateAllWidgets(getActivity(), mAccountID);
+ 				return true;
+ 
+ 			case R.id.context_menu_delete:
+@@ -122,7 +122,7 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+ 				}				
+ 				refreshList();
+ 				mode.finish();
+-				Configuration.updateAllWidgets(getActivity(), mAccountID);
++				WidgetConfigurationActivity.updateAllWidgets(getActivity(), mAccountID);
+ 				return true;
+ 				
+ 			default:
+@@ -181,7 +181,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		refreshList();
+ 		
+ 	}
+-	
++		
+ 	public void refreshList(){
+ 		getLoaderManager().restartLoader(0, null, this);
+ 		
+@@ -199,7 +199,7 @@ public void refreshList(){
+ 	public void onAttach(Activity activity) {
+ 		super.onAttach(activity);
+ 		try {
+-			 mTransactionEditListener = (OnItemClickedListener) activity;
++			 mTransactionEditListener = (OnTransactionClickedListener) activity;
+ 		} catch (ClassCastException e) {
+ 			throw new ClassCastException(activity.toString() + " must implement OnAccountSelectedListener");
+ 		}	
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/widget/Configuration.java b/GnucashMobile/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+similarity index 87%
+rename from GnucashMobile/src/org/gnucash/android/ui/widget/Configuration.java
+rename to GnucashMobile/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 1b2cfd1a..3236379b 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/widget/Configuration.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -31,7 +31,7 @@
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.receivers.TransactionAppWidgetProvider;
+-import org.gnucash.android.ui.MainActivity;
++import org.gnucash.android.ui.transactions.TransactionsActivity;
+ import org.gnucash.android.ui.transactions.TransactionsListFragment;
+ 
+ import android.app.Activity;
+@@ -52,7 +52,7 @@
+ import android.widget.RemoteViews;
+ import android.widget.Spinner;
+ 
+-public class Configuration extends Activity {
++public class WidgetConfigurationActivity extends Activity {
+ 	private AccountsDbAdapter mAccountsDbAdapter;
+ 	private SimpleCursorAdapter mCursorAdapter;
+ 	private int mAppWidgetId;
+@@ -100,13 +100,17 @@ public void onClick(View v) {
+ 				            AppWidgetManager.INVALID_APPWIDGET_ID);
+ 				}
+ 				
+-				SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(Configuration.this);
++				if (mAppWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID)
++					return;
++				
++				SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(WidgetConfigurationActivity.this);
+ 				Editor editor = prefs.edit();
+ 				editor.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID + mAppWidgetId, 
+-						mAccountsSpinner.getSelectedItemId());				
++						mAccountsSpinner.getSelectedItemId());	
++				
+ 				editor.commit();	
+ 				
+-				updateWidget(Configuration.this, mAppWidgetId, mAccountsSpinner.getSelectedItemId());
++				updateWidget(WidgetConfigurationActivity.this, mAppWidgetId, mAccountsSpinner.getSelectedItemId());
+ 						
+ 				Intent resultValue = new Intent();
+ 				resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, mAppWidgetId);
+@@ -135,6 +139,9 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 		Account account = accountsDbAdapter.getAccount(accountId);
+ 		accountsDbAdapter.close();
+ 		
++		if (account == null)
++			return;
++		
+ 		RemoteViews views = new RemoteViews(context.getPackageName(),
+ 				R.layout.widget_4x1);
+ 		views.setTextViewText(R.id.account_name, account.getName());
+@@ -143,18 +150,16 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 		int color = account.getBalance().isNegative() ? R.color.debit_red : R.color.credit_green;
+ 		views.setTextColor(R.id.transactions_summary, context.getResources().getColor(color));
+ 		
+-		//TODO: start account list activity
+-		Intent accountViewIntent = new Intent(context, MainActivity.class);
+-		accountViewIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+-		accountViewIntent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
++		Intent accountViewIntent = new Intent(context, TransactionsActivity.class);
++		accountViewIntent.setAction(Intent.ACTION_VIEW);
++		accountViewIntent.putExtra(TransactionsListFragment.SELECTED_ACCOUNT_ID, accountId);
+ 		PendingIntent accountPendingIntent = PendingIntent
+ 				.getActivity(context, 0, accountViewIntent, 0);
+ 		views.setOnClickPendingIntent(R.id.widget_layout, accountPendingIntent);
+ 		
+-		//TODO: Start new transaction activity
+-		Intent newTransactionIntent = new Intent(context, MainActivity.class);
+-		newTransactionIntent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+-		newTransactionIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
++		Intent newTransactionIntent = new Intent(context, TransactionsActivity.class);
++		newTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
++		newTransactionIntent.putExtra(TransactionsListFragment.SELECTED_ACCOUNT_ID, accountId);		
+ 		PendingIntent pendingIntent = PendingIntent
+ 				.getActivity(context, 0, newTransactionIntent, 0);	            
+ 		views.setOnClickPendingIntent(R.id.btn_new_transaction, pendingIntent);
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OnAccountClickedListener.java b/GnucashMobile/src/org/gnucash/android/util/OnAccountClickedListener.java
+new file mode 100644
+index 00000000..e6698639
+--- /dev/null
++++ b/GnucashMobile/src/org/gnucash/android/util/OnAccountClickedListener.java
+@@ -0,0 +1,7 @@
++package org.gnucash.android.util;
++
++public interface OnAccountClickedListener {
++
++	public void accountSelected(long accountRowId, String accountName);
++	
++}
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OnItemClickedListener.java b/GnucashMobile/src/org/gnucash/android/util/OnTransactionClickedListener.java
+similarity index 56%
+rename from GnucashMobile/src/org/gnucash/android/util/OnItemClickedListener.java
+rename to GnucashMobile/src/org/gnucash/android/util/OnTransactionClickedListener.java
+index 972a3208..b99001a2 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OnItemClickedListener.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OnTransactionClickedListener.java
+@@ -1,9 +1,7 @@
+ package org.gnucash.android.util;
+ 
+-public interface OnItemClickedListener {
++public interface OnTransactionClickedListener {
+ 
+-	public void accountSelected(long accountRowId, String accountName);
+-	
+ 	public void createNewTransaction(long accountRowId);
+ 	
+ 	public void editTransaction(long transactionId);	
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
+index 16ee86e1..d4605cab 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
+@@ -31,8 +31,9 @@
+ import org.gnucash.android.data.Transaction;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.ui.MainActivity;
++import org.gnucash.android.ui.accounts.AccountsActivity;
+ import org.gnucash.android.ui.accounts.AccountsListFragment;
++import org.gnucash.android.ui.transactions.TransactionsActivity;
+ 
+ import android.content.Intent;
+ import android.os.Build;
+@@ -43,12 +44,12 @@
+ 
+ import com.jayway.android.robotium.solo.Solo;
+ 
+-public class AccountsActivityTest extends ActivityInstrumentationTestCase2<MainActivity> {
++public class AccountsActivityTest extends ActivityInstrumentationTestCase2<AccountsActivity> {
+ 	private static final String DUMMY_ACCOUNT_NAME = "Test account";
+ 	private Solo mSolo;
+ 	
+ 	public AccountsActivityTest() {		
+-		super(MainActivity.class);
++		super(AccountsActivity.class);
+ 	}
+ 
+ 	protected void setUp() throws Exception {
+@@ -64,7 +65,7 @@ public void testDisplayAccountsList(){
+ 		//there should exist a listview of accounts
+ 		Fragment fragment = getActivity()
+ 				.getSupportFragmentManager()
+-				.findFragmentByTag(MainActivity.FRAGMENT_ACCOUNTS_LIST);
++				.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
+ 		assertNotNull(fragment);
+ 		assertNotNull(mSolo.getCurrentListViews().get(0));		
+ 	}
+@@ -92,7 +93,7 @@ public void testCreateAccount(){
+ 	public void testEditAccount(){
+ 		Fragment fragment = getActivity()
+ 				.getSupportFragmentManager()
+-				.findFragmentByTag(MainActivity.FRAGMENT_ACCOUNTS_LIST);
++				.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
+ 		((AccountsListFragment) fragment).refreshList();
+ 		
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+@@ -119,7 +120,7 @@ public void testEditAccount(){
+ 	public void testDisplayTransactionsList(){	
+ 		Fragment fragment = getActivity()
+ 				.getSupportFragmentManager()
+-				.findFragmentByTag(MainActivity.FRAGMENT_ACCOUNTS_LIST);
++				.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
+ 		((AccountsListFragment) fragment).refreshList();
+ 		
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+@@ -128,7 +129,7 @@ public void testDisplayTransactionsList(){
+ 		
+ 		fragment = getActivity()
+ 				.getSupportFragmentManager()
+-				.findFragmentByTag(MainActivity.FRAGMENT_TRANSACTIONS_LIST);
++				.findFragmentByTag(TransactionsActivity.FRAGMENT_TRANSACTIONS_LIST);
+ 		assertNotNull(fragment);
+ 		
+ 		assertNotNull(mSolo.getCurrentListViews());
+@@ -148,7 +149,7 @@ public void testDeleteAccount(){
+ 		
+ 		Fragment fragment = getActivity()
+ 				.getSupportFragmentManager()
+-				.findFragmentByTag(MainActivity.FRAGMENT_ACCOUNTS_LIST);
++				.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
+ 		assertNotNull(fragment);
+ 		
+ 		((AccountsListFragment) fragment).refreshList();
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java b/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+index d189fbab..6b50c264 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+@@ -30,7 +30,7 @@
+ import org.gnucash.android.data.Account;
+ import org.gnucash.android.data.Transaction;
+ import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.ui.MainActivity;
++import org.gnucash.android.ui.accounts.AccountsActivity;
+ import org.gnucash.android.ui.accounts.ExportDialogFragment;
+ 
+ import android.os.Environment;
+@@ -40,12 +40,12 @@
+ import com.jayway.android.robotium.solo.Solo;
+ 
+ public class OfxExportTest extends
+-		ActivityInstrumentationTestCase2<MainActivity> {
++		ActivityInstrumentationTestCase2<AccountsActivity> {
+ 
+ 	private Solo mSolo;
+ 	
+ 	public OfxExportTest() {
+-		super(MainActivity.class);
++		super(AccountsActivity.class);
+ 	}
+ 	
+ 	@Override
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java b/GnucashMobileTest/src/org/gnucash/android/test/TransactionsActivityTest.java
+similarity index 84%
+rename from GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java
+rename to GnucashMobileTest/src/org/gnucash/android/test/TransactionsActivityTest.java
+index 93555be9..8230cb02 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/TransactionsActivityTest.java
+@@ -34,10 +34,11 @@
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.ui.MainActivity;
+-import org.gnucash.android.ui.accounts.AccountsListFragment;
+ import org.gnucash.android.ui.transactions.NewTransactionFragment;
++import org.gnucash.android.ui.transactions.TransactionsActivity;
++import org.gnucash.android.ui.transactions.TransactionsListFragment;
+ 
++import android.content.Context;
+ import android.content.Intent;
+ import android.database.Cursor;
+ import android.support.v4.app.Fragment;
+@@ -46,21 +47,19 @@
+ 
+ import com.jayway.android.robotium.solo.Solo;
+ 
+-public class TransactionsFragmentTest extends
+-		ActivityInstrumentationTestCase2<MainActivity> {
++public class TransactionsActivityTest extends
++		ActivityInstrumentationTestCase2<TransactionsActivity> {
+ 	private static final String DUMMY_ACCOUNT_UID = "transactions-account";
+ 	private static final String DUMMY_ACCOUNT_NAME = "Transactions Account";
+ 	private Solo mSolo;
+ 	private Transaction mTransaction;
+ 	
+-	public TransactionsFragmentTest() {
+-		super(MainActivity.class);
++	public TransactionsActivityTest() {
++		super(TransactionsActivity.class);		
+ 	}
+-
++	
+ 	@Override
+-	protected void setUp() throws Exception {
+-		mSolo = new Solo(getInstrumentation(), getActivity());	
+-		
++	protected void setUp() throws Exception {		
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+ 		account.setUID(DUMMY_ACCOUNT_UID);
+ 		
+@@ -69,17 +68,25 @@ protected void setUp() throws Exception {
+ 		mTransaction.setDescription("What up?");
+ 		mTransaction.setTime(System.currentTimeMillis());
+ 		
+-		account.addTransaction(mTransaction);
++		account.addTransaction(mTransaction);		
+ 		
+-		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.addAccount(account);
++		Context context = getInstrumentation().getTargetContext();
++		AccountsDbAdapter adapter = new AccountsDbAdapter(context);
++		long id = adapter.addAccount(account);
+ 		adapter.close();
++		
++
++		Intent intent = new Intent(Intent.ACTION_VIEW);
++		intent.putExtra(TransactionsListFragment.SELECTED_ACCOUNT_ID, id);
++		setActivityIntent(intent);
++		
++		mSolo = new Solo(getInstrumentation(), getActivity());			
+ 	}
+ 	
+ 	private void validateTransactionListDisplayed(){
+ 		Fragment fragment = getActivity()
+ 				.getSupportFragmentManager()
+-				.findFragmentByTag(MainActivity.FRAGMENT_TRANSACTIONS_LIST);
++				.findFragmentByTag(TransactionsActivity.FRAGMENT_TRANSACTIONS_LIST);
+ 		
+ 		assertNotNull(fragment);
+ 	}
+@@ -106,12 +113,8 @@ private void validateNewTransactionFields(){
+ 		assertEquals(DUMMY_ACCOUNT_NAME, actualValue);
+ 	}
+ 	
+-	public void testAddTransaction(){
+-		refreshAccountsList();
+-		
+-		//open transactions
+-		mSolo.clickOnText(DUMMY_ACCOUNT_NAME);
+-		mSolo.waitForText(DUMMY_ACCOUNT_NAME);		
++	public void testAddTransaction(){	
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		validateTransactionListDisplayed();
+ 		
+ //		mSolo.clickOnActionBarItem(R.id.menu_add_transaction);
+@@ -163,11 +166,8 @@ private void validateEditTransactionFields(Transaction transaction){
+ 		assertEquals(transaction.getAccountUID(), actualValue);
+ 	}
+ 	
+-	public void testEditTransaction(){
+-		refreshAccountsList();
+-		
++	public void testEditTransaction(){		
+ 		//open transactions
+-		mSolo.clickOnText(DUMMY_ACCOUNT_NAME);
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		
+ 		validateTransactionListDisplayed();
+@@ -185,9 +185,6 @@ public void testEditTransaction(){
+ 	}
+ 	
+ 	public void testDeleteTransaction(){
+-		refreshAccountsList();
+-		
+-		mSolo.clickOnText(DUMMY_ACCOUNT_NAME);
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		
+ 		mSolo.clickOnCheckBox(0);
+@@ -238,15 +235,7 @@ public void testIntentTransactionRecording(){
+ 		
+ 		trxnAdapter.close();
+ 	}
+-	
+-	private void refreshAccountsList(){
+-		Fragment fragment = getActivity()
+-				.getSupportFragmentManager()
+-				.findFragmentByTag(MainActivity.FRAGMENT_ACCOUNTS_LIST);
+-		assertNotNull(fragment);
+-		((AccountsListFragment) fragment).refreshList();		
+-	}
+-	
++
+ 	@Override
+ 	protected void tearDown() throws Exception {	
+ 		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());

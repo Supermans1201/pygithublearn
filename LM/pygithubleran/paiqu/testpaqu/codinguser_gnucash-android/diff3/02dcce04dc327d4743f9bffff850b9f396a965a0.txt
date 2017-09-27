@@ -1,0 +1,373 @@
+From 02dcce04dc327d4743f9bffff850b9f396a965a0 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 17 Mar 2015 16:48:53 +0100
+Subject: [PATCH] Added UX for explicit creation of transaction templates
+
+Fixed: bug causing no transaction templates to be saved
+Autocomplete in the transaction description field only filters through templates
+Recurring transactions always trigger a template to be saved
+
+TODO: Add view for viewing, editing and deleting existing transaction templates
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  5 ++-
+ .../org/gnucash/android/model/Transaction.java     | 12 +++---
+ .../ui/transaction/TransactionFormFragment.java    | 46 +++++++++++++++-------
+ .../main/res/layout/fragment_new_transaction.xml   |  7 +++-
+ app/src/main/res/values-de/strings.xml             |  1 +
+ app/src/main/res/values-el/strings.xml             |  1 +
+ app/src/main/res/values-es-rMX/strings.xml         |  1 +
+ app/src/main/res/values-es/strings.xml             |  1 +
+ app/src/main/res/values-fr/strings.xml             |  1 +
+ app/src/main/res/values-hu/strings.xml             |  1 +
+ app/src/main/res/values-it/strings.xml             |  1 +
+ app/src/main/res/values-nb/strings.xml             |  1 +
+ app/src/main/res/values-nl/strings.xml             |  1 +
+ app/src/main/res/values-pt-rBR/strings.xml         |  1 +
+ app/src/main/res/values-ru/strings.xml             |  1 +
+ app/src/main/res/values-zh/strings.xml             |  1 +
+ app/src/main/res/values/strings.xml                |  1 +
+ 17 files changed, 60 insertions(+), 23 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index fb8d9c20..8da5e910 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -488,10 +488,11 @@ public long getAllTransactionsCount() {
+      * @param prefix Starting characters of the transaction name
+      * @return Cursor to the data set containing all matching transactions
+      */
+-    public Cursor fetchTransactionsStartingWith(String prefix){
++    public Cursor fetchTemplatesStartingWith(String prefix){
+         return mDb.query(TransactionEntry.TABLE_NAME,
+                 new String[]{TransactionEntry._ID, TransactionEntry.COLUMN_DESCRIPTION},
+-                TransactionEntry.COLUMN_DESCRIPTION + " LIKE '" + prefix + "%'",
++                TransactionEntry.COLUMN_TEMPLATE + "=1 AND "
++                        + TransactionEntry.COLUMN_DESCRIPTION + " LIKE '" + prefix + "%'",
+                 null, null, null,
+                 TransactionEntry.COLUMN_DESCRIPTION + " ASC");
+     }
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 302c192a..e6ee2fd3 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -100,7 +100,7 @@
+ 	 * Flag indicating if this transaction has been exported before or not
+ 	 * The transactions are typically exported as bank statement in the OFX format
+ 	 */
+-	private int mIsExported = 0;
++	private boolean mIsExported = false;
+ 
+ 	/**
+ 	 * Timestamp when this transaction occurred
+@@ -110,7 +110,7 @@
+     /**
+      * Flag indicating that this transaction is a template
+      */
+-    private int mIsTemplate = 0;
++    private boolean mIsTemplate = false;
+ 
+ 	/**
+ 	 * Overloaded constructor. Creates a new transaction instance with the
+@@ -384,7 +384,7 @@ public static boolean shouldDecreaseBalance(AccountType accountType, Transaction
+ 	 * @param isExported <code>true</code> if the transaction has been exported, <code>false</code> otherwise
+ 	 */
+ 	public void setExported(boolean isExported){
+-		mIsExported = isExported ? 1 : 0;
++		mIsExported = isExported;
+ 	}
+ 
+ 	/**
+@@ -392,7 +392,7 @@ public void setExported(boolean isExported){
+ 	 * @return <code>true</code> if the transaction has been exported, <code>false</code> otherwise
+ 	 */
+ 	public boolean isExported(){
+-		return mIsExported == 1;
++		return mIsExported;
+ 	}
+ 
+     /**
+@@ -400,7 +400,7 @@ public boolean isExported(){
+      * @return {@code true} if this transaction is a template, {@code false} otherwise
+      */
+     public boolean isTemplate(){
+-        return mIsTemplate == 1;
++        return mIsTemplate;
+     }
+ 
+     /**
+@@ -408,7 +408,7 @@ public boolean isTemplate(){
+      * @param isTemplate Flag indicating if transaction is a template or not
+      */
+     public void setTemplate(boolean isTemplate){
+-        mIsExported = isTemplate ? 1 : 0;
++        mIsTemplate = isTemplate;
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 5cdcfc81..6af4b081 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -164,6 +164,11 @@
+ 	private Spinner mDoubleAccountSpinner;
+ 
+     /**
++     * Checkbox indicating if this transaction should be saved as a template or not
++     */
++    private CheckBox mSaveTemplate;
++
++    /**
+      * Flag to note if double entry accounting is in use or not
+      */
+ 	private boolean mUseDoubleEntry;
+@@ -209,7 +214,8 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 		mDoubleAccountSpinner   = (Spinner) v.findViewById(R.id.input_double_entry_accounts_spinner);
+         mOpenSplitsButton       = (Button) v.findViewById(R.id.btn_open_splits);
+         mRecurrenceTextView     = (TextView) v.findViewById(R.id.input_recurrence);
+-		return v;
++        mSaveTemplate           = (CheckBox) v.findViewById(R.id.checkbox_save_template);
++        return v;
+ 	}
+ 
+ 	@Override
+@@ -296,7 +302,7 @@ public CharSequence convertToString(Cursor cursor) {
+         adapter.setFilterQueryProvider(new FilterQueryProvider() {
+             @Override
+             public Cursor runQuery(CharSequence name) {
+-                return mTransactionsDbAdapter.fetchTransactionsStartingWith(name==null?"":name.toString());
++                return mTransactionsDbAdapter.fetchTemplatesStartingWith(name == null ? "" : name.toString());
+             }
+         });
+ 
+@@ -378,6 +384,8 @@ private void initializeViewsWithTransaction(){
+         if (mMultiCurrency) {
+             enableControls(false);
+         }
++
++        mSaveTemplate.setChecked(mTransaction.isTemplate());
+     }
+ 
+     private void enableControls(boolean b) {
+@@ -659,8 +667,17 @@ private void saveNewTransaction() {
+         mTransaction.setExported(false);
+         //save the normal transaction first
+         mTransactionsDbAdapter.addTransaction(mTransaction);
+-        scheduleRecurringTransaction();
+ 
++        if (mSaveTemplate.isChecked()){
++            Transaction templateTransaction;
++            //creating a new recurring transaction
++            templateTransaction = new Transaction(mTransaction, true);
++            templateTransaction.setTemplate(true);
++            mTransactionsDbAdapter.addTransaction(templateTransaction);
++
++            //inside the if statement becuase scheduling always creates a template
++            scheduleRecurringTransaction(templateTransaction.getUID());
++        }
+ 
+         //update widgets, if any
+ 		WidgetConfigurationActivity.updateAllWidgets(getActivity().getApplicationContext());
+@@ -672,27 +689,22 @@ private void saveNewTransaction() {
+      * Schedules a recurring transaction (if necessary) after the transaction has been saved
+      * @see #saveNewTransaction()
+      */
+-    private void scheduleRecurringTransaction() {
+-        List<ScheduledAction> events = RecurrenceParser.parse(mEventRecurrence, ScheduledAction.ActionType.TRANSACTION);
++    private void scheduleRecurringTransaction(String transactionUID) {
++        List<ScheduledAction> events = RecurrenceParser.parse(mEventRecurrence,
++                ScheduledAction.ActionType.TRANSACTION);
+ 
+         if (events.size() == 0) //there are no scheduled events detected
+             return;
+ 
+-        Transaction recurringTransaction;
+-        //creating a new recurring transaction
+-        recurringTransaction = new Transaction(mTransaction, true);
+-        recurringTransaction.setTemplate(true);
+-        mTransactionsDbAdapter.addTransaction(recurringTransaction);
+-
+         ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+         for (ScheduledAction event : events) {
+-            event.setEventUID(recurringTransaction.getUID());
++            event.setEventUID(transactionUID);
+             event.setLastRun(System.currentTimeMillis());
+             scheduledActionDbAdapter.addScheduledEvent(event);
+ 
+             Log.i("TransactionFormFragment", event.toString());
+         }
+-        if (events.size() > 0)
++        if (events.size() > 0) //TODO: localize this toast string for all supported locales
+             Toast.makeText(getActivity(), "Scheduled transaction", Toast.LENGTH_SHORT).show();
+     }
+ 
+@@ -846,11 +858,17 @@ public static BigDecimal parseInputToDecimal(String amountString){
+     @Override
+     public void onRecurrenceSet(String rrule) {
+         mRecurrenceRule = rrule;
+-        String repeatString = "Not scheduled";
++        String repeatString = "Not scheduled"; //TODO: localize this string
+         if (mRecurrenceRule != null){
+             mEventRecurrence.parse(mRecurrenceRule);
+             repeatString = EventRecurrenceFormatter.getRepeatString(getActivity(), getResources(), mEventRecurrence, true);
+ 
++            //when recurrence is set, we will definitely be saving a template
++            mSaveTemplate.setChecked(true);
++            mSaveTemplate.setEnabled(false);
++        } else {
++            mSaveTemplate.setEnabled(true);
++            mSaveTemplate.setChecked(false);
+         }
+ 
+         mRecurrenceTextView.setText(repeatString);
+diff --git a/app/src/main/res/layout/fragment_new_transaction.xml b/app/src/main/res/layout/fragment_new_transaction.xml
+index 756b609e..c951fd50 100644
+--- a/app/src/main/res/layout/fragment_new_transaction.xml
++++ b/app/src/main/res/layout/fragment_new_transaction.xml
+@@ -171,9 +171,14 @@
+                       android:layout_width="match_parent"
+                       android:layout_height="wrap_content"
+                       android:gravity="center"
+-                      android:text="Not scheduled"
++                      android:text="Tap to create schedule"
+                       style="@style/Dropdown.TextView" />
+ 
+         </LinearLayout>
++        <CheckBox android:id="@+id/checkbox_save_template"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginBottom="@dimen/form_row_bottom_margin"
++            android:text="@string/label_save_template" />
+ 	</LinearLayout>
+ </ScrollView>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index be3bcfa3..3a28f70e 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -435,4 +435,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index 2411dcd7..2c013658 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -460,4 +460,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index f7acd93f..b0eeaa0d 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -445,4 +445,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index a55a3095..61c9bb05 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -442,4 +442,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 08eecbce..ad3619ed 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -442,4 +442,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 83dc0e8f..5f24efec 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -446,4 +446,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index 553aa733..b2fca4f2 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -446,4 +446,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 2580be6e..b0775385 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -442,4 +442,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 3c3fad01..5cd048a9 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -447,4 +447,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 5261de0a..afd5ab8c 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -445,4 +445,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 3a5dee8c..0976477c 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -448,4 +448,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index c0fb8226..abcf121c 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -439,4 +439,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index d6aba07a..8d06b36e 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -445,4 +445,5 @@
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_save_template">Save as template</string>
+ </resources>

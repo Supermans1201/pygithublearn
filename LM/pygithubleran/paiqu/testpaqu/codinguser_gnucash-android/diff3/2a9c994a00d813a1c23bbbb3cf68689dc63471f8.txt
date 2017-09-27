@@ -1,0 +1,981 @@
+From 2a9c994a00d813a1c23bbbb3cf68689dc63471f8 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 23 Mar 2015 14:54:01 +0100
+Subject: [PATCH] Implemented import of scheduled transactions from XML
+
+Updated writing of scheduled transactions to XML to more closely match GnuCash desktop
+Added bulk saving of scheduled actions to db
+Fixed: writing of scheduled actions did not add the GUID of the action
+---
+ .../org/gnucash/android/db/DatabaseSchema.java     |  21 +--
+ .../android/db/ScheduledActionDbAdapter.java       |  57 +++++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  19 +-
+ .../gnucash/android/export/xml/GncXmlExporter.java |  54 +++++-
+ .../gnucash/android/export/xml/GncXmlHelper.java   |  60 ++-----
+ .../gnucash/android/importer/GncXmlHandler.java    | 191 ++++++++++++++++++---
+ .../org/gnucash/android/model/ScheduledAction.java | 120 ++++++++++---
+ .../gnucash/android/service/SchedulerService.java  |   2 +-
+ .../ui/transaction/TransactionFormFragment.java    |   4 +-
+ 9 files changed, 397 insertions(+), 131 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 3aee09a9..bba49b48 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -104,18 +104,15 @@ private DatabaseSchema(){}
+     }
+ 
+     public static abstract class ScheduledActionEntry implements CommonColumns {
+-        public static final String TABLE_NAME           = "scheduled_actions";
+-
+-        public static final String COLUMN_TYPE          = "type";
+-        public static final String COLUMN_ACTION_UID    = "action_uid";
+-        public static final String COLUMN_START_TIME    = "start_time";
+-        public static final String COLUMN_END_TIME      = "end_time";
+-        public static final String COLUMN_LAST_RUN      = "last_run";
+-        public static final String COLUMN_PERIOD        = "period";
+-        /**
+-         * Tags for any scheduled action-specific information
+-         */
+-        public static final String COLUMN_TAG               = "tag";
++        public static final String TABLE_NAME               = "scheduled_actions";
++
++        public static final String COLUMN_TYPE              = "type";
++        public static final String COLUMN_ACTION_UID        = "action_uid";
++        public static final String COLUMN_START_TIME        = "start_time";
++        public static final String COLUMN_END_TIME          = "end_time";
++        public static final String COLUMN_LAST_RUN          = "last_run";
++        public static final String COLUMN_PERIOD            = "period";
++        public static final String COLUMN_TAG               = "tag"; //for any action-specific information
+         public static final String COLUMN_ENABLED           = "is_enabled";
+         public static final String COLUMN_NUM_OCCURRENCES   = "num_occurrences";
+         public static final String COLUMN_EXECUTION_COUNT   = "execution_count";
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index fed08fb6..edda39ee 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -18,6 +18,7 @@
+ import android.content.ContentValues;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
++import android.database.sqlite.SQLiteStatement;
+ import android.support.annotation.NonNull;
+ import android.util.Log;
+ 
+@@ -53,9 +54,9 @@ public static ScheduledActionDbAdapter getInstance(){
+      * @param scheduledAction {@link org.gnucash.android.model.ScheduledAction} to be added
+      * @return Database row ID of the newly created/replaced instance
+      */
+-    public long addScheduledEvent(ScheduledAction scheduledAction){
++    public long addScheduledAction(ScheduledAction scheduledAction){
+         ContentValues contentValues = getContentValues(scheduledAction);
+-        contentValues.put(ScheduledActionEntry.COLUMN_ACTION_UID, scheduledAction.getEventUID());
++        contentValues.put(ScheduledActionEntry.COLUMN_ACTION_UID, scheduledAction.getActionUID());
+         contentValues.put(ScheduledActionEntry.COLUMN_PERIOD,    scheduledAction.getPeriod());
+         contentValues.put(ScheduledActionEntry.COLUMN_START_TIME, scheduledAction.getStartTime());
+         contentValues.put(ScheduledActionEntry.COLUMN_END_TIME,  scheduledAction.getEndTime());
+@@ -71,13 +72,61 @@ public long addScheduledEvent(ScheduledAction scheduledAction){
+     }
+ 
+     /**
++     * Adds a multiple scheduled actions to the database in one transaction.
++     * @param scheduledActionList List of ScheduledActions
++     * @return Returns the number of rows inserted
++     */
++    public int bulkAddScheduledActions(List<ScheduledAction> scheduledActionList){
++        Log.d(TAG, "Bulk adding scheduled actions to the database");
++        int nRow = 0;
++        try {
++            mDb.beginTransaction();
++            SQLiteStatement replaceStatement = mDb.compileStatement("REPLACE INTO " + ScheduledActionEntry.TABLE_NAME + " ( "
++                    + ScheduledActionEntry.COLUMN_UID 	            + " , "
++                    + ScheduledActionEntry.COLUMN_ACTION_UID        + " , "
++                    + ScheduledActionEntry.COLUMN_TYPE              + " , "
++                    + ScheduledActionEntry.COLUMN_START_TIME        + " , "
++                    + ScheduledActionEntry.COLUMN_END_TIME          + " , "
++                    + ScheduledActionEntry.COLUMN_LAST_RUN 		    + " , "
++                    + ScheduledActionEntry.COLUMN_PERIOD 	        + " , "
++                    + ScheduledActionEntry.COLUMN_ENABLED           + " , "
++                    + ScheduledActionEntry.COLUMN_CREATED_AT        + " , "
++                    + ScheduledActionEntry.COLUMN_TAG               + " , "
++                    + ScheduledActionEntry.COLUMN_NUM_OCCURRENCES   + " , "
++                    + ScheduledActionEntry.COLUMN_EXECUTION_COUNT   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
++            for (ScheduledAction schedxAction:scheduledActionList) {
++                replaceStatement.clearBindings();
++                replaceStatement.bindString(1,  schedxAction.getUID());
++                replaceStatement.bindString(2,  schedxAction.getActionUID());
++                replaceStatement.bindString(3,  schedxAction.getActionType().name());
++                replaceStatement.bindLong(4,    schedxAction.getStartTime());
++                replaceStatement.bindLong(5,    schedxAction.getEndTime());
++                replaceStatement.bindLong(6,    schedxAction.getLastRun());
++                replaceStatement.bindLong(7,    schedxAction.getPeriod());
++                replaceStatement.bindLong(8,    schedxAction.isEnabled() ? 1 : 0);
++                replaceStatement.bindString(9,  schedxAction.getCreatedTimestamp().toString());
++                replaceStatement.bindString(10, schedxAction.getTag());
++                replaceStatement.bindString(11, Integer.toString(schedxAction.getNumberOfOccurences()));
++                replaceStatement.bindString(12, Integer.toString(schedxAction.getExecutionCount()));
++
++                replaceStatement.execute();
++                nRow ++;
++            }
++            mDb.setTransactionSuccessful();
++        }
++        finally {
++            mDb.endTransaction();
++        }
++        return nRow;
++    }
++    /**
+      * Builds a {@link org.gnucash.android.model.ScheduledAction} instance from a row to cursor in the database.
+      * The cursor should be already pointing to the right entry in the data set. It will not be modified in any way
+      * @param cursor Cursor pointing to data set
+      * @return ScheduledEvent object instance
+      */
+     private ScheduledAction buildScheduledEventInstance(final Cursor cursor){
+-        String eventUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
++        String actionUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
+         long period     = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
+         long startTime  = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
+         long endTime    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_END_TIME));
+@@ -93,7 +142,7 @@ private ScheduledAction buildScheduledEventInstance(final Cursor cursor){
+         event.setPeriod(period);
+         event.setStartTime(startTime);
+         event.setEndTime(endTime);
+-        event.setEventUID(eventUid);
++        event.setActionUID(actionUid);
+         event.setLastRun(lastRun);
+         event.setTag(tag);
+         event.setEnabled(enabled);
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index ae57cc1c..89ab4790 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2012 - 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 - 2015 Ngewi Fet <ngewif@gmail.com>
+  * Copyright (c) 2014 Yongxin Wang <fefe.wyx@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -152,9 +152,6 @@ public long bulkAddTransactions(List<Transaction> transactionList){
+                 + TransactionEntry.COLUMN_CREATED_AT    + " , "
+                 + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ?)");
+             for (Transaction transaction : transactionList) {
+-                if (transaction.isTemplate()) { //TODO: Properly schedule transactions
+-                    scheduleTransaction(transaction);
+-                }
+                 //Log.d(TAG, "Replacing transaction in db");
+                 replaceStatement.clearBindings();
+                 replaceStatement.bindString(1,  transaction.getUID());
+@@ -518,20 +515,6 @@ public int updateTransaction(ContentValues contentValues, String whereClause, St
+     }
+ 
+     /**
+-     * Schedules <code>recurringTransaction</code> to be executed at specific intervals.
+-     * The interval period is packaged within the transaction
+-     * @param recurringTransaction Transaction which is to be recurring
+-     */
+-    public void scheduleTransaction(Transaction recurringTransaction) {
+-        long recurrencePeriodMillis = System.currentTimeMillis(); //recurringTransaction.getRecurrencePeriod();
+-        long firstRunMillis = System.currentTimeMillis() + recurrencePeriodMillis;
+-        long recurringTransactionId = addTransaction(recurringTransaction);
+-
+-
+-        //TODO: Properly create ScheduledEvent
+-    }
+-
+-    /**
+      * Returns a transaction for the given transaction GUID
+      * @param transactionUID GUID of the transaction
+      * @return Retrieves a transaction from the database
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 2c7db1db..6aaf0627 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -26,6 +26,7 @@
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.model.TransactionType;
+ import org.xmlpull.v1.XmlPullParserFactory;
+ import org.xmlpull.v1.XmlSerializer;
+ 
+@@ -70,7 +71,7 @@ private void exportSlots(XmlSerializer xmlSerializer,
+                 slotKey.size() == 0 || slotType.size() != slotKey.size() || slotValue.size() != slotKey.size()) {
+             return;
+         }
+-        xmlSerializer.startTag(null, GncXmlHelper.TAG_ACT_SLOTS);
++
+         for (int i = 0; i < slotKey.size(); i++) {
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SLOT);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SLOT_KEY);
+@@ -82,7 +83,6 @@ private void exportSlots(XmlSerializer xmlSerializer,
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SLOT_VALUE);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SLOT);
+         }
+-        xmlSerializer.endTag(null, GncXmlHelper.TAG_ACT_SLOTS);
+     }
+ 
+     private void exportAccounts(XmlSerializer xmlSerializer) throws IOException {
+@@ -148,7 +148,10 @@ private void exportAccounts(XmlSerializer xmlSerializer) throws IOException {
+             slotKey.add(GncXmlHelper.KEY_FAVORITE);
+             slotType.add(GncXmlHelper.ATTR_VALUE_STRING);
+             slotValue.add(Boolean.toString(cursor.getInt(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_FAVORITE)) != 0));
++
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_ACT_SLOTS);
+             exportSlots(xmlSerializer, slotKey, slotType, slotValue);
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_ACT_SLOTS);
+ 
+             // parent uid
+             String parentUID = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_PARENT_ACCOUNT_UID));
+@@ -263,7 +266,11 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                     slotType.add(GncXmlHelper.ATTR_VALUE_STRING);
+                     slotValue.add("false");
+                 }
++
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_TRN_SLOTS);
+                 exportSlots(xmlSerializer, slotKey, slotType, slotValue);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_TRN_SLOTS);
++
+                 // splits start
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_TRN_SPLITS);
+             }
+@@ -300,8 +307,38 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             // account guid
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_ACCOUNT);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+-            xmlSerializer.text(cursor.getString(cursor.getColumnIndexOrThrow("split_acct_uid")));
++            String splitAccountUID = cursor.getString(cursor.getColumnIndexOrThrow("split_acct_uid"));
++            xmlSerializer.text(splitAccountUID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_ACCOUNT);
++
++            //if we are exporting a template transaction, then we need to add some extra slots
++            if (exportTemplates){
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_SLOTS);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_SLOT);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_SLOT_KEY);
++                xmlSerializer.text(GncXmlHelper.KEY_SCHEDX_ACTION); //FIXME: not all templates may be scheduled actions
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_SLOT_KEY);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_SLOT_VALUE);
++                xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, "frame");
++
++                List<String> slotKeys = new ArrayList<>();
++                List<String> slotTypes = new ArrayList<>();
++                List<String> slotValues = new ArrayList<>();
++                slotKeys.add(GncXmlHelper.KEY_SPLIT_ACCOUNT);
++                slotTypes.add(GncXmlHelper.ATTR_VALUE_GUID);
++                slotValues.add(splitAccountUID);
++                TransactionType type = TransactionType.valueOf(trxType);
++                slotKeys.add(type == TransactionType.CREDIT ? GncXmlHelper.KEY_CREDIT_FORMULA : GncXmlHelper.KEY_DEBIT_FORMULA);
++                slotTypes.add(GncXmlHelper.ATTR_VALUE_STRING);
++                slotValues.add(GncXmlHelper.getNumberFormatForTemplateSplits().format(value.doubleValue()));
++
++                exportSlots(xmlSerializer, slotKeys, slotTypes, slotValues);
++
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_SLOT_VALUE);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_SLOT);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_SLOTS);
++            }
++
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_TRN_SPLIT);
+         }
+         if (!lastTrxUID.equals("")){ // there's an unfinished transaction, close it
+@@ -380,11 +417,14 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+                 xmlSerializer.text(tag);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_TAG);
+             }
++
++            //TODO: possibly generate temporary template accounts to keep gnucash desktop happy
+             //Ignoring GnuCash XML template account: <sx:templ-acct type="guid">2da76df09056540bb3a37e4a04547d82</sx:templ-acct>
+ 
+             String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_TEMPL_ACTION);
+-            xmlSerializer.attribute(null, GncXmlHelper.ATTR_VALUE_GUID, actionUID);
++            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++            xmlSerializer.text(actionUID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_TEMPL_ACTION);
+ 
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_SCHEDULE);
+@@ -395,7 +435,7 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RX_MULT);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_RX_PERIOD_TYPE);
+             long period = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
+-            xmlSerializer.text(GncXmlHelper.getScheduledPeriodType(ScheduledAction.getPeriodType(period)));
++            xmlSerializer.text(ScheduledAction.getPeriodType(period).name());
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RX_PERIOD_TYPE);
+ 
+             serializeDate(xmlSerializer, GncXmlHelper.TAG_RX_START, startTime);
+@@ -471,9 +511,9 @@ public void generateExport(Writer writer) throws ExporterException{
+             exportTransactions(xmlSerializer, false);
+ 
+             //transaction templates
+-            xmlSerializer.startTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTION);
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+             exportTransactions(xmlSerializer, true);
+-            xmlSerializer.endTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTION);
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+ 
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_BOOK);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_ROOT);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 059031b8..5e112c22 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
+  * Copyright (c) 2014 Yongxin Wang <fefe.wyx@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -18,13 +18,13 @@
+ package org.gnucash.android.export.xml;
+ 
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.TransactionType;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ 
+ import java.math.BigDecimal;
++import java.text.NumberFormat;
+ import java.text.ParseException;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+@@ -45,7 +45,7 @@
+     public static final String ATTR_VALUE_STRING    = "string";
+     public static final String ATTR_VALUE_GUID      = "guid";
+     public static final String ATTR_VALUE_BOOK      = "book";
+-    public static final String TAG_GDATE = "gdate";
++    public static final String TAG_GDATE            = "gdate";
+ 
+     /*
+     Qualified GnuCash XML tag names
+@@ -68,7 +68,7 @@
+     public static final String TAG_SLOT_VALUE       = "slot:value";
+     public static final String TAG_ACT_SLOTS        = "act:slots";
+     public static final String TAG_SLOT             = "slot";
+-    public static final String TAG_ACCT_DESCRIPTION = "act:description";
++    public static final String TAG_ACCT_DESCRIPTION = "act:description"; //TODO: Use this when we add descriptions to the database
+ 
+     public static final String TAG_TRANSACTION      = "gnc:transaction";
+     public static final String TAG_TRX_ID           = "trn:id";
+@@ -80,7 +80,7 @@
+     public static final String TAG_TRN_SPLITS       = "trn:splits";
+     public static final String TAG_TRN_SPLIT        = "trn:split";
+     public static final String TAG_TRN_SLOTS        = "trn:slots";
+-    public static final String TAG_TEMPLATE_TRANSACTION = "gnc:template-transactions";
++    public static final String TAG_TEMPLATE_TRANSACTIONS = "gnc:template-transactions";
+ 
+     public static final String TAG_SPLIT_ID         = "split:id";
+     public static final String TAG_SPLIT_MEMO       = "split:memo";
+@@ -88,6 +88,7 @@
+     public static final String TAG_SPLIT_ACCOUNT    = "split:account";
+     public static final String TAG_SPLIT_VALUE      = "split:value";
+     public static final String TAG_SPLIT_QUANTITY   = "split:quantity";
++    public static final String TAG_SPLIT_SLOTS      = "split:slots";
+ 
+     //TODO: Remove this in the future when scheduled transactions are improved
+     @Deprecated
+@@ -127,6 +128,11 @@
+     public static final String KEY_NOTES            = "notes";
+     public static final String KEY_DEFAULT_TRANSFER_ACCOUNT = "default_transfer_account";
+     public static final String KEY_EXPORTED         = "exported";
++    public static final String KEY_SCHEDX_ACTION = "sched-xaction";
++    public static final String KEY_SPLIT_ACCOUNT    = "key_account";
++    public static final String KEY_DEBIT_FORMULA    = "debit-formula";
++    public static final String KEY_CREDIT_FORMULA   = "credit-formula";
++
+ 
+     /**
+      * Formats dates for the GnuCash XML format
+@@ -137,27 +143,6 @@ public static String formatDate(long milliseconds){
+     }
+ 
+     /**
+-     * Converts the adjective describing the period type into a noun for the XML format
+-     * @param periodType PeriodType from the scheduled action
+-     * @return Period type as a noun
+-     */
+-    public static String getScheduledPeriodType(ScheduledAction.PeriodType periodType){
+-        switch (periodType) {
+-            case DAILY:
+-                return "day";
+-            case WEEKLY:
+-                return "week";
+-            case FORTNIGHTLY:
+-                return "fortnight";
+-            case MONTHLY:
+-                return "month";
+-            case YEARLY:
+-                return "year";
+-            default:
+-                return "";
+-        }
+-    }
+-    /**
+      * Parses a date string formatted in the format "yyyy-MM-dd HH:mm:ss Z"
+      * @param dateString String date representation
+      * @return Time in milliseconds since epoch
+@@ -193,23 +178,12 @@ public static BigDecimal parseMoney(String amountString){
+     }
+ 
+     /**
+-     * Helper method for creating slot key-value pairs in the GnuCash XML structure.
+-     * <p>This method is only a helper for creating slots whose values are of string type</p>
+-     * @param doc {@link org.w3c.dom.Document} for creating nodes
+-     * @param key Slot key as string
+-     * @param value Slot value as String
+-     * @return Element node containing the key-value pair
++     * Returns a {@link java.text.NumberFormat} for parsing or writing amounts in template splits
++     * @return NumberFormat object
+      */
+-    public static Element createSlot(Document doc, String key, String value, String valueType){
+-        Element slotNode  = doc.createElement(TAG_SLOT);
+-        Element slotKeyNode = doc.createElement(TAG_SLOT_KEY);
+-        slotKeyNode.appendChild(doc.createTextNode(key));
+-        Element slotValueNode = doc.createElement(TAG_SLOT_VALUE);
+-        slotValueNode.setAttribute(ATTR_KEY_TYPE, valueType);
+-        slotValueNode.appendChild(doc.createTextNode(value));
+-        slotNode.appendChild(slotKeyNode);
+-        slotNode.appendChild(slotValueNode);
+-
+-        return slotNode;
++    public static NumberFormat getNumberFormatForTemplateSplits(){
++        //TODO: Check if GnuCash desktop always using this formatting or if it is device locale specific
++        return NumberFormat.getNumberInstance(Locale.GERMANY);
+     }
++
+ }
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 9ffd5273..b96bbcb4 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2013 - 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2013 - 2015 Ngewi Fet <ngewif@gmail.com>
+  * Copyright (c) 2014 Yongxin Wang <fefe.wyx@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -21,12 +21,14 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.xml.GncXmlHelper;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
++import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+@@ -34,11 +36,15 @@
+ import org.xml.sax.SAXException;
+ import org.xml.sax.helpers.DefaultHandler;
+ 
++import java.math.BigDecimal;
++import java.sql.Timestamp;
++import java.text.NumberFormat;
+ import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.HashMap;
+ import java.util.List;
++import java.util.Locale;
+ import java.util.Stack;
+ import java.util.regex.Pattern;
+ 
+@@ -102,6 +108,16 @@
+     String mIgnoreElement = null;
+ 
+     /**
++     * {@link ScheduledAction} instance for each scheduled action parsed
++     */
++    ScheduledAction mScheduledAction;
++
++    /**
++     * List of scheduled actions to be bulk inserted
++     */
++    List<ScheduledAction> mScheduledActionsList;
++
++    /**
+      * Showing whether we are in bulk import mode
+      */
+     boolean mBulk = false;
+@@ -111,14 +127,36 @@
+     boolean mInFavoriteSlot     = false;
+     boolean mISO4217Currency    = false;
+     boolean mIsDatePosted       = false;
++    boolean mIsDateEntered      = false;
+     boolean mIsNote             = false;
+     boolean mInDefaultTransferAccount = false;
+     boolean mInExported         = false;
++    boolean mInTemplates        = false;
++    boolean mInSplitAccountSlot = false;
++    boolean mInCreditFormulaSlot = false;
++    boolean mInDebitFormulaSlot = false;
++    boolean mIsScheduledStart   = false;
++    boolean mIsScheduledEnd     = false;
++    boolean mIsLastRun          = false;
++
++    /**
++     * Multiplier for the recurrence period type. e.g. period type of week and multiplier of 2 means bi-weekly
++     */
++    int mRecurrenceMultiplier   = 1;
++
++    /**
++     * Used for parsing old backup files where recurrence was saved inside the transaction
++     * @deprecated Use the new scheduled action elements instead
++     */
++    @Deprecated
++    private long mRecurrencePeriod = 0;
+ 
+     private TransactionsDbAdapter mTransactionsDbAdapter;
+ 
++    private ScheduledActionDbAdapter mScheduledActionsDbAdapter;
++
+     public GncXmlHandler() {
+-        init(false, null);
++        init(true, null);
+     }
+ 
+     public GncXmlHandler(boolean bulk) {
+@@ -133,15 +171,18 @@ private void init(boolean bulk, SQLiteDatabase db) {
+         if (db == null) {
+             mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+             mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
++            mScheduledActionsDbAdapter = ScheduledActionDbAdapter.getInstance();
+         } else {
+             mTransactionsDbAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
+             mAccountsDbAdapter = new AccountsDbAdapter(db, mTransactionsDbAdapter);
++            mScheduledActionsDbAdapter = new ScheduledActionDbAdapter(db);
+         }
+         mContent = new StringBuilder();
+         mBulk = bulk;
+         if (bulk) {
+-            mAccountList = new ArrayList<Account>();
+-            mTransactionList = new ArrayList<Transaction>();
++            mAccountList = new ArrayList<>();
++            mTransactionList = new ArrayList<>();
++            mScheduledActionsList = new ArrayList<>();
+         }
+     }
+ 
+@@ -161,8 +202,24 @@ else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRN_SPLIT)){
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_DATE_POSTED)){
+             mIsDatePosted = true;
+         }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TEMPLATE_TRANSACTION)) {
+-            mIgnoreElement = GncXmlHelper.TAG_TEMPLATE_TRANSACTION;
++        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_DATE_ENTERED)){
++            mIsDateEntered = true;
++        }
++        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS)) {
++            mInTemplates = true;
++        }
++        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SCHEDULED_ACTION)){
++            //default to transaction type, will be changed during parsing
++            mScheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        }
++        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SX_START)){
++            mIsScheduledStart = true;
++        }
++        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SX_END)){
++            mIsScheduledEnd = true;
++        }
++        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SX_LAST)){
++            mIsLastRun = true;
+         }
+     }
+ 
+@@ -209,16 +266,17 @@ else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_PARENT_UID)){
+             mAccount.setParentUID(characterString);
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_ACCOUNT)){
+-            if (mBulk) {
+-                mAccountList.add(mAccount);
+-            }
+-            else {
+-                Log.d(LOG_TAG, "Saving account...");
+-                mAccountsDbAdapter.addAccount(mAccount);
++            if (!mInTemplates) { //we ignore template accounts, we have no use for them
++                if (mBulk) {
++                    mAccountList.add(mAccount);
++                } else {
++                    Log.d(LOG_TAG, "Saving account...");
++                    mAccountsDbAdapter.addAccount(mAccount);
++                }
++                mAccount = null;
++                //reset ISO 4217 flag for next account
++                mISO4217Currency = false;
+             }
+-            mAccount = null;
+-            //reset ISO 4217 flag for next account
+-            mISO4217Currency = false;
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SLOT_KEY)){
+             if (characterString.equals(GncXmlHelper.KEY_PLACEHOLDER)){
+@@ -238,6 +296,12 @@ else if (characterString.equals(GncXmlHelper.KEY_DEFAULT_TRANSFER_ACCOUNT)){
+             }
+             else if (characterString.equals(GncXmlHelper.KEY_EXPORTED)){
+                 mInExported = true;
++            } else if (characterString.equals(GncXmlHelper.KEY_SPLIT_ACCOUNT)){
++                mInSplitAccountSlot = true;
++            } else if (characterString.equals(GncXmlHelper.KEY_CREDIT_FORMULA)){
++                mInCreditFormulaSlot = true;
++            } else if (characterString.equals(GncXmlHelper.KEY_DEBIT_FORMULA)){
++                mInDebitFormulaSlot = true;
+             }
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SLOT_VALUE)){
+@@ -285,6 +349,33 @@ else if (mInExported){
+                     mInExported = false;
+                 }
+             }
++            else if (mInTemplates && mInSplitAccountSlot){
++                mSplit.setAccountUID(characterString);
++            }
++            else if (mInTemplates && mInCreditFormulaSlot){
++                NumberFormat numberFormat = NumberFormat.getNumberInstance(Locale.GERMANY);
++                try {
++                    Number number = numberFormat.parse(characterString);
++                    Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
++                    mSplit.setAmount(amount.absolute());
++                    mSplit.setType(TransactionType.CREDIT);
++                } catch (ParseException e) {
++                    Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
++                    e.printStackTrace();
++                }
++            }
++            else if (mInTemplates && mInDebitFormulaSlot){
++                NumberFormat numberFormat = GncXmlHelper.getNumberFormatForTemplateSplits();
++                try {
++                    Number number = numberFormat.parse(characterString);
++                    Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
++                    mSplit.setAmount(amount.absolute());
++                    mSplit.setType(TransactionType.DEBIT);
++                } catch (ParseException e) {
++                    Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
++                    e.printStackTrace();
++                }
++            }
+         }
+ 
+ 
+@@ -296,19 +387,35 @@ else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRN_DESCRIPTION)){
+             mTransaction.setDescription(characterString);
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_DATE)){
+-            try { //TODO: Use the created_at and modified_at dates in the xml
++            try {
+                 if (mIsDatePosted && mTransaction != null) {
+                     mTransaction.setTime(GncXmlHelper.parseDate(characterString));
+                     mIsDatePosted = false;
+                 }
++                if (mIsDateEntered && mTransaction != null){
++                    Timestamp timestamp = new Timestamp(GncXmlHelper.parseDate(characterString));
++                    mTransaction.setCreatedTimestamp(timestamp);
++                    mIsDateEntered = false;
++                }
++                if (mIsScheduledStart){
++                    mScheduledAction.setStartTime(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
++                }
++
++                if (mIsScheduledEnd){
++                    mScheduledAction.setEndTime(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
++                }
++
++                if (mIsLastRun){
++                    mScheduledAction.setLastRun(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
++                }
+             } catch (ParseException e) {
+                 e.printStackTrace();
+                 throw new SAXException("Unable to parse transaction time", e);
+             }
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_RECURRENCE_PERIOD)){
+-            mTransaction.setTemplate(Long.parseLong(characterString) > 0);
+-            //TODO: Remove this and properly parse recurrence events
++            mRecurrencePeriod = Long.parseLong(characterString);
++            mTransaction.setTemplate(mRecurrencePeriod > 0);
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SPLIT_ID)){
+             mSplit.setUID(characterString);
+@@ -328,18 +435,56 @@ else if (qualifiedName.equals(GncXmlHelper.TAG_TRN_SPLIT)){
+             mTransaction.addSplit(mSplit);
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRANSACTION)){
++            mTransaction.setTemplate(mInTemplates);
+             if (mBulk) {
+                 mTransactionList.add(mTransaction);
+-            }
+-            else {
+-                if (mTransaction.isTemplate()) { //TODO: Fix this when scheduled actions are expanded
+-                    mTransactionsDbAdapter.scheduleTransaction(mTransaction);
++            } else {
++                if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
++                    mTransaction.setTemplate(true);
+                     mTransactionsDbAdapter.addTransaction(mTransaction);
++                    ScheduledAction scheduledAction = ScheduledAction.parseScheduledAction(mTransaction, mRecurrencePeriod);
++                    mScheduledActionsDbAdapter.addScheduledAction(scheduledAction);
+                 } else {
+                     mTransactionsDbAdapter.addTransaction(mTransaction);
+                 }
+             }
++            mRecurrencePeriod = 0;
+             mTransaction = null;
++        } else if (qualifiedName.equals(GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS)){
++            mInTemplates = false;
++        }
++
++        // ========================= PROCESSING SCHEDULED ACTIONS ==================================
++        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_ID)){
++            mScheduledAction.setUID(characterString);
++        }
++        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_NAME)){
++            ScheduledAction.ActionType type = ScheduledAction.ActionType.valueOf(characterString);
++            mScheduledAction.setActionType(type);
++        }
++        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_ENABLED)){
++            mScheduledAction.setEnabled(characterString.equalsIgnoreCase("y"));
++        }
++        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_NUM_OCCUR)){
++            mScheduledAction.setNumberOfOccurences(Integer.parseInt(characterString));
++        }
++        else if (qualifiedName.equals(GncXmlHelper.TAG_RX_MULT)){
++            mRecurrenceMultiplier = Integer.parseInt(characterString);
++        }
++        else if (qualifiedName.equals(GncXmlHelper.TAG_RX_PERIOD_TYPE)){
++            ScheduledAction.PeriodType periodType = ScheduledAction.PeriodType.valueOf(characterString.toUpperCase());
++            periodType.setMultiplier(mRecurrenceMultiplier);
++            mScheduledAction.setPeriod(periodType);
++        }
++        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_TEMPL_ACTION)){
++            mScheduledAction.setActionUID(characterString);
++        }
++        else if (qualifiedName.equals(GncXmlHelper.TAG_SCHEDULED_ACTION)){
++            if (mBulk){
++                mScheduledActionsList.add(mScheduledAction);
++            } else {
++                mScheduledActionsDbAdapter.addScheduledAction(mScheduledAction);
++            }
+         }
+ 
+         //reset the accumulated characters
+@@ -406,6 +551,8 @@ public void endDocument() throws SAXException {
+             Log.d("Handler:", String.format("%d accounts inserted", nAccounts));
+             long nTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTransactionList);
+             Log.d("Handler:", String.format("%d transactions inserted", nTransactions));
++            int nSchedActions = mScheduledActionsDbAdapter.bulkAddScheduledActions(mScheduledActionsList);
++            Log.d("Handler:", String.format("%d scheduled actions inserted", nSchedActions));
+             long endTime = System.nanoTime();
+             Log.d("Handler:", String.format(" bulk insert time: %d", endTime - startTime));
+         }
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index 03de9ad8..12747b1f 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -38,7 +38,29 @@
+      */
+     public enum ActionType {TRANSACTION, EXPORT}
+ 
+-    public enum PeriodType {DAILY, WEEKLY, FORTNIGHTLY, MONTHLY, YEARLY}
++    public enum PeriodType {
++        DAY, WEEK, MONTH, YEAR;
++
++        int mMultiplier = 1; //multiplier for the period type
++
++        /**
++         * Sets the multiplier for this period type
++         * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
++         * @param multiplier Multiplier for this period type
++         */
++        public void setMultiplier(int multiplier){
++            mMultiplier = multiplier;
++        }
++
++        /**
++         * Returns the multiplier for this period type. The default multiplier is 1.
++         * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
++         * @return  Multiplier for this period type
++         */
++        public int getMultiplier(){
++            return mMultiplier;
++        }
++    }
+ 
+     /**
+      * Next scheduled run of Event
+@@ -49,7 +71,7 @@
+      * Unique ID of the template from which the recurring event will be executed.
+      * For example, transaction UID
+      */
+-    private String mEventUID;
++    private String mActionUID;
+ 
+     /**
+      * Flag indicating if this event is enabled or not
+@@ -86,12 +108,12 @@ public void setActionType(ActionType actionType) {
+         this.mActionType = actionType;
+     }
+ 
+-    public String getEventUID() {
+-        return mEventUID;
++    public String getActionUID() {
++        return mActionUID;
+     }
+ 
+-    public void setEventUID(String eventUID) {
+-        this.mEventUID = eventUID;
++    public void setActionUID(String actionUID) {
++        this.mActionUID = actionUID;
+     }
+ 
+     public long getLastRun() {
+@@ -110,28 +132,74 @@ public void setPeriod(long period) {
+         this.mPeriod = period;
+     }
+ 
+-    public static PeriodType getPeriodType(long period){
+-        int result = (int) (period/RecurrenceParser.DAY_MILLIS);
+-        if (result == 0)
+-            return PeriodType.DAILY;
++    /**
++     * Sets the period given the period type.
++     * The {@link org.gnucash.android.model.ScheduledAction.PeriodType} should have the multiplier set,
++     * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
++     * @param periodType Type of period
++     */
++    public void setPeriod(PeriodType periodType){
++        int multiplier = periodType.getMultiplier();
++        switch (periodType){
++            case DAY:
++                mPeriod = RecurrenceParser.DAY_MILLIS * multiplier;
++                break;
++            case WEEK:
++                mPeriod = RecurrenceParser.WEEK_MILLIS * multiplier;
++                break;
++            case MONTH:
++                mPeriod = RecurrenceParser.MONTH_MILLIS * multiplier;
++                break;
++            case YEAR:
++                mPeriod = RecurrenceParser.YEAR_MILLIS * multiplier;
++                break;
++        }
++    }
+ 
+-        result = (int) (period/RecurrenceParser.WEEK_MILLIS);
+-        if (result == 0)
+-            return PeriodType.WEEKLY;
++    /**
++     * Returns the period type for this scheduled action
++     * @return Period type of the action
++     */
++    public PeriodType getPeriodType(){
++        return getPeriodType(mPeriod);
++    }
+ 
+-        result = (int) (period/(2*RecurrenceParser.WEEK_MILLIS));
+-        if (result == 0)
+-            return PeriodType.FORTNIGHTLY;
++    /**
++     * Computes the {@link org.gnucash.android.model.ScheduledAction.PeriodType} for a given {@code period}
++     * @param period Period in milliseconds since Epoch
++     * @return PeriodType corresponding to the period
++     */
++    public static PeriodType getPeriodType(long period){
++        PeriodType periodType = PeriodType.DAY;
++        int result = (int) (period/RecurrenceParser.YEAR_MILLIS);
++        if (result > 0) {
++            periodType = PeriodType.YEAR;
++            periodType.setMultiplier(result);
++            return periodType;
++        }
+ 
+         result = (int) (period/RecurrenceParser.MONTH_MILLIS);
+-        if (result == 0)
+-            return PeriodType.MONTHLY;
++        if (result > 0) {
++            periodType = PeriodType.MONTH;
++            periodType.setMultiplier(result);
++            return periodType;
++        }
++
++        result = (int) (period/RecurrenceParser.WEEK_MILLIS);
++        if (result > 0) {
++            periodType = PeriodType.WEEK;
++            periodType.setMultiplier(result);
++            return periodType;
++        }
+ 
+-        result = (int) (period/RecurrenceParser.YEAR_MILLIS);
+-        if (result == 0)
+-            return PeriodType.YEARLY;
++        result = (int) (period/RecurrenceParser.DAY_MILLIS);
++        if (result > 0) {
++            periodType = PeriodType.DAY;
++            periodType.setMultiplier(result);
++            return periodType;
++        }
+ 
+-        return PeriodType.DAILY;
++        return periodType;
+     }
+ 
+     public long getStartTime() {
+@@ -155,6 +223,7 @@ public long getEndTime() {
+     public long getApproxEndTime(){
+         return mStartDate + (mPeriod * mNumberOfOccurences);
+     }
++
+     public void setEndTime(long endDate) {
+         this.mEndDate = endDate;
+     }
+@@ -224,6 +293,13 @@ public String getRepeatString(){
+         return repeatString;
+     }
+ 
++    public static ScheduledAction parseScheduledAction(Transaction transaction, long period){
++        ScheduledAction scheduledAction = new ScheduledAction(ActionType.TRANSACTION);
++        scheduledAction.mActionUID = transaction.getUID();
++        scheduledAction.mPeriod = period;
++        return scheduledAction;
++    }
++
+     @Override
+     public String toString() {
+ 
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 37af77a4..06ac655f 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -88,7 +88,7 @@ protected void onHandleIntent(Intent intent) {
+     private void executeScheduledEvent(ScheduledAction scheduledAction){
+         switch (scheduledAction.getActionType()){
+             case TRANSACTION:
+-                String eventUID = scheduledAction.getEventUID();
++                String eventUID = scheduledAction.getActionUID();
+                 TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+                 Transaction trxnTemplate = transactionsDbAdapter.getTransaction(eventUID);
+                 Transaction recurringTrxn = new Transaction(trxnTemplate, true);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index f96a66cc..0b6b2e4a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -722,9 +722,9 @@ private void scheduleRecurringTransaction(String transactionUID) {
+ 
+         ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+         for (ScheduledAction event : events) {
+-            event.setEventUID(transactionUID);
++            event.setActionUID(transactionUID);
+             event.setLastRun(System.currentTimeMillis());
+-            scheduledActionDbAdapter.addScheduledEvent(event);
++            scheduledActionDbAdapter.addScheduledAction(event);
+ 
+             Log.i("TransactionFormFragment", event.toString());
+         }

@@ -1,0 +1,123 @@
+From 41f368bfdd2bfcba7858194410a1eba591beb175 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 31 Aug 2016 10:01:13 +0200
+Subject: [PATCH] Fix bug with counting number of occurrences (some occurrences
+ missed)
+
+Switch Recurrence to use LocalDateTimes to avoid time zone and DST issues
+Fix breaking tests
+---
+ .../java/org/gnucash/android/model/Recurrence.java | 50 +++++++++++++++++-----
+ .../unit/service/ScheduledActionServiceTest.java   |  5 +--
+ 2 files changed, 40 insertions(+), 15 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index 2b1c4169..48db0af9 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -25,7 +25,9 @@
+ import org.joda.time.DateTime;
+ import org.joda.time.Days;
+ import org.joda.time.LocalDate;
++import org.joda.time.LocalDateTime;
+ import org.joda.time.Months;
++import org.joda.time.ReadablePeriod;
+ import org.joda.time.Weeks;
+ import org.joda.time.Years;
+ 
+@@ -273,25 +275,51 @@ public int getCount(){
+         if (mPeriodEnd == null)
+             return -1;
+ 
+-        int count = 0;
+-        DateTime startDate = new DateTime(mPeriodStart.getTime());
+-        DateTime endDate = new DateTime(mPeriodEnd.getTime());
++        int multiple = mPeriodType.getMultiplier();
++        ReadablePeriod jodaPeriod;
+         switch (mPeriodType){
+             case DAY:
+-                count = Days.daysBetween(startDate, endDate).getDays();
++                jodaPeriod = Days.days(multiple);
+                 break;
+             case WEEK:
+-                count = Weeks.weeksBetween(startDate, endDate).getWeeks();
++                jodaPeriod = Weeks.weeks(multiple);
+                 break;
+             case MONTH:
+-                count = Months.monthsBetween(startDate, endDate).getMonths();
++                jodaPeriod = Months.months(multiple);
+                 break;
+             case YEAR:
+-                count = Years.yearsBetween(startDate, endDate).getYears();
++                jodaPeriod = Years.years(multiple);
+                 break;
++            default:
++                jodaPeriod = Months.months(multiple);
++        }
++        int count = 0;
++        LocalDateTime startTime = new LocalDateTime(mPeriodStart.getTime());
++        while (startTime.toDateTime().getMillis() < mPeriodEnd.getTime()){
++            ++count;
++            startTime = startTime.plus(jodaPeriod);
+         }
++        return count;
+ 
+-        return count/mPeriodType.getMultiplier();
++/*
++        //this solution does not use looping, but is not very accurate
++
++        int multiplier = mPeriodType.getMultiplier();
++        LocalDateTime startDate = new LocalDateTime(mPeriodStart.getTime());
++        LocalDateTime endDate = new LocalDateTime(mPeriodEnd.getTime());
++        switch (mPeriodType){
++            case DAY:
++                return Days.daysBetween(startDate, endDate).dividedBy(multiplier).getDays();
++            case WEEK:
++                return Weeks.weeksBetween(startDate, endDate).dividedBy(multiplier).getWeeks();
++            case MONTH:
++                return Months.monthsBetween(startDate, endDate).dividedBy(multiplier).getMonths();
++            case YEAR:
++                return Years.yearsBetween(startDate, endDate).dividedBy(multiplier).getYears();
++            default:
++                return -1;
++        }
++*/
+     }
+ 
+     /**
+@@ -299,8 +327,8 @@ public int getCount(){
+      * @param numberOfOccurences Number of occurences from the start time
+      */
+     public void setPeriodEnd(int numberOfOccurences){
+-        DateTime localDate = new DateTime(mPeriodStart.getTime());
+-        DateTime endDate;
++        LocalDateTime localDate = new LocalDateTime(mPeriodStart.getTime());
++        LocalDateTime endDate;
+         int occurrenceDuration = numberOfOccurences * mPeriodType.getMultiplier();
+         switch (mPeriodType){
+             case DAY:
+@@ -317,7 +345,7 @@ public void setPeriodEnd(int numberOfOccurences){
+                 endDate = localDate.plusYears(occurrenceDuration);
+                 break;
+         }
+-        mPeriodEnd = new Timestamp(endDate.getMillis());
++        mPeriodEnd = new Timestamp(endDate.toDateTime().getMillis());
+     }
+ 
+     /**
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 0e6adb24..08e5f3a5 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -199,10 +199,7 @@ public void missedScheduledTransactions_shouldBeGenerated(){
+         actions.add(scheduledAction);
+         ScheduledActionService.processScheduledActions(actions, mDb);
+ 
+-        int weeks = Weeks.weeksBetween(startTime, new DateTime(2016, 8, 29, 10, 0)).getWeeks();
+-        int expectedTransactionCount = weeks/2;
+-
+-        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(expectedTransactionCount);
++        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(7);
+     }
+ 
+     public void endTimeInTheFuture_shouldExecuteOnlyUntilPresent(){

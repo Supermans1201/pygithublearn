@@ -1,0 +1,710 @@
+From 67d24c55ce3e7bfa5e9a378255753ca7d40a6a4b Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 28 Jul 2014 14:25:10 +0200
+Subject: [PATCH] Prepare for v1.4.0-beta3 release
+
+Fixed: Crash when upgrading database due to invalid SQL query (for the old db version)
+Fixed: Future transactions not imported
+Show dialog during database upgrade operations
+Show richer exception message as toast when importing or exporting
+---
+ app/AndroidManifest.xml                            |  2 +-
+ app/res/values/strings.xml                         |  2 +-
+ app/src/org/gnucash/android/db/DatabaseHelper.java | 33 ++++++++--
+ .../org/gnucash/android/db/MigrationHelper.java    | 38 ++++-------
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 38 +++++++----
+ .../android/export/ExportDialogFragment.java       |  2 +-
+ .../org/gnucash/android/export/ExportParams.java   |  2 +-
+ .../{ExporterTask.java => ExporterAsyncTask.java}  |  9 +--
+ .../gnucash/android/importer/GncXmlHandler.java    | 69 +++++--------------
+ .../gnucash/android/importer/GncXmlImporter.java   | 77 ++++++++++++++++++++++
+ ...{GncXmlImportTask.java => ImportAsyncTask.java} | 13 ++--
+ .../android/ui/account/AccountsActivity.java       |  9 +--
+ .../ui/settings/AccountPreferencesFragment.java    |  4 +-
+ .../android/ui/settings/SettingsActivity.java      |  6 +-
+ 14 files changed, 185 insertions(+), 119 deletions(-)
+ rename app/src/org/gnucash/android/export/{ExporterTask.java => ExporterAsyncTask.java} (96%)
+ create mode 100644 app/src/org/gnucash/android/importer/GncXmlImporter.java
+ rename app/src/org/gnucash/android/importer/{GncXmlImportTask.java => ImportAsyncTask.java} (80%)
+
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index 3a8cc1e8..3e847627 100644
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -17,7 +17,7 @@
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+-    android:versionCode="31"
++    android:versionCode="32"
+     android:versionName="@string/app_version_name" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="16"/>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 685afd8d..72d11bf9 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -17,7 +17,7 @@
+ 
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="app_name">GnuCash</string>
+-    <string name="app_version_name">1.4.0-beta2</string>
++    <string name="app_version_name">1.4.0-beta3</string>
+     <string name="title_add_account">Create Account</string>
+     <string name="title_edit_account">Edit Account</string>
+     <string name="info_details">Info</string>
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index d7945c51..3dc00e5b 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -16,12 +16,14 @@
+ 
+ package org.gnucash.android.db;
+ 
++import android.app.ProgressDialog;
+ import android.content.ContentValues;
+ import android.content.Context;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteOpenHelper;
+ import android.util.Log;
++import android.widget.Toast;
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+@@ -103,11 +105,17 @@
+             + ");";
+ 
+     /**
++     * Context passed in for database upgrade. Keep reference so as to be able to display UI dialogs
++     */
++    private Context mContext;
++
++    /**
+ 	 * Constructor
+ 	 * @param context Application context
+ 	 */
+ 	public DatabaseHelper(Context context){
+ 		super(context, DATABASE_NAME, null, DatabaseSchema.DATABASE_VERSION);
++        mContext = context;
+ 	}
+ 	
+ 	@Override
+@@ -119,7 +127,9 @@ public void onCreate(SQLiteDatabase db) {
+ 	public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 		Log.i(LOG_TAG, "Upgrading database from version "
+ 				+ oldVersion + " to " + newVersion);
+-		
++
++        ProgressDialog progressDialog = ProgressDialog.show(mContext, "Upgrading database", "Processing...", true);
++
+ 		if (oldVersion < newVersion){
+ 			//introducing double entry accounting
+ 			Log.i(LOG_TAG, "Upgrading database to version " + newVersion);
+@@ -185,6 +195,8 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 5 && newVersion >= 6){
+                 Log.i(LOG_TAG, "Upgrading database to version 6");
++                progressDialog.setMessage("Upgrading database to version 6");
++
+                 String addFullAccountNameQuery = " ALTER TABLE " + AccountEntry.TABLE_NAME
+                         + " ADD COLUMN " + AccountEntry.COLUMN_FULL_NAME + " varchar(255) ";
+                 db.execSQL(addFullAccountNameQuery);
+@@ -216,6 +228,7 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 6 && newVersion >= DatabaseSchema.SPLITS_DB_VERSION){
+                 Log.i(LOG_TAG, "Upgrading database to version 7");
++                progressDialog.setMessage("Upgrading to version " + SPLITS_DB_VERSION);
+ 
+                 //for users who do not have double-entry activated, we create imbalance accounts for their splits
+                 //TODO: Enable when we can hide imbalance accounts from user
+@@ -225,17 +238,27 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ //                    accountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
+ //                }
+ 
+-                String filepath = MigrationHelper.exportDatabase(db, ExportFormat.GNC_XML);
++                progressDialog.setMessage("Backing up database");
++                try {
++                    String filepath = MigrationHelper.exportDatabase(db, ExportFormat.GNC_XML);
+ 
+-                dropAllDatabaseTables(db);
+-                createDatabaseTables(db);
++                    progressDialog.setMessage("Upgrading database schema");
+ 
+-                MigrationHelper.importGnucashXML(db, filepath);
++                    dropAllDatabaseTables(db);
++                    createDatabaseTables(db);
+ 
++                    progressDialog.setMessage("Restoring database");
++
++                    MigrationHelper.importGnucashXML(db, filepath);
++                } catch (Exception e){
++                    Toast.makeText(mContext, "Error upgrading database.\n" + e.getMessage(), Toast.LENGTH_LONG).show();
++                    throw new RuntimeException(e);
++                }
+                 oldVersion = DatabaseSchema.SPLITS_DB_VERSION;
+             }
+ 		}
+ 
++        progressDialog.dismiss();
+         if (oldVersion != newVersion) {
+             Log.w(LOG_TAG, "Upgrade for the database failed. The Database is currently at version " + oldVersion);
+         }
+diff --git a/app/src/org/gnucash/android/db/MigrationHelper.java b/app/src/org/gnucash/android/db/MigrationHelper.java
+index 2b609679..b71decf1 100644
+--- a/app/src/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/org/gnucash/android/db/MigrationHelper.java
+@@ -20,20 +20,15 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.Environment;
+ import android.util.Log;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.qif.QifExporter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+-import org.gnucash.android.importer.GncXmlHandler;
+-import org.gnucash.android.importer.GncXmlImportTask;
++import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.model.AccountType;
+ 
+ import java.io.*;
+-import java.util.ArrayList;
+-import java.util.Currency;
+-import java.util.List;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
+ 
+@@ -117,7 +112,7 @@ private static String getGnuCashRootAccountUID(SQLiteDatabase db){
+      * Exports the database to a GnuCash XML file and returns the path to the file
+      * @return String with exported GnuCash XML
+      */
+-    static String exportDatabase(SQLiteDatabase db, ExportFormat format) {
++    static String exportDatabase(SQLiteDatabase db, ExportFormat format) throws IOException {
+         Log.i(LOG_TAG, "Exporting database to GnuCash XML");
+         ExportParams exportParams = new ExportParams(format);
+         exportParams.setExportAllTransactions(true);
+@@ -128,6 +123,7 @@ static String exportDatabase(SQLiteDatabase db, ExportFormat format) {
+         exportParams.setTargetFilepath(Environment.getExternalStorageDirectory()
+                 + "/gnucash/" + Exporter.buildExportFilename(format));
+ 
++        //we do not use the ExporterAsyncTask here because we want to use an already open db
+         Exporter exporter = null;
+         switch (format){
+             case QIF:
+@@ -137,18 +133,13 @@ static String exportDatabase(SQLiteDatabase db, ExportFormat format) {
+             default:
+                 exporter = new GncXmlExporter(exportParams, db);
+         }
+-        try {
+-            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+-                    new FileOutputStream(exportParams.getTargetFilepath()), "UTF-8"));
+-            writer.write(exporter.generateExport());
+-
+-            writer.flush();
+-            writer.close();
+-        } catch (IOException e) {
+-            e.printStackTrace();
+-            throw new RuntimeException("Error backing up database for upgrade", e);
+-        }
+ 
++        BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
++                new FileOutputStream(exportParams.getTargetFilepath()), "UTF-8"));
++        writer.write(exporter.generateExport());
++
++        writer.flush();
++        writer.close();
+         return exportParams.getTargetFilepath();
+     }
+ 
+@@ -156,14 +147,9 @@ static String exportDatabase(SQLiteDatabase db, ExportFormat format) {
+      * Imports GnuCash XML into the database from file
+      * @param filepath Path to GnuCash XML file
+      */
+-    static void importGnucashXML(SQLiteDatabase db, String filepath) {
++    static void importGnucashXML(SQLiteDatabase db, String filepath) throws Exception {
+         Log.i(LOG_TAG, "Importing GnuCash XML");
+-        try {
+-            FileInputStream inputStream = new FileInputStream(filepath);
+-            GncXmlHandler.parse(db, inputStream);
+-        } catch (FileNotFoundException e) {
+-            e.printStackTrace();
+-            throw new RuntimeException(e);
+-        }
++        FileInputStream inputStream = new FileInputStream(filepath);
++        GncXmlImporter.parse(db, inputStream);
+     }
+ }
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 92e8accd..425f8479 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -151,21 +151,33 @@ public Transaction getTransaction(long rowId){
+ 	 * i.e <code>accountUID</code> is double entry account UID
+ 	 * @param accountUID UID of the account whose transactions are to be retrieved
+ 	 * @return Cursor holding set of transactions for particular account
++     * @throws java.lang.IllegalArgumentException if the accountUID is null
+ 	 */
+ 	public Cursor fetchAllTransactionsForAccount(String accountUID){
+-        SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
+-        queryBuilder.setTables(TransactionEntry.TABLE_NAME
+-                + " INNER JOIN " +  SplitEntry.TABLE_NAME + " ON "
+-                + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
+-                + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID);
+-        queryBuilder.setDistinct(true);
+-        String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
+-        String selection = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID + " = ?"
+-                + " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " = 0";
+-        String[] selectionArgs = new String[]{accountUID};
+-        String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " DESC";
+-
+-        return queryBuilder.query(mDb, projectionIn, selection, selectionArgs, null, null, sortOrder);
++        if (accountUID == null)
++            throw new IllegalArgumentException("Unique ID of the account cannot be null");
++
++        if (mDb.getVersion() < DatabaseSchema.SPLITS_DB_VERSION){ //legacy from previous database format
++            return mDb.query(TransactionEntry.TABLE_NAME, null,
++                    "((" + SplitEntry.COLUMN_ACCOUNT_UID + " = '" + accountUID + "') "
++                            + "OR (" + DatabaseHelper.KEY_DOUBLE_ENTRY_ACCOUNT_UID + " = '" + accountUID + "' ))"
++                            + " AND " + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " = 0",
++                    null, null, null, TransactionEntry.COLUMN_TIMESTAMP + " DESC");
++        } else {
++            SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
++            queryBuilder.setTables(TransactionEntry.TABLE_NAME
++                    + " INNER JOIN " + SplitEntry.TABLE_NAME + " ON "
++                    + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
++                    + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID);
++            queryBuilder.setDistinct(true);
++            String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
++            String selection = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID + " = ?"
++                    + " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " = 0";
++            String[] selectionArgs = new String[]{accountUID};
++            String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " DESC";
++
++            return queryBuilder.query(mDb, projectionIn, selection, selectionArgs, null, null, sortOrder);
++        }
+ 	}
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/export/ExportDialogFragment.java b/app/src/org/gnucash/android/export/ExportDialogFragment.java
+index 3fe8c6b7..d7dd6c4f 100644
+--- a/app/src/org/gnucash/android/export/ExportDialogFragment.java
++++ b/app/src/org/gnucash/android/export/ExportDialogFragment.java
+@@ -95,7 +95,7 @@ public void onClick(View v) {
+             dismiss();
+ 
+             Log.i(TAG, "Commencing async export of transactions");
+-            new ExporterTask(getActivity()).execute(exportParameters);
++            new ExporterAsyncTask(getActivity()).execute(exportParameters);
+ 		}
+ 		
+ 	}
+diff --git a/app/src/org/gnucash/android/export/ExportParams.java b/app/src/org/gnucash/android/export/ExportParams.java
+index 6ad6c496..821fde13 100644
+--- a/app/src/org/gnucash/android/export/ExportParams.java
++++ b/app/src/org/gnucash/android/export/ExportParams.java
+@@ -21,7 +21,7 @@
+  * The parameters are determined by the user in the export dialog and are then transmitted to the asynchronous task which
+  * actually performs the export.
+  * @see org.gnucash.android.export.ExportDialogFragment
+- * @see org.gnucash.android.export.ExporterTask
++ * @see ExporterAsyncTask
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+diff --git a/app/src/org/gnucash/android/export/ExporterTask.java b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+similarity index 96%
+rename from app/src/org/gnucash/android/export/ExporterTask.java
+rename to app/src/org/gnucash/android/export/ExporterAsyncTask.java
+index 654e6e8f..7a52fa50 100644
+--- a/app/src/org/gnucash/android/export/ExporterTask.java
++++ b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -44,7 +44,7 @@
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class ExporterTask extends AsyncTask<ExportParams, Void, Boolean> {
++public class ExporterAsyncTask extends AsyncTask<ExportParams, Void, Boolean> {
+     /**
+      * App context
+      */
+@@ -55,14 +55,14 @@
+     /**
+      * Log tag
+      */
+-    public static final String TAG = "ExporterTask";
++    public static final String TAG = "ExporterAsyncTask";
+ 
+     /**
+      * Export parameters
+      */
+     private ExportParams mExportParams;
+ 
+-    public ExporterTask(Context context){
++    public ExporterAsyncTask(Context context){
+         this.mContext = context;
+     }
+ 
+@@ -111,7 +111,8 @@ protected Boolean doInBackground(ExportParams... params) {
+             e.printStackTrace();
+             Log.e(TAG, e.getMessage());
+             Toast.makeText(mContext, R.string.toast_export_error,
+-                    Toast.LENGTH_LONG).show();
++                    Toast.LENGTH_SHORT).show();
++            Toast.makeText(mContext, e.getLocalizedMessage(), Toast.LENGTH_LONG).show();
+             return false;
+         }
+         return true;
+diff --git a/app/src/org/gnucash/android/importer/GncXmlHandler.java b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+index 481579d6..bf102a3d 100644
+--- a/app/src/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+@@ -32,6 +32,7 @@
+ import org.xml.sax.XMLReader;
+ import org.xml.sax.helpers.DefaultHandler;
+ 
++import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.parsers.SAXParser;
+ import javax.xml.parsers.SAXParserFactory;
+ import java.io.*;
+@@ -98,6 +99,7 @@
+     boolean mInPlaceHolderSlot  = false;
+     boolean mInFavoriteSlot     = false;
+     boolean mISO4217Currency    = false;
++    boolean mIsDatePosted       = false;
+ 
+     private Context mContext;
+     private TransactionsDbAdapter mTransactionsDbAdapter;
+@@ -134,6 +136,10 @@ public void startElement(String uri, String localName,
+         if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRX_SPLIT)){
+             mSplit = new Split(Money.getZeroInstance(),"");
+         }
++
++        if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_DATE_POSTED)){
++            mIsDatePosted = true;
++        }
+     }
+ 
+     @Override
+@@ -210,7 +216,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 if (!Pattern.matches(Account.COLOR_HEX_REGEX, color))
+                     color = "#" + color.replaceAll(".(.)?", "$1").replace("null", "");
+                 try {
+-                    mAccount.setColorCode(color);
++                    if (mAccount != null)
++                        mAccount.setColorCode(color);
+                 } catch (IllegalArgumentException ex){
+                     //sometimes the color entry in the account file is "Not set" instead of just blank. So catch!
+                     Log.i(LOG_TAG, "Invalid color code '" + color + "' for account " + mAccount.getName());
+@@ -238,7 +245,10 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+ 
+         if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_DATE)){
+             try {
+-                mTransaction.setTime(GncXmlHelper.parseDate(characterString));
++                if (mIsDatePosted && mTransaction != null) {
++                    mTransaction.setTime(GncXmlHelper.parseDate(characterString));
++                    mIsDatePosted = false;
++                }
+             } catch (ParseException e) {
+                 e.printStackTrace();
+                 throw new SAXException("Unable to parse transaction time", e);
+@@ -289,56 +299,11 @@ public void characters(char[] chars, int start, int length) throws SAXException
+         mContent.append(chars, start, length);
+     }
+ 
+-    /**
+-     * Parses XML into an already open database.
+-     * <p>This method is used mainly by the {@link org.gnucash.android.db.DatabaseHelper} for database migrations.<br>
+-     *     You should probably use {@link #parse(android.content.Context, java.io.InputStream)} instead</p>
+-     * @param db SQLite Database
+-     * @param gncXmlInputStream Input stream of GnuCash XML
+-     */
+-    public static void parse(SQLiteDatabase db, InputStream gncXmlInputStream) {
+-        try {
+-            SAXParserFactory spf = SAXParserFactory.newInstance();
+-            SAXParser sp = spf.newSAXParser();
+-            XMLReader xr = sp.getXMLReader();
+-
+-            BufferedInputStream bos = new BufferedInputStream(gncXmlInputStream);
+-
+-            /** Create handler to handle XML Tags ( extends DefaultHandler ) */
+-
+-            GncXmlHandler handler = new GncXmlHandler(db);
+-            xr.setContentHandler(handler);
+-            xr.parse(new InputSource(bos));
+-        } catch (Exception e) {
+-            e.printStackTrace();
+-            Toast.makeText(GnuCashApplication.getAppContext(),
+-                    R.string.toast_error_importing_accounts, Toast.LENGTH_LONG).show();
+-        }
++    @Override
++    public void endDocument() throws SAXException {
++        super.endDocument();
++        mAccountsDbAdapter.close();
++        mTransactionsDbAdapter.close();
+     }
+ 
+-    /**
+-     * Parse GnuCash XML input and populates the database
+-     * @param context Application context
+-     * @param gncXmlInputStream InputStream source of the GnuCash XML file
+-     */
+-    public static void parse(Context context, InputStream gncXmlInputStream){
+-        try {
+-            SAXParserFactory spf = SAXParserFactory.newInstance();
+-            SAXParser sp = spf.newSAXParser();
+-            XMLReader xr = sp.getXMLReader();
+-
+-            BufferedInputStream bos = new BufferedInputStream(gncXmlInputStream);
+-
+-            /** Create handler to handle XML Tags ( extends DefaultHandler ) */
+-
+-            GncXmlHandler handler = new GncXmlHandler(context);
+-            xr.setContentHandler(handler);
+-            xr.parse(new InputSource(bos));
+-            handler.mAccountsDbAdapter.close();
+-            handler.mTransactionsDbAdapter.close();
+-        } catch (Exception e) {
+-            e.printStackTrace();
+-            Toast.makeText(context, R.string.toast_error_importing_accounts, Toast.LENGTH_LONG).show();
+-        }
+-    }
+ }
+diff --git a/app/src/org/gnucash/android/importer/GncXmlImporter.java b/app/src/org/gnucash/android/importer/GncXmlImporter.java
+new file mode 100644
+index 00000000..068322d3
+--- /dev/null
++++ b/app/src/org/gnucash/android/importer/GncXmlImporter.java
+@@ -0,0 +1,77 @@
++/*
++ * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.importer;
++
++import android.content.Context;
++import android.database.sqlite.SQLiteDatabase;
++import org.xml.sax.InputSource;
++import org.xml.sax.SAXException;
++import org.xml.sax.XMLReader;
++
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.parsers.SAXParser;
++import javax.xml.parsers.SAXParserFactory;
++import java.io.BufferedInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++
++/**
++ * Importer for Gnucash XML files and GNCA (GnuCash Android) XML files
++ *
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
++public class GncXmlImporter {
++
++    /**
++     * Parses XML into an already open database.
++     * <p>This method is used mainly by the {@link org.gnucash.android.db.DatabaseHelper} for database migrations.<br>
++     *     You should probably use {@link #parse(android.content.Context, java.io.InputStream)} instead</p>
++     * @param db SQLite Database
++     * @param gncXmlInputStream Input stream of GnuCash XML
++     */
++    public static void parse(SQLiteDatabase db, InputStream gncXmlInputStream) throws Exception {
++        SAXParserFactory spf = SAXParserFactory.newInstance();
++        SAXParser sp = spf.newSAXParser();
++        XMLReader xr = sp.getXMLReader();
++
++        BufferedInputStream bos = new BufferedInputStream(gncXmlInputStream);
++
++        /** Create handler to handle XML Tags ( extends DefaultHandler ) */
++
++        GncXmlHandler handler = new GncXmlHandler(db);
++        xr.setContentHandler(handler);
++        xr.parse(new InputSource(bos));
++    }
++
++    /**
++     * Parse GnuCash XML input and populates the database
++     * @param context Application context
++     * @param gncXmlInputStream InputStream source of the GnuCash XML file
++     */
++    public static void parse(Context context, InputStream gncXmlInputStream) throws ParserConfigurationException, SAXException, IOException {
++        SAXParserFactory spf = SAXParserFactory.newInstance();
++        SAXParser sp = spf.newSAXParser();
++        XMLReader xr = sp.getXMLReader();
++
++        BufferedInputStream bos = new BufferedInputStream(gncXmlInputStream);
++
++        //TODO: Set an error handler which can log errors
++
++        GncXmlHandler handler = new GncXmlHandler(context);
++        xr.setContentHandler(handler);
++        xr.parse(new InputSource(bos));
++    }
++}
+diff --git a/app/src/org/gnucash/android/importer/GncXmlImportTask.java b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+similarity index 80%
+rename from app/src/org/gnucash/android/importer/GncXmlImportTask.java
+rename to app/src/org/gnucash/android/importer/ImportAsyncTask.java
+index d16c669a..b585aad0 100644
+--- a/app/src/org/gnucash/android/importer/GncXmlImportTask.java
++++ b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -18,6 +18,7 @@
+ import android.content.Context;
+ import android.os.AsyncTask;
+ import android.os.Build;
++import android.util.Log;
+ import android.widget.Toast;
+ import org.gnucash.android.R;
+ import org.gnucash.android.ui.account.AccountsActivity;
+@@ -28,11 +29,11 @@
+  * Imports a GnuCash (desktop) account file and displays a progress dialog.
+  * The AccountsActivity is opened when importing is done.
+  */
+-public class GncXmlImportTask extends AsyncTask<InputStream, Void, Boolean> {
++public class ImportAsyncTask extends AsyncTask<InputStream, Void, Boolean> {
+     private final Context context;
+     private ProgressDialog progressDialog;
+ 
+-    public GncXmlImportTask(Context context){
++    public ImportAsyncTask(Context context){
+         this.context = context;
+     }
+ 
+@@ -53,9 +54,13 @@ protected void onPreExecute() {
+     @Override
+     protected Boolean doInBackground(InputStream... inputStreams) {
+         try {
+-            GncXmlHandler.parse(context, inputStreams[0]);
++            GncXmlImporter.parse(context, inputStreams[0]);
+         } catch (Exception exception){
+             exception.printStackTrace();
++            Log.e(ImportAsyncTask.class.getName(), exception.getMessage());
++            Toast.makeText(context,
++                    context.getString(R.string.toast_error_importing_accounts) + "\n" + exception.getLocalizedMessage(),
++                    Toast.LENGTH_LONG).show();
+             return false;
+         }
+         return true;
+@@ -67,7 +72,7 @@ protected void onPostExecute(Boolean importSuccess) {
+             progressDialog.dismiss();
+ 
+         int message = importSuccess ? R.string.toast_success_importing_accounts : R.string.toast_error_importing_accounts;
+-        Toast.makeText(context, message, Toast.LENGTH_LONG).show();
++        Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
+ 
+         AccountsActivity.start(context);
+     }
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+index fa7da330..485ecc9b 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -33,7 +33,6 @@
+ import android.support.v4.app.FragmentTransaction;
+ import android.support.v4.view.PagerAdapter;
+ import android.support.v4.view.ViewPager;
+-import android.util.Log;
+ import android.util.SparseArray;
+ import android.view.View;
+ import android.view.ViewGroup;
+@@ -44,7 +43,7 @@
+ import com.viewpagerindicator.TitlePageIndicator;
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.importer.GncXmlImportTask;
++import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.UxArgument;
+@@ -55,8 +54,6 @@
+ 
+ import java.io.FileNotFoundException;
+ import java.io.InputStream;
+-import java.util.Currency;
+-import java.util.Locale;
+ 
+ /**
+  * Manages actions related to accounts, displaying, exporting and creating new accounts
+@@ -439,7 +436,7 @@ private void createDefaultAccounts(){
+ 			@Override
+ 			public void onClick(DialogInterface dialog, int which) {
+                 InputStream accountFileInputStream = getResources().openRawResource(R.raw.default_accounts);
+-                new GncXmlImportTask(AccountsActivity.this).execute(accountFileInputStream);
++                new ImportAsyncTask(AccountsActivity.this).execute(accountFileInputStream);
+                 removeFirstRunFlag();
+ 			}
+ 		});
+@@ -489,7 +486,7 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+             case REQUEST_PICK_ACCOUNTS_FILE:
+                 try {
+                     InputStream accountInputStream = getContentResolver().openInputStream(data.getData());
+-                    new GncXmlImportTask(this).execute(accountInputStream);
++                    new ImportAsyncTask(this).execute(accountInputStream);
+                 } catch (FileNotFoundException e) {
+                     e.printStackTrace();
+                 }
+diff --git a/app/src/org/gnucash/android/ui/settings/AccountPreferencesFragment.java b/app/src/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
+index cd70b5e8..40384546 100644
+--- a/app/src/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
++++ b/app/src/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
+@@ -26,7 +26,7 @@
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
+ import org.gnucash.android.R;
+-import org.gnucash.android.importer.GncXmlImportTask;
++import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.model.Money;
+ 
+ import java.io.InputStream;
+@@ -81,7 +81,7 @@ public boolean onPreferenceClick(Preference preference) {
+                             @Override
+                             public void onClick(DialogInterface dialogInterface, int i) {
+                                 InputStream accountFileInputStream = getResources().openRawResource(R.raw.default_accounts);
+-                                new GncXmlImportTask(getActivity()).execute(accountFileInputStream);
++                                new ImportAsyncTask(getActivity()).execute(accountFileInputStream);
+                             }
+                         })
+                         .setNegativeButton(R.string.btn_cancel, new DialogInterface.OnClickListener() {
+diff --git a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+index 1d1e1494..106d943d 100644
+--- a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -35,7 +35,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+-import org.gnucash.android.importer.GncXmlImportTask;
++import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -283,7 +283,7 @@ public void importMostRecentBackup(){
+ 
+         try {
+             FileInputStream inputStream = new FileInputStream(backupFile);
+-            new GncXmlImportTask(this).execute(inputStream);
++            new ImportAsyncTask(this).execute(inputStream);
+         } catch (FileNotFoundException e) {
+             e.printStackTrace();
+             throw new RuntimeException(e);
+@@ -300,7 +300,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 try {
+                     InputStream accountInputStream = getContentResolver().openInputStream(data.getData());
+-                    new GncXmlImportTask(this).execute(accountInputStream);
++                    new ImportAsyncTask(this).execute(accountInputStream);
+                 } catch (FileNotFoundException e) {
+                     e.printStackTrace();
+                     Toast.makeText(this, R.string.toast_error_importing_accounts, Toast.LENGTH_SHORT).show();

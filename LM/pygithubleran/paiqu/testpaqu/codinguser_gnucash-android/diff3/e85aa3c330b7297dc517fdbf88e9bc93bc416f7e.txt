@@ -1,0 +1,148 @@
+From e85aa3c330b7297dc517fdbf88e9bc93bc416f7e Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Wed, 13 May 2015 21:53:28 +0300
+Subject: [PATCH] Support for Android API 10
+
+---
+ .../android/ui/passcode/PassLockActivity.java      |  5 +-
+ .../android/ui/settings/SettingsActivity.java      | 71 +++++++++++++++-------
+ 2 files changed, 53 insertions(+), 23 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/passcode/PassLockActivity.java b/app/src/main/java/org/gnucash/android/ui/passcode/PassLockActivity.java
+index be8ae8fa..368fd1af 100644
+--- a/app/src/main/java/org/gnucash/android/ui/passcode/PassLockActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/passcode/PassLockActivity.java
+@@ -43,8 +43,9 @@ protected void onResume() {
+         if ((getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
+             GnuCashApplication.PASSCODE_SESSION_INIT_TIME = 0;
+         }
+-        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
+-        if (sharedPreferences.getBoolean(UxArgument.ENABLED_PASSCODE, false) && !isSessionActive()) {
++        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
++        String passCode = prefs.getString(UxArgument.PASSCODE, "");
++        if (prefs.getBoolean(UxArgument.ENABLED_PASSCODE, false) && !isSessionActive() && !passCode.trim().isEmpty()) {
+             startActivity(new Intent(this, PasscodeLockScreenActivity.class)
+                     .setAction(getIntent().getAction())
+                     .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK)
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 083d50e9..5f351e85 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -62,6 +62,7 @@
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.account.AccountsActivity;
++import org.gnucash.android.ui.passcode.PasscodeLockScreenActivity;
+ import org.gnucash.android.ui.passcode.PasscodePreferenceActivity;
+ 
+ import java.io.File;
+@@ -201,8 +202,13 @@ protected void onCreate(Bundle savedInstanceState) {
+ 
+             pref = findPreference(getString(R.string.key_enable_passcode));
+             pref.setOnPreferenceChangeListener(this);
+-            pref.setTitle(((CheckBoxPreference) pref).isChecked() ?
+-                    getString(R.string.title_passcode_enabled) : getString(R.string.title_passcode_disabled));
++            pref.setTitle(((CheckBoxPreference) pref).isChecked()
++                    ? getString(R.string.title_passcode_enabled)
++                    : getString(R.string.title_passcode_disabled)
++            );
++
++            pref = findPreference(getString(R.string.key_change_passcode));
++            pref.setOnPreferenceClickListener(this);
+         }
+ 	}
+ 
+@@ -251,12 +257,10 @@ public boolean onPreferenceChange(Preference preference, Object newValue) {
+                 startActivityForResult(new Intent(this, PasscodePreferenceActivity.class),
+                         PasscodePreferenceFragment.PASSCODE_REQUEST_CODE);
+             } else {
+-                preference.setTitle(getString(R.string.title_passcode_disabled));
++                Intent passIntent = new Intent(this, PasscodeLockScreenActivity.class);
++                passIntent.putExtra(UxArgument.DISABLE_PASSCODE, UxArgument.DISABLE_PASSCODE);
++                startActivityForResult(passIntent, PasscodePreferenceFragment.REQUEST_DISABLE_PASSCODE);
+             }
+-            PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
+-                    .edit()
+-                    .putBoolean(UxArgument.ENABLED_PASSCODE, (Boolean) newValue)
+-                    .commit();
+         } else if (preference.getKey().equals(getString(R.string.key_use_double_entry))){
+             setImbalanceAccountsHidden((Boolean) newValue);
+         }
+@@ -373,7 +377,7 @@ public boolean onPreferenceClick(Preference preference) {
+ 
+         if (key.equals(getString(R.string.key_change_passcode))){
+             startActivityForResult(new Intent(this, PasscodePreferenceActivity.class),
+-                    PasscodePreferenceFragment.PASSCODE_REQUEST_CODE);
++                    PasscodePreferenceFragment.REQUEST_CHANGE_PASSCODE);
+             return true;
+         }
+ 
+@@ -567,17 +571,6 @@ public void onClick(DialogInterface dialog, int which) {
+ 
+     @Override
+     public void onActivityResult(int requestCode, int resultCode, Intent data) {
+-        if (resultCode == Activity.RESULT_CANCELED) {
+-            if (requestCode == PasscodePreferenceFragment.PASSCODE_REQUEST_CODE) {
+-                PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
+-                        .edit()
+-                        .putBoolean(UxArgument.ENABLED_PASSCODE, false)
+-                        .commit();
+-                ((CheckBoxPreference) findPreference(getString(R.string.key_enable_passcode))).setChecked(false);
+-            }
+-            return;
+-        }
+-
+         switch (requestCode) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 try {
+@@ -589,12 +582,48 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+                 }
+                 break;
+             case PasscodePreferenceFragment.PASSCODE_REQUEST_CODE:
+-                if (data != null) {
++                if (resultCode == Activity.RESULT_OK && data != null) {
+                     PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
+                             .edit()
+                             .putString(UxArgument.PASSCODE, data.getStringExtra(UxArgument.PASSCODE))
+                             .commit();
+-                    Toast.makeText(getApplicationContext(), R.string.toast_passcode_set, Toast.LENGTH_SHORT).show();
++                    PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
++                            .edit()
++                            .putBoolean(UxArgument.ENABLED_PASSCODE, true)
++                            .commit();
++                    Toast.makeText(this, R.string.toast_passcode_set, Toast.LENGTH_SHORT).show();
++                    findPreference(getString(R.string.key_enable_passcode)).setTitle(getString(R.string.title_passcode_enabled));
++                }
++                if (resultCode == Activity.RESULT_CANCELED) {
++                    PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
++                            .edit()
++                            .putBoolean(UxArgument.ENABLED_PASSCODE, false)
++                            .commit();
++                    ((CheckBoxPreference) findPreference(getString(R.string.key_enable_passcode))).setChecked(false);
++                    findPreference(getString(R.string.key_enable_passcode)).setTitle(getString(R.string.title_passcode_disabled));
++                }
++                break;
++
++            case PasscodePreferenceFragment.REQUEST_DISABLE_PASSCODE:
++                boolean flag = resultCode != Activity.RESULT_OK;
++                PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
++                        .edit()
++                        .putBoolean(UxArgument.ENABLED_PASSCODE, flag)
++                        .commit();
++                ((CheckBoxPreference) findPreference(getString(R.string.key_enable_passcode))).setChecked(flag);
++                break;
++
++            case PasscodePreferenceFragment.REQUEST_CHANGE_PASSCODE:
++                if (resultCode == Activity.RESULT_OK && data != null) {
++                    PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
++                            .edit()
++                            .putString(UxArgument.PASSCODE, data.getStringExtra(UxArgument.PASSCODE))
++                            .commit();
++                    PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
++                            .edit()
++                            .putBoolean(UxArgument.ENABLED_PASSCODE, true)
++                            .commit();
++                    Toast.makeText(this, R.string.toast_passcode_set, Toast.LENGTH_SHORT).show();
+                     findPreference(getString(R.string.key_enable_passcode)).setTitle(getString(R.string.title_passcode_enabled));
+                 }
+                 break;

@@ -1,0 +1,895 @@
+From 0c75d357ce3b648590c3e603ebfaf18affd2a229 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 8 Dec 2015 13:57:35 +0800
+Subject: [PATCH] rewrite db replace
+
+---
+ .../android/db/adapter/AccountsDbAdapter.java      |  70 ++++++------
+ .../android/db/adapter/BudgetAmountsDbAdapter.java |  38 +++----
+ .../android/db/adapter/BudgetsDbAdapter.java       |  32 +++---
+ .../android/db/adapter/CommoditiesDbAdapter.java   |  46 ++++----
+ .../android/db/adapter/DatabaseAdapter.java        | 117 +++++++++++++++++++--
+ .../android/db/adapter/PricesDbAdapter.java        |  44 ++++----
+ .../android/db/adapter/RecurrenceDbAdapter.java    |  36 +++----
+ .../db/adapter/ScheduledActionDbAdapter.java       |  88 +++++++---------
+ .../android/db/adapter/SplitsDbAdapter.java        |  64 +++++------
+ .../android/db/adapter/TransactionsDbAdapter.java  |  55 +++++-----
+ .../gnucash/android/importer/GncXmlHandler.java    |   4 +
+ 11 files changed, 326 insertions(+), 268 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+index 906b9673..34704d2a 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+@@ -81,9 +81,22 @@
+      * @param db SQliteDatabase instance
+      */
+     public AccountsDbAdapter(SQLiteDatabase db, TransactionsDbAdapter transactionsDbAdapter) {
+-        super(db, AccountEntry.TABLE_NAME);
++        super(db, AccountEntry.TABLE_NAME, new String[]{
++                AccountEntry.COLUMN_NAME         ,
++                AccountEntry.COLUMN_DESCRIPTION  ,
++                AccountEntry.COLUMN_TYPE         ,
++                AccountEntry.COLUMN_CURRENCY     ,
++                AccountEntry.COLUMN_COLOR_CODE   ,
++                AccountEntry.COLUMN_FAVORITE     ,
++                AccountEntry.COLUMN_FULL_NAME    ,
++                AccountEntry.COLUMN_PLACEHOLDER  ,
++                AccountEntry.COLUMN_CREATED_AT   ,
++                AccountEntry.COLUMN_HIDDEN       ,
++                AccountEntry.COLUMN_COMMODITY_UID,
++                AccountEntry.COLUMN_PARENT_ACCOUNT_UID,
++                AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID
++        });
+         mTransactionsAdapter = transactionsDbAdapter;
+-        LOG_TAG = "AccountsDbAdapter";
+     }
+ 
+     /**
+@@ -151,59 +164,40 @@ public long bulkAddRecords(@NonNull List<Account> accountList){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull final Account account) {
+-        if (mReplaceStatement == null){
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + AccountEntry.TABLE_NAME + " ( "
+-                    + AccountEntry.COLUMN_UID           + " , "
+-                    + AccountEntry.COLUMN_NAME          + " , "
+-                    + AccountEntry.COLUMN_DESCRIPTION   + " , "
+-                    + AccountEntry.COLUMN_TYPE          + " , "
+-                    + AccountEntry.COLUMN_CURRENCY      + " , "
+-                    + AccountEntry.COLUMN_COLOR_CODE    + " , "
+-                    + AccountEntry.COLUMN_FAVORITE      + " , "
+-                    + AccountEntry.COLUMN_FULL_NAME     + " , "
+-                    + AccountEntry.COLUMN_PLACEHOLDER   + " , "
+-                    + AccountEntry.COLUMN_CREATED_AT    + " , "
+-                    + AccountEntry.COLUMN_HIDDEN        + " , "
+-                    + AccountEntry.COLUMN_COMMODITY_UID + " , "
+-                    + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " , "
+-                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ?, ?)");
+-            //commodity_uid is not forgotten. It will be inserted by a database trigger
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, account.getUID());
+-        mReplaceStatement.bindString(2, account.getName());
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Account account) {
++        stmt.clearBindings();
++        stmt.bindString(1, account.getName());
+         if (account.getDescription() != null)
+-            mReplaceStatement.bindString(3, account.getDescription());
+-        mReplaceStatement.bindString(4, account.getAccountType().name());
+-        mReplaceStatement.bindString(5, account.getCurrency().getCurrencyCode());
++            stmt.bindString(2, account.getDescription());
++        stmt.bindString(3, account.getAccountType().name());
++        stmt.bindString(4, account.getCurrency().getCurrencyCode());
+         if (account.getColorHexCode() != null) {
+-            mReplaceStatement.bindString(6, account.getColorHexCode());
++            stmt.bindString(5, account.getColorHexCode());
+         }
+-        mReplaceStatement.bindLong(7, account.isFavorite() ? 1 : 0);
+-        mReplaceStatement.bindString(8, account.getFullName());
+-        mReplaceStatement.bindLong(9, account.isPlaceholderAccount() ? 1 : 0);
+-        mReplaceStatement.bindString(10, account.getCreatedTimestamp().toString());
+-        mReplaceStatement.bindLong(11, account.isHidden() ? 1 : 0);
++        stmt.bindLong(6, account.isFavorite() ? 1 : 0);
++        stmt.bindString(7, account.getFullName());
++        stmt.bindLong(8, account.isPlaceholderAccount() ? 1 : 0);
++        stmt.bindString(9, account.getCreatedTimestamp().toString());
++        stmt.bindLong(10, account.isHidden() ? 1 : 0);
+         Commodity commodity = account.getCommodity();
+         if (commodity == null)
+             commodity = CommoditiesDbAdapter.getInstance().getCommodity(account.getCurrency().getCurrencyCode());
+ 
+-        mReplaceStatement.bindString(12, commodity.getUID());
++        stmt.bindString(11, commodity.getUID());
+ 
+         String parentAccountUID = account.getParentUID();
+         if (parentAccountUID == null && account.getAccountType() != AccountType.ROOT) {
+             parentAccountUID = getOrCreateGnuCashRootAccountUID();
+         }
+         if (parentAccountUID != null) {
+-            mReplaceStatement.bindString(13, parentAccountUID);
++            stmt.bindString(12, parentAccountUID);
+         }
+         if (account.getDefaultTransferAccountUID() != null) {
+-            mReplaceStatement.bindString(14, account.getDefaultTransferAccountUID());
++            stmt.bindString(13, account.getDefaultTransferAccountUID());
+         }
++        stmt.bindString(14, account.getUID());
+ 
+-        return mReplaceStatement;
++        return stmt;
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BudgetAmountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BudgetAmountsDbAdapter.java
+index 60ff4f30..a698659d 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BudgetAmountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BudgetAmountsDbAdapter.java
+@@ -41,7 +41,13 @@
+      * @param db        SQLiteDatabase object
+      */
+     public BudgetAmountsDbAdapter(SQLiteDatabase db) {
+-        super(db, BudgetAmountEntry.TABLE_NAME);
++        super(db, BudgetAmountEntry.TABLE_NAME, new String[] {
++                BudgetAmountEntry.COLUMN_BUDGET_UID   ,
++                BudgetAmountEntry.COLUMN_ACCOUNT_UID  ,
++                BudgetAmountEntry.COLUMN_AMOUNT_NUM   ,
++                BudgetAmountEntry.COLUMN_AMOUNT_DENOM ,
++                BudgetAmountEntry.COLUMN_PERIOD_NUM
++        });
+     }
+ 
+     public static BudgetAmountsDbAdapter getInstance(){
+@@ -65,26 +71,16 @@ public BudgetAmount buildModelInstance(@NonNull Cursor cursor) {
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull BudgetAmount budgetAmount) {
+-        if (mReplaceStatement == null){
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + BudgetAmountEntry.TABLE_NAME + " ( "
+-                    + BudgetAmountEntry.COLUMN_UID            + " , "
+-                    + BudgetAmountEntry.COLUMN_BUDGET_UID     + " , "
+-                    + BudgetAmountEntry.COLUMN_ACCOUNT_UID    + " , "
+-                    + BudgetAmountEntry.COLUMN_AMOUNT_NUM     + " , "
+-                    + BudgetAmountEntry.COLUMN_AMOUNT_DENOM   + " , "
+-                    + BudgetAmountEntry.COLUMN_PERIOD_NUM     + " ) VALUES ( ? , ? , ? , ? , ? , ? ) ");
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, budgetAmount.getUID());
+-        mReplaceStatement.bindString(2, budgetAmount.getBudgetUID());
+-        mReplaceStatement.bindString(3, budgetAmount.getAccountUID());
+-        mReplaceStatement.bindLong(4, budgetAmount.getAmount().getNumerator());
+-        mReplaceStatement.bindLong(5, budgetAmount.getAmount().getDenominator());
+-        mReplaceStatement.bindLong(6, budgetAmount.getPeriodNum());
+-
+-        return mReplaceStatement;
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final BudgetAmount budgetAmount) {
++        stmt.clearBindings();
++        stmt.bindString(1, budgetAmount.getBudgetUID());
++        stmt.bindString(2, budgetAmount.getAccountUID());
++        stmt.bindLong(3, budgetAmount.getAmount().getNumerator());
++        stmt.bindLong(4, budgetAmount.getAmount().getDenominator());
++        stmt.bindLong(6, budgetAmount.getPeriodNum());
++        stmt.bindString(7, budgetAmount.getUID());
++
++        return stmt;
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BudgetsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BudgetsDbAdapter.java
+index 9f03d0f2..bf0a7047 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BudgetsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BudgetsDbAdapter.java
+@@ -48,7 +48,12 @@
+      * @param db        SQLiteDatabase object
+      */
+     public BudgetsDbAdapter(SQLiteDatabase db) {
+-        super(db, BudgetEntry.TABLE_NAME);
++        super(db, BudgetEntry.TABLE_NAME, new String[]{
++                BudgetEntry.COLUMN_NAME,
++                BudgetEntry.COLUMN_DESCRIPTION,
++                BudgetEntry.COLUMN_RECURRENCE_UID,
++                BudgetEntry.COLUMN_NUM_PERIODS
++        });
+         mRecurrenceDbAdapter = new RecurrenceDbAdapter(db);
+         mBudgetAmountsDbAdapter = new BudgetAmountsDbAdapter(db);
+     }
+@@ -118,25 +123,16 @@ public Budget buildModelInstance(@NonNull Cursor cursor) {
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull Budget budget) {
+-        if (mReplaceStatement == null){
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + BudgetEntry.TABLE_NAME + " ( "
+-                    + BudgetEntry.COLUMN_UID            + " , "
+-                    + BudgetEntry.COLUMN_NAME           + " , "
+-                    + BudgetEntry.COLUMN_DESCRIPTION    + " , "
+-                    + BudgetEntry.COLUMN_RECURRENCE_UID + " , "
+-                    + BudgetEntry.COLUMN_NUM_PERIODS    + " ) VALUES (? , ? , ? , ? , ? ) ");
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, budget.getUID());
+-        mReplaceStatement.bindString(2, budget.getName());
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Budge budge) {
++        stmt.clearBindings();
++        stmt.bindString(1, budget.getName());
+         if (budget.getDescription() != null)
+-            mReplaceStatement.bindString(3, budget.getDescription());
+-        mReplaceStatement.bindString(4, budget.getRecurrence().getUID());
+-        mReplaceStatement.bindLong(5, budget.getNumberOfPeriods());
++            stmt.bindString(2, budget.getDescription());
++        stmt.bindString(3, budget.getRecurrence().getUID());
++        stmt.bindLong(4, budget.getNumberOfPeriods());
++        stmt.bindString(5, budget.getUID());
+ 
+-        return mReplaceStatement;
++        return stmt;
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/CommoditiesDbAdapter.java
+index ade7fab7..4b4129ad 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/CommoditiesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/CommoditiesDbAdapter.java
+@@ -21,7 +21,15 @@
+      * @param db        SQLiteDatabase object
+      */
+     public CommoditiesDbAdapter(SQLiteDatabase db) {
+-        super(db, CommodityEntry.TABLE_NAME);
++        super(db, CommodityEntry.TABLE_NAME, new String[]{
++                CommodityEntry.COLUMN_FULLNAME,
++                CommodityEntry.COLUMN_NAMESPACE,
++                CommodityEntry.COLUMN_MNEMONIC,
++                CommodityEntry.COLUMN_LOCAL_SYMBOL,
++                CommodityEntry.COLUMN_CUSIP,
++                CommodityEntry.COLUMN_SMALLEST_FRACTION,
++                CommodityEntry.COLUMN_QUOTE_FLAG
++        });
+         /**
+          * initialize commonly used commodities
+          */
+@@ -39,30 +47,18 @@ public static CommoditiesDbAdapter getInstance(){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull final Commodity commodity) {
+-        if (mReplaceStatement == null) {
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + CommodityEntry.TABLE_NAME + " ( "
+-                    + CommodityEntry.COLUMN_UID             + " , "
+-                    + CommodityEntry.COLUMN_FULLNAME        + " , "
+-                    + CommodityEntry.COLUMN_NAMESPACE       + " , "
+-                    + CommodityEntry.COLUMN_MNEMONIC        + " , "
+-                    + CommodityEntry.COLUMN_LOCAL_SYMBOL    + " , "
+-                    + CommodityEntry.COLUMN_CUSIP           + " , "
+-                    + CommodityEntry.COLUMN_SMALLEST_FRACTION + " , "
+-                    + CommodityEntry.COLUMN_QUOTE_FLAG      + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? ) ");
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, commodity.getUID());
+-        mReplaceStatement.bindString(2, commodity.getFullname());
+-        mReplaceStatement.bindString(3, commodity.getNamespace().name());
+-        mReplaceStatement.bindString(4, commodity.getMnemonic());
+-        mReplaceStatement.bindString(5, commodity.getLocalSymbol());
+-        mReplaceStatement.bindString(6, commodity.getCusip());
+-        mReplaceStatement.bindLong(7, commodity.getSmallestFraction());
+-        mReplaceStatement.bindLong(8, commodity.getQuoteFlag());
+-
+-        return mReplaceStatement;
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Commodity commodity) {
++        stmt.clearBindings();
++        stmt.bindString(1, commodity.getFullname());
++        stmt.bindString(2, commodity.getNamespace().name());
++        stmt.bindString(3, commodity.getMnemonic());
++        stmt.bindString(4, commodity.getLocalSymbol());
++        stmt.bindString(5, commodity.getCusip());
++        stmt.bindLong(6, commodity.getSmallestFraction());
++        stmt.bindLong(7, commodity.getQuoteFlag());
++        stmt.bindString(8, commodity.getUID());
++
++        return stmt;
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
+index a834379e..4ed49211 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
+@@ -21,6 +21,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
+ import android.support.annotation.NonNull;
++import android.text.TextUtils;
+ import android.util.Log;
+ 
+ import org.gnucash.android.db.DatabaseSchema;
+@@ -55,7 +56,13 @@
+ 
+     protected final String mTableName;
+ 
+-    protected SQLiteStatement mReplaceStatement;
++    protected final String[] mColumns;
++
++    protected volatile SQLiteStatement mReplaceStatement;
++
++    protected volatile SQLiteStatement mUpdateStatement;
++
++    protected volatile SQLiteStatement mInsertStatement;
+ 
+     public enum UpdateMethod {
+         insert, update, replace
+@@ -65,9 +72,10 @@
+      * Opens the database adapter with an existing database
+      * @param db SQLiteDatabase object
+      */
+-    public DatabaseAdapter(SQLiteDatabase db, @NonNull String tableName) {
++    public DatabaseAdapter(SQLiteDatabase db, @NonNull String tableName, @NonNull String[] columns) {
+         this.mTableName = tableName;
+         this.mDb = db;
++        this.mColumns = columns;
+         if (!db.isOpen() || db.isReadOnly())
+             throw new IllegalArgumentException("Database not open or is read-only. Require writeable database");
+ 
+@@ -200,7 +208,41 @@ public boolean isOpen(){
+      */
+     public void addRecord(@NonNull final Model model){
+         Log.d(LOG_TAG, String.format("Adding %s record to database: ", model.getClass().getSimpleName()));
+-        compileReplaceStatement(model).execute();
++        synchronized(mReplaceStatement) {
++            setBindings(getReplaceStatement(), model).execute();
++        }
++    }
++
++    /// This function should be called in a db transaction
++    private long doAddModels(@NonNull final List<Model> modelList, UpdateMethod updateMethod) {
++        long nRow = 0;
++        switch (updateMethod) {
++            case update:
++                synchronized(mUpdateStatement) {
++                    for (Model model : modelList) {
++                        setBindings(getUpdateStatement(), model).execute();
++                        nRow++;
++                    }
++                }
++                break;
++            case insert:
++                synchronized(mInsertStatement) {
++                    for (Model model : modelList) {
++                        setBindings(getInsertStatement(), model).execute();
++                        nRow++;
++                    }
++                }
++                break;
++            default:
++                synchronized(mReplaceStatement) {
++                    for (Model model : modelList) {
++                        setBindings(getReplaceStatement(), model).execute();
++                        nRow++;
++                    }
++                }
++                break;
++        }
++        return nRow;
+     }
+ 
+     /**
+@@ -209,7 +251,11 @@ public void addRecord(@NonNull final Model model){
+      * @param modelList List of model records
+      * @return Number of rows inserted
+      */
+-    public long bulkAddRecords(@NonNull List<Model> modelList) {
++    public long bulkAddRecords(@NonNull List<Model> modelList){
++        return bulkAddRecords(modelList, replace);
++    }
++
++    public long bulkAddRecords(@NonNull List<Model> modelList, UpdateMethod updateMethod) {
+         if (modelList.isEmpty()) {
+             Log.d(LOG_TAG, "Empty model list. Cannot bulk add records, returning 0");
+             return 0;
+@@ -220,10 +266,7 @@ public long bulkAddRecords(@NonNull List<Model> modelList) {
+         long nRow = 0;
+         try {
+             mDb.beginTransaction();
+-            for (Model model : modelList) {
+-                compileReplaceStatement(model).execute();
+-                nRow++;
+-            }
++            doAddModels(modelList, updateMethod);
+             mDb.setTransactionSuccessful();
+         }
+         finally {
+@@ -249,7 +292,63 @@ public long bulkAddRecords(@NonNull List<Model> modelList) {
+      * @param model Model whose attributes will be used as bindings
+      * @return SQLiteStatement for replacing a record in the database
+      */
+-    protected abstract SQLiteStatement compileReplaceStatement(@NonNull final Model model);
++
++    protected final @NonNull SQLiteStatement getReplaceStatement() {
++        SQLiteStatement stmt = mReplaceStatement;
++        if (stmt == null) {
++            synchronized (this) {
++                stmt = mReplaceStatement;
++                if (stmt == null) {
++                    mReplaceStatement = stmt
++                            = mDb.compileStatement("REPLACE INTO " + mTableName + " ( "
++                            + TextUtils.join(" , ", mColumns) + " , "
++                            + TransactionEntry.COLUMN_UID
++                            + " ) VALUES ( "
++                            + (new String(new char[mColumns.length]).replace("\0", "? , "))
++                            + "?)");
++                }
++            }
++        }
++        return stmt;
++    }
++
++    protected final @NonNull SQLiteStatement getUpdateStatement() {
++        SQLiteStatement stmt = mUpdateStatement;
++        if (stmt == null) {
++            synchronized (this) {
++                stmt = mUpdateStatement;
++                if (stmt == null) {
++                    mUpdateStatement = stmt
++                            = mDb.compileStatement("UPDATE " + mTableName + " SET "
++                            + TextUtils.join(" = ? , ", mColumns) + " = ? WHERE "
++                            + TransactionEntry.COLUMN_UID
++                            + " = ?");
++                }
++            }
++        }
++        return stmt;
++    }
++
++    protected final @NonNull SQLiteStatement getInsertStatement() {
++        SQLiteStatement stmt = mInsertStatement;
++        if (stmt == null) {
++            synchronized (this) {
++                stmt = mInsertStatement;
++                if (stmt == null) {
++                    mInsertStatement = stmt
++                            = mDb.compileStatement("INSERT INTO " + mTableName + " ( "
++                            + TextUtils.join(" , ", mColumns) + " , "
++                            + TransactionEntry.COLUMN_UID
++                            + " ) VALUES ( "
++                            + (new String(new char[mColumns.length]).replace("\0", "? , "))
++                            + "?)");
++                }
++            }
++        }
++        return stmt;
++    }
++
++    protected abstract @NotNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull Model Model);
+ 
+     /**
+      * Returns a model instance populated with data from the record with GUID {@code uid}
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/PricesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/PricesDbAdapter.java
+index 86d92886..88269b57 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/PricesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/PricesDbAdapter.java
+@@ -22,7 +22,15 @@
+      * @param db SQLiteDatabase object
+      */
+     public PricesDbAdapter(SQLiteDatabase db) {
+-        super(db, PriceEntry.TABLE_NAME);
++        super(db, PriceEntry.TABLE_NAME, new String[]{
++                PriceEntry.COLUMN_COMMODITY_UID,
++                PriceEntry.COLUMN_CURRENCY_UID,
++                PriceEntry.COLUMN_DATE,
++                PriceEntry.COLUMN_SOURCE,
++                PriceEntry.COLUMN_TYPE,
++                PriceEntry.COLUMN_VALUE_NUM,
++                PriceEntry.COLUMN_VALUE_DENOM
++        });
+     }
+ 
+     public static PricesDbAdapter getInstance(){
+@@ -30,34 +38,22 @@ public static PricesDbAdapter getInstance(){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull final Price price) {
+-        if (mReplaceStatement == null) {
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + PriceEntry.TABLE_NAME + " ( "
+-                    + PriceEntry.COLUMN_UID + " , "
+-                    + PriceEntry.COLUMN_COMMODITY_UID + " , "
+-                    + PriceEntry.COLUMN_CURRENCY_UID + " , "
+-                    + PriceEntry.COLUMN_DATE + " , "
+-                    + PriceEntry.COLUMN_SOURCE + " , "
+-                    + PriceEntry.COLUMN_TYPE + " , "
+-                    + PriceEntry.COLUMN_VALUE_NUM + " , "
+-                    + PriceEntry.COLUMN_VALUE_DENOM + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? ) ");
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, price.getUID());
+-        mReplaceStatement.bindString(2, price.getCommodityUID());
+-        mReplaceStatement.bindString(3, price.getCurrencyUID());
+-        mReplaceStatement.bindString(4, price.getDate().toString());
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Price price) {
++        stmt.clearBindings();
++        stmt.bindString(1, price.getCommodityUID());
++        stmt.bindString(2, price.getCurrencyUID());
++        stmt.bindString(3, price.getDate().toString());
+         if (price.getSource() != null) {
+-            mReplaceStatement.bindString(5, price.getSource());
++            stmt.bindString(4, price.getSource());
+         }
+         if (price.getType() != null) {
+-            mReplaceStatement.bindString(6, price.getType());
++            stmt.bindString(5, price.getType());
+         }
+-        mReplaceStatement.bindLong(7,   price.getValueNum());
+-        mReplaceStatement.bindLong(8,   price.getValueDenom());
++        stmt.bindLong(6, price.getValueNum());
++        stmt.bindLong(7, price.getValueDenom());
++        stmt.bindString(8, price.getUID());
+ 
+-        return mReplaceStatement;
++        return stmt;
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
+index 8235be4c..90ca5dcf 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
+@@ -39,7 +39,13 @@
+      * @param db        SQLiteDatabase object
+      */
+     public RecurrenceDbAdapter(SQLiteDatabase db) {
+-        super(db, RecurrenceEntry.TABLE_NAME);
++        super(db, RecurrenceEntry.TABLE_NAME, new String[]{
++                RecurrenceEntry.COLUMN_MULTIPLIER,
++                RecurrenceEntry.COLUMN_PERIOD_TYPE,
++                RecurrenceEntry.COLUMN_BYDAY,
++                RecurrenceEntry.COLUMN_PERIOD_START,
++                RecurrenceEntry.COLUMN_PERIOD_END
++        });
+     }
+ 
+     public static RecurrenceDbAdapter getInstance(){
+@@ -69,29 +75,19 @@ public Recurrence buildModelInstance(@NonNull Cursor cursor) {
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull Recurrence recurrence) {
+-        if (mReplaceStatement == null) {
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + RecurrenceEntry.TABLE_NAME + " ( "
+-                    + RecurrenceEntry.COLUMN_UID + " , "
+-                    + RecurrenceEntry.COLUMN_MULTIPLIER + " , "
+-                    + RecurrenceEntry.COLUMN_PERIOD_TYPE + " , "
+-                    + RecurrenceEntry.COLUMN_BYDAY + " , "
+-                    + RecurrenceEntry.COLUMN_PERIOD_START + " , "
+-                    + RecurrenceEntry.COLUMN_PERIOD_END + " ) VALUES ( ? , ? , ? , ? , ? , ? ) ");
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, recurrence.getUID());
+-        mReplaceStatement.bindLong(2, recurrence.getPeriodType().getMultiplier());
+-        mReplaceStatement.bindString(3, recurrence.getPeriodType().name());
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Recurrence recurrence) {
++        stmt.clearBindings();
++        stmt.bindLong(1, recurrence.getPeriodType().getMultiplier());
++        stmt.bindString(2, recurrence.getPeriodType().name());
+         if (recurrence.getByDay() != null)
+-            mReplaceStatement.bindString(4, recurrence.getByDay());
++            stmt.bindString(3, recurrence.getByDay());
+         //recurrence should always have a start date
+-        mReplaceStatement.bindString(5, recurrence.getPeriodStart().toString());
++        stmt.bindString(4, recurrence.getPeriodStart().toString());
+ 
+         if (recurrence.getPeriodEnd() != null)
+-            mReplaceStatement.bindString(6, recurrence.getPeriodEnd().toString());
++            stmt.bindString(5, recurrence.getPeriodEnd().toString());
++        stmt.bindString(6, recurrence.getUID());
+ 
+-        return mReplaceStatement;
++        return stmt;
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
+index ade23f80..0e554348 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
+@@ -42,9 +42,25 @@
+     RecurrenceDbAdapter mRecurrenceDbAdapter;
+ 
+     public ScheduledActionDbAdapter(SQLiteDatabase db){
+-        super(db, ScheduledActionEntry.TABLE_NAME);
++        super(db, ScheduledActionEntry.TABLE_NAME, new String[]{
++                ScheduledActionEntry.COLUMN_ACTION_UID        ,
++                ScheduledActionEntry.COLUMN_TYPE              ,
++                ScheduledActionEntry.COLUMN_START_TIME        ,
++                ScheduledActionEntry.COLUMN_END_TIME          ,
++                ScheduledActionEntry.COLUMN_LAST_RUN 		  ,
++                ScheduledActionEntry.COLUMN_ENABLED           ,
++                ScheduledActionEntry.COLUMN_CREATED_AT        ,
++                ScheduledActionEntry.COLUMN_TAG               ,
++                ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY   ,
++                ScheduledActionEntry.COLUMN_RECURRENCE_UID    ,
++                ScheduledActionEntry.COLUMN_AUTO_CREATE       ,
++                ScheduledActionEntry.COLUMN_AUTO_NOTIFY       ,
++                ScheduledActionEntry.COLUMN_ADVANCE_CREATION  ,
++                ScheduledActionEntry.COLUMN_ADVANCE_NOTIFY    ,
++                ScheduledActionEntry.COLUMN_TEMPLATE_ACCT_UID ,
++                ScheduledActionEntry.COLUMN_EXECUTION_COUNT
++        });
+         mRecurrenceDbAdapter = new RecurrenceDbAdapter(db);
+-        LOG_TAG = "ScheduledActionDbAdapter";
+     }
+ 
+     /**
+@@ -107,56 +123,32 @@ public long updateRecurrenceAttributes(ScheduledAction scheduledAction){
+         return mDb.update(ScheduledActionEntry.TABLE_NAME, contentValues, where, whereArgs);
+     }
+ 
+-
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull final ScheduledAction schedxAction) {
+-        if (mReplaceStatement == null) {
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + ScheduledActionEntry.TABLE_NAME + " ( "
+-                    + ScheduledActionEntry.COLUMN_UID 	            + " , "
+-                    + ScheduledActionEntry.COLUMN_ACTION_UID        + " , "
+-                    + ScheduledActionEntry.COLUMN_TYPE              + " , "
+-                    + ScheduledActionEntry.COLUMN_START_TIME        + " , "
+-                    + ScheduledActionEntry.COLUMN_END_TIME          + " , "
+-                    + ScheduledActionEntry.COLUMN_LAST_RUN 		    + " , "
+-                    + ScheduledActionEntry.COLUMN_ENABLED           + " , "
+-                    + ScheduledActionEntry.COLUMN_CREATED_AT        + " , "
+-                    + ScheduledActionEntry.COLUMN_TAG               + " , "
+-                    + ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY   + " , "
+-                    + ScheduledActionEntry.COLUMN_RECURRENCE_UID    + " , "
+-                    + ScheduledActionEntry.COLUMN_AUTO_CREATE       + " , "
+-                    + ScheduledActionEntry.COLUMN_AUTO_NOTIFY       + " , "
+-                    + ScheduledActionEntry.COLUMN_ADVANCE_CREATION  + " , "
+-                    + ScheduledActionEntry.COLUMN_ADVANCE_NOTIFY    + " , "
+-                    + ScheduledActionEntry.COLUMN_TEMPLATE_ACCT_UID + " , "
+-                    + ScheduledActionEntry.COLUMN_EXECUTION_COUNT   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, schedxAction.getUID());
+-        mReplaceStatement.bindString(2, schedxAction.getActionUID());
+-        mReplaceStatement.bindString(3, schedxAction.getActionType().name());
+-        mReplaceStatement.bindLong(4,   schedxAction.getStartTime());
+-        mReplaceStatement.bindLong(5, schedxAction.getEndTime());
+-        mReplaceStatement.bindLong(6, schedxAction.getLastRunTime());
+-        mReplaceStatement.bindLong(7, schedxAction.isEnabled() ? 1 : 0);
+-        mReplaceStatement.bindString(8, schedxAction.getCreatedTimestamp().toString());
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final ScheduledAction schedxAction) {
++        stmt.clearBindings();
++        stmt.bindString(1, schedxAction.getActionUID());
++        stmt.bindString(2, schedxAction.getActionType().name());
++        stmt.bindLong(3,   schedxAction.getStartTime());
++        stmt.bindLong(4, schedxAction.getEndTime());
++        stmt.bindLong(5, schedxAction.getLastRunTime());
++        stmt.bindLong(6, schedxAction.isEnabled() ? 1 : 0);
++        stmt.bindString(7, schedxAction.getCreatedTimestamp().toString());
+         if (schedxAction.getTag() == null)
+-            mReplaceStatement.bindNull(9);
++            stmt.bindNull(8);
+         else
+-            mReplaceStatement.bindString(9, schedxAction.getTag());
+-        mReplaceStatement.bindString(10, Integer.toString(schedxAction.getTotalFrequency()));
+-        mReplaceStatement.bindString(11, schedxAction.getRecurrence().getUID());
+-        mReplaceStatement.bindLong(12,   schedxAction.shouldAutoCreate() ? 1 : 0);
+-        mReplaceStatement.bindLong(13,   schedxAction.shouldAutoNotify() ? 1 : 0);
+-        mReplaceStatement.bindLong(14,   schedxAction.getAdvanceCreateDays());
+-        mReplaceStatement.bindLong(15,   schedxAction.getAdvanceNotifyDays());
+-        mReplaceStatement.bindString(16, schedxAction.getTemplateAccountUID());
+-
+-        mReplaceStatement.bindString(17, Integer.toString(schedxAction.getExecutionCount()));
+-
+-        return mReplaceStatement;
++            stmt.bindString(9, schedxAction.getTag());
++        stmt.bindString(9, Integer.toString(schedxAction.getTotalFrequency()));
++        stmt.bindString(10, schedxAction.getRecurrence().getUID());
++        stmt.bindLong(11,   schedxAction.shouldAutoCreate() ? 1 : 0);
++        stmt.bindLong(12,   schedxAction.shouldAutoNotify() ? 1 : 0);
++        stmt.bindLong(13,   schedxAction.getAdvanceCreateDays());
++        stmt.bindLong(14,   schedxAction.getAdvanceNotifyDays());
++        stmt.bindString(15, schedxAction.getTemplateAccountUID());
++
++        stmt.bindString(16, Integer.toString(schedxAction.getExecutionCount()));
++        stmt.bindString(17, schedxAction.getUID());
++        return stmt;
+     }
+-
+     /**
+      * Builds a {@link org.gnucash.android.model.ScheduledAction} instance from a row to cursor in the database.
+      * The cursor should be already pointing to the right entry in the data set. It will not be modified in any way
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/SplitsDbAdapter.java
+index 5a0f2b6c..c056efba 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/SplitsDbAdapter.java
+@@ -52,8 +52,19 @@
+ public class SplitsDbAdapter extends DatabaseAdapter<Split> {
+ 
+     public SplitsDbAdapter(SQLiteDatabase db) {
+-        super(db, SplitEntry.TABLE_NAME);
+-        LOG_TAG = "SplitsDbAdapter";
++        super(db, SplitEntry.TABLE_NAME, new String[]{
++                SplitEntry.COLUMN_MEMO,
++                SplitEntry.COLUMN_TYPE,
++                SplitEntry.COLUMN_VALUE_NUM,
++                SplitEntry.COLUMN_VALUE_DENOM,
++                SplitEntry.COLUMN_QUANTITY_NUM,
++                SplitEntry.COLUMN_QUANTITY_DENOM,
++                SplitEntry.COLUMN_CREATED_AT,
++                SplitEntry.COLUMN_RECONCILE_STATE,
++                SplitEntry.COLUMN_RECONCILE_DATE,
++                SplitEntry.COLUMN_ACCOUNT_UID,
++                SplitEntry.COLUMN_TRANSACTION_UID
++        });
+     }
+ 
+     /**
+@@ -84,42 +95,25 @@ public void addRecord(@NonNull final Split split){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull final Split split) {
+-        if (mReplaceStatement == null) {
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + SplitEntry.TABLE_NAME + " ( "
+-                    + SplitEntry.COLUMN_UID + " , "
+-                    + SplitEntry.COLUMN_MEMO + " , "
+-                    + SplitEntry.COLUMN_TYPE + " , "
+-                    + SplitEntry.COLUMN_VALUE_NUM + " , "
+-                    + SplitEntry.COLUMN_VALUE_DENOM + " , "
+-                    + SplitEntry.COLUMN_QUANTITY_NUM + " , "
+-                    + SplitEntry.COLUMN_QUANTITY_DENOM + " , "
+-                    + SplitEntry.COLUMN_CREATED_AT + " , "
+-                    + SplitEntry.COLUMN_RECONCILE_STATE + " , "
+-                    + SplitEntry.COLUMN_RECONCILE_DATE + " , "
+-                    + SplitEntry.COLUMN_ACCOUNT_UID + " , "
+-                    + SplitEntry.COLUMN_TRANSACTION_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? ) ");
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, split.getUID());
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Split split) {
++        stmt.clearBindings();
+         if (split.getMemo() != null) {
+-            mReplaceStatement.bindString(2, split.getMemo());
++            stmt.bindString(1, split.getMemo());
+         }
+-        mReplaceStatement.bindString(3, split.getType().name());
+-        mReplaceStatement.bindLong(4, split.getValue().getNumerator());
+-        mReplaceStatement.bindLong(5,   split.getValue().getDenominator());
+-        mReplaceStatement.bindLong(6, split.getQuantity().getNumerator());
+-        mReplaceStatement.bindLong(7, split.getQuantity().getDenominator());
+-        mReplaceStatement.bindString(8, split.getCreatedTimestamp().toString());
+-        mReplaceStatement.bindString(9, String.valueOf(split.getReconcileState()));
+-        mReplaceStatement.bindString(10, split.getReconcileDate().toString());
+-        mReplaceStatement.bindString(11, split.getAccountUID());
+-        mReplaceStatement.bindString(12, split.getTransactionUID());
+-
+-        return mReplaceStatement;
++        stmt.bindString(2, split.getType().name());
++        stmt.bindLong(3, split.getValue().getNumerator());
++        stmt.bindLong(4, split.getValue().getDenominator());
++        stmt.bindLong(5, split.getQuantity().getNumerator());
++        stmt.bindLong(6, split.getQuantity().getDenominator());
++        stmt.bindString(7, split.getCreatedTimestamp().toString());
++        stmt.bindString(8, String.valueOf(split.getReconcileState()));
++        stmt.bindString(9, split.getReconcileDate().toString());
++        stmt.bindString(10, split.getAccountUID());
++        stmt.bindString(11, split.getTransactionUID());
++        stmt.bindString(12, split.getUID());
++
++        return stmt;
+     }
+-
+     /**
+      * Builds a split instance from the data pointed to by the cursor provided
+      * <p>This method will not move the cursor in any way. So the cursor should already by pointing to the correct entry</p>
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+index 1f25f5cc..cc37951c 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+@@ -61,9 +61,18 @@
+      * @param db SQlite db instance
+      */
+     public TransactionsDbAdapter(SQLiteDatabase db, SplitsDbAdapter splitsDbAdapter) {
+-        super(db, TransactionEntry.TABLE_NAME);
++        super(db, TransactionEntry.TABLE_NAME, new String[]{
++                TransactionEntry.COLUMN_DESCRIPTION,
++                TransactionEntry.COLUMN_NOTES,
++                TransactionEntry.COLUMN_TIMESTAMP,
++                TransactionEntry.COLUMN_EXPORTED,
++                TransactionEntry.COLUMN_CURRENCY,
++                TransactionEntry.COLUMN_COMMODITY_UID,
++                TransactionEntry.COLUMN_CREATED_AT,
++                TransactionEntry.COLUMN_SCHEDX_ACTION_UID,
++                TransactionEntry.COLUMN_TEMPLATE
++        });
+         mSplitsDbAdapter = splitsDbAdapter;
+-        LOG_TAG = "TransactionsDbAdapter";
+     }
+ 
+     /**
+@@ -158,43 +167,29 @@ public long bulkAddRecords(@NonNull List<Transaction> transactionList){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(@NonNull final Transaction transaction) {
+-        if (mReplaceStatement == null) {
+-            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + TransactionEntry.TABLE_NAME + " ( "
+-                    + TransactionEntry.COLUMN_UID + " , "
+-                    + TransactionEntry.COLUMN_DESCRIPTION + " , "
+-                    + TransactionEntry.COLUMN_NOTES + " , "
+-                    + TransactionEntry.COLUMN_TIMESTAMP + " , "
+-                    + TransactionEntry.COLUMN_EXPORTED + " , "
+-                    + TransactionEntry.COLUMN_CURRENCY + " , "
+-                    + TransactionEntry.COLUMN_COMMODITY_UID + " , "
+-                    + TransactionEntry.COLUMN_CREATED_AT + " , "
+-                    + TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " , "
+-                    + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ?, ? , ?)");
+-        }
+-
+-        mReplaceStatement.clearBindings();
+-        mReplaceStatement.bindString(1, transaction.getUID());
+-        mReplaceStatement.bindString(2, transaction.getDescription());
+-        mReplaceStatement.bindString(3, transaction.getNote());
+-        mReplaceStatement.bindLong(4,   transaction.getTimeMillis());
+-        mReplaceStatement.bindLong(5, transaction.isExported() ? 1 : 0);
+-        mReplaceStatement.bindString(6, transaction.getCurrencyCode());
++    protected @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull Transaction transaction) {
++        stmt.clearBindings();
++        stmt.bindString(1, transaction.getDescription());
++        stmt.bindString(2, transaction.getNote());
++        stmt.bindLong(3, transaction.getTimeMillis());
++        stmt.bindLong(4, transaction.isExported() ? 1 : 0);
++        stmt.bindString(5, transaction.getCurrencyCode());
+ 
+         Commodity commodity = transaction.getCommodity();
+         if (commodity == null)
+             commodity = CommoditiesDbAdapter.getInstance().getCommodity(transaction.getCurrencyCode());
+ 
+-        mReplaceStatement.bindString(7, commodity.getUID());
+-        mReplaceStatement.bindString(8, transaction.getCreatedTimestamp().toString());
++        stmt.bindString(6, commodity.getUID());
++        stmt.bindString(7, transaction.getCreatedTimestamp().toString());
+ 
+         if (transaction.getScheduledActionUID() == null)
+-            mReplaceStatement.bindNull(9);
++            stmt.bindNull(8);
+         else
+-            mReplaceStatement.bindString(9,  transaction.getScheduledActionUID());
+-        mReplaceStatement.bindLong(10, transaction.isTemplate() ? 1 : 0);
++            stmt.bindString(8, transaction.getScheduledActionUID());
++        stmt.bindLong(9, transaction.isTemplate() ? 1 : 0);
++        stmt.bindString(10, transaction.getUID());
+ 
+-        return mReplaceStatement;
++        return stmt;
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 677656c4..2f330c68 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -931,6 +931,9 @@ public void endDocument() throws SAXException {
+         mAccountsDbAdapter.beginTransaction();
+         Log.d(getClass().getSimpleName(), "bulk insert starts");
+         try {
++            // disable foreign key. The database structure should be ensured by the data inserted.
++            // it will make insertion much faster.
++            mAccountsDbAdapter.enableForeignKey(false);
+             Log.d(getClass().getSimpleName(), "before clean up db");
+             mAccountsDbAdapter.deleteAllRecords();
+             Log.d(getClass().getSimpleName(), String.format("deb clean up done %d ns", System.nanoTime()-startTime));
+@@ -958,6 +961,7 @@ public void endDocument() throws SAXException {
+ 
+             mAccountsDbAdapter.setTransactionSuccessful();
+         } finally {
++            mAccountsDbAdapter.enableForeignKey(true);
+             mAccountsDbAdapter.endTransaction();
+         }
+ 

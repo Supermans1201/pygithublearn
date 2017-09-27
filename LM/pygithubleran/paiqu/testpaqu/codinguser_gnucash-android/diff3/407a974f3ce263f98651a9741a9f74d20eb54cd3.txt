@@ -1,0 +1,394 @@
+From b88e06769b0ab1c391548a26d9896b7648a8f349 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 22 Aug 2015 18:09:37 +0800
+Subject: [PATCH 1/3] import and export both value and quantity
+
+SetValue would not set quanity any more. Check the error message.
+stripCurrencyFormatting is removed from parseSplitAmount. The gnc doc in gnucash shows that amount is as follows:-?[0-9]+/-?[0-9]+
+---
+ .../gnucash/android/export/xml/GncXmlExporter.java |  9 ++++--
+ .../gnucash/android/export/xml/GncXmlHelper.java   |  5 ++--
+ .../gnucash/android/importer/GncXmlHandler.java    | 26 +++++++++++++----
+ .../main/java/org/gnucash/android/model/Split.java | 34 ++++++++++++++++++----
+ 4 files changed, 60 insertions(+), 14 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 0f7c4a27..f76288fc 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -271,7 +271,8 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_TYPE + " AS split_type",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_VALUE_NUM + " AS split_value_num",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_VALUE_DENOM + " AS split_value_denom",
+-                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_ACCOUNT_UID + " AS split_acct_uid"},
++                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_QUANTITY_NUM + " AS split_quantity_num",
++                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_QUANTITY_DENOM + " AS split_quantity_denom",                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_ACCOUNT_UID + " AS split_acct_uid"},
+                         where, null,
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " ASC , " +
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " ASC ");
+@@ -405,7 +406,11 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             xmlSerializer.text(strValue);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_VALUE);
+             // quantity, in the split account's currency
+-            // TODO: multi currency support.
++            String splitQuantityNum = cursor.getString(cursor.getColumnIndexOrThrow("split_quantity_num"));
++            String splitQuantityDenom = cursor.getString(cursor.getColumnIndexOrThrow("split_quantity_denom"));
++            if (!exportTemplates) {
++                strValue = (trxType.equals("CREDIT") ? "-" : "") + splitValueNum + "/" + splitQuantityDenom;
++            }
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_QUANTITY);
+             xmlSerializer.text(strValue);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_QUANTITY);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 53f479e3..3591d0c4 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -161,7 +161,7 @@ public static long parseDate(String dateString) throws ParseException {
+ 
+     /**
+      * Parses amount strings from GnuCash XML into {@link java.math.BigDecimal}s.
+-     * The amounts are formatted as 12345/4100
++     * The amounts are formatted as 12345/100
+      * @param amountString String containing the amount
+      * @return BigDecimal with numerical value
+      * @throws ParseException if the amount could not be parsed
+@@ -174,7 +174,8 @@ public static BigDecimal parseSplitAmount(String amountString) throws ParseExcep
+         }
+ 
+         int scale = amountString.length() - pos - 2; //do this before, because we could modify the string
+-        String numerator = TransactionFormFragment.stripCurrencyFormatting(amountString.substring(0, pos));
++        //String numerator = TransactionFormFragment.stripCurrencyFormatting(amountString.substring(0, pos));
++        String numerator = amountString.substring(0,pos);
+         BigInteger numeratorInt = new BigInteger(numerator);
+         return new BigDecimal(numeratorInt, scale);
+     }
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 602ebdca..453b9efb 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -132,11 +132,16 @@
+     Split mSplit;
+ 
+     /**
+-     * (Absolute) quantity of the split
++     * (Absolute) quantity of the split, which uses split account currency
+      */
+     BigDecimal mQuantity;
+ 
+     /**
++     * (Absolute) value of the split, which uses transaction currency
++     */
++    BigDecimal mValue;
++
++    /**
+      * Whether the quantity is negative
+      */
+     boolean mNegativeQuantity;
+@@ -263,7 +268,7 @@ public void startElement(String uri, String localName,
+                 mISO4217Currency = false;
+                 break;
+             case GncXmlHelper.TAG_TRN_SPLIT:
+-                mSplit = new Split(Money.getZeroInstance(),"");
++                mSplit = new Split(Money.getZeroInstance(), "");
+                 break;
+             case GncXmlHelper.TAG_DATE_POSTED:
+                 mIsDatePosted = true;
+@@ -470,6 +475,16 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SPLIT_MEMO:
+                 mSplit.setMemo(characterString);
+                 break;
++            case GncXmlHelper.TAG_SPLIT_VALUE:
++                try {
++                    mValue = GncXmlHelper.parseSplitAmount(characterString).abs(); // use sign from quantity
++                } catch (ParseException e) {
++                    String msg = "Error parsing split quantity - " + characterString;
++                    Crashlytics.log(msg);
++                    Crashlytics.logException(e);
++                    throw new SAXException(msg, e);
++                }
++                break;
+             case GncXmlHelper.TAG_SPLIT_QUANTITY:
+                 // delay the assignment of currency when the split account is seen
+                 try {
+@@ -490,11 +505,12 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_SPLIT_ACCOUNT:
+                 if (!mInTemplates) {
+-                    //the split amount uses the account currency
+-                    Money amount = new Money(mQuantity, getCurrencyForAccount(characterString));
+                     //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
+                     mSplit.setType(mNegativeQuantity ? TransactionType.CREDIT : TransactionType.DEBIT);
+-                    mSplit.setValue(amount);
++                    //the split amount uses the account currency
++                    mSplit.setQuantity(new Money(mQuantity, getCurrencyForAccount(characterString)));
++                    //the split value uses the transaction currency
++                    mSplit.setValue(new Money(mQuantity, mTransaction.getCurrency()));
+                     mSplit.setAccountUID(characterString);
+                 } else {
+                     if (!mIgnoreTemplateTransaction)
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 5ad38452..5bdce094 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -2,6 +2,7 @@
+ 
+ 
+ import android.support.annotation.NonNull;
++import android.util.Log;
+ 
+ /**
+  * A split amount in a transaction.
+@@ -49,7 +50,8 @@
+      * @param value Money value amount of this split
+      * @param accountUID String UID of transfer account
+      */
+-    public Split(@NonNull Money value, String accountUID){
++    public Split(@NonNull Money value, @NonNull Money quantity, String accountUID){
++        setQuantity(quantity);
+         setValue(value);
+         setAccountUID(accountUID);
+         //NOTE: This is a rather simplististic approach to the split type.
+@@ -59,6 +61,22 @@ public Split(@NonNull Money value, String accountUID){
+     }
+ 
+     /**
++     * Initialize split with a value amount and account
++     * @param value Money value amount of this split
++     * @param accountUID String UID of transfer account
++     */
++    public Split(@NonNull Money amount, String accountUID){
++        setQuantity(amount);
++        setValue(amount);
++        setAccountUID(accountUID);
++        //NOTE: This is a rather simplististic approach to the split type.
++        //It typically also depends on the account type of the account. But we do not want to access
++        //the database everytime a split is created. So we keep it simple here. Set the type you want explicity.
++        mSplitType = amount.isNegative() ? TransactionType.DEBIT : TransactionType.CREDIT;
++    }
++
++
++    /**
+      * Clones the <code>sourceSplit</code> to create a new instance with same fields
+      * @param sourceSplit Split to be cloned
+      * @param generateUID Determines if the clone should have a new UID or should maintain the one from source
+@@ -94,10 +112,16 @@ public Money getValue() {
+      * @param amount Money value of this split
+      * @see #setQuantity(Money)
+      */
+-    public void setValue(Money amount) {
+-        this.mValue = amount;
+-        if (mQuantity == null){
+-            mQuantity = amount;
++    public void setValue(Money value) {
++        mValue = value;
++        // remove the following when porting to value/quantity is done
++        if (mQuantity == null) {
++            Log.e(getClass().getSimpleName(), "Are you sure you want set the value instead of the quantity?");
++            try {
++                throw new Exception("");
++            } catch (Exception e) {
++                e.printStackTrace();
++            }
+         }
+     }
+ 
+
+From 91feec88e2472fb6fa5258527a082a53a689ee18 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 22 Aug 2015 21:03:05 +0800
+Subject: [PATCH 2/3] use quantity instead of value to calculate account
+ balance
+
+use quantity as quantity is always in the split account's currency, not the transactions.
+---
+ app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index 6f1faedd..fa34b645 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -199,9 +199,9 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+ 
+         cursor = mDb.query(SplitEntry.TABLE_NAME + " , " + TransactionEntry.TABLE_NAME,
+                 new String[]{"TOTAL ( CASE WHEN " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TYPE + " = 'DEBIT' THEN " +
+-                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + " ELSE - " +
+-                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + " END )",
+-                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_DENOM},
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_QUANTITY_NUM + " ELSE - " +
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_QUANTITY_NUM + " END )",
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_QUANTITY_DENOM},
+                 selection, selectionArgs, null, null, null);
+ 
+         try {
+
+From 2e092f8564e5292bea19ad3fdf83a1ec23ff8710 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 22 Aug 2015 23:02:49 +0800
+Subject: [PATCH 3/3] implement auto balance for multi-currency transaction
+
+For GnuCash, the value for multi-currency transaction should be balanced.
+Still cannot support custom currency well.
+---
+ .../org/gnucash/android/db/SplitsDbAdapter.java    |  2 +-
+ .../gnucash/android/importer/GncXmlHandler.java    | 20 ++++++++------
+ .../main/java/org/gnucash/android/model/Money.java | 17 ++----------
+ .../org/gnucash/android/model/Transaction.java     | 32 +++++++++++-----------
+ 4 files changed, 31 insertions(+), 40 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index fa34b645..6e708e4a 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -212,7 +212,7 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+                 if (!hasDebitNormalBalance) {
+                     amount_num = -amount_num;
+                 }
+-                return new Money(amount_num, amount_denom, Currency.getInstance(currencyCode));
++                return new Money(amount_num, amount_denom, currencyCode);
+             }
+         } finally {
+             cursor.close();
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 453b9efb..59f4ba44 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -477,6 +477,15 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_SPLIT_VALUE:
+                 try {
++                    // The value and quantity can have different sign for custom currency(stock).
++                    // Use the sign of value for split, as it would not be custom currency
++                    String q = characterString;
++                    if (q.charAt(0) == '-') {
++                        mNegativeQuantity = true;
++                        q = q.substring(1);
++                    } else {
++                        mNegativeQuantity = false;
++                    }
+                     mValue = GncXmlHelper.parseSplitAmount(characterString).abs(); // use sign from quantity
+                 } catch (ParseException e) {
+                     String msg = "Error parsing split quantity - " + characterString;
+@@ -488,14 +497,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SPLIT_QUANTITY:
+                 // delay the assignment of currency when the split account is seen
+                 try {
+-                    String q = characterString;
+-                    if (q.charAt(0) == '-') {
+-                        mNegativeQuantity = true;
+-                        q = q.substring(1);
+-                    } else {
+-                        mNegativeQuantity = false;
+-                    }
+-                    mQuantity = GncXmlHelper.parseSplitAmount(q);
++                    mQuantity = GncXmlHelper.parseSplitAmount(characterString).abs();
+                 } catch (ParseException e) {
+                     String msg = "Error parsing split quantity - " + characterString;
+                     Crashlytics.log(msg);
+@@ -510,7 +512,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     //the split amount uses the account currency
+                     mSplit.setQuantity(new Money(mQuantity, getCurrencyForAccount(characterString)));
+                     //the split value uses the transaction currency
+-                    mSplit.setValue(new Money(mQuantity, mTransaction.getCurrency()));
++                    mSplit.setValue(new Money(mValue, mTransaction.getCurrency()));
+                     mSplit.setAccountUID(characterString);
+                 } else {
+                     if (!mIgnoreTemplateTransaction)
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 3f89ebc2..b1c5b414 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -116,12 +116,12 @@ public Money() {
+ 		init();
+ 	}
+ 
+-	public static BigDecimal getBigDecimal(long numerator, int denominator) {
++	public static BigDecimal getBigDecimal(long numerator, long denominator) {
+ 		int scale;
+ 		if (numerator == 0 && denominator == 0) {
+ 			denominator = 1;
+ 		}
+-		switch (denominator) {
++		switch ((int)denominator) {
+ 			case 1: scale = 0; break;
+ 			case 10: scale = 1; break;
+ 			case 100: scale = 2; break;
+@@ -134,17 +134,6 @@ public static BigDecimal getBigDecimal(long numerator, int denominator) {
+ 
+ 	/**
+ 	 * Overloaded constructor
+-	 * @param numerator numerator of the money instance
+-	 * @param denominator denominator of the money instance
+-	 * @param currency {@link Currency} associated with the <code>amount</code>
+-	 */
+-	public Money(long numerator, int denominator, Currency currency){
+-		this.mAmount = getBigDecimal(numerator, denominator);
+-		this.mCurrency = currency;
+-	}
+-	
+-	/**
+-	 * Overloaded constructor
+ 	 * @param amount {@link BigDecimal} value of the money instance
+ 	 * @param currency {@link Currency} associated with the <code>amount</code>
+ 	 */
+@@ -186,7 +175,7 @@ public Money(BigDecimal amount, Currency currency, MathContext context){
+ 	 * @param currencyCode 3-character currency code string
+ 	 */
+ 	public Money(long numerator, long denominator, String currencyCode){
+-		mAmount = new BigDecimal(numerator).divide(new BigDecimal(denominator), MathContext.UNLIMITED);
++		mAmount = getBigDecimal(numerator, denominator);
+ 		setCurrency(Currency.getInstance(currencyCode));
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index ec9b4b9c..55a2b26d 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -179,21 +179,20 @@ private void initDefaults(){
+      * @return Split whose amount is the imbalance of this transaction
+      */
+     public Split getAutoBalanceSplit(){
+-        //FIXME: when multiple currencies per transaction are supported
+-        Currency lastCurrency = null;
+-        for (Split split : mSplitList) {
+-            Currency currentCurrency = split.getValue().getCurrency();
+-            if (lastCurrency == null)
+-                lastCurrency = currentCurrency;
+-            else if (lastCurrency != currentCurrency){
+-                return null; //for now we will not autobalance multi-currency transactions
+-            }
+-            lastCurrency = currentCurrency;
+-        }
++        //The values should be balanced even for multi-currency transactions
++        //Currency lastCurrency = null;
++        //for (Split split : mSplitList) {
++        //    Currency currentCurrency = split.getQuantity().getCurrency();
++        //    if (lastCurrency == null)
++        //        lastCurrency = currentCurrency;
++        //    else if (lastCurrency != currentCurrency){
++        //        return null; //for now we will not autobalance multi-currency transactions
++        //    }
++        //}
+ 
+         //if all the splits are the same currency but the transaction is another
+-        if (!lastCurrency.getCurrencyCode().equals(mCurrencyCode))
+-            return null;
++        //if (!lastCurrency.getCurrencyCode().equals(mCurrencyCode))
++        //    return null;
+ 
+         Money imbalance = getImbalance();
+         if (!imbalance.isAmountZero()){
+@@ -272,9 +271,10 @@ public Money getBalance(String accountUID){
+     public Money getImbalance(){
+         Money imbalance = Money.createZeroInstance(mCurrencyCode);
+         for (Split split : mSplitList) {
+-            //TODO: Handle this better when multi-currency support is introduced
+-            if (!split.getValue().getCurrency().getCurrencyCode().equals(mCurrencyCode))
+-                return Money.createZeroInstance(mCurrencyCode); //abort
++            if (!split.getValue().getCurrency().getCurrencyCode().equals(mCurrencyCode)) {
++                // values in transactions are always in the same currency
++                throw new RuntimeException("Splits values in transaction are not in the same currency");
++            }
+             Money amount = split.getValue().absolute();
+             if (split.getType() == TransactionType.DEBIT)
+                 imbalance = imbalance.subtract(amount);

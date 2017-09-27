@@ -1,0 +1,1194 @@
+From aff430382532a030cad7c483787eba2a51e7e469 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Thu, 18 Sep 2014 20:31:44 +0800
+Subject: [PATCH 1/9] Separate QIF export by currency
+
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  4 +-
+ .../gnucash/android/export/ExporterAsyncTask.java  | 54 +++++++++++++++++-----
+ .../gnucash/android/export/qif/QifExporter.java    | 11 ++++-
+ .../org/gnucash/android/export/qif/QifHelper.java  |  1 +
+ 4 files changed, 55 insertions(+), 15 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index bed881d0..d871ef3e 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -305,7 +305,7 @@ public Cursor fetchTransactionsWithSplits(String [] columns, String condition, S
+ 
+     }
+ 
+-    public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] columns, String condition, String orderBy) {
++    public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] columns, String where, String[] whereArgs, String orderBy) {
+         // table is :
+         // transactions, splits ON transactions.uid = splits.transaction_uid ,
+         // ( SELECT transactions.uid AS trans_acct_t_uid ,
+@@ -361,7 +361,7 @@ public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] column
+                 AccountEntry.TABLE_NAME + " AS account1 ON account1." + AccountEntry.COLUMN_UID +
+                 " = trans_acct.trans_acct_a_uid , " + AccountEntry.TABLE_NAME + " AS account2 ON account2." +
+                 AccountEntry.COLUMN_UID + " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID,
+-                columns, condition, null, null, null , orderBy);
++                columns, where, whereArgs, null, null , orderBy);
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/export/ExporterAsyncTask.java b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+index 796e1b58..d72aa6a6 100644
+--- a/app/src/org/gnucash/android/export/ExporterAsyncTask.java
++++ b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -32,6 +32,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.export.ofx.OfxExporter;
+ import org.gnucash.android.export.qif.QifExporter;
++import org.gnucash.android.export.qif.QifHelper;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.transaction.dialog.TransactionsDeleteConfirmationDialogFragment;
+@@ -223,21 +224,50 @@ private void shareFile(String path){
+      * @param dst Absolute path to the destination file
+      * @throws IOException if the file could not be copied
+      */
+-    public static void copyFile(File src, File dst) throws IOException
++    public void copyFile(File src, File dst) throws IOException
+     {
+         //TODO: Make this asynchronous at some time, t in the future.
+-        FileChannel inChannel = new FileInputStream(src).getChannel();
+-        FileChannel outChannel = new FileOutputStream(dst).getChannel();
+-        try
+-        {
+-            inChannel.transferTo(0, inChannel.size(), outChannel);
++        if (mExportParams.getExportFormat() == ExportFormat.QIF) {
++            // split only at the last dot
++            String[] pathParts = dst.getPath().split("(?=\\.[^\\.]+$)");
++            String line;
++            BufferedReader in = new BufferedReader(new FileReader(src));
++            BufferedWriter out = null;
++            try {
++                while ((line = in.readLine()) != null) {
++                    if (line.startsWith(QifHelper.INTERNAL_CURRENCY_PREFIX)) {
++                        String currencyCode = line.substring(1);
++                        if (out != null) {
++                            out.close();
++                        }
++                        out = new BufferedWriter(new FileWriter(pathParts[0] + "_" + currencyCode + pathParts[1]));
++                    }
++                    else {
++                        if (out == null) {
++                            out = new BufferedWriter(new FileWriter(pathParts[0] + pathParts[1]));
++                        }
++                        out.append(line).append('\n');
++                    }
++                }
++            }
++            finally {
++                in.close();
++                if (out != null) {
++                    out.close();
++                }
++            }
+         }
+-        finally
+-        {
+-            if (inChannel != null)
+-                inChannel.close();
+-            if (outChannel != null)
+-                outChannel.close();
++        else {
++            FileChannel inChannel = new FileInputStream(src).getChannel();
++            FileChannel outChannel = new FileOutputStream(dst).getChannel();
++            try {
++                inChannel.transferTo(0, inChannel.size(), outChannel);
++            } finally {
++                if (inChannel != null)
++                    inChannel.close();
++                if (outChannel != null)
++                    outChannel.close();
++            }
+         }
+     }
+ 
+diff --git a/app/src/org/gnucash/android/export/qif/QifExporter.java b/app/src/org/gnucash/android/export/qif/QifExporter.java
+index a6049f3d..92d271c3 100644
+--- a/app/src/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/org/gnucash/android/export/qif/QifExporter.java
+@@ -73,14 +73,18 @@ public void generateExport(Writer writer) throws ExporterException {
+                             mParameters.shouldExportAllTransactions() ?
+                                     "" : " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_EXPORTED + "== 0"
+                             ),
++                    null,
++                    // acct1_currency : group transaction with the same currency together
+                     // trans_time ASC : put transactions in time order
+                     // trans_uid ASC  : put splits from the same transaction together
+-                   "trans_time ASC, trans_uid ASC"
++                   "acct1_currency ASC, trans_time ASC, trans_uid ASC"
+                     );
+             try {
++                String currentCurrencyCode = "";
+                 String currentAccountUID = "";
+                 String currentTransactionUID = "";
+                 while (cursor.moveToNext()) {
++                    String currencyCode = cursor.getString(cursor.getColumnIndexOrThrow("acct1_currency"));
+                     String accountUID = cursor.getString(cursor.getColumnIndexOrThrow("acct1_uid"));
+                     String transactionUID = cursor.getString(cursor.getColumnIndexOrThrow("trans_uid"));
+                     if (!transactionUID.equals(currentTransactionUID)) {
+@@ -93,6 +97,11 @@ public void generateExport(Writer writer) throws ExporterException {
+                             //if (!currentAccountUID.equals("")) {
+                             //    // end last account
+                             //}
++                            if (!currencyCode.equals(currentCurrencyCode)) {
++                                currentCurrencyCode = currencyCode;
++                                writer.append(QifHelper.INTERNAL_CURRENCY_PREFIX)
++                                        .append(currencyCode);
++                            }
+                             // start new account
+                             currentAccountUID = accountUID;
+                             writer.append(QifHelper.ACCOUNT_HEADER).append(newLine);
+diff --git a/app/src/org/gnucash/android/export/qif/QifHelper.java b/app/src/org/gnucash/android/export/qif/QifHelper.java
+index 3a5e3d08..13374ded 100644
+--- a/app/src/org/gnucash/android/export/qif/QifHelper.java
++++ b/app/src/org/gnucash/android/export/qif/QifHelper.java
+@@ -43,6 +43,7 @@
+     public static final String ACCOUNT_HEADER           = "!Account";
+     public static final String ACCOUNT_NAME_PREFIX      = "N";
+ 
++    public static final String INTERNAL_CURRENCY_PREFIX = "*";
+ 
+     public static final String ENTRY_TERMINATOR = "^";
+     private static final SimpleDateFormat QIF_DATE_FORMATTER = new SimpleDateFormat("yyyy/M/d");
+
+From 913120dff3e3197d7514225db3c2b9bfc416a9af Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Thu, 18 Sep 2014 21:01:29 +0800
+Subject: [PATCH 2/9] QIF export fixup
+
+---
+ app/src/org/gnucash/android/export/qif/QifExporter.java | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/export/qif/QifExporter.java b/app/src/org/gnucash/android/export/qif/QifExporter.java
+index 92d271c3..bf00221a 100644
+--- a/app/src/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/org/gnucash/android/export/qif/QifExporter.java
+@@ -100,7 +100,8 @@ public void generateExport(Writer writer) throws ExporterException {
+                             if (!currencyCode.equals(currentCurrencyCode)) {
+                                 currentCurrencyCode = currencyCode;
+                                 writer.append(QifHelper.INTERNAL_CURRENCY_PREFIX)
+-                                        .append(currencyCode);
++                                        .append(currencyCode)
++                                        .append(newLine);
+                             }
+                             // start new account
+                             currentAccountUID = accountUID;
+
+From 6ac205856b923d8597568385901368e86d8ddf10 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Fri, 19 Sep 2014 20:53:24 +0800
+Subject: [PATCH 3/9] handling of export by file sharing
+
+---
+ .../gnucash/android/export/ExporterAsyncTask.java  | 102 +++++++++++++--------
+ 1 file changed, 65 insertions(+), 37 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/export/ExporterAsyncTask.java b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+index d72aa6a6..9b9ed163 100644
+--- a/app/src/org/gnucash/android/export/ExporterAsyncTask.java
++++ b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -40,7 +40,9 @@
+ import java.io.*;
+ import java.nio.channels.FileChannel;
+ import java.text.SimpleDateFormat;
++import java.util.ArrayList;
+ import java.util.Date;
++import java.util.List;
+ 
+ /**
+  * Asynchronous task for exporting transactions.
+@@ -199,21 +201,38 @@ protected void onPostExecute(Boolean exportResult) {
+      * the exported OFX file
+      * @param path String path to the file on disk
+      */
+-    private void shareFile(String path){
++    private void shareFile(String path) {
+         String defaultEmail = PreferenceManager.getDefaultSharedPreferences(mContext)
+                 .getString(mContext.getString(R.string.key_default_export_email), null);
+-        Intent shareIntent = new Intent(Intent.ACTION_SEND);
++        Intent shareIntent = new Intent(Intent.ACTION_SEND_MULTIPLE);
+         shareIntent.setType("application/xml");
+-        shareIntent.putExtra(Intent.EXTRA_STREAM, Uri.parse("file://" + path));
++        ArrayList<Uri> exportFiles = new ArrayList<Uri>();
++        if (mExportParams.getExportFormat() == ExportFormat.QIF) {
++            try {
++                List<String> splitFiles = splitQIF(new File(path), new File(path));
++                for (String file : splitFiles) {
++                    exportFiles.add(Uri.parse("file://" + file));
++                }
++            } catch (IOException e) {
++                Log.e(TAG, "error split up files in shareFile");
++                e.printStackTrace();
++                return;
++            }
++        } else {
++            exportFiles.add(Uri.parse("file://" + path));
++        }
++        shareIntent.putExtra(Intent.EXTRA_STREAM, exportFiles);
+         shareIntent.putExtra(Intent.EXTRA_SUBJECT, mContext.getString(R.string.title_export_email,
+                 mExportParams.getExportFormat().name()));
+-        if (defaultEmail != null && defaultEmail.trim().length() > 0){
++        if (defaultEmail != null && defaultEmail.trim().length() > 0) {
+             shareIntent.putExtra(Intent.EXTRA_EMAIL, new String[]{defaultEmail});
+         }
+         SimpleDateFormat formatter = (SimpleDateFormat) SimpleDateFormat.getDateTimeInstance();
+ 
+-        shareIntent.putExtra(Intent.EXTRA_TEXT, mContext.getString(R.string.description_export_email)
++        ArrayList<CharSequence> extraText = new ArrayList<CharSequence>();
++        extraText.add(mContext.getString(R.string.description_export_email)
+                 + " " + formatter.format(new Date(System.currentTimeMillis())));
++        shareIntent.putExtra(Intent.EXTRA_TEXT, extraText);
+ 
+         mContext.startActivity(Intent.createChooser(shareIntent, mContext.getString(R.string.title_select_export_destination)));
+     }
+@@ -224,40 +243,11 @@ private void shareFile(String path){
+      * @param dst Absolute path to the destination file
+      * @throws IOException if the file could not be copied
+      */
+-    public void copyFile(File src, File dst) throws IOException
+-    {
++    public void copyFile(File src, File dst) throws IOException {
+         //TODO: Make this asynchronous at some time, t in the future.
+         if (mExportParams.getExportFormat() == ExportFormat.QIF) {
+-            // split only at the last dot
+-            String[] pathParts = dst.getPath().split("(?=\\.[^\\.]+$)");
+-            String line;
+-            BufferedReader in = new BufferedReader(new FileReader(src));
+-            BufferedWriter out = null;
+-            try {
+-                while ((line = in.readLine()) != null) {
+-                    if (line.startsWith(QifHelper.INTERNAL_CURRENCY_PREFIX)) {
+-                        String currencyCode = line.substring(1);
+-                        if (out != null) {
+-                            out.close();
+-                        }
+-                        out = new BufferedWriter(new FileWriter(pathParts[0] + "_" + currencyCode + pathParts[1]));
+-                    }
+-                    else {
+-                        if (out == null) {
+-                            out = new BufferedWriter(new FileWriter(pathParts[0] + pathParts[1]));
+-                        }
+-                        out.append(line).append('\n');
+-                    }
+-                }
+-            }
+-            finally {
+-                in.close();
+-                if (out != null) {
+-                    out.close();
+-                }
+-            }
+-        }
+-        else {
++            splitQIF(src, dst);
++        } else {
+             FileChannel inChannel = new FileInputStream(src).getChannel();
+             FileChannel outChannel = new FileOutputStream(dst).getChannel();
+             try {
+@@ -271,4 +261,42 @@ public void copyFile(File src, File dst) throws IOException
+         }
+     }
+ 
++    /**
++     * Copies a file from <code>src</code> to <code>dst</code>
++     * @param src Absolute path to the source file
++     * @param dst Absolute path to the destination file
++     * @throws IOException if the file could not be copied
++     */
++    private static List<String> splitQIF(File src, File dst) throws IOException {
++        // split only at the last dot
++        String[] pathParts = dst.getPath().split("(?=\\.[^\\.]+$)");
++        ArrayList<String> splitFiles = new ArrayList<String>();
++        String line;
++        BufferedReader in = new BufferedReader(new FileReader(src));
++        BufferedWriter out = null;
++        try {
++            while ((line = in.readLine()) != null) {
++                if (line.startsWith(QifHelper.INTERNAL_CURRENCY_PREFIX)) {
++                    String currencyCode = line.substring(1);
++                    if (out != null) {
++                        out.close();
++                    }
++                    String newFileName = pathParts[0] + "_" + currencyCode + pathParts[1];
++                    splitFiles.add(newFileName);
++                    out = new BufferedWriter(new FileWriter(newFileName));
++                } else {
++                    if (out == null) {
++                        throw new IllegalArgumentException(src.getPath() + " format is not correct");
++                    }
++                    out.append(line).append('\n');
++                }
++            }
++        } finally {
++            in.close();
++            if (out != null) {
++                out.close();
++            }
++        }
++        return splitFiles;
++    }
+ }
+
+From 920bcfa1bf7095f525868f82c4c09fa566db20d8 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Fri, 19 Sep 2014 20:56:03 +0800
+Subject: [PATCH 4/9] reject non-GncXML in migrationHelper
+
+---
+ app/src/org/gnucash/android/db/MigrationHelper.java | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/MigrationHelper.java b/app/src/org/gnucash/android/db/MigrationHelper.java
+index 860746b5..f285f7c6 100644
+--- a/app/src/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/org/gnucash/android/db/MigrationHelper.java
+@@ -126,12 +126,11 @@ static String exportDatabase(SQLiteDatabase db, ExportFormat format) throws IOEx
+         //we do not use the ExporterAsyncTask here because we want to use an already open db
+         Exporter exporter = null;
+         switch (format){
+-            case QIF:
+-                exporter = new QifExporter(exportParams, db);
+-                break;
+             case GNC_XML:
+-            default:
+                 exporter = new GncXmlExporter(exportParams, db);
++                break;
++            default:
++                throw new IllegalArgumentException("Only Gnc XML is supported in Migration");
+         }
+ 
+         BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+
+From b636b28373359695d397f2e8fe7b6a2288142dd3 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 22 Sep 2014 23:53:19 +0200
+Subject: [PATCH 5/9] Fixed several bugs from crash logs
+
+Fixed: Random crash in transaction delete confirmation dialog
+Fixed: Transaction type label word wraps around button - fixes #203
+Fixed: Negative sign not displayed for amount when entering a debit in a new transaction
+---
+ app/res/layout/item_split_entry.xml                 |  2 +-
+ .../gnucash/android/importer/ImportAsyncTask.java   |  4 +++-
+ .../DeleteAllTransacationsConfirmationDialog.java   |  2 +-
+ .../ScheduledTransactionsListFragment.java          | 10 +++++++++-
+ .../ui/transaction/TransactionFormFragment.java     | 21 ++++++++++++++++++++-
+ .../dialog/SplitEditorDialogFragment.java           |  8 +++-----
+ 6 files changed, 37 insertions(+), 10 deletions(-)
+
+diff --git a/app/res/layout/item_split_entry.xml b/app/res/layout/item_split_entry.xml
+index 363563de..da992141 100644
+--- a/app/res/layout/item_split_entry.xml
++++ b/app/res/layout/item_split_entry.xml
+@@ -47,7 +47,7 @@ limitations under the License.
+ 
+         <org.gnucash.android.ui.util.TransactionTypeToggleButton android:id="@+id/btn_split_type"
+                       android:layout_width="0dp"
+-                      android:layout_weight="2"
++                      android:layout_weight="3"
+                       android:layout_height="wrap_content"
+                       android:textOn="@string/label_debit"
+                       android:textOff="@string/label_credit"
+diff --git a/app/src/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+index 52173029..e24f376f 100644
+--- a/app/src/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -53,11 +53,13 @@ protected void onPreExecute() {
+         progressDialog.setTitle(R.string.title_progress_importing_accounts);
+         progressDialog.setIndeterminate(true);
+         progressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
++        progressDialog.show();
+         if (Build.VERSION.SDK_INT > Build.VERSION_CODES.HONEYCOMB){
++            //these methods must be called after progressDialog.show()
+             progressDialog.setProgressNumberFormat(null);
+             progressDialog.setProgressPercentFormat(null);
+         }
+-        progressDialog.show();
++
+     }
+ 
+     @Override
+diff --git a/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java b/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+index 89aca3fb..578e5bf2 100644
+--- a/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
++++ b/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+@@ -57,7 +57,7 @@ public Dialog onCreateDialog(Bundle savedInstanceState) {
+                             public void onClick(DialogInterface dialog, int whichButton) {
+                                 GncXmlExporter.createBackup();
+ 
+-                                Context context = getDialog().getContext();
++                                Context context = getActivity();
+                                 AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
+                                 List<Transaction> openingBalances = new ArrayList<Transaction>();
+                                 boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
+diff --git a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index ce142492..005a8e92 100644
+--- a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -183,7 +183,15 @@ public void onListItemClick(ListView l, View v, int position, long id) {
+             checkbox.setChecked(!checkbox.isChecked());
+             return;
+         }
+-        String accountUID = mTransactionsDbAdapter.getTransaction(id).getSplits().get(0).getAccountUID();
++        Transaction transaction = mTransactionsDbAdapter.getTransaction(id);
++
++        //this should actually never happen, but has happened once. So perform check for the future
++        if (transaction.getSplits().size() == 0){
++            Toast.makeText(getActivity(), "The selected transaction has no splits and cannot be opened", Toast.LENGTH_SHORT).show();
++            return;
++        }
++
++        String accountUID = transaction.getSplits().get(0).getAccountUID();
+         openTransactionForEdit(accountUID, mTransactionsDbAdapter.getUID(id));
+     }
+ 
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index e8b9b1b3..aa993df4 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -23,6 +23,7 @@
+ import java.util.*;
+ 
+ import android.support.v4.app.FragmentManager;
++import android.text.Editable;
+ import android.widget.*;
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.*;
+@@ -473,7 +474,7 @@ private void openSplitEditor(){
+ 	 * Sets click listeners for the dialog buttons
+ 	 */
+ 	private void setListeners() {
+-        mAmountInputFormatter = new AmountInputFormatter(mAmountEditText);
++        mAmountInputFormatter = new AmountTextWatcher(mAmountEditText); //new AmountInputFormatter(mAmountEditText);
+         mAmountEditText.addTextChangedListener(mAmountInputFormatter);
+ 
+         mOpenSplitsButton.setOnClickListener(new View.OnClickListener() {
+@@ -790,6 +791,8 @@ public static String stripCurrencyFormatting(String s){
+ 		//remove all currency formatting and anything else which is not a number
+         String sign = s.trim().substring(0,1);
+         String stripped = s.trim().replaceAll("\\D*", "");
++        if (stripped.length() == 0)
++            return "";
+         if (sign.equals("+") || sign.equals("-")){
+             stripped = sign + stripped;
+         }
+@@ -814,5 +817,21 @@ public static BigDecimal parseInputToDecimal(String amountString){
+ 		return amount;
+ 	}
+ 
++    private class AmountTextWatcher extends AmountInputFormatter {
+ 
++        public AmountTextWatcher(EditText amountInput) {
++            super(amountInput);
++        }
++
++        @Override
++        public void afterTextChanged(Editable s) {
++            String value = s.toString();
++            if (mTransactionTypeButton.isChecked()){
++                if (s.charAt(0) != '-'){
++                    s = Editable.Factory.getInstance().newEditable("-" + value);
++                }
++            }
++            super.afterTextChanged(s);
++        }
++    }
+ }
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 02e1e780..09de0d8b 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -62,7 +62,6 @@
+     private Cursor mCursor;
+     private SimpleCursorAdapter mCursorAdapter;
+     private List<View> mSplitItemViewList;
+-    private long mAccountId;
+     private String mAccountUID;
+ 
+     private BalanceTextWatcher mBalanceUpdater = new BalanceTextWatcher();
+@@ -156,11 +155,10 @@ private void initArgs() {
+ 
+         Bundle args     = getArguments();
+         mAccountUID      = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
+-        mAccountId     = mAccountsDbAdapter.getID(mAccountUID);
+         mBaseAmount     = new BigDecimal(args.getString(UxArgument.AMOUNT_STRING));
+ 
+         String conditions = "(" //+ AccountEntry._ID + " != " + mAccountId + " AND "
+-                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountId)
++                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountUID)
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                 + ")";
+@@ -196,7 +194,7 @@ public void onClick(View view) {
+         updateTransferAccountsList(accountsSpinner);
+         accountsSpinner.setOnItemSelectedListener(new TypeButtonLabelUpdater(splitTypeButton));
+ 
+-        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountId));
++        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountUID));
+         splitCurrencyTextView.setText(accountCurrency.getSymbol());
+         splitTypeButton.setAmountFormattingListener(splitAmountEditText, splitCurrencyTextView);
+         splitTypeButton.setChecked(mBaseAmount.signum() > 0);
+@@ -307,7 +305,7 @@ public void onClick(View view) {
+      */
+     private void updateTotal(){
+         List<Split> splitList   = extractSplitsFromView();
+-        String currencyCode     = mAccountsDbAdapter.getCurrencyCode(mAccountId);
++        String currencyCode     = mAccountsDbAdapter.getCurrencyCode(mAccountUID);
+         Money splitSum          = Money.createZeroInstance(currencyCode);
+ 
+         for (Split split : splitList) {
+
+From b60a05c00260c5735e446c530d0fcff9d1389829 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 23 Sep 2014 00:17:40 +0200
+Subject: [PATCH 6/9] Show appropriate warnings for the different export
+ formats in the export dialog
+
+---
+ app/res/layout/dialog_export.xml                   |  6 ++++
+ app/res/values-de/strings.xml                      |  2 ++
+ app/res/values-el/strings.xml                      |  2 ++
+ app/res/values-es-rMX/strings.xml                  |  2 ++
+ app/res/values-es/strings.xml                      |  2 ++
+ app/res/values-fr/strings.xml                      |  2 ++
+ app/res/values-hu/strings.xml                      |  2 ++
+ app/res/values-it/strings.xml                      |  2 ++
+ app/res/values-nb/strings.xml                      |  2 ++
+ app/res/values-nl/strings.xml                      |  2 ++
+ app/res/values-pt-rBR/strings.xml                  |  2 ++
+ app/res/values-ru/strings.xml                      |  2 ++
+ app/res/values-zh/strings.xml                      |  2 ++
+ app/res/values/strings.xml                         |  2 ++
+ .../gnucash/android/app/GnuCashApplication.java    |  5 ++--
+ .../android/export/ExportDialogFragment.java       | 34 +++++++++++++++++++---
+ 16 files changed, 64 insertions(+), 7 deletions(-)
+
+diff --git a/app/res/layout/dialog_export.xml b/app/res/layout/dialog_export.xml
+index e032abaa..9ea5bdad 100644
+--- a/app/res/layout/dialog_export.xml
++++ b/app/res/layout/dialog_export.xml
+@@ -69,6 +69,12 @@
+                          android:layout_height="wrap_content"
+                          android:text="OFX"/>
+         </RadioGroup>
++        <TextView android:id="@+id/export_warning"
++                  android:layout_marginLeft="@dimen/dialog_padding"
++                  android:text="Some format-based export warning"
++                  android:textColor="@color/account_red"
++                  style="@style/TextAppearance.Hint"
++                  android:visibility="gone" />
+ 
+ 	    <CheckBox android:id="@+id/checkbox_export_all"
+ 	        android:layout_width="wrap_content"
+diff --git a/app/res/values-de/strings.xml b/app/res/values-de/strings.xml
+index 7d7519ac..496cf559 100644
+--- a/app/res/values-de/strings.xml
++++ b/app/res/values-de/strings.xml
+@@ -416,4 +416,6 @@
+     <string name="summary_save_opening_balances">Mglichkeit aktivieren, den aktuellen Saldo als neuen Anfangsbestand nach dem Lschen der Buchungen zu bernehmen
+     </string>
+     <string name="title_save_opening_balances">Saldo als neuen Anfangsbestand bernehmen</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-el/strings.xml b/app/res/values-el/strings.xml
+index fd98866d..1b9f053d 100644
+--- a/app/res/values-el/strings.xml
++++ b/app/res/values-el/strings.xml
+@@ -434,4 +434,6 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-es-rMX/strings.xml b/app/res/values-es-rMX/strings.xml
+index 26833c09..0fc3198d 100644
+--- a/app/res/values-es-rMX/strings.xml
++++ b/app/res/values-es-rMX/strings.xml
+@@ -419,4 +419,6 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-es/strings.xml b/app/res/values-es/strings.xml
+index 73ccf00e..99e67c7c 100644
+--- a/app/res/values-es/strings.xml
++++ b/app/res/values-es/strings.xml
+@@ -416,4 +416,6 @@
+     <string name="summary_save_opening_balances">Seleccionar para guardar el saldo actual (antes de borrar las transacciones) como nuevo saldo de apertura despues de borrar las transacciones
+     </string>
+     <string name="title_save_opening_balances">Guardar saldos de apertura</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-fr/strings.xml b/app/res/values-fr/strings.xml
+index f5a2d5f8..99b681e7 100644
+--- a/app/res/values-fr/strings.xml
++++ b/app/res/values-fr/strings.xml
+@@ -416,4 +416,6 @@
+     <string name="summary_save_opening_balances">Permet d\'enregistrer le solde du compte courant (avant la suppression des transactions) comme le nouveau solde d\'ouverture aprs la suppression des transactions
+     </string>
+     <string name="title_save_opening_balances">Enregistrer les soldes des comptes d\'ouverture</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-hu/strings.xml b/app/res/values-hu/strings.xml
+index 2314ab77..8ec09d9a 100644
+--- a/app/res/values-hu/strings.xml
++++ b/app/res/values-hu/strings.xml
+@@ -420,4 +420,6 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/res/values-it/strings.xml b/app/res/values-it/strings.xml
+index b4882656..71d68d14 100644
+--- a/app/res/values-it/strings.xml
++++ b/app/res/values-it/strings.xml
+@@ -420,4 +420,6 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-nb/strings.xml b/app/res/values-nb/strings.xml
+index a0e40336..cc816911 100644
+--- a/app/res/values-nb/strings.xml
++++ b/app/res/values-nb/strings.xml
+@@ -416,4 +416,6 @@
+     <string name="account_name_equity">Egenkapital</string>
+     <string name="summary_save_opening_balances">Merk for  lagre gjeldende konto balanse (fr sletting) som ny inngende balanse (etter sletting av transaksjoner).</string>
+     <string name="title_save_opening_balances">Lagre inngende balanser</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-nl/strings.xml b/app/res/values-nl/strings.xml
+index ddc904d0..c3beebcf 100644
+--- a/app/res/values-nl/strings.xml
++++ b/app/res/values-nl/strings.xml
+@@ -421,4 +421,6 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-pt-rBR/strings.xml b/app/res/values-pt-rBR/strings.xml
+index 89c6a37b..56e85b24 100644
+--- a/app/res/values-pt-rBR/strings.xml
++++ b/app/res/values-pt-rBR/strings.xml
+@@ -419,4 +419,6 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-ru/strings.xml b/app/res/values-ru/strings.xml
+index 60783748..b69e83d2 100644
+--- a/app/res/values-ru/strings.xml
++++ b/app/res/values-ru/strings.xml
+@@ -420,4 +420,6 @@
+     <string name="summary_save_opening_balances">     (  )       
+     </string>
+     <string name="title_save_opening_balances">   </string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values-zh/strings.xml b/app/res/values-zh/strings.xml
+index 21ca7414..8f68e059 100644
+--- a/app/res/values-zh/strings.xml
++++ b/app/res/values-zh/strings.xml
+@@ -412,4 +412,6 @@
+     <string name="account_name_equity"></string>
+     <string name="summary_save_opening_balances"></string>
+     <string name="title_save_opening_balances"></string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 2c5b8ed5..5c70c985 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -435,4 +435,6 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
+ </resources>
+diff --git a/app/src/org/gnucash/android/app/GnuCashApplication.java b/app/src/org/gnucash/android/app/GnuCashApplication.java
+index ef3bda82..f4add72a 100644
+--- a/app/src/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/org/gnucash/android/app/GnuCashApplication.java
+@@ -60,12 +60,11 @@ public static Context getAppContext() {
+     /**
+      * Returns <code>true</code> if double entry is enabled in the app settings, <code>false</code> otherwise.
+      * If the value is not set, the default value can be specified in the parameters.
+-     * @param defaultValue Default value to return if double entry is not explicitly set
+      * @return <code>true</code> if double entry is enabled, <code>false</code> otherwise
+      */
+-    public static boolean isDoubleEntryEnabled(boolean defaultValue){
++    public static boolean isDoubleEntryEnabled(){
+         SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
+-        return sharedPrefs.getBoolean(context.getString(R.string.key_use_double_entry), defaultValue);
++        return sharedPrefs.getBoolean(context.getString(R.string.key_use_double_entry), false);
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/export/ExportDialogFragment.java b/app/src/org/gnucash/android/export/ExportDialogFragment.java
+index b5a23353..4ae49090 100644
+--- a/app/src/org/gnucash/android/export/ExportDialogFragment.java
++++ b/app/src/org/gnucash/android/export/ExportDialogFragment.java
+@@ -19,15 +19,18 @@
+ import android.app.Activity;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
++import android.os.Build;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.DialogFragment;
++import android.text.AndroidCharacter;
+ import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.widget.*;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ 
+ import java.io.File;
+ 
+@@ -64,7 +67,12 @@
+ 	 * Cancels the export dialog
+ 	 */
+ 	Button mCancelButton;
+-	
++
++    /**
++     * Text view for showing warnings based on chosen export format
++     */
++    TextView mExportWarningTextView;
++
+ 	/**
+ 	 * File path for saving the OFX files
+ 	 */
+@@ -104,12 +112,24 @@ public void onRadioButtonClicked(View view){
+         switch (view.getId()){
+             case R.id.radio_ofx_format:
+                 mExportFormat = ExportFormat.OFX;
++                if (GnuCashApplication.isDoubleEntryEnabled()){
++                    mExportWarningTextView.setText(getActivity().getString(R.string.export_warning_ofx));
++                    mExportWarningTextView.setVisibility(View.VISIBLE);
++                } else {
++                    mExportWarningTextView.setVisibility(View.GONE);
++                }
+                 break;
+             case R.id.radio_qif_format:
+                 mExportFormat = ExportFormat.QIF;
++                //TODO: Also check that there exist transactions with multiple currencies before displaying warning
++                if (GnuCashApplication.isDoubleEntryEnabled()) {
++                    mExportWarningTextView.setText(getActivity().getString(R.string.export_warning_qif));
++                    mExportWarningTextView.setVisibility(View.VISIBLE);
++                } else {
++                    mExportWarningTextView.setVisibility(View.GONE);
++                }
+         }
+         mFilePath = getActivity().getExternalFilesDir(null) + "/" + Exporter.buildExportFilename(mExportFormat);
+-        return;
+     }
+ 
+ 	@Override
+@@ -158,6 +178,8 @@ public void onClick(View v) {
+ 		
+ 		mSaveButton.setOnClickListener(new ExportClickListener());
+ 
++        mExportWarningTextView = (TextView) v.findViewById(R.id.export_warning);
++
+         String defaultExportFormat = sharedPrefs.getString(getString(R.string.key_default_export_format), ExportFormat.QIF.name());
+         mExportFormat = ExportFormat.valueOf(defaultExportFormat);
+         View.OnClickListener clickListener = new View.OnClickListener() {
+@@ -168,12 +190,16 @@ public void onClick(View view) {
+         };
+ 
+         RadioButton ofxRadioButton = (RadioButton) v.findViewById(R.id.radio_ofx_format);
+-        ofxRadioButton.setChecked(defaultExportFormat.equalsIgnoreCase(ExportFormat.OFX.name()));
+         ofxRadioButton.setOnClickListener(clickListener);
++        if (defaultExportFormat.equalsIgnoreCase(ExportFormat.OFX.name())) {
++            ofxRadioButton.performClick();
++        }
+ 
+         RadioButton qifRadioButton = (RadioButton) v.findViewById(R.id.radio_qif_format);
+-        qifRadioButton.setChecked(defaultExportFormat.equalsIgnoreCase(ExportFormat.QIF.name()));
+         qifRadioButton.setOnClickListener(clickListener);
++        if (defaultExportFormat.equalsIgnoreCase(ExportFormat.QIF.name())){
++            qifRadioButton.performClick();
++        }
+ 	}
+ 
+ 
+
+From e476460605b4482ed192f1013a3cf98dbad8eb60 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 23 Sep 2014 09:56:56 +0200
+Subject: [PATCH 7/9] Update export warning for QIF
+
+---
+ app/res/values-de/strings.xml     | 2 +-
+ app/res/values-el/strings.xml     | 2 +-
+ app/res/values-es-rMX/strings.xml | 2 +-
+ app/res/values-es/strings.xml     | 2 +-
+ app/res/values-fr/strings.xml     | 2 +-
+ app/res/values-hu/strings.xml     | 2 +-
+ app/res/values-it/strings.xml     | 2 +-
+ app/res/values-nb/strings.xml     | 2 +-
+ app/res/values-nl/strings.xml     | 2 +-
+ app/res/values-pt-rBR/strings.xml | 2 +-
+ app/res/values-ru/strings.xml     | 2 +-
+ app/res/values-zh/strings.xml     | 2 +-
+ 12 files changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/app/res/values-de/strings.xml b/app/res/values-de/strings.xml
+index 496cf559..59a14a91 100644
+--- a/app/res/values-de/strings.xml
++++ b/app/res/values-de/strings.xml
+@@ -417,5 +417,5 @@
+     </string>
+     <string name="title_save_opening_balances">Saldo als neuen Anfangsbestand bernehmen</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-el/strings.xml b/app/res/values-el/strings.xml
+index 1b9f053d..8af91936 100644
+--- a/app/res/values-el/strings.xml
++++ b/app/res/values-el/strings.xml
+@@ -435,5 +435,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-es-rMX/strings.xml b/app/res/values-es-rMX/strings.xml
+index 0fc3198d..f1461471 100644
+--- a/app/res/values-es-rMX/strings.xml
++++ b/app/res/values-es-rMX/strings.xml
+@@ -420,5 +420,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-es/strings.xml b/app/res/values-es/strings.xml
+index 99e67c7c..1b4b215a 100644
+--- a/app/res/values-es/strings.xml
++++ b/app/res/values-es/strings.xml
+@@ -417,5 +417,5 @@
+     </string>
+     <string name="title_save_opening_balances">Guardar saldos de apertura</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-fr/strings.xml b/app/res/values-fr/strings.xml
+index 99b681e7..2fb56406 100644
+--- a/app/res/values-fr/strings.xml
++++ b/app/res/values-fr/strings.xml
+@@ -417,5 +417,5 @@
+     </string>
+     <string name="title_save_opening_balances">Enregistrer les soldes des comptes d\'ouverture</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-hu/strings.xml b/app/res/values-hu/strings.xml
+index 8ec09d9a..8c2d8aad 100644
+--- a/app/res/values-hu/strings.xml
++++ b/app/res/values-hu/strings.xml
+@@ -421,5 +421,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/res/values-it/strings.xml b/app/res/values-it/strings.xml
+index 71d68d14..29d38f64 100644
+--- a/app/res/values-it/strings.xml
++++ b/app/res/values-it/strings.xml
+@@ -421,5 +421,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-nb/strings.xml b/app/res/values-nb/strings.xml
+index cc816911..8e795256 100644
+--- a/app/res/values-nb/strings.xml
++++ b/app/res/values-nb/strings.xml
+@@ -417,5 +417,5 @@
+     <string name="summary_save_opening_balances">Merk for  lagre gjeldende konto balanse (fr sletting) som ny inngende balanse (etter sletting av transaksjoner).</string>
+     <string name="title_save_opening_balances">Lagre inngende balanser</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-nl/strings.xml b/app/res/values-nl/strings.xml
+index c3beebcf..dc8dc4dc 100644
+--- a/app/res/values-nl/strings.xml
++++ b/app/res/values-nl/strings.xml
+@@ -422,5 +422,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-pt-rBR/strings.xml b/app/res/values-pt-rBR/strings.xml
+index 56e85b24..4634d100 100644
+--- a/app/res/values-pt-rBR/strings.xml
++++ b/app/res/values-pt-rBR/strings.xml
+@@ -420,5 +420,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-ru/strings.xml b/app/res/values-ru/strings.xml
+index b69e83d2..aab214b0 100644
+--- a/app/res/values-ru/strings.xml
++++ b/app/res/values-ru/strings.xml
+@@ -421,5 +421,5 @@
+     </string>
+     <string name="title_save_opening_balances">   </string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+diff --git a/app/res/values-zh/strings.xml b/app/res/values-zh/strings.xml
+index 8f68e059..0f24237e 100644
+--- a/app/res/values-zh/strings.xml
++++ b/app/res/values-zh/strings.xml
+@@ -413,5 +413,5 @@
+     <string name="summary_save_opening_balances"></string>
+     <string name="title_save_opening_balances"></string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
+ </resources>
+
+From 7bdca159a19e091f79dc6dd6974939052c0693da Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 23 Sep 2014 11:08:45 +0200
+Subject: [PATCH 8/9] Updated QIF export warning
+
+---
+ app/res/values-de/strings.xml     | 2 +-
+ app/res/values-el/strings.xml     | 2 +-
+ app/res/values-es-rMX/strings.xml | 2 +-
+ app/res/values-es/strings.xml     | 2 +-
+ app/res/values-fr/strings.xml     | 2 +-
+ app/res/values-hu/strings.xml     | 2 +-
+ app/res/values-it/strings.xml     | 2 +-
+ app/res/values-nb/strings.xml     | 2 +-
+ app/res/values-nl/strings.xml     | 2 +-
+ app/res/values-pt-rBR/strings.xml | 2 +-
+ app/res/values-ru/strings.xml     | 2 +-
+ app/res/values-zh/strings.xml     | 2 +-
+ app/res/values/strings.xml        | 2 +-
+ 13 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/app/res/values-de/strings.xml b/app/res/values-de/strings.xml
+index 59a14a91..41a32aa7 100644
+--- a/app/res/values-de/strings.xml
++++ b/app/res/values-de/strings.xml
+@@ -417,5 +417,5 @@
+     </string>
+     <string name="title_save_opening_balances">Saldo als neuen Anfangsbestand bernehmen</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-el/strings.xml b/app/res/values-el/strings.xml
+index 8af91936..77c47ec9 100644
+--- a/app/res/values-el/strings.xml
++++ b/app/res/values-el/strings.xml
+@@ -435,5 +435,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-es-rMX/strings.xml b/app/res/values-es-rMX/strings.xml
+index f1461471..b8aa7b9c 100644
+--- a/app/res/values-es-rMX/strings.xml
++++ b/app/res/values-es-rMX/strings.xml
+@@ -420,5 +420,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-es/strings.xml b/app/res/values-es/strings.xml
+index 1b4b215a..5dc7ae19 100644
+--- a/app/res/values-es/strings.xml
++++ b/app/res/values-es/strings.xml
+@@ -417,5 +417,5 @@
+     </string>
+     <string name="title_save_opening_balances">Guardar saldos de apertura</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-fr/strings.xml b/app/res/values-fr/strings.xml
+index 2fb56406..19738f4b 100644
+--- a/app/res/values-fr/strings.xml
++++ b/app/res/values-fr/strings.xml
+@@ -417,5 +417,5 @@
+     </string>
+     <string name="title_save_opening_balances">Enregistrer les soldes des comptes d\'ouverture</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-hu/strings.xml b/app/res/values-hu/strings.xml
+index 8c2d8aad..9736bf03 100644
+--- a/app/res/values-hu/strings.xml
++++ b/app/res/values-hu/strings.xml
+@@ -421,5 +421,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/res/values-it/strings.xml b/app/res/values-it/strings.xml
+index 29d38f64..b9c58ced 100644
+--- a/app/res/values-it/strings.xml
++++ b/app/res/values-it/strings.xml
+@@ -421,5 +421,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-nb/strings.xml b/app/res/values-nb/strings.xml
+index 8e795256..1c3f70cd 100644
+--- a/app/res/values-nb/strings.xml
++++ b/app/res/values-nb/strings.xml
+@@ -417,5 +417,5 @@
+     <string name="summary_save_opening_balances">Merk for  lagre gjeldende konto balanse (fr sletting) som ny inngende balanse (etter sletting av transaksjoner).</string>
+     <string name="title_save_opening_balances">Lagre inngende balanser</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-nl/strings.xml b/app/res/values-nl/strings.xml
+index dc8dc4dc..6aefc698 100644
+--- a/app/res/values-nl/strings.xml
++++ b/app/res/values-nl/strings.xml
+@@ -422,5 +422,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-pt-rBR/strings.xml b/app/res/values-pt-rBR/strings.xml
+index 4634d100..d41dde59 100644
+--- a/app/res/values-pt-rBR/strings.xml
++++ b/app/res/values-pt-rBR/strings.xml
+@@ -420,5 +420,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-ru/strings.xml b/app/res/values-ru/strings.xml
+index aab214b0..847893ad 100644
+--- a/app/res/values-ru/strings.xml
++++ b/app/res/values-ru/strings.xml
+@@ -421,5 +421,5 @@
+     </string>
+     <string name="title_save_opening_balances">   </string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values-zh/strings.xml b/app/res/values-zh/strings.xml
+index 0f24237e..9434a861 100644
+--- a/app/res/values-zh/strings.xml
++++ b/app/res/values-zh/strings.xml
+@@ -413,5 +413,5 @@
+     <string name="summary_save_opening_balances"></string>
+     <string name="title_save_opening_balances"></string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">There will be one QIF file per currency in use</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 5c70c985..68fa2e2f 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -436,5 +436,5 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">QIF does not support transactions with splits of different currencies</string>
++    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
+ </resources>
+
+From 0ac4f5318aa76eb1d4494eb8ff30aa243c966c77 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 23 Sep 2014 15:13:45 +0200
+Subject: [PATCH 9/9] Fixed: transactions created from accounts list view have
+ wrong account assigned
+
+---
+ app/src/org/gnucash/android/ui/account/AccountsListFragment.java | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
+index 158ee5d1..f8ead4fd 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -673,7 +673,7 @@ public void close() {
+         }
+ 
+         @Override
+-        public void bindView(View v, Context context, final Cursor cursor) {
++        public void bindView(View v, Context context, Cursor cursor) {
+             // perform the default binding
+             super.bindView(v, context, cursor);
+ 
+@@ -714,7 +714,6 @@ public void bindView(View v, Context context, final Cursor cursor) {
+                     public void onClick(View v) {
+                         Intent intent = new Intent(getActivity(), TransactionsActivity.class);
+                         intent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-                        String accountUID = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_UID));
+                         intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+                         getActivity().startActivity(intent);
+                     }

@@ -1,0 +1,581 @@
+From 9ab4e04b4ff296ca8a9238d971a7c68c5991583a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 16 Nov 2015 13:24:07 +0100
+Subject: [PATCH] Fix: export start time not respected
+
+Add tests for creating backup
+Use cache directory as primary export destination
+Code refactoring
+---
+ .../android/test/ui/ExportTransactionsTest.java    | 28 +++++++++
+ .../gnucash/android/export/ExportAsyncTask.java    | 25 +++++---
+ .../org/gnucash/android/export/ExportParams.java   | 26 +-------
+ .../java/org/gnucash/android/export/Exporter.java  | 44 +++++++++++++-
+ .../gnucash/android/export/ofx/OfxExporter.java    | 14 ++---
+ .../gnucash/android/export/qif/QifExporter.java    |  8 +--
+ .../gnucash/android/export/xml/GncXmlExporter.java | 71 ++++++++++++++--------
+ .../android/test/unit/export/BackupTest.java       | 66 ++++++++++++++++++++
+ .../android/test/unit/export/GncXmlHelperTest.java | 16 +++++
+ 9 files changed, 228 insertions(+), 70 deletions(-)
+ create mode 100644 app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 5b51bdce..05c9bbed 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -61,6 +61,7 @@
+ import static android.support.test.espresso.Espresso.onView;
+ import static android.support.test.espresso.action.ViewActions.click;
+ import static android.support.test.espresso.assertion.ViewAssertions.matches;
++import static android.support.test.espresso.matcher.RootMatchers.withDecorView;
+ import static android.support.test.espresso.matcher.ViewMatchers.isAssignableFrom;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
+ import static android.support.test.espresso.matcher.ViewMatchers.isEnabled;
+@@ -69,6 +70,8 @@
+ import static android.support.test.espresso.matcher.ViewMatchers.withText;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.hamcrest.Matchers.allOf;
++import static org.hamcrest.Matchers.is;
++import static org.hamcrest.Matchers.not;
+ 
+ @RunWith(AndroidJUnit4.class)
+ @FixMethodOrder(MethodSorters.NAME_ASCENDING)
+@@ -192,6 +195,11 @@ public void testExport(ExportFormat format){
+ 
+ 		DrawerActions.openDrawer(R.id.drawer_layout);
+ 		onView(withText(R.string.nav_menu_export)).perform(click());
++
++		onView(withId(R.id.spinner_export_destination)).perform(click());
++		String[] destinations = getActivity().getResources().getStringArray(R.array.export_destinations);
++
++		onView(withText(destinations[0])).perform(click());
+ 		onView(withText(format.name())).perform(click());
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+@@ -243,6 +251,26 @@ public void testShouldCreateExportSchedule(){
+ 		assertThat(action.getEndTime()).isEqualTo(0);
+ 	}
+ 
++	@Test
++	public void testCreateBackup(){
++		DrawerActions.openDrawer(R.id.drawer_layout);
++		onView(withText(R.string.title_settings)).perform(click());
++		onView(withText(R.string.header_backup_and_export_settings)).perform(click());
++
++		onView(withText(R.string.title_create_backup_pref)).perform(click());
++		assertToastDisplayed(R.string.toast_backup_successful);
++	}
++
++	/**
++	 * Checks that a specific toast message is displayed
++	 * @param toastString String that should be displayed
++	 */
++	private void assertToastDisplayed(int toastString) {
++		onView(withText(toastString))
++				.inRoot(withDecorView(not(is(getActivity().getWindow().getDecorView()))))
++				.check(matches(isDisplayed()));
++	}
++
+ 	//todo: add testing of export flag to unit test
+ 	//todo: add test of ignore exported transactions to unit tests
+ 	@Override
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 97c219bf..0e17ef28 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -393,8 +393,9 @@ private void shareFiles(List<String> paths) {
+         Intent shareIntent = new Intent(Intent.ACTION_SEND_MULTIPLE);
+         shareIntent.setType("text/xml");
+ 
+-        ArrayList<Uri> exportFiles = convertPathsToUris(paths);
+-        shareIntent.putExtra(Intent.EXTRA_STREAM, exportFiles);
++        ArrayList<Uri> exportFiles = convertFilePathsToUris(paths);
++//        shareIntent.putExtra(Intent.EXTRA_STREAM, exportFiles);
++        shareIntent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, exportFiles);
+ 
+         shareIntent.putExtra(Intent.EXTRA_SUBJECT, mContext.getString(R.string.title_export_email,
+                 mExportParams.getExportFormat().name()));
+@@ -422,14 +423,24 @@ private void shareFiles(List<String> paths) {
+         }
+     }
+ 
+-    // /some/path/file.ext -> file:///some/path/file.ext
++    //
++
++    /**
++     * Convert file paths to URIs by adding the file// prefix
++     * <p>e.g. /some/path/file.ext --> file:///some/path/file.ext</p>
++     * @param paths List of file paths to convert
++     * @return List of file URIs
++     */
+     @NonNull
+-    private ArrayList<Uri> convertPathsToUris(List<String> paths) {
++    private ArrayList<Uri> convertFilePathsToUris(List<String> paths) {
+         ArrayList<Uri> exportFiles = new ArrayList<>();
+ 
+-        for (String file : paths)
+-            exportFiles.add(Uri.parse("file://" + file));
+-
++        for (String path : paths) {
++            File file = new File(path);
++            file.setReadable(true, false);
++            exportFiles.add(Uri.fromFile(file));
++//            exportFiles.add(Uri.parse("file://" + file));
++        }
+         return exportFiles;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index 7d859621..04d860e0 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -16,12 +16,6 @@
+ 
+ package org.gnucash.android.export;
+ 
+-import android.preference.PreferenceManager;
+-import android.util.Log;
+-
+-import com.crashlytics.android.Crashlytics;
+-
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.ui.export.ExportFormFragment;
+ 
+ import java.sql.Timestamp;
+@@ -65,11 +59,6 @@
+     private ExportTarget mExportTarget      = ExportTarget.SHARING;
+ 
+     /**
+-     * File path for the internal saving of transactions before determining export destination.
+-     */
+-    private String mTargetFilepath;
+-
+-    /**
+      * Creates a new set of paramters and specifies the export format
+      * @param format Format to use when exporting the transactions
+      */
+@@ -91,8 +80,6 @@ public ExportFormat getExportFormat() {
+      */
+     public void setExportFormat(ExportFormat exportFormat) {
+         this.mExportFormat = exportFormat;
+-        this.mTargetFilepath = GnuCashApplication.getAppContext().getFilesDir() + "/"
+-                            + Exporter.buildExportFilename(mExportFormat);
+     }
+ 
+     /**
+@@ -144,19 +131,10 @@ public void setExportTarget(ExportTarget mExportTarget) {
+         this.mExportTarget = mExportTarget;
+     }
+ 
+-    /**
+-     * Returns the internal target file path for the exported transactions.
+-     * This file path is not accessible outside the context of the application
+-     * @return String path to exported transactions
+-     */
+-    public String getInternalExportPath() {
+-        return mTargetFilepath;
+-    }
+-
+     @Override
+     public String toString() {
+-        return "Export " + mExportFormat.name() + " to " + mExportTarget.name() + " at "
+-                + mTargetFilepath;
++        return "Export all transactions created since " + mExportStartTime.toString()
++                + " as "+ mExportFormat.name() + " to " + mExportTarget.name();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index bbbb7b46..9727f101 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -34,6 +34,7 @@
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ 
++import java.io.File;
+ import java.sql.Timestamp;
+ import java.text.ParseException;
+ import java.text.SimpleDateFormat;
+@@ -72,7 +73,16 @@
+     /**
+      * Export options
+      */
+-    protected ExportParams mParameters;
++    protected ExportParams mExportParams;
++
++    /**
++     * Cache directory to which files will be first exported before moved to final destination.
++     * <p>There is a different cache dir per export format, which has the name of the export format.<br/>
++     *    The cache dir is cleared every time a new {@link Exporter} is instantiated.
++     *    The files created here are only accessible within this application, and should be copied to SD card before they can be shared
++     * </p>
++     */
++    protected File mCacheDir;
+ 
+     private static final SimpleDateFormat EXPORT_FILENAME_DATE_FORMAT = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US);
+ 
+@@ -95,7 +105,7 @@
+     protected Context mContext;
+ 
+     public Exporter(ExportParams params, SQLiteDatabase db) {
+-        this.mParameters = params;
++        this.mExportParams = params;
+         mContext = GnuCashApplication.getAppContext();
+         if (db == null) {
+             mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+@@ -112,6 +122,10 @@ public Exporter(ExportParams params, SQLiteDatabase db) {
+             mPricesDbAdapter = new PricesDbAdapter(db);
+             mCommoditiesDbAdapter = new CommoditiesDbAdapter(db);
+         }
++
++        mCacheDir = new File(mContext.getCacheDir(), params.getExportFormat().name());
++        mCacheDir.mkdir();
++        purgeDirectory(mCacheDir);
+     }
+ 
+     /**
+@@ -151,6 +165,32 @@ public static long getExportTime(String filename){
+     public abstract List<String> generateExport() throws ExporterException;
+ 
+     /**
++     * Recursively delete all files in a directory
++     * @param directory File descriptor for directory
++     */
++    private void purgeDirectory(File directory){
++        for (File file : directory.listFiles()) {
++            if (file.isDirectory())
++                purgeDirectory(file);
++            else
++                file.delete();
++        }
++    }
++
++    /**
++     * Returns the path to the file where the exporter should save the export during generation
++     * <p>This path is a temporary cache file whose file extension matches the export format.<br>
++     *     This file is deleted every time a new export is started</p>
++     * @return Absolute path to file
++     */
++    protected String getExportCacheFilePath(){
++        String cachePath = mCacheDir.getAbsolutePath();
++        if (!cachePath.endsWith("/"))
++            cachePath += "/";
++        return cachePath + buildExportFilename(mExportParams.getExportFormat());
++    }
++
++    /**
+      * Returns the MIME type for this exporter.
+      * @return MIME type as string
+      */
+diff --git a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+index b116f34f..c29e426b 100644
+--- a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -104,7 +104,7 @@ private void generateOfx(Document doc, Element parent){
+ 
+ 
+ 			//add account details (transactions) to the XML document			
+-			account.toOfx(doc, statementTransactionResponse, mParameters.getExportStartTime());
++			account.toOfx(doc, statementTransactionResponse, mExportParams.getExportStartTime());
+ 			
+ 			//mark as exported
+ 			accountsDbAdapter.markAsExported(account.getUID());
+@@ -114,7 +114,7 @@ private void generateOfx(Document doc, Element parent){
+ 
+     // FIXME: Move code to generateExport()
+     private String generateOfxExport() throws ExporterException {
+-        mAccountsList = mAccountsDbAdapter.getExportableAccounts(mParameters.getExportStartTime());
++        mAccountsList = mAccountsDbAdapter.getExportableAccounts(mExportParams.getExportStartTime());
+ 
+         DocumentBuilderFactory docFactory = DocumentBuilderFactory
+                 .newInstance();
+@@ -122,7 +122,7 @@ private String generateOfxExport() throws ExporterException {
+         try {
+             docBuilder = docFactory.newDocumentBuilder();
+         } catch (ParserConfigurationException e) {
+-            throw new ExporterException(mParameters, e);
++            throw new ExporterException(mExportParams, e);
+         }
+ 
+         Document document = docBuilder.newDocument();
+@@ -158,23 +158,23 @@ private String generateOfxExport() throws ExporterException {
+         BufferedWriter writer = null;
+ 
+         try {
+-            File file = new File(mParameters.getInternalExportPath());
++            File file = new File(getExportCacheFilePath());
+             writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
+             writer.write(generateOfxExport());
+         } catch (IOException e) {
+-            throw new ExporterException(mParameters, e);
++            throw new ExporterException(mExportParams, e);
+         } finally {
+             if (writer != null) {
+                 try {
+                     writer.close();
+                 } catch (IOException e) {
+-                    throw new ExporterException(mParameters, e);
++                    throw new ExporterException(mExportParams, e);
+                 }
+             }
+         }
+ 
+         List<String> exportedFiles = new ArrayList<>();
+-        exportedFiles.add(mParameters.getInternalExportPath());
++        exportedFiles.add(getExportCacheFilePath());
+ 
+         return exportedFiles;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index 1f3eb6aa..6c1fcfde 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -60,7 +60,7 @@ public QifExporter(ExportParams params){
+         final String newLine = "\n";
+         TransactionsDbAdapter transactionsDbAdapter = mTransactionsDbAdapter;
+         try {
+-            String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(mContext).getString(Exporter.PREF_LAST_EXPORT_TIME, Exporter.TIMESTAMP_ZERO);
++            String lastExportTimeStamp = mExportParams.getExportStartTime().toString();
+             Cursor cursor = transactionsDbAdapter.fetchTransactionsWithSplitsWithTransactionAccount(
+                     new String[]{
+                             TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID + " AS trans_uid",
+@@ -95,7 +95,7 @@ public QifExporter(ExportParams params){
+                    "acct1_currency ASC, trans_time ASC, trans_uid ASC"
+                     );
+ 
+-            File file = new File(mParameters.getInternalExportPath());
++            File file = new File(getExportCacheFilePath());
+             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
+ 
+             try {
+@@ -190,7 +190,7 @@ public QifExporter(ExportParams params){
+                             precision = 3;
+                             break;
+                         default:
+-                            throw new ExporterException(mParameters, "split quantity has illegal denominator: "+ quantity_denom);
++                            throw new ExporterException(mExportParams, "split quantity has illegal denominator: "+ quantity_denom);
+                     }
+                     Double quantity = 0.0;
+                     if (quantity_denom != 0) {
+@@ -220,7 +220,7 @@ public QifExporter(ExportParams params){
+             PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+             return splitQIF(file);
+         } catch (IOException e) {
+-            throw new ExporterException(mParameters, e);
++            throw new ExporterException(mExportParams, e);
+         }
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index b148e5a6..407d65ad 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -45,6 +45,7 @@
+ import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.OutputStreamWriter;
++import java.io.Writer;
+ import java.math.BigDecimal;
+ import java.sql.Timestamp;
+ import java.util.ArrayList;
+@@ -696,16 +697,41 @@ private void exportPrices(XmlSerializer xmlSerializer) throws IOException {
+     @Override
+     public List<String> generateExport() throws ExporterException {
+         OutputStreamWriter writer = null;
++        String outputFile = getExportCacheFilePath();
++        try {
++            FileOutputStream fileOutputStream = new FileOutputStream(outputFile);
++            BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
++            writer = new OutputStreamWriter(bufferedOutputStream);
++
++            generateExport(writer);
++        } catch (IOException ex){
++            Crashlytics.log("Error exporting XML");
++            Crashlytics.logException(ex);
++        } finally {
++            if (writer != null) {
++                try {
++                    writer.close();
++                } catch (IOException e) {
++                    throw new ExporterException(mExportParams, e);
++                }
++            }
++        }
++
++        List<String> exportedFiles = new ArrayList<>();
++        exportedFiles.add(outputFile);
++
++        return exportedFiles;
++    }
+ 
++    /**
++     * Generates an XML export of the database and writes it to the {@code writer} output stream
++     * @param writer Output stream
++     * @throws ExporterException
++     */
++    public void generateExport(Writer writer) throws ExporterException {
+         try {
+             String[] namespaces = new String[]{"gnc", "act", "book", "cd", "cmdty", "price", "slot",
+                     "split", "trn", "ts", "sx", "recurrence"};
+-            new File(BACKUP_FOLDER_PATH).mkdirs();
+-            FileOutputStream fileOutputStream = new FileOutputStream(getBackupFilePath());
+-            BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
+-            GZIPOutputStream gzipOutputStream = new GZIPOutputStream(bufferedOutputStream);
+-            writer = new OutputStreamWriter(gzipOutputStream);
+-
+             XmlSerializer xmlSerializer = XmlPullParserFactory.newInstance().newSerializer();
+             xmlSerializer.setOutput(writer);
+             xmlSerializer.startDocument("utf-8", true);
+@@ -779,24 +805,11 @@ private void exportPrices(XmlSerializer xmlSerializer) throws IOException {
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_BOOK);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_ROOT);
+             xmlSerializer.endDocument();
++            xmlSerializer.flush();
+         } catch (Exception e) {
+             Crashlytics.logException(e);
+-            throw new ExporterException(mParameters, e);
+-        } finally {
+-            if (writer != null) {
+-                try {
+-                    writer.close();
+-                } catch (IOException e) {
+-                    throw new ExporterException(mParameters, e);
+-                }
+-            }
++            throw new ExporterException(mExportParams, e);
+         }
+-
+-        List<String> exportedFiles = new ArrayList<>();
+-        // FIXME: this looks weird
+-        exportedFiles.add(getBackupFilePath());
+-
+-        return exportedFiles;
+     }
+ 
+     /**
+@@ -808,17 +821,23 @@ public String getExportMimeType(){
+     }
+ 
+     /**
+-     * Creates a backup of current database contents to the default backup location
++     * Creates a backup of current database contents to the directory {@link Exporter#BACKUP_FOLDER_PATH}
+      * @return {@code true} if backup was successful, {@code false} otherwise
+      */
+     public static boolean createBackup(){
+-        ExportParams params = new ExportParams(ExportFormat.XML);
+         try {
+-            new GncXmlExporter(params).generateExport();
++            new File(BACKUP_FOLDER_PATH).mkdirs();
++            FileOutputStream fileOutputStream = new FileOutputStream(getBackupFilePath());
++            BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
++            GZIPOutputStream gzipOutputStream = new GZIPOutputStream(bufferedOutputStream);
++            OutputStreamWriter writer = new OutputStreamWriter(gzipOutputStream);
++
++            ExportParams params = new ExportParams(ExportFormat.XML);
++            new GncXmlExporter(params).generateExport(writer);
+             return true;
+-        } catch (ExporterException e) {
++        } catch (IOException | ExporterException e) {
+             Crashlytics.logException(e);
+-            Log.e("GncXmlExporter", "Error creating backup", e);
++            Log.e("GncXmlExporter", "Error creating XML  backup", e);
+             return false;
+         }
+     }
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java b/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+new file mode 100644
+index 00000000..411299b5
+--- /dev/null
++++ b/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+@@ -0,0 +1,66 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.test.unit.export;
++
++import org.gnucash.android.BuildConfig;
++import org.gnucash.android.export.ExportFormat;
++import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.export.Exporter;
++import org.gnucash.android.export.xml.GncXmlExporter;
++import org.gnucash.android.test.unit.db.AccountsDbAdapterTest;
++import org.gnucash.android.test.unit.util.GnucashTestRunner;
++import org.gnucash.android.test.unit.util.ShadowCrashlytics;
++import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.junit.Before;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
++
++import java.io.File;
++import java.util.List;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/**
++ * Test backup and restore functionality
++ */
++@RunWith(GnucashTestRunner.class)
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
++public class BackupTest {
++
++    @Before
++    public void setUp(){
++        AccountsDbAdapterTest.loadDefaultAccounts();
++    }
++
++    @Test
++    public void shouldCreateBackup(){
++        boolean backupResult = GncXmlExporter.createBackup();
++        assertThat(backupResult).isTrue();
++    }
++
++    @Test
++    public void shouldCreateBackupFileName(){
++        Exporter exporter = new GncXmlExporter(new ExportParams(ExportFormat.XML));
++        List<String> xmlFiles = exporter.generateExport();
++
++        assertThat(xmlFiles).hasSize(1);
++        assertThat(new File(xmlFiles.get(0)))
++                .exists()
++                .hasExtension(ExportFormat.XML.getExtension().substring(1));
++
++    }
++}
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java b/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
+index 0e4c811f..320b218b 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
+@@ -1,3 +1,19 @@
++/*
++ * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
+ package org.gnucash.android.test.unit.export;
+ 
+ import org.gnucash.android.export.xml.GncXmlHelper;

@@ -1,0 +1,1065 @@
+From 6b202da1a8eb0277cca8d959c47830c7dd43f74a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 30 Jun 2012 05:07:20 +0200
+Subject: [PATCH] Implemented exporting of transactions to OFX format
+
+---
+ GnucashMobile/AndroidManifest.xml                  |   1 +
+ GnucashMobile/res/layout/dialog_export_ofx.xml     |  84 +++++++
+ GnucashMobile/res/values/strings.xml               |  10 +
+ .../src/org/gnucash/android/data/Account.java      |   4 +-
+ .../src/org/gnucash/android/data/Transaction.java  |  28 ++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  23 +-
+ .../org/gnucash/android/db/DatabaseAdapter.java    |   1 +
+ .../src/org/gnucash/android/db/DatabaseHelper.java |  25 ++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  39 ++++
+ .../org/gnucash/android/ui/AccountsActivity.java   |   2 +-
+ .../gnucash/android/ui/AccountsListFragment.java   |  18 +-
+ .../gnucash/android/ui/ExportDialogFragment.java   | 243 +++++++++++++++++++++
+ .../src/org/gnucash/android/util/OfxFormatter.java | 189 ++++++++++++++++
+ .../gnucash/android/test/AccountsActivityTest.java |  24 ++
+ .../org/gnucash/android/test/OfxExportTest.java    |  31 ++-
+ .../android/test/TransactionsFragmentTest.java     |  24 ++
+ 16 files changed, 716 insertions(+), 30 deletions(-)
+ create mode 100644 GnucashMobile/res/layout/dialog_export_ofx.xml
+ create mode 100644 GnucashMobile/src/org/gnucash/android/ui/ExportDialogFragment.java
+ create mode 100644 GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+
+diff --git a/GnucashMobile/AndroidManifest.xml b/GnucashMobile/AndroidManifest.xml
+index c155fd44..92937faa 100644
+--- a/GnucashMobile/AndroidManifest.xml
++++ b/GnucashMobile/AndroidManifest.xml
+@@ -29,6 +29,7 @@
+     android:versionName="1.0" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="15"/>
++    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+ 
+     <application
+         android:icon="@drawable/ic_launcher"
+diff --git a/GnucashMobile/res/layout/dialog_export_ofx.xml b/GnucashMobile/res/layout/dialog_export_ofx.xml
+new file mode 100644
+index 00000000..d8e92a7f
+--- /dev/null
++++ b/GnucashMobile/res/layout/dialog_export_ofx.xml
+@@ -0,0 +1,84 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++ Written By: Ngewi Fet <ngewif@gmail.com>
++ Copyright (c) 2012 Ngewi Fet
++ 
++ This file is part of Gnucash for Android
++ 
++ Gnucash for Android is free software; you can redistribute it and/or
++ modify it under the terms of the GNU General Public License as
++ published by the Free Software Foundation; either version 2 of
++ the License, or (at your option) any later version.
++ 
++ This program is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++ 
++ You should have received a copy of the GNU General Public License
++ along with this program; if not, contact:
++ 
++ Free Software Foundation           Voice:  +1-617-542-5942
++ 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
++ Boston, MA  02110-1301,  USA       gnu@gnu.org
++-->
++
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:padding="@dimen/edge_padding"
++    android:orientation="vertical" >
++    
++    <TextView
++        android:text="@string/label_export_destination"
++        android:layout_height="wrap_content"
++        android:layout_width="wrap_content"
++        android:layout_marginBottom="-8dip"
++        style="@style/TextAppearance.EditTransaction_LabelSmall" />
++
++    <Spinner android:id="@+id/spinner_export_destination"
++        android:layout_height="wrap_content" 
++        android:layout_width="match_parent"
++        style="@style/ListItem"
++        android:layout_marginBottom="20dp" />
++       
++    <CheckBox android:id="@+id/checkbox_export_all"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:textAppearance="?android:attr/textAppearanceLarge"
++        android:text="@string/export_all_transactions"        
++        />
++    <TextView
++        android:text="@string/label_export_choice"
++        android:layout_height="wrap_content"
++        android:layout_width="wrap_content"
++        android:layout_marginBottom="-8dip"
++        android:padding="10dp"
++        android:textAppearance="?android:attr/textAppearanceSmall" />
++        <!--  style="@style/TextAppearance.EditTransaction_LabelSmall" /> -->
++        
++	<LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:padding="10dp"
++        android:orientation="horizontal" >
++
++        <Button
++            android:id="@+id/btn_cancel"
++            android:layout_width="0dp"            
++            android:layout_height="wrap_content"
++            android:padding="14dp"
++            android:layout_weight="1"       
++            android:drawableLeft="@drawable/navigation_cancel"     
++            android:text="@string/btn_cancel" />
++
++        <Button
++            android:id="@+id/btn_save"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:padding="14dp"
++            android:layout_weight="1"
++            android:drawableLeft="@drawable/navigation_accept"
++            android:text="@string/btn_export" />       
++    </LinearLayout>        
++</LinearLayout>
+\ No newline at end of file
+diff --git a/GnucashMobile/res/values/strings.xml b/GnucashMobile/res/values/strings.xml
+index ac021971..fa542465 100644
+--- a/GnucashMobile/res/values/strings.xml
++++ b/GnucashMobile/res/values/strings.xml
+@@ -58,5 +58,15 @@
+     <string name="menu_move">MOVE</string>
+     <string name="selected">selected</string>
+     <string name="label_transactions_total">Total sum:</string>
++    <string name="label_export_destination">Export Destination</string>
++    <string name="title_export_dialog">Export OFX</string>
++    <string name="export_all_transactions">Export all transactions</string>
++    <string name="label_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
++    <string name="error_exporting">Error exporting OFX data</string>
++    <string-array name="export_destinations">
++        <item >Email&#8230;</item>
++        <item >SD Card</item>
++    </string-array>
++    <string name="btn_export">Export</string>
+ 
+ </resources>
+\ No newline at end of file
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index 20c74722..5e948d9a 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -184,8 +184,10 @@ public double getBalance(){
+ 	 * @param doc XML DOM document for the OFX data
+ 	 * @param parent Node to which to add this account's transactions
+ 	 */
+-	public void toXml(Document doc, Element parent){
++	public void toXml(Document doc, Element parent, boolean allTransactions){
+ 		for (Transaction transaction : mTransactionsList) {
++			if (!allTransactions && transaction.isExported())
++				continue;
+ 			parent.appendChild(transaction.toXml(doc));
+ 		}
+ 	}
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index 5f395e86..cec6aed9 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -49,7 +49,7 @@
+ 	private String mName;
+ 	private String mDescription = "";
+ 	private String mAccountUID = null;
+-	
++	private int mIsExported = 0;
+ 	private long mTimestamp;
+ 	private TransactionType mType = TransactionType.DEBIT;
+ 	
+@@ -213,7 +213,14 @@ public String getAccountUID() {
+ 		return mAccountUID;
+ 	}
+ 	
+-
++	public void setExported(boolean isExported){
++		mIsExported = isExported ? 1 : 0;
++	}
++	
++	public boolean isExported(){
++		return mIsExported == 1;
++	}
++	
+ 	/**
+ 	 * Set the account UID of the account to which this transaction belongs
+ 	 * @param accountUID the UID of the account which owns this transaction
+@@ -222,18 +229,17 @@ public void setAccountUID(String accountUID) {
+ 		this.mAccountUID = accountUID;
+ 	}
+ 	
+-
+ 	/**
+ 	 * Converts transaction to XML DOM corresponding to OFX Statement transaction and 
+ 	 * returns the element node for the transaction
+ 	 * @param doc XML document to which transaction should be added
+ 	 * @return Element in DOM corresponding to transaction
+ 	 */
+-	public Element toXml(Document doc){
+-		Element transaction = doc.createElement("STMTTRN");
++	public Element toXml(Document doc){		
++		Element transactionNode = doc.createElement("STMTTRN");
+ 		Element type = doc.createElement("TRNTYPE");
+ 		type.appendChild(doc.createTextNode(mType.toString()));
+-		transaction.appendChild(type);
++		transactionNode.appendChild(type);
+ 
+ /* TODO Remove references to expenses
+ 		Element datePosted = doc.createElement("DTPOSTED");
+@@ -247,21 +253,21 @@ public Element toXml(Document doc){
+ */		
+ 		Element amount = doc.createElement("TRNAMT");
+ 		amount.appendChild(doc.createTextNode(Double.toString(mAmount)));
+-		transaction.appendChild(amount);
++		transactionNode.appendChild(amount);
+ 		
+ 		Element transID = doc.createElement("FITID");
+ 		transID.appendChild(doc.createTextNode(mTransactionUID));
+-		transaction.appendChild(transID);
++		transactionNode.appendChild(transID);
+ 		
+ 		Element name = doc.createElement("NAME");
+ 		name.appendChild(doc.createTextNode(mName));
+-		transaction.appendChild(name);
++		transactionNode.appendChild(name);
+ 		
+ 		Element memo = doc.createElement("MEMO");
+ 		memo.appendChild(doc.createTextNode(mDescription));
+-		transaction.appendChild(memo);
++		transactionNode.appendChild(memo);
+ 		
+-		return transaction;
++		return transactionNode;
+ 	}
+ 
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 8f2a36db..6b2efe32 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -24,6 +24,9 @@
+ 
+ package org.gnucash.android.db;
+ 
++import java.util.ArrayList;
++import java.util.List;
++
+ import org.gnucash.android.data.Account;
+ import org.gnucash.android.data.Account.AccountType;
+ import org.gnucash.android.data.Transaction;
+@@ -36,7 +39,7 @@
+ /**
+  * Manages persistence of {@link Account}s in the database
+  * Handles adding, modifying and deleting of account records.
+- * @author Ngewi Fet <ngewif@gmail.com
++ * @author Ngewi Fet <ngewif@gmail.com>
+  *
+  */
+ public class AccountsDbAdapter extends DatabaseAdapter {
+@@ -203,6 +206,24 @@ public Account getAccount(String uid){
+ 	}	
+ 	
+ 	/**
++	 * Returns a list of all account objects in the system
++	 * @return List of {@link Account}s in the database
++	 */
++	public List<Account> getAllAccounts(){
++		ArrayList<Account> accounts = new ArrayList<Account>();
++		Cursor c = fetchAllAccounts();
++		
++		if (c == null)
++			return accounts;
++		
++		while(c.moveToNext()){
++			accounts.add(buildAccountInstance(c));
++		}
++		c.close();
++		return accounts;
++	}
++	
++	/**
+ 	 * Returns a cursor to all account records in the database
+ 	 * @return {@link Cursor} to all account records
+ 	 */
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
+index 2005754a..89079963 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -54,6 +54,7 @@
+ 	public static final int COLUMN_DESCRIPTION 	= 5;
+ 	public static final int COLUMN_TIMESTAMP 	= 6;
+ 	public static final int COLUMN_ACCOUNT_UID 	= 7;
++	public static final int COLUMN_EXPORTED 	= 8;
+ 	
+ 	/**
+ 	 * {@link DatabaseHelper} for creating and opening the database
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+index 16b7439d..4c9b48ae 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -34,20 +34,21 @@
+ 	private static final String TAG = "DatabaseHelper";
+ 	
+ 	private static final String DATABASE_NAME = "gnucash_db";
+-	private static final int DATABASE_VERSION = 1;
++	private static final int DATABASE_VERSION = 2;
+ 	
+ 	public static final String ACCOUNTS_TABLE_NAME = "accounts";
+ 	public static final String TRANSACTIONS_TABLE_NAME = "transactions";
+ 	
+-	public static final String KEY_ROW_ID = "_id";
+-	public static final String KEY_NAME = "name";
+-	public static final String KEY_UID 	= "uid";
+-	public static final String KEY_TYPE = "type";
++	public static final String KEY_ROW_ID 	= "_id";
++	public static final String KEY_NAME 	= "name";
++	public static final String KEY_UID 		= "uid";
++	public static final String KEY_TYPE 	= "type";
+ 	
+ 	public static final String KEY_AMOUNT = "amount";
+-	public static final String KEY_ACCOUNT_UID = "account_uid";
+-	public static final String KEY_DESCRIPTION = "description";
+-	public static final String KEY_TIMESTAMP = "timestamp";
++	public static final String KEY_ACCOUNT_UID 	= "account_uid";
++	public static final String KEY_DESCRIPTION 	= "description";
++	public static final String KEY_TIMESTAMP 	= "timestamp";
++	public static final String KEY_EXPORTED		= "is_exported";
+ 	
+ 	//if you modify the order of the columns, 
+ 	//make sure to modify the indices in DatabaseAdapter
+@@ -67,6 +68,7 @@
+ 			+ KEY_DESCRIPTION 	+ " text, "
+ 			+ KEY_TIMESTAMP 	+ " integer not null, "
+ 			+ KEY_ACCOUNT_UID 	+ " varchar(255) not null, "
++			+ KEY_EXPORTED 		+ " tinyint not null default 0, "
+ 			+ "FOREIGN KEY (" + KEY_ACCOUNT_UID + ") REFERENCES " + ACCOUNTS_TABLE_NAME + " (" + KEY_UID + ")"
+ 			+ ");";
+ 	
+@@ -88,7 +90,12 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 				+ " which will destroy all old data");
+ 		
+ 		if (oldVersion < newVersion){
+-			
++			if (oldVersion == 1 && newVersion == 2){
++				Log.i("DatabaseHelper", "Upgrading database to version 2");
++				String addColumnSql = "ALTER TABLE " + TRANSACTIONS_TABLE_NAME + 
++									" ADD COLUMN " + KEY_EXPORTED + " tinyint default 0";
++				db.execSQL(addColumnSql);
++			}
+ 		} else {
+ 			Log.i(TAG, "Cannot downgrade database.");
+ 			/*
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 2e8651bc..f7ae1ab3 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -27,6 +27,7 @@
+ import java.util.ArrayList;
+ import java.util.List;
+ 
++import org.gnucash.android.data.Account;
+ import org.gnucash.android.data.Transaction;
+ 
+ import android.content.ContentValues;
+@@ -67,6 +68,7 @@ public long addTransaction(Transaction transaction){
+ 		contentValues.put(DatabaseHelper.KEY_ACCOUNT_UID, transaction.getAccountUID());
+ 		contentValues.put(DatabaseHelper.KEY_TIMESTAMP, transaction.getTimeMillis());
+ 		contentValues.put(DatabaseHelper.KEY_DESCRIPTION, transaction.getDescription());
++		contentValues.put(DatabaseHelper.KEY_EXPORTED, transaction.isExported() ? 1 : 0);
+ 		
+ 		long rowId = -1;
+ 		if ((rowId = fetchTransactionWithUID(transaction.getUID())) > 0){
+@@ -172,6 +174,7 @@ public Transaction buildTransactionInstance(Cursor c){
+ 		transaction.setAccountUID(c.getString(DatabaseAdapter.COLUMN_ACCOUNT_UID));
+ 		transaction.setTime(c.getLong(DatabaseAdapter.COLUMN_TIMESTAMP));
+ 		transaction.setDescription(c.getString(DatabaseAdapter.COLUMN_DESCRIPTION));
++		transaction.setExported(c.getInt(DatabaseAdapter.COLUMN_EXPORTED) == 1);
+ 		return transaction;
+ 	}
+ 	
+@@ -184,6 +187,7 @@ public boolean deleteTransaction(String uid){
+ 		return mDb.delete(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
+ 				DatabaseHelper.KEY_UID + "='" + uid + "'", null) > 0;
+ 	}
++	
+ 	public int getTransactionsCount(long accountId){
+ 		Cursor cursor = fetchAllTransactionsForAccount(accountId);
+ 		int count = 0;
+@@ -219,8 +223,43 @@ public double getTransactionsSum(long accountId){
+ 		
+ 		return amountSum;
+ 	}
++		
++	/**
++	 * Marks an account record as exported
++	 * @param accountUID Unique ID of the record to be marked as exported
++	 * @return Number of records marked as exported
++	 */
++	public int markAsExported(String accountUID){
++		ContentValues contentValues = new ContentValues();
++		contentValues.put(DatabaseHelper.KEY_EXPORTED, 1);
++		
++		return mDb.update(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
++				contentValues, 
++				DatabaseHelper.KEY_UID + "='" + accountUID + "'", 
++				null);
++	}
+ 	
+ 	/**
++	 * Returns list of all accounts which have not been exported yet
++	 * @return List of {@link Account}s which have not been exported
++	 */
++	public List<Transaction> getNonExportedTransactionsForAccount(String accountUID){
++		Cursor c = mDb.query(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
++				null, 
++				DatabaseHelper.KEY_EXPORTED + "= 0 AND " + 
++				DatabaseHelper.KEY_ACCOUNT_UID + "= '" + accountUID + "'", 
++				null, null, null, null);
++		ArrayList<Transaction> transactionsList = new ArrayList<Transaction>();
++		if (c == null)
++			return transactionsList;
++		
++		while (c.moveToNext()){
++			transactionsList.add(buildTransactionInstance(c));
++		}
++		return transactionsList;
++	}
++
++	/**
+ 	 * Returns an account UID of the account with record id <code>accountRowID</code>
+ 	 * @param acountRowID Record ID of account as long paramenter
+ 	 * @return String containing UID of account
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java b/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
+index 63391c65..71a07a01 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
+@@ -79,7 +79,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 	@Override
+ 	public boolean onCreateOptionsMenu(Menu menu) {
+ 		MenuInflater inflater = getSupportMenuInflater();
+-		inflater.inflate(R.menu.action_bar, menu);
++		inflater.inflate(R.menu.global_actions, menu);
+ 		return true;
+ 	}
+ 
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+index 022339b1..99af0407 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+@@ -41,6 +41,7 @@
+ import android.content.DialogInterface;
+ import android.database.Cursor;
+ import android.os.Bundle;
++import android.support.v4.app.DialogFragment;
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.app.FragmentTransaction;
+@@ -71,7 +72,7 @@
+ 		LoaderCallbacks<Cursor>, OnItemLongClickListener {
+ 
+ 	protected static final String FRAGMENT_NEW_ACCOUNT = "new_account_dialog";
+-
++	protected static final String FRAGMENT_EXPORT_OFX  = "export_ofx";
+ 	private static final int DIALOG_ADD_ACCOUNT = 0x10;
+ 	
+ 	protected static final String TAG = "AccountsListFragment";
+@@ -308,7 +309,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 			return true;
+ 
+ 		case R.id.menu_export:
+-			
++			showExportDialog();
+ 			return true;
+ 			
+ 		default:
+@@ -354,6 +355,19 @@ public void showAddAccountDialog(long accountId) {
+ 		mAddAccountFragment.show(ft, FRAGMENT_NEW_ACCOUNT);
+ 	}
+ 
++	public void showExportDialog(){
++		FragmentTransaction ft = getFragmentManager().beginTransaction();
++	    Fragment prev = getFragmentManager().findFragmentByTag("dialog");
++	    if (prev != null) {
++	        ft.remove(prev);
++	    }
++	    ft.addToBackStack(null);
++
++	    // Create and show the dialog.
++	    DialogFragment exportFragment = new ExportDialogFragment();
++	    exportFragment.show(ft, FRAGMENT_EXPORT_OFX);
++	}
++	
+ 	private class AccountsCursorAdapter extends SimpleCursorAdapter {
+ 		TransactionsDbAdapter transactionsDBAdapter;
+ 		
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/ExportDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/ExportDialogFragment.java
+new file mode 100644
+index 00000000..f7eea8a7
+--- /dev/null
++++ b/GnucashMobile/src/org/gnucash/android/ui/ExportDialogFragment.java
+@@ -0,0 +1,243 @@
++/*
++ * Written By: Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 Ngewi Fet
++ *
++ * This file is part of Gnucash for Android
++ * 
++ * Gnucash for Android is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, contact:
++ *
++ * Free Software Foundation           Voice:  +1-617-542-5942
++ * 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
++ * Boston, MA  02110-1301,  USA       gnu@gnu.org
++ */
++
++package org.gnucash.android.ui;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.FileWriter;
++import java.io.IOException;
++import java.io.Writer;
++import java.nio.channels.FileChannel;
++import java.text.SimpleDateFormat;
++import java.util.Date;
++
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.DocumentBuilderFactory;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.transform.OutputKeys;
++import javax.xml.transform.Transformer;
++import javax.xml.transform.TransformerConfigurationException;
++import javax.xml.transform.TransformerException;
++import javax.xml.transform.TransformerFactory;
++import javax.xml.transform.dom.DOMSource;
++import javax.xml.transform.stream.StreamResult;
++
++import org.gnucash.android.R;
++import org.gnucash.android.util.OfxFormatter;
++import org.w3c.dom.Document;
++import org.w3c.dom.Element;
++import org.w3c.dom.ProcessingInstruction;
++
++import android.app.Activity;
++import android.content.Intent;
++import android.net.Uri;
++import android.os.Bundle;
++import android.support.v4.app.DialogFragment;
++import android.util.Log;
++import android.view.LayoutInflater;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.ArrayAdapter;
++import android.widget.Button;
++import android.widget.CheckBox;
++import android.widget.Spinner;
++import android.widget.Toast;
++
++public class ExportDialogFragment extends DialogFragment {
++		
++	Spinner mDestinationSpinner;
++	CheckBox mExportAllCheckBox;
++	Button mSaveButton;
++	Button mCancelButton;
++	
++	String mFilePath;
++	
++	@Override
++	public View onCreateView(LayoutInflater inflater, ViewGroup container,
++			Bundle savedInstanceState) {
++		return inflater.inflate(R.layout.dialog_export_ofx, container, false);
++	}
++	
++	@Override
++	public void onActivityCreated(Bundle savedInstanceState) {		
++		super.onActivityCreated(savedInstanceState);
++		mFilePath = getActivity().getExternalFilesDir(null) + "/" + buildExportFilename();
++		getDialog().setTitle(R.string.export_ofx);
++		bindViews();
++	}
++
++	private void bindViews(){
++		View v = getView();
++		mDestinationSpinner = (Spinner) v.findViewById(R.id.spinner_export_destination);
++		ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(getActivity(),
++		        R.array.export_destinations, android.R.layout.simple_spinner_item);		
++		adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);		
++		mDestinationSpinner.setAdapter(adapter);
++		
++		mExportAllCheckBox = (CheckBox) v.findViewById(R.id.checkbox_export_all);
++		mSaveButton = (Button) v.findViewById(R.id.btn_save);
++		mCancelButton = (Button) v.findViewById(R.id.btn_cancel);
++		
++		mCancelButton.setOnClickListener(new View.OnClickListener() {
++			
++			@Override
++			public void onClick(View v) {				
++				dismiss();
++			}
++		});
++		
++		mSaveButton.setOnClickListener(new View.OnClickListener() {
++			
++			@Override
++			public void onClick(View v) {
++				boolean exportAll = mExportAllCheckBox.isChecked();
++				Document document = null;				
++				try {
++					document = exportOfx(exportAll);
++					writeToExternalStorage(document);
++				} catch (Exception e) {
++					Log.e(getTag(), e.getMessage());
++					Toast.makeText(getActivity(), R.string.error_exporting,
++							Toast.LENGTH_LONG).show();
++					dismiss();
++					return;
++				}
++				
++				int position = mDestinationSpinner.getSelectedItemPosition();
++				switch (position) {
++				case 0:					
++					shareFile(mFilePath);
++					
++					break;
++
++				case 1:
++					//file already exists, just let the user know
++					Toast.makeText(getActivity(), 
++							"OFX file exported to:\n" + mFilePath, 
++							Toast.LENGTH_LONG).show();					
++					break;
++					
++				default:
++					break;
++				}
++				dismiss();
++			}
++		});
++	}
++	
++	private void writeToExternalStorage(Document doc) throws IOException{
++		File file = new File(mFilePath);
++		
++		FileWriter writer = new FileWriter(file);
++		write(doc, writer);
++		
++	}
++	
++	@Override
++	public void onActivityResult(int requestCode, int resultCode, Intent data) {
++		//TODO: fix the exception which is thrown on return
++		if (resultCode == Activity.RESULT_OK){
++			//uploading or emailing has finished. clean up now.
++			File file = new File(mFilePath);
++			file.delete();
++		}
++	}
++	
++	private void shareFile(String path){
++		Intent shareIntent = new Intent(Intent.ACTION_SEND);
++		shareIntent.setType("text/plain");
++		shareIntent.putExtra(Intent.EXTRA_STREAM, Uri.parse("file://"+ path));
++		shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Gnucash OFX export");
++		SimpleDateFormat formatter = new SimpleDateFormat("yyyy.MM.dd HH:mm");
++		shareIntent.putExtra(Intent.EXTRA_TEXT, "Gnucash accounts export from " 
++							+ formatter.format(new Date(System.currentTimeMillis())));
++		startActivity(Intent.createChooser(shareIntent, "Sharing OFX file..."));	
++	}
++	
++	public static void copyFile(File src, File dst) throws IOException
++	{
++		//TODO: Make this asynchronous at some time, t in the future.
++	    FileChannel inChannel = new FileInputStream(src).getChannel();
++	    FileChannel outChannel = new FileOutputStream(dst).getChannel();
++	    try
++	    {
++	        inChannel.transferTo(0, inChannel.size(), outChannel);
++	    }
++	    finally
++	    {
++	        if (inChannel != null)
++	            inChannel.close();
++	        if (outChannel != null)
++	            outChannel.close();
++	    }
++	}
++	
++	public static String buildExportFilename(){
++		SimpleDateFormat formatter = new SimpleDateFormat("yyyyMMdd_HHmm");
++		String filename = formatter.format(
++				new Date(System.currentTimeMillis())) 
++				+ "_gnucash_all.ofx";
++		return filename;
++	}
++	
++	protected Document exportOfx(boolean exportAll) throws ParserConfigurationException{		
++		DocumentBuilderFactory docFactory = DocumentBuilderFactory
++				.newInstance();
++		DocumentBuilder docBuilder = docFactory.newDocumentBuilder();
++
++		Document document = docBuilder.newDocument();
++		Element root = document.createElement("OFX");
++		
++		ProcessingInstruction pi = document.createProcessingInstruction("OFX", "OFXHEADER=\"200\" VERSION=\"211\" SECURITY=\"NONE\" OLDFILEUID=\"NONE\" NEWFILEUID=\"NONE\"");
++		document.appendChild(pi);		
++		document.appendChild(root);
++		
++		OfxFormatter exporter = new OfxFormatter(getActivity(), exportAll);
++		exporter.toXml(document, root);
++		
++		return document;
++	}
++	
++	public void write(Document document, Writer outputWriter){
++		try {
++			TransformerFactory transformerFactory = TransformerFactory
++					.newInstance();
++			Transformer transformer = transformerFactory.newTransformer();
++			DOMSource source = new DOMSource(document);
++			StreamResult result = new StreamResult(outputWriter);
++			
++			transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
++			transformer.setOutputProperty(OutputKeys.INDENT, "yes");
++			
++			transformer.transform(source, result);
++		} catch (TransformerConfigurationException txconfigException) {
++			txconfigException.printStackTrace();
++		} catch (TransformerException tfException) {
++			tfException.printStackTrace();
++		}
++	}
++}
++
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+new file mode 100644
+index 00000000..14ee5fc4
+--- /dev/null
++++ b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+@@ -0,0 +1,189 @@
++/*
++ * Written By: Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 Ngewi Fet
++ *
++ * This file is part of Gnucash for Android
++ * 
++ * Gnucash for Android is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, contact:
++ *
++ * Free Software Foundation           Voice:  +1-617-542-5942
++ * 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
++ * Boston, MA  02110-1301,  USA       gnu@gnu.org
++ */
++
++package org.gnucash.android.util;
++
++import java.text.SimpleDateFormat;
++import java.util.Calendar;
++import java.util.Currency;
++import java.util.Date;
++import java.util.List;
++import java.util.Locale;
++import java.util.TimeZone;
++
++import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Transaction;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.w3c.dom.Document;
++import org.w3c.dom.Element;
++
++import android.content.Context;
++
++/**
++ * Exports the data in the database in OFX format
++ * @author Ngewi Fet <ngewi.fet@gmail.com>
++ */
++public class OfxFormatter {
++
++	public final static SimpleDateFormat ofxDateFormatter = new SimpleDateFormat("yyyyMMddHHmmss");
++	
++	/**
++	 * ID which will be used as the bank ID for OFX from this app
++	 */
++	public static String APP_ID = "org.gnucash.android";
++	
++	/**
++	 * The Transaction ID is usually the client ID sent in a request.
++	 * Since the data exported is not as a result of a request, we use 0
++	 */
++	public static final String UNSOLICITED_TRANSACTION_ID = "0";
++	
++	/**
++	 * List of accounts in the expense report
++	 */
++	private List<Account> mAccountsList;
++	
++	private boolean mExportAll = false;
++	private Context mContext;
++	
++	/**
++	 * Builds an XML representation of the {@link Account}s and {@link Transaction}s in the database 
++	 * @param context Application context
++	 * @param exportAll Whether all transactions should be exported or only new ones since last export
++	 */
++	public OfxFormatter(Context context, boolean exportAll) {
++		AccountsDbAdapter dbAdapter = new AccountsDbAdapter(context);
++		mAccountsList = dbAdapter.getAllAccounts();
++		dbAdapter.close();
++		mExportAll = exportAll;
++		mContext = context;
++	}
++	
++	public static String getFormattedCurrentTime(){
++		return getFormattedCurrentTime(System.currentTimeMillis());
++	}
++	
++	public static String getFormattedCurrentTime(long milliseconds){
++		Date date = new Date(milliseconds);
++		String dateString = ofxDateFormatter.format(date);
++		TimeZone tz = Calendar.getInstance().getTimeZone();
++		int offset = tz.getRawOffset();
++		int hours   = (int) (( offset / (1000*60*60)) % 24);
++		String sign = offset > 0 ?  "+" : "";
++		return dateString + "[" + sign + hours + ":" + tz.getDisplayName(false, TimeZone.SHORT, Locale.getDefault()) + "]";
++	}
++	
++	/**
++	 * Converts all expenses into OFX XML format and adds them to the XML document
++	 * @param doc DOM document of the OFX expenses
++	 * @param parent Parent node for all expenses in report
++	 */
++	public void toXml(Document doc, Element parent){
++		
++		Element transactionUid = doc.createElement("TRNUID");		
++		//unsolicited because the data exported is not as a result of a request
++		transactionUid.appendChild(doc.createTextNode(UNSOLICITED_TRANSACTION_ID));
++
++		Element statementTransactionResponse = doc.createElement("STMTTRNRS");
++		statementTransactionResponse.appendChild(transactionUid);
++		
++		Element bankmsgs = doc.createElement("BANKMSGSRSV1");
++		bankmsgs.appendChild(statementTransactionResponse);
++		
++		parent.appendChild(bankmsgs);		
++		
++		TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(mContext);
++		for (Account account : mAccountsList) {				
++			Element currency = doc.createElement("CURDEF");
++			currency.appendChild(doc.createTextNode(Currency.getInstance(Locale.getDefault()).getCurrencyCode()));						
++			
++			//================= BEGIN BANK ACCOUNT INFO (BANKACCTFROM) =================================
++			
++			Element bankId = doc.createElement("BANKID");
++			bankId.appendChild(doc.createTextNode(APP_ID));
++			
++			Element acctId = doc.createElement("ACCTID");
++			acctId.appendChild(doc.createTextNode(account.getUID()));
++			
++			Element accttype = doc.createElement("ACCTTPYE");
++			accttype.appendChild(doc.createTextNode(account.getAccountType().toString()));
++			
++			Element bankFrom = doc.createElement("BANKACCTFROM");
++			bankFrom.appendChild(bankId);
++			bankFrom.appendChild(acctId);
++			bankFrom.appendChild(accttype);
++			
++			//================= END BANK ACCOUNT INFO ============================================
++			
++			
++			//================= BEGIN ACCOUNT BALANCE INFO =================================
++			String balance = Double.toString(account.getBalance());
++			String formattedCurrentTimeString = getFormattedCurrentTime();
++			
++			Element balanceAmount = doc.createElement("BALAMT");
++			balanceAmount.appendChild(doc.createTextNode(balance));			
++			Element dtasof = doc.createElement("DTASOF");
++			dtasof.appendChild(doc.createTextNode(formattedCurrentTimeString));
++			
++			Element ledgerBalance = doc.createElement("LEDGERBAL");
++			ledgerBalance.appendChild(balanceAmount);
++			ledgerBalance.appendChild(dtasof);
++			
++			//================= END ACCOUNT BALANCE INFO =================================
++			
++			
++			//================= BEGIN TIME PERIOD INFO =================================
++			
++			Element dtstart = doc.createElement("DTSTART");			
++			dtstart.appendChild(doc.createTextNode(formattedCurrentTimeString));
++			
++			Element dtend = doc.createElement("DTEND");
++			dtend.appendChild(doc.createTextNode(formattedCurrentTimeString));
++			
++			Element bankTransactionsList = doc.createElement("BANKTRANLIST");
++			bankTransactionsList.appendChild(dtstart);
++			bankTransactionsList.appendChild(dtend);
++			
++			//================= END TIME PERIOD INFO =================================
++			
++						
++			Element statementTransactions = doc.createElement("STMTRS");
++			statementTransactions.appendChild(currency);
++			statementTransactions.appendChild(bankFrom);
++			statementTransactions.appendChild(bankTransactionsList);
++			statementTransactions.appendChild(ledgerBalance);
++			
++			statementTransactionResponse.appendChild(statementTransactions);
++			
++			//add account details (transactions) to the XML document			
++			account.toXml(doc, bankTransactionsList, mExportAll);
++			
++			//mark as exported
++			transactionsDbAdapter.markAsExported(account.getUID());
++			
++		}
++		transactionsDbAdapter.close();
++	}
++}
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
+index 485c0d7b..63d0ea85 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
+@@ -1,3 +1,27 @@
++/*
++ * Written By: Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 Ngewi Fet
++ *
++ * This file is part of Gnucash for Android
++ * 
++ * Gnucash for Android is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, contact:
++ *
++ * Free Software Foundation           Voice:  +1-617-542-5942
++ * 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
++ * Boston, MA  02110-1301,  USA       gnu@gnu.org
++ */
++
+ package org.gnucash.android.test;
+ 
+ import java.util.List;
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java b/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+index 4e56c590..65560117 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+@@ -1,11 +1,34 @@
++/*
++ * Written By: Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 Ngewi Fet
++ *
++ * This file is part of Gnucash for Android
++ * 
++ * Gnucash for Android is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, contact:
++ *
++ * Free Software Foundation           Voice:  +1-617-542-5942
++ * 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
++ * Boston, MA  02110-1301,  USA       gnu@gnu.org
++ */
++
+ package org.gnucash.android.test;
+ 
+ import java.io.File;
+-import java.text.SimpleDateFormat;
+-import java.util.Date;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.ui.AccountsActivity;
++import org.gnucash.android.ui.ExportDialogFragment;
+ 
+ import android.test.ActivityInstrumentationTestCase2;
+ 
+@@ -31,10 +54,8 @@ public void testOfxExport(){
+ 		
+ 		mSolo.waitForText("Export OFX");
+ 		mSolo.clickOnText("Export");
+-		long timeMillis = System.currentTimeMillis();
+ 		
+-		SimpleDateFormat formatter = new SimpleDateFormat("yyyyMMdd_HHmm");
+-		String filename = formatter.format(new Date(timeMillis)) + "_gnucash_export.ofx";
++		String filename = ExportDialogFragment.buildExportFilename();
+ 		
+ 		File file = new File(getActivity().getExternalFilesDir(null), filename);
+ 		assertNotNull(file);
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java b/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java
+index 4eaace8c..5622e207 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java
+@@ -1,3 +1,27 @@
++/*
++ * Written By: Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 Ngewi Fet
++ *
++ * This file is part of Gnucash for Android
++ * 
++ * Gnucash for Android is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, contact:
++ *
++ * Free Software Foundation           Voice:  +1-617-542-5942
++ * 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
++ * Boston, MA  02110-1301,  USA       gnu@gnu.org
++ */
++
+ package org.gnucash.android.test;
+ 
+ import java.util.Date;

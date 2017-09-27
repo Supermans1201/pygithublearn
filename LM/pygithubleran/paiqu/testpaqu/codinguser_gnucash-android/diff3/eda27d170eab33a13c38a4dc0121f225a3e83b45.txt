@@ -1,0 +1,177 @@
+From fc5d4b12dc5858807ab7d8559ecbe97214284a2e Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sun, 31 Aug 2014 20:13:38 +0800
+Subject: [PATCH] Speeding up Account balance calculation
+
+Calculate account balance using SQL query.
+
+Conflicts:
+	app/src/org/gnucash/android/db/AccountsDbAdapter.java
+	app/src/org/gnucash/android/db/SplitsDbAdapter.java
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 51 ++++++++++++++++++++++
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 47 ++++++++++++++++++++
+ .../android/ui/util/AccountBalanceTask.java        |  5 ++-
+ 3 files changed, 102 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index adc13d79..3d6809c3 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -21,6 +21,9 @@
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
++import android.database.sqlite.SQLiteStatement;
++import android.text.TextUtils;
++
+ import android.util.Log;
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -618,6 +621,54 @@ public Money getAccountBalance(long accountId){
+     }
+ 
+     /**
++     * Returns the balance of an account while taking sub-accounts into consideration
++     * @return Account Balance of an account including sub-accounts
++     */
++    public Money getAccountBalance(String accountUID){
++        Log.d(TAG, "Computing account balance for account ID " + accountUID);
++        String currencyCode = mTransactionsAdapter.getCurrencyCode(accountUID);
++        boolean hasDebitNormalBalance = getAccountType(accountUID).hasDebitNormalBalance();
++        currencyCode = currencyCode == null ? Money.DEFAULT_CURRENCY_CODE : currencyCode;
++        Money balance = Money.createZeroInstance(currencyCode);
++
++        // retrieve all descendant accounts of the accountUID
++        // accountsList will hold accountUID with all descendant accounts.
++        // accountsList level will hold descendant accounts of the same level
++        // only accounts have the same currency with accountUID will be retrieved
++        ArrayList<String> accountsList = new ArrayList<String>();
++        accountsList.add(accountUID);
++        ArrayList<String> accountsListLevel = new ArrayList<String>();
++        accountsListLevel.add(accountUID);
++        for (;;) {
++            Cursor cursor = mDb.query(AccountEntry.TABLE_NAME,
++                    new String[]{AccountEntry.COLUMN_UID},
++                    AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IN ( '" + TextUtils.join("' , '", accountsListLevel) + "' ) AND " +
++                            AccountEntry.COLUMN_CURRENCY + " = ? ",
++                    new String[]{currencyCode}, null, null, null);
++            accountsListLevel.clear();
++            if (cursor != null){
++                int columnIndex = cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_UID);
++                while(cursor.moveToNext()){
++                    accountsListLevel.add(cursor.getString(columnIndex));
++                }
++                cursor.close();
++            }
++            if (accountsListLevel.size() > 0) {
++                accountsList.addAll(accountsListLevel);
++            }
++            else {
++                break;
++            }
++        }
++
++        SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getContext());
++        Log.d(TAG, "all account list : " + accountsList.size());
++        Money splitSum = splitsDbAdapter.computeSplitBalance(accountsList, currencyCode, hasDebitNormalBalance);
++        splitsDbAdapter.close();
++        return balance.add(splitSum);
++    }
++
++    /**
+      * Returns a list of IDs for the sub-accounts for account <code>accountId</code>
+      * @param accountId Account ID whose sub-accounts are to be retrieved
+      * @return List of IDs for the sub-accounts for account <code>accountId</code>
+diff --git a/app/src/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+index b5437388..64907cb3 100644
+--- a/app/src/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -21,13 +21,21 @@
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
++import android.database.sqlite.SQLiteStatement;
++import android.text.TextUtils;
++
+ import android.util.Log;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+ 
++import java.math.BigDecimal;
++import java.math.MathContext;
++import java.math.RoundingMode;
+ import java.util.ArrayList;
++import java.util.Currency;
+ import java.util.List;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.*;
+@@ -181,6 +189,45 @@ public Money computeSplitBalance(String accountUID){
+     }
+ 
+     /**
++     * Returns the sum of the splits for given set of accounts.
++     * This takes into account the kind of movement caused by the split in the account (which also depends on account type)
++     * The Caller must make sure all accounts have the currency, which is passed in as currencyCode
++     * @param accountUIDList List of String unique IDs of given set of accounts
++     * @param currencyCode currencyCode for all the accounts in the list
++     * @param hasDebitNormalBalance Does the final balance has normal debit credit meaning
++     * @return Balance of the splits for this account
++     */
++    public Money computeSplitBalance(List<String> accountUIDList, String currencyCode, boolean hasDebitNormalBalance){
++        //Cursor cursor = fetchSplitsForAccount(accountUID);
++        if (accountUIDList == null || accountUIDList.size() == 0){
++            return new Money("0", currencyCode);
++        }
++
++        Cursor cursor;
++        cursor = mDb.query(SplitEntry.TABLE_NAME + " , " + TransactionEntry.TABLE_NAME,
++                new String[]{"TOTAL ( CASE WHEN " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TYPE + " = 'DEBIT' THEN "+
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_AMOUNT + " ELSE - " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_AMOUNT + " END )"},
++                SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID + " in ( '" + TextUtils.join("' , '", accountUIDList) + "' ) AND " +
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID + " = " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " AND " +
++                        TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " = 0",
++                null, null, null, null);
++
++        if (cursor != null){
++            if (cursor.moveToFirst()) {
++                double amount = cursor.getDouble(0);
++                cursor.close();
++                Log.d(TAG, "amount return " + amount);
++                if (!hasDebitNormalBalance) {
++                    amount = -amount;
++                }
++                return new Money(BigDecimal.valueOf(amount).setScale(2, BigDecimal.ROUND_HALF_UP), Currency.getInstance(currencyCode));
++            }
++            cursor.close();
++        }
++        return new Money("0", currencyCode);
++    }
++
++    /**
+      * Returns the list of splits for a transaction
+      * @param transactionUID String unique ID of transaction
+      * @return List of {@link org.gnucash.android.model.Split}s
+diff --git a/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java b/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
+index 4d80c40d..63864c77 100644
+--- a/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
++++ b/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
+@@ -52,11 +52,14 @@ protected Money doInBackground(Long... params) {
+ 
+         Money balance = Money.getZeroInstance();
+         try {
+-            balance = accountsDbAdapter.getAccountBalance(params[0]);
++            balance = accountsDbAdapter.getAccountBalance(accountsDbAdapter.getAccountUID(params[0]));
+         } catch (IllegalArgumentException ex){
+             //sometimes a load computation has been started and the data set changes.
+             //the account ID may no longer exist. So we catch that exception here and do nothing
+             Log.e(LOG_TAG, "Error computing account balance: " + ex);
++        } catch (Exception ex) {
++            Log.e(LOG_TAG, "Error computing account balance: " + ex);
++            ex.printStackTrace();
+         }
+         return balance;
+     }

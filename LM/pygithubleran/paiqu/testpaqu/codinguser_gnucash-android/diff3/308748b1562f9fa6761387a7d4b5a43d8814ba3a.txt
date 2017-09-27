@@ -1,0 +1,746 @@
+From 9fb286ff06b093244e7994572c04d91be59d9514 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 22 Aug 2015 10:28:08 +0200
+Subject: [PATCH] Use the FormActivity for editing splits instead of a dialog
+
+Added split GUID to generated CSV
+Fixed: parsing of split CSV throwing exception
+Fixed: first item in split editor is truncated
+Fixed: transaction type text sometimes wraps in transaction form
+Fixed: removed trash icon from account delete dialog
+
+TODO: Check the equality comparison for Money
+---
+ .../main/java/org/gnucash/android/model/Money.java |   2 +-
+ .../main/java/org/gnucash/android/model/Split.java |  39 +++---
+ .../java/org/gnucash/android/ui/FormActivity.java  |  21 +++-
+ .../java/org/gnucash/android/ui/UxArgument.java    |  11 ++
+ .../ui/account/DeleteAccountDialogFragment.java    |   1 -
+ .../ui/transaction/TransactionFormFragment.java    |  49 +++++---
+ .../ui/transaction/TransactionsActivity.java       |   1 +
+ ...ialogFragment.java => SplitEditorFragment.java} | 138 ++++++++++++---------
+ ..._split_editor.xml => fragment_split_editor.xml} |  29 ++---
+ .../main/res/layout/fragment_transaction_form.xml  |   2 +-
+ app/src/main/res/layout/item_split_entry.xml       |  28 +++--
+ .../gnucash/android/test/unit/model/SplitTest.java |   8 +-
+ 12 files changed, 201 insertions(+), 128 deletions(-)
+ rename app/src/main/java/org/gnucash/android/ui/transaction/dialog/{SplitEditorDialogFragment.java => SplitEditorFragment.java} (83%)
+ rename app/src/main/res/layout/{dialog_split_editor.xml => fragment_split_editor.xml} (88%)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index fdcdeab0..8718d0d0 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -450,7 +450,7 @@ public int hashCode() {
+ 		return result;
+ 	}
+ 
+-	/**
++	/** //FIXME: equality failing for money objects
+ 	 * Two Money objects are only equal if their amount (value) and currencies are equal
+ 	 * @param obj Object to compare with
+ 	 * @return <code>true</code> if the objects are equal, <code>false</code> otherwise
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 5ad38452..2dff42c0 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -234,13 +234,15 @@ public String toString() {
+     /**
+      * Returns a string representation of the split which can be parsed again using {@link org.gnucash.android.model.Split#parseSplit(String)}
+      * <p>The string is formatted as:<br/>
+-     * "<valueNum>;<valueDenom>;<valueCurrencyCode>;<quantityNum>;<quantityDenom>;<quantityCurrencyCode>;<transaction_uid>;<account_uid>;<type>;<memo>"</p>
++     * "&lt;uid&gt;;&lt;valueNum&gt;;&lt;valueDenom&gt;;&lt;valueCurrencyCode&gt;;&lt;quantityNum&gt;;&lt;quantityDenom&gt;;&lt;quantityCurrencyCode&gt;;&lt;transaction_uid&gt;;&lt;account_uid&gt;;&lt;type&gt;;&lt;memo&gt;"
++     * </p>
++     * <p><b>Only the memo field is allowed to be null</b></p>
+      * @return the converted CSV string of this split
+      */
+     public String toCsv(){
+         String sep = ";";
+ 
+-        String splitString = mValue.getNumerator() + sep + mValue.getDenominator() + sep + mValue.getCurrency().getCurrencyCode() + sep
++        String splitString = getUID() + sep + mValue.getNumerator() + sep + mValue.getDenominator() + sep + mValue.getCurrency().getCurrencyCode() + sep
+                 + mQuantity.getNumerator() + sep + mQuantity.getDenominator() + sep + mQuantity.getCurrency().getCurrencyCode()
+                 + sep + mTransactionUID + sep + mAccountUID + sep + mSplitType.name();
+         if (mMemo != null){
+@@ -251,16 +253,16 @@ public String toCsv(){
+ 
+     /**
+      * Parses a split which is in the format:<br/>
+-     * "<valueNum>;<valueDenom>;<currency_code>;<quantityNum>;<quantityDenom>;<currency_code>;<transaction_uid>;<account_uid>;<type>;<memo>".
++     * "<uid>;<valueNum>;<valueDenom>;<currency_code>;<quantityNum>;<quantityDenom>;<currency_code>;<transaction_uid>;<account_uid>;<type>;<memo>".
+      * <p>Also supports parsing of the deprecated format "<amount>;<currency_code>;<transaction_uid>;<account_uid>;<type>;<memo>".
+      * The split input string is the same produced by the {@link Split#toCsv()} method
+      *</p>
+-     * @param splitString String containing formatted split
++     * @param splitCsvString String containing formatted split
+      * @return Split instance parsed from the string
+      */
+-    public static Split parseSplit(String splitString) {
+-        String[] tokens = splitString.split(";");
+-        if (tokens.length < 8) {
++    public static Split parseSplit(String splitCsvString) {
++        String[] tokens = splitCsvString.split(";");
++        if (tokens.length < 8) { //old format splits
+             Money amount = new Money(tokens[0], tokens[1]);
+             Split split = new Split(amount, tokens[2]);
+             split.setTransactionUID(tokens[3]);
+@@ -270,22 +272,23 @@ public static Split parseSplit(String splitString) {
+             }
+             return split;
+         } else {
+-            int valueNum = Integer.parseInt(tokens[0]);
+-            int valueDenom = Integer.parseInt(tokens[1]);
+-            String valueCurrencyCode = tokens[2];
+-            int quantityNum = Integer.parseInt(tokens[3]);
+-            int quantityDenom = Integer.parseInt(tokens[4]);
+-            String qtyCurrencyCode = tokens[5];
++            int valueNum = Integer.parseInt(tokens[1]);
++            int valueDenom = Integer.parseInt(tokens[2]);
++            String valueCurrencyCode = tokens[3];
++            int quantityNum = Integer.parseInt(tokens[4]);
++            int quantityDenom = Integer.parseInt(tokens[5]);
++            String qtyCurrencyCode = tokens[6];
+ 
+             Money value = new Money(valueNum, valueDenom, valueCurrencyCode);
+             Money quantity = new Money(quantityNum, quantityDenom, qtyCurrencyCode);
+ 
+-            Split split = new Split(value, tokens[7]);
++            Split split = new Split(value, tokens[8]);
++            split.setUID(tokens[0]);
+             split.setQuantity(quantity);
+-            split.setTransactionUID(tokens[6]);
+-            split.setType(TransactionType.valueOf(tokens[8]));
+-            if (tokens.length == 9) {
+-                split.setMemo(tokens[9]);
++            split.setTransactionUID(tokens[7]);
++            split.setType(TransactionType.valueOf(tokens[9]));
++            if (tokens.length == 11) {
++                split.setMemo(tokens[10]);
+             }
+             return split;
+         }
+diff --git a/app/src/main/java/org/gnucash/android/ui/FormActivity.java b/app/src/main/java/org/gnucash/android/ui/FormActivity.java
+index 83a3d6e3..2c978ef4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/FormActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/FormActivity.java
+@@ -33,16 +33,19 @@
+ import org.gnucash.android.ui.account.AccountFormFragment;
+ import org.gnucash.android.ui.export.ExportFormFragment;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
++import org.gnucash.android.ui.transaction.dialog.SplitEditorFragment;
+ 
+ /**
+- * Activity for displaying forms
++ * Activity for displaying forms in the application.
++ * The activity provides the standard close button, but it is up to the form fragments to display
++ * menu options (e.g. for saving etc)
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class FormActivity extends AppCompatActivity {
+ 
+     private String mAccountUID;
+ 
+-    public enum FormType {ACCOUNT_FORM, TRANSACTION_FORM, EXPORT_FORM}
++    public enum FormType {ACCOUNT_FORM, TRANSACTION_FORM, EXPORT_FORM, SPLIT_EDITOR}
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+@@ -85,6 +88,10 @@ protected void onCreate(Bundle savedInstanceState) {
+                 showExportFormFragment(null);
+                 break;
+ 
++            case SPLIT_EDITOR:
++                showSplitEditorFragment(intent.getExtras());
++                break;
++
+             default:
+                 throw new IllegalArgumentException("No form display type specified");
+         }
+@@ -141,10 +148,20 @@ private void showTransactionFormFragment(Bundle args){
+      */
+     private void showExportFormFragment(Bundle args){
+         ExportFormFragment exportFragment = new ExportFormFragment();
++        exportFragment.setArguments(args);
+         showFormFragment(exportFragment);
+     }
+ 
+     /**
++     * Load the split editor fragment
++     * @param args View arguments
++     */
++    private void showSplitEditorFragment(Bundle args){
++        SplitEditorFragment splitEditor = SplitEditorFragment.newInstance(args);
++        showFormFragment(splitEditor);
++    }
++
++    /**
+      * Loads the fragment into the fragment container, replacing whatever was there before
+      * @param fragment Fragment to be displayed
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/UxArgument.java b/app/src/main/java/org/gnucash/android/ui/UxArgument.java
+index 192c134c..6478bd01 100644
+--- a/app/src/main/java/org/gnucash/android/ui/UxArgument.java
++++ b/app/src/main/java/org/gnucash/android/ui/UxArgument.java
+@@ -82,6 +82,17 @@
+      */
+     public static final String FORM_TYPE = "form_type";
+ 
++    /**
++     * List of splits which have been created using the split editor
++     */
++    public static final String SPLIT_LIST = "split_list";
++
++    /**
++     * GUID of splits which have been removed from the split editor
++     */
++    public static String REMOVED_SPLITS = "removed_split_guids";
++
++
+     //prevent initialization of instances of this class
+     private UxArgument(){
+         //prevent even the native class from calling the ctor
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
+index 65d0efb0..61d2d087 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
+@@ -124,7 +124,6 @@ public View onCreateView(LayoutInflater inflater, @Nullable ViewGroup container,
+         mCancelButton = (Button) view.findViewById(R.id.btn_cancel);
+         mOkButton = (Button) view.findViewById(R.id.btn_save);
+         mOkButton.setText(R.string.alert_dialog_ok_delete);
+-        mOkButton.setCompoundDrawablesWithIntrinsicBounds(R.drawable.content_discard_holo_light,0,0,0);
+         return view;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index f52b991b..54ff1b8d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -18,6 +18,7 @@
+ 
+ import android.app.Activity;
+ import android.content.Context;
++import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.database.Cursor;
+ import android.os.Bundle;
+@@ -66,8 +67,8 @@
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.ui.FormActivity;
+ import org.gnucash.android.ui.UxArgument;
+-import org.gnucash.android.ui.transaction.dialog.SplitEditorDialogFragment;
+ import org.gnucash.android.ui.util.AmountInputFormatter;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ import org.gnucash.android.ui.util.TransactionTypeSwitch;
+@@ -94,8 +95,8 @@
+         CalendarDatePickerDialog.OnDateSetListener, RadialTimePickerDialog.OnTimeSetListener,
+         RecurrencePickerDialog.OnRecurrenceSetListener {
+ 
+-    public static final String FRAGMENT_TAG_SPLITS_EDITOR       = "splits_editor";
+     private static final String FRAGMENT_TAG_RECURRENCE_PICKER  = "recurrence_picker";
++    private static final int REQUEST_SPLIT_EDITOR = 0x11;
+ 
+     /**
+ 	 * Transactions database adapter
+@@ -288,6 +289,7 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+ 
+         setListeners();
+         ActionBar actionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
++        assert actionBar != null;
+ //        actionBar.setSubtitle(mAccountsDbAdapter.getFullyQualifiedAccountName(mAccountUID));
+ 
+         if (mTransaction == null) {
+@@ -540,7 +542,7 @@ private void openSplitEditor(){
+             Toast.makeText(getActivity(), "Please enter an amount to split", Toast.LENGTH_SHORT).show();
+             return;
+         }
+-        FragmentManager fragmentManager = getActivity().getSupportFragmentManager();
++
+         String baseAmountString;
+ 
+         if (mTransaction == null){ //if we are creating a new transaction (not editing an existing one)
+@@ -555,11 +557,20 @@ private void openSplitEditor(){
+             baseAmountString = biggestAmount.toPlainString();
+         }
+ 
+-        SplitEditorDialogFragment splitEditorDialogFragment =
+-                SplitEditorDialogFragment.newInstance(baseAmountString);
+-        splitEditorDialogFragment.setTargetFragment(TransactionFormFragment.this, 0);
+-        splitEditorDialogFragment.show(fragmentManager, FRAGMENT_TAG_SPLITS_EDITOR);
++        Intent intent = new Intent(getActivity(), FormActivity.class);
++        intent.putExtra(UxArgument.FORM_TYPE, FormActivity.FormType.SPLIT_EDITOR.name());
++        intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
++        intent.putExtra(UxArgument.AMOUNT_STRING, baseAmountString);
++        if (mSplitsList != null) {
++            ArrayList<String> splitStrings = new ArrayList<>();
++            for (Split split : mSplitsList) {
++                splitStrings.add(split.toCsv());
++            }
++            intent.putStringArrayListExtra(UxArgument.SPLIT_LIST, splitStrings);
++        }
++        startActivityForResult(intent, REQUEST_SPLIT_EDITOR);
+     }
++
+ 	/**
+ 	 * Sets click listeners for the dialog buttons
+ 	 */
+@@ -914,13 +925,6 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+         }
+     }
+ 
+-    /**
+-     * Returns the list of splits currently in editing
+-     * @return List of splits
+-     */
+-    public List<Split> getSplitList(){
+-        return mSplitsList;
+-    }
+ 
+ 	/**
+ 	 * Finishes the fragment appropriately.
+@@ -1010,6 +1014,23 @@ public void onRecurrenceSet(String rrule) {
+ 
+         mRecurrenceTextView.setText(repeatString);
+     }
++
++    @Override
++    public void onActivityResult(int requestCode, int resultCode, Intent data) {
++        if (resultCode == Activity.RESULT_OK){
++            List<String> splits = data.getStringArrayListExtra(UxArgument.SPLIT_LIST);
++            List<Split> splitList = new ArrayList<>();
++            for (String splitCsv : splits) {
++                splitList.add(Split.parseSplit(splitCsv));
++            }
++            List<String> removedSplits = data.getStringArrayListExtra(UxArgument.REMOVED_SPLITS);
++            setSplitList(splitList, removedSplits);
++        }
++    }
++
++    /**
++     * Formats the amount and adds a negative sign if the amount will decrease the account balance
++     */
+     private class AmountTextWatcher extends AmountInputFormatter {
+ 
+         public AmountTextWatcher(EditText amountInput) {
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index a1859d32..f899bee6 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -436,6 +436,7 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 
+         refresh();
+         setupActionBarNavigation();
++        super.onActivityResult(requestCode, resultCode, data);
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorFragment.java
+similarity index 83%
+rename from app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+rename to app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorFragment.java
+index f82a71fb..5ea836e4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorFragment.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -15,20 +15,25 @@
+  */
+ package org.gnucash.android.ui.transaction.dialog;
+ 
++import android.app.Activity;
++import android.content.Intent;
+ import android.database.Cursor;
+ import android.os.Bundle;
+-import android.support.v4.app.DialogFragment;
++import android.support.v4.app.Fragment;
+ import android.support.v4.widget.SimpleCursorAdapter;
++import android.support.v7.app.ActionBar;
++import android.support.v7.app.AppCompatActivity;
+ import android.text.Editable;
+ import android.text.TextWatcher;
+ import android.view.LayoutInflater;
++import android.view.Menu;
++import android.view.MenuInflater;
++import android.view.MenuItem;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import android.view.WindowManager;
+ import android.widget.AdapterView;
+ import android.widget.Button;
+ import android.widget.EditText;
+-import android.widget.ImageButton;
+ import android.widget.ImageView;
+ import android.widget.LinearLayout;
+ import android.widget.Spinner;
+@@ -38,7 +43,6 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+-import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+@@ -58,21 +62,21 @@
+ import java.util.List;
+ import java.util.UUID;
+ 
++import butterknife.Bind;
++import butterknife.ButterKnife;
++
+ /**
+  * Dialog for editing the splits in a transaction
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class SplitEditorDialogFragment extends DialogFragment {
++public class SplitEditorFragment extends Fragment {
+ 
+-    private LinearLayout mSplitsLinearLayout;
+-    private TextView mImbalanceTextView;
+-    private Button mAddSplit;
+-    private Button mSaveButton;
+-    private Button mCancelButton;
++    @Bind(R.id.split_list_layout) LinearLayout mSplitsLinearLayout;
++    @Bind(R.id.imbalance_textview) TextView mImbalanceTextView;
++    @Bind(R.id.btn_add_split) Button mAddSplit;
+ 
+     private AccountsDbAdapter mAccountsDbAdapter;
+-    private SplitsDbAdapter mSplitsDbAdapter;
+     private Cursor mCursor;
+     private SimpleCursorAdapter mCursorAdapter;
+     private List<View> mSplitItemViewList;
+@@ -81,49 +85,48 @@
+     private BalanceTextWatcher mBalanceUpdater = new BalanceTextWatcher();
+     private BigDecimal mBaseAmount = BigDecimal.ZERO;
+ 
+-    private List<String> mRemovedSplitUIDs = new ArrayList<String>();
++    private ArrayList<String> mRemovedSplitUIDs = new ArrayList<>();
+ 
+     private boolean mMultiCurrency = false;
+     /**
+      * Create and return a new instance of the fragment with the appropriate paramenters
+-     * @param baseAmountString String with base amount which is being split
+-     * @return New instance of SplitEditorDialogFragment
++     * @param args Arguments to be set to the fragment. <br>
++     *             See {@link UxArgument#AMOUNT_STRING} and {@link UxArgument#SPLIT_LIST}
++     * @return New instance of SplitEditorFragment
+      */
+-    public static SplitEditorDialogFragment newInstance(String baseAmountString){
+-        SplitEditorDialogFragment fragment = new SplitEditorDialogFragment();
+-        Bundle args = new Bundle();
+-        args.putString(UxArgument.AMOUNT_STRING, baseAmountString);
++    public static SplitEditorFragment newInstance(Bundle args){
++        SplitEditorFragment fragment = new SplitEditorFragment();
+         fragment.setArguments(args);
+         return fragment;
+     }
+ 
+     @Override
+     public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+-        View view = inflater.inflate(R.layout.dialog_split_editor, container, false);
+-        mSplitsLinearLayout = (LinearLayout) view.findViewById(R.id.split_list_layout);
+-
+-        mImbalanceTextView = (TextView) view.findViewById(R.id.imbalance_textview);
+-
+-        mAddSplit   = (Button) view.findViewById(R.id.btn_add_split);
+-        mSaveButton = (Button) view.findViewById(R.id.btn_save);
+-        mCancelButton       = (Button) view.findViewById(R.id.btn_cancel);
++        View view = inflater.inflate(R.layout.fragment_split_editor, container, false);
++        ButterKnife.bind(this, view);
+         return view;
+     }
+ 
+     @Override
+     public void onActivityCreated(Bundle savedInstanceState) {
+         super.onActivityCreated(savedInstanceState);
+-        getDialog().getWindow().setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+-                WindowManager.LayoutParams.MATCH_PARENT);
+ 
+-        getDialog().setTitle(R.string.title_transaction_splits);
++        ActionBar actionBar = ((AppCompatActivity)getActivity()).getSupportActionBar();
++        assert actionBar != null;
++        actionBar.setTitle(R.string.title_transaction_splits);
++        setHasOptionsMenu(true);
+ 
+         mSplitItemViewList = new ArrayList<>();
+-        mSplitsDbAdapter = SplitsDbAdapter.getInstance();
+ 
+         //we are editing splits for a new transaction.
+         // But the user may have already created some splits before. Let's check
+-        List<Split> splitList = ((TransactionFormFragment) getTargetFragment()).getSplitList();
++        List<String> splitStrings = getArguments().getStringArrayList(UxArgument.SPLIT_LIST);
++        List<Split> splitList = new ArrayList<>();
++        if (splitStrings != null) {
++            for (String splitString : splitStrings) {
++                splitList.add(Split.parseSplit(splitString));
++            }
++        }
+         {
+             Currency currency = null;
+             for (Split split : splitList) {
+@@ -163,11 +166,34 @@ private void loadSplitViews(List<Split> splitList) {
+         }
+     }
+ 
++    @Override
++    public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
++        inflater.inflate(R.menu.default_save_actions, menu);
++    }
++
++    @Override
++    public boolean onOptionsItemSelected(MenuItem item) {
++
++        switch (item.getItemId()) {
++            case android.R.id.home:
++                getActivity().setResult(Activity.RESULT_CANCELED);
++                getActivity().finish();
++                return true;
++
++            case R.id.menu_save:
++                saveSplits();
++                return true;
++
++            default:
++                return super.onOptionsItemSelected(item);
++        }
++    }
++
+     private void enableAllControls(boolean b) {
+         for (View splitView : mSplitItemViewList) {
+             EditText splitMemoEditText = (EditText) splitView.findViewById(R.id.input_split_memo);
+             final EditText splitAmountEditText = (EditText) splitView.findViewById(R.id.input_split_amount);
+-            ImageButton removeSplitButton = (ImageButton) splitView.findViewById(R.id.btn_remove_split);
++            ImageView removeSplitButton = (ImageView) splitView.findViewById(R.id.btn_remove_split);
+             Spinner accountsSpinner = (Spinner) splitView.findViewById(R.id.input_accounts_spinner);
+             final TextView splitCurrencyTextView = (TextView) splitView.findViewById(R.id.split_currency_symbol);
+             final TextView splitUidTextView = (TextView) splitView.findViewById(R.id.split_uid);
+@@ -301,27 +327,6 @@ private void updateTransferAccountsList(Spinner transferAccountSpinner){
+      * Attaches listeners for the buttons of the dialog
+      */
+     protected void setListeners(){
+-        mCancelButton.setOnClickListener(new View.OnClickListener() {
+-            @Override
+-            public void onClick(View view) {
+-                dismiss();
+-            }
+-        });
+-
+-        mSaveButton.setOnClickListener(new View.OnClickListener() {
+-            @Override
+-            public void onClick(View view) {
+-                if (mMultiCurrency) {
+-                    Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
+-                }
+-                else {
+-                    List<Split> splitList = extractSplitsFromView();
+-                    ((TransactionFormFragment) getTargetFragment()).setSplitList(splitList, mRemovedSplitUIDs);
+-                }
+-                dismiss();
+-            }
+-        });
+-
+         mAddSplit.setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View view) {
+@@ -335,12 +340,30 @@ public void onClick(View view) {
+         });
+     }
+ 
++    private void saveSplits() {
++        if (mMultiCurrency) {
++            Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
++        }
++        else {
++            List<Split> splitList = extractSplitsFromView();
++            ArrayList<String> splitStrings = new ArrayList<>();
++            for (Split split : splitList) {
++                splitStrings.add(split.toCsv());
++            }
++            Intent data = new Intent();
++            data.putStringArrayListExtra(UxArgument.SPLIT_LIST, splitStrings);
++            data.putStringArrayListExtra(UxArgument.REMOVED_SPLITS, mRemovedSplitUIDs);
++            getActivity().setResult(Activity.RESULT_OK, data);
++        }
++        getActivity().finish();
++    }
++
+     /**
+      * Extracts the input from the views and builds {@link org.gnucash.android.model.Split}s to correspond to the input.
+      * @return List of {@link org.gnucash.android.model.Split}s represented in the view
+      */
+     private List<Split> extractSplitsFromView(){
+-        List<Split> splitList = new ArrayList<Split>();
++        List<Split> splitList = new ArrayList<>();
+         for (View splitView : mSplitItemViewList) {
+             EditText splitMemoEditText              = (EditText)    splitView.findViewById(R.id.input_split_memo);
+             EditText splitAmountEditText            = (EditText)    splitView.findViewById(R.id.input_split_amount);
+@@ -381,11 +404,6 @@ private void updateTotal(){
+         TransactionsActivity.displayBalance(mImbalanceTextView, splitSum);
+     }
+ 
+-    @Override
+-    public void onDestroy() {
+-        super.onDestroy();
+-    }
+-
+     /**
+      * Updates the displayed balance of the accounts when the amount of a split is changed
+      */
+diff --git a/app/src/main/res/layout/dialog_split_editor.xml b/app/src/main/res/layout/fragment_split_editor.xml
+similarity index 88%
+rename from app/src/main/res/layout/dialog_split_editor.xml
+rename to app/src/main/res/layout/fragment_split_editor.xml
+index ddff0a89..f3d48b82 100644
+--- a/app/src/main/res/layout/dialog_split_editor.xml
++++ b/app/src/main/res/layout/fragment_split_editor.xml
+@@ -42,16 +42,21 @@ limitations under the License.
+              android:layout_height="1dp"
+              android:layout_above="@id/footer"/>
+ 
+-    <include layout="@layout/default_buttons"
+-             android:id="@+id/default_buttons"
+-             android:layout_width="220dp"
+-             android:layout_height="wrap_content"
+-             android:layout_alignParentBottom="true"/>
++    <Button android:id="@+id/btn_add_split"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:minWidth="100dp"
++        android:layout_alignParentBottom="true"
++        android:layout_alignParentRight="true"
++        android:layout_alignParentEnd="true"
++        android:layout_gravity="center"
++        android:textColor="@android:color/white"
++        android:text="@string/btn_add_split"/>
+ 
+     <LinearLayout android:id="@+id/footer"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+-                 android:layout_above="@id/default_buttons">
++                 android:layout_above="@id/btn_add_split">
+ 
+             <TextView
+                     android:layout_width="wrap_content"
+@@ -66,15 +71,7 @@ limitations under the License.
+                       android:layout_weight="1"
+                       android:textAppearance="?android:attr/textAppearanceSmall"
+                       android:gravity="right|center_vertical"
+-                      android:text="$200"/>
++                      tools:text="$200"/>
+     </LinearLayout>
+-    <Button android:id="@+id/btn_add_split"
+-        android:layout_width="wrap_content"
+-        android:layout_height="wrap_content"
+-        android:minWidth="100dp"
+-        android:layout_alignParentBottom="true"
+-        android:layout_toRightOf="@id/default_buttons"
+-        android:layout_alignParentRight="true"
+-        android:textColor="@android:color/white"
+-        android:text="@string/btn_add_split"/>
++
+ </RelativeLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/fragment_transaction_form.xml b/app/src/main/res/layout/fragment_transaction_form.xml
+index ed42c05a..6506c374 100644
+--- a/app/src/main/res/layout/fragment_transaction_form.xml
++++ b/app/src/main/res/layout/fragment_transaction_form.xml
+@@ -72,9 +72,9 @@
+ 				android:layout_height="wrap_content"
+ 				android:textOn="@string/label_debit"
+ 				android:textOff="@string/label_credit"
+-				android:textAllCaps="true"
+ 				android:gravity="end|center_vertical"
+ 				android:textColor="@color/debit_red"
++				android:textSize="14sp"
+ 				android:checked="true"/>
+ 
+ 		</TableRow>
+diff --git a/app/src/main/res/layout/item_split_entry.xml b/app/src/main/res/layout/item_split_entry.xml
+index 99170056..b5819b92 100644
+--- a/app/src/main/res/layout/item_split_entry.xml
++++ b/app/src/main/res/layout/item_split_entry.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <!--
+-Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -21,6 +21,7 @@ limitations under the License.
+         android:orientation="vertical">
+     <LinearLayout
+             android:layout_width="match_parent"
++            android:minHeight="40dp"
+             android:layout_height="wrap_content">
+ 
+         <TextView
+@@ -75,16 +76,21 @@ limitations under the License.
+             tools:ignore="ContentDescription" />
+     </LinearLayout>
+ 
+-    <EditText android:id="@+id/input_split_memo"
+-              android:layout_width="match_parent"
+-              android:layout_height="wrap_content"
+-              android:singleLine="false"
+-              android:hint="@string/hint_split_memo"
+-              android:textSize="15sp"
+-              android:inputType="textMultiLine|textCapSentences"
+-              android:background="@android:color/transparent"
+-              android:layout_marginLeft="7dp"
+-              android:gravity="top" />
++    <android.support.design.widget.TextInputLayout
++        android:id="@+id/textinputlayout"
++        android:layout_width="match_parent"
++        android:layout_marginLeft="7dp"
++        android:layout_height="wrap_content">
++        <EditText android:id="@+id/input_split_memo"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:singleLine="false"
++            android:hint="@string/hint_split_memo"
++            android:textSize="15sp"
++            android:inputType="textMultiLine|textCapSentences"
++            android:background="@android:color/transparent"
++            android:gravity="top" />
++    </android.support.design.widget.TextInputLayout>
+ 
+     <Spinner
+             android:id="@+id/input_accounts_spinner"
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+index 92974455..647cc15c 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+@@ -40,7 +40,7 @@ public void testCloning(){
+         assertThat(clone1).isEqualTo(split);
+ 
+         Split clone2 = new Split(split, true);
+-        assertThat(clone2.toCsv()).isEqualTo(split.toCsv());
++        assertThat(clone2.getUID()).isNotEqualTo(split.getUID());
+     }
+ 
+     /**
+@@ -66,14 +66,14 @@ public void shouldGenerateValidCsv(){
+         split.setTransactionUID("terminator-trx");
+         split.setType(TransactionType.CREDIT);
+ 
+-        assertThat(split.toCsv()).isEqualTo("1000;100;EUR;1000;100;EUR;terminator-trx;random-account;CREDIT");
++        assertThat(split.toCsv()).isEqualTo(split.getUID() + ";1000;100;EUR;1000;100;EUR;terminator-trx;random-account;CREDIT");
+     }
+ 
+     @Test
+     public void shouldParseCsv(){
+-        String csv = "4.90;USD;test-account;trx-action;DEBIT;Didn't you get the memo?";
++        String csv = "test-split-uid;490;100;USD;490;100;USD;trx-action;test-account;DEBIT;Didn't you get the memo?";
+         Split split = Split.parseSplit(csv);
+-        assertThat(split.getValue()).isEqualTo(new Money("4.90", "USD"));
++        assertThat(split.getValue().getNumerator()).isEqualTo(new Money("4.90", "USD").getNumerator());
+         assertThat(split.getTransactionUID()).isEqualTo("trx-action");
+         assertThat(split.getAccountUID()).isEqualTo("test-account");
+         assertThat(split.getType()).isEqualTo(TransactionType.DEBIT);

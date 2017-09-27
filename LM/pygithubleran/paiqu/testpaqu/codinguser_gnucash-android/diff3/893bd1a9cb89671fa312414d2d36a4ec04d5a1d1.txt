@@ -1,0 +1,817 @@
+From 893bd1a9cb89671fa312414d2d36a4ec04d5a1d1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 15 Aug 2016 23:04:37 +0200
+Subject: [PATCH] Improve reliability of scheduled actions - computation of
+ when a scheduled action is due is now based on the execution count (and not
+ the last runtime like before)
+
+Last RunTime now stores the actual time when the scheduled action was executed, which is not necessarily when it was due
+Add tests for scheduled actions service
+Tapping a book in the BookManager should launch the book
+
+Fix bug causing some scheduled actions to be executed in a loop forever inside the service - fixes #535
+There was a bug in the computation of the nextRun time of scheduled actions.
+This could lead to situations where the nextRun time remains negative and the service holds a wakelock forever.
+---
+ .../org/gnucash/android/test/ui/MultiBookTest.java |  11 +
+ .../gnucash/android/app/GnuCashApplication.java    |  10 +-
+ .../android/db/adapter/TransactionsDbAdapter.java  |   8 +-
+ .../java/org/gnucash/android/model/Recurrence.java |   5 +-
+ .../org/gnucash/android/model/ScheduledAction.java |  80 +++++-
+ .../gnucash/android/service/SchedulerService.java  |  75 +++--
+ .../android/ui/budget/BudgetDetailFragment.java    |   2 +-
+ .../android/ui/settings/BookManagerFragment.java   |  10 +
+ .../test/unit/model/ScheduledActionTest.java       |  41 +++
+ .../unit/service/ScheduledActionServiceTest.java   | 303 +++++++++++++++++++++
+ 10 files changed, 498 insertions(+), 47 deletions(-)
+ create mode 100644 app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
+index 3a964482..86e19576 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
+@@ -71,6 +71,17 @@ public void shouldOpenBookManager(){
+         Intents.intended(hasComponent(PreferenceActivity.class.getName()));
+     }
+ 
++    public void testLoadBookFromBookManager(){
++        Book book = new Book();
++        book.setDisplayName("Launch Codes");
++        BooksDbAdapter.getInstance().addRecord(book);
++
++        shouldOpenBookManager();
++        onView(withText(book.getDisplayName())).perform(click());
++
++        assertThat(BooksDbAdapter.getInstance().getActiveBookUID()).isEqualTo(book.getUID());
++    }
++
+     @Test
+     public void creatingNewAccounts_shouldCreatedNewBook(){
+         long booksCount = mBooksDbAdapter.getRecordsCount();
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 13c976b0..219b8c36 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -132,7 +132,7 @@ public void onCreate(){
+ 
+         setDefaultCurrencyCode(getDefaultCurrencyCode());
+ 
+-        if (BuildConfig.DEBUG)
++        if (BuildConfig.DEBUG && !isRoboUnitTest())
+             setUpRemoteDebuggingFromChrome();
+     }
+ 
+@@ -242,6 +242,14 @@ public static boolean isCrashlyticsEnabled(){
+     }
+ 
+     /**
++     * Returns {@code true} if the app is being run by robolectric
++     * @return {@code true} if in unit testing, {@code false} otherwise
++     */
++    public static boolean isRoboUnitTest(){
++        return "robolectric".equals(Build.FINGERPRINT);
++    }
++
++    /**
+      * Returns <code>true</code> if double entry is enabled in the app settings, <code>false</code> otherwise.
+      * If the value is not set, the default value can be specified in the parameters.
+      * @return <code>true</code> if double entry is enabled, <code>false</code> otherwise
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+index 099373a2..4facc734 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+@@ -356,7 +356,7 @@ public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] column
+     }
+ 
+     /**
+-     * Return number of transactions in the database which are non recurring
++     * Return number of transactions in the database (excluding templates)
+      * @return Number of transactions
+      */
+     public long getRecordsCount() {
+@@ -371,6 +371,12 @@ public long getRecordsCount() {
+         }
+     }
+ 
++    /**
++     * Returns the number of transactions in the database which fulfill the conditions
++     * @param where SQL WHERE clause without the "WHERE" itself
++     * @param whereArgs Arguments to substitute question marks for
++     * @return Number of records in the databases
++     */
+     public long getRecordsCount(@Nullable String where, @Nullable String[] whereArgs) {
+         Cursor cursor = mDb.query(true, TransactionEntry.TABLE_NAME + " , trans_extra_info ON "
+                         + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index 1446f0a5..79ee1b37 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -98,6 +98,7 @@ public void setPeriodStart(Timestamp periodStart) {
+      * <p>The period is approximate because months do not all have the same number of days,
+      * but that is assumed</p>
+      * @return Milliseconds since Epoch representing the period
++     * @deprecated Do not use in new code. Uses fixed period values for months and years (which have variable units of time)
+      */
+     public long getPeriod(){
+         long baseMillis = 0;
+@@ -195,14 +196,16 @@ public int getDaysLeftInCurrentPeriod(){
+     }
+ 
+     /**
+-     * Returns the number of periods from the start date of this occurence until the end of the
++     * Returns the number of periods from the start date of this recurrence until the end of the
+      * interval multiplier specified in the {@link PeriodType}
++     * //fixme: Improve the documentation
+      * @return Number of periods in this recurrence
+      */
+     public int getNumberOfPeriods(int numberOfPeriods) {
+         LocalDate startDate = new LocalDate(mPeriodStart.getTime());
+         LocalDate endDate;
+         int interval = mPeriodType.getMultiplier();
++        //// TODO: 15.08.2016 Why do we add the number of periods. maybe rename method or param
+         switch (mPeriodType){
+ 
+             case DAY:
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index ad82ab1b..3fcbd03a 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -17,7 +17,9 @@
+ 
+ import android.support.annotation.NonNull;
+ 
++import org.joda.time.DateTime;
+ import org.joda.time.LocalDate;
++import org.joda.time.LocalDateTime;
+ 
+ import java.sql.Timestamp;
+ import java.text.DateFormat;
+@@ -127,6 +129,7 @@ public void setActionUID(String actionUID) {
+ 
+     /**
+      * Returns the timestamp of the last execution of this scheduled action
++     * <p>This is not necessarily the time when the scheduled action was due, only when it was actually last executed.</p>
+      * @return Timestamp in milliseconds since Epoch
+      */
+     public long getLastRunTime() {
+@@ -134,31 +137,65 @@ public long getLastRunTime() {
+     }
+ 
+     /**
+-     * Computes the next time that this scheduled action is supposed to be executed, taking the
+-     * last execution time into account
++     * Returns the time when the last schedule in the sequence of planned executions was executed.
++     * This relies on the number of executions of the scheduled action
++     * <p>This is different from {@link #getLastRunTime()} which returns the date when the system last
++     * run the scheduled action.</p>
++     * @return Time of last schedule, or -1 if the scheduled action has never been run
++     */
++    public long getTimeOfLastSchedule(){
++        if (mExecutionCount == 0)
++            return  -1;
++
++        LocalDateTime startTime = LocalDateTime.fromDateFields(new Date(mStartDate));
++        int multiplier = mRecurrence.getPeriodType().getMultiplier();
++
++        int factor = (mExecutionCount-1) * multiplier;
++        switch (mRecurrence.getPeriodType()){
++            case DAY:
++                startTime = startTime.plusDays(factor);
++                break;
++            case WEEK:
++                startTime = startTime.plusWeeks(factor);
++                break;
++            case MONTH:
++                startTime = startTime.plusMonths(factor);
++                break;
++            case YEAR:
++                startTime = startTime.plusYears(factor);
++                break;
++        }
++
++        return startTime.toDate().getTime();
++    }
++
++    /**
++     * Computes the next time that this scheduled action is supposed to be executed
+      * <p>This method does not consider the end time, or number of times it should be run.
+      * It only considers when the next execution would theoretically be due</p>
+      * @return Next run time in milliseconds
+      */
+-    public long computeNextRunTime(){
++    public long computeNextScheduledExecutionTime(){
+         int multiplier = mRecurrence.getPeriodType().getMultiplier();
+-        long time = mLastRun;
+-        if (time == 0) {
+-            time = mStartDate;
++        //this is the last planned time for the action to occur, not the last run time
++        long lastActionTime = getTimeOfLastSchedule(); //mStartDate + ((mExecutionCount-1)*getPeriod());
++        if (lastActionTime < 0){
++            return mStartDate;
+         }
+-        LocalDate localDate = LocalDate.fromDateFields(new Date(mLastRun));
++
++        LocalDateTime localDate = LocalDateTime.fromDateFields(new Date(lastActionTime));
+         switch (mRecurrence.getPeriodType()) {
+             case DAY:
+-                localDate.plusDays(multiplier);
++                localDate = localDate.plusDays(multiplier);
+                 break;
+             case WEEK:
+-                localDate.plusWeeks(multiplier);
++                localDate = localDate.plusWeeks(multiplier);
+                 break;
+             case MONTH:
+-                localDate.plusMonths(multiplier);
++                localDate = localDate.plusMonths(multiplier);
+                 break;
+             case YEAR:
+-                localDate.plusYears(multiplier);
++                localDate = localDate.plusYears(multiplier);
+                 break;
+         }
+         return localDate.toDate().getTime();
+@@ -173,8 +210,9 @@ public void setLastRun(long nextRun) {
+     }
+ 
+     /**
+-     * Returns the period of this scheduled action
++     * Returns the period of this scheduled action in milliseconds.
+      * @return Period in milliseconds since Epoch
++     * @deprecated Uses fixed values for time of months and years (which actually vary depending on number of days in month or leap year)
+      */
+     public long getPeriod() {
+         return mRecurrence.getPeriod();
+@@ -256,8 +294,8 @@ public void setEnabled(boolean enabled){
+     }
+ 
+     /**
+-     * Returns the total number of occurences of this scheduled action.
+-     * @return Total number of occurences of this action
++     * Returns the total number of planned occurrences of this scheduled action.
++     * @return Total number of planned occurrences of this action
+      */
+     public int getTotalFrequency(){
+         return mTotalFrequency;
+@@ -427,6 +465,20 @@ public Recurrence getRecurrence() {
+     }
+ 
+     /**
++     * Overloaded method for setting the recurrence of the scheduled action.
++     * <p>This method allows you to specify the periodicity and the ordinal of it. For example,
++     * a recurrence every fortnight would give parameters: {@link PeriodType#WEEK}, ordinal:2</p>
++     * @param periodType Periodicity of the scheduled action
++     * @param ordinal Ordinal of the periodicity. If unsure, specify 1
++     * @see #setRecurrence(Recurrence)
++     */
++    public void setRecurrence(PeriodType periodType, int ordinal){
++        periodType.setMultiplier(ordinal);
++        Recurrence recurrence = new Recurrence(periodType);
++        setRecurrence(recurrence);
++    }
++
++    /**
+      * Sets the recurrence pattern of this scheduled action
+      * <p>This also sets the start period of the recurrence object, if there is one</p>
+      * @param recurrence {@link Recurrence} object
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 1ca2a54f..1d6e461e 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -21,8 +21,6 @@
+ import android.content.Intent;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.PowerManager;
+-import android.os.SystemClock;
+-import android.text.format.DateFormat;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+@@ -41,9 +39,8 @@
+ import org.gnucash.android.model.Book;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
+-import org.joda.time.format.DateTimeFormatter;
+ 
+-import java.sql.Timestamp;
++import java.util.ArrayList;
+ import java.util.Date;
+ import java.util.List;
+ import java.util.concurrent.ExecutionException;
+@@ -98,22 +95,21 @@ protected void onHandleIntent(Intent intent) {
+      * Process scheduled actions and execute any pending actions
+      * @param scheduledActions List of scheduled actions
+      */
+-    private void processScheduledActions(List<ScheduledAction> scheduledActions, SQLiteDatabase db) {
++    //made public static for testing. Do not call these methods directly
++    public static void processScheduledActions(List<ScheduledAction> scheduledActions, SQLiteDatabase db) {
+         for (ScheduledAction scheduledAction : scheduledActions) {
+-            long endTime    = scheduledAction.getEndTime();
++
+             long now        = System.currentTimeMillis();
+-            long nextRunTime;
+-            do { //loop so that we can add transactions which were missed while device was off
+-                nextRunTime = scheduledAction.computeNextRunTime();
+-                if (((endTime > 0 && now < endTime) //if and endTime is set and we did not reach it yet
+-                        || (scheduledAction.getExecutionCount() < scheduledAction.getTotalFrequency()) //or the number of scheduled runs
+-                        || (endTime == 0 && scheduledAction.getTotalFrequency() == 0)) //or the action is to run forever
+-                        && (nextRunTime <= now)  //one period has passed since last execution
+-                        && scheduledAction.getStartTime() <= now
+-                        && scheduledAction.isEnabled()) { //the start time has arrived
+-                    executeScheduledEvent(scheduledAction, db);
+-                }
+-            } while (nextRunTime <= now && scheduledAction.getActionType() == ScheduledAction.ActionType.TRANSACTION);
++            int totalPlannedExecutions = scheduledAction.getTotalFrequency();
++            int executionCount = scheduledAction.getExecutionCount();
++
++            if (scheduledAction.getStartTime() > now    //if schedule begins in the future
++                    || !scheduledAction.isEnabled()     // of if schedule is disabled
++                    || (totalPlannedExecutions > 0 && executionCount >= totalPlannedExecutions)) { //limit was set and we reached or exceeded it
++                Log.i(LOG_TAG, "Skipping scheduled action: " + scheduledAction.toString());
++                continue;
++            }
++            executeScheduledEvent(scheduledAction, db);
+         }
+     }
+ 
+@@ -121,21 +117,41 @@ private void processScheduledActions(List<ScheduledAction> scheduledActions, SQL
+      * Executes a scheduled event according to the specified parameters
+      * @param scheduledAction ScheduledEvent to be executed
+      */
+-    private void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDatabase db){
++    //made public static for testing. Do not call directly
++    public static void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDatabase db){
+         Log.i(LOG_TAG, "Executing scheduled action: " + scheduledAction.toString());
++        int executionCount = scheduledAction.getExecutionCount();
++
+         switch (scheduledAction.getActionType()){
+             case TRANSACTION:
+                 String actionUID = scheduledAction.getActionUID();
+                 TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
+                 Transaction trxnTemplate = transactionsDbAdapter.getRecord(actionUID);
+-                Transaction recurringTrxn = new Transaction(trxnTemplate, true);
++
++                long now = System.currentTimeMillis();
++                //if there is an end time in the past, we execute all schedules up to the end time.
++                //if the end time is in the future, we execute all schedules until now (current time)
++                //if there is no end time, we execute all schedules until now
++                long endTime = scheduledAction.getEndTime() > 0 ? Math.min(scheduledAction.getEndTime(), now) : now;
++                int totalPlannedExecutions = scheduledAction.getTotalFrequency();
++                List<Transaction> transactions = new ArrayList<>();
+ 
+                 //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+                 //so compute the actual transaction time from pre-known values
+-                long transactionTime = scheduledAction.computeNextRunTime(); //default
+-                recurringTrxn.setTime(transactionTime);
+-                recurringTrxn.setCreatedTimestamp(new Timestamp(transactionTime));
+-                transactionsDbAdapter.addRecord(recurringTrxn, DatabaseAdapter.UpdateMethod.insert);
++                long transactionTime = scheduledAction.computeNextScheduledExecutionTime();
++                while (transactionTime <= endTime) {
++                    Transaction recurringTrxn = new Transaction(trxnTemplate, true);
++                    recurringTrxn.setTime(transactionTime);
++                    transactions.add(recurringTrxn);
++                    recurringTrxn.setScheduledActionUID(scheduledAction.getUID());
++                    scheduledAction.setExecutionCount(++executionCount);
++
++                    if (totalPlannedExecutions > 0 && executionCount >= totalPlannedExecutions)
++                        break; //if we hit the total planned executions set, then abort
++                    transactionTime = scheduledAction.computeNextScheduledExecutionTime();
++                }
++
++                transactionsDbAdapter.bulkAddRecords(transactions, DatabaseAdapter.UpdateMethod.insert);
+                 break;
+ 
+             case BACKUP:
+@@ -143,8 +159,8 @@ private void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDataba
+                 try {
+                     //wait for async task to finish before we proceed (we are holding a wake lock)
+                     new ExportAsyncTask(GnuCashApplication.getAppContext(), db).execute(params).get();
++                    scheduledAction.setExecutionCount(++executionCount);
+                 } catch (InterruptedException | ExecutionException e) {
+-                    //TODO: Create special log for scheduler service
+                     Crashlytics.logException(e);
+                     Log.e(LOG_TAG, e.getMessage());
+                     return; //return immediately, do not update last run time of event
+@@ -152,15 +168,16 @@ private void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDataba
+                 break;
+         }
+ 
+-        long lastRun = scheduledAction.computeNextRunTime();
+-        int executionCount = scheduledAction.getExecutionCount() + 1;
++        //the last run time is computed instead of just using "now" so that if the more than
++        // one period has been skipped, all intermediate transactions can be created
++
+         //update the last run time and execution count
+         ContentValues contentValues = new ContentValues();
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, lastRun);
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, System.currentTimeMillis());
+         contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, executionCount);
+         new ScheduledActionDbAdapter(db, new RecurrenceDbAdapter(db)).updateRecord(scheduledAction.getUID(), contentValues);
+ 
+-        scheduledAction.setLastRun(lastRun);
++        //set the values in the object because they will be checked for the next iteration in the calling loop
+         scheduledAction.setExecutionCount(executionCount);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java b/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
+index 195476f2..730eb993 100644
+--- a/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
+@@ -254,7 +254,7 @@ public void generateChartData(BarChart barChart, BudgetAmount budgetAmount) {
+             //todo: refactor getNumberOfPeriods into budget
+             int budgetPeriods = (int) mBudget.getNumberOfPeriods();
+             budgetPeriods = budgetPeriods == 0 ? 12 : budgetPeriods;
+-            int periods = mBudget.getRecurrence().getNumberOfPeriods(budgetPeriods);
++            int periods = mBudget.getRecurrence().getNumberOfPeriods(budgetPeriods); //// FIXME: 15.08.2016 why do we need number of periods
+ 
+             for (int periodNum = 1; periodNum <= periods; periodNum++) {
+                 BigDecimal amount = accountsDbAdapter.getAccountBalance(budgetAmount.getAccountUID(),
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+index d0a11d0e..510d259c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+@@ -219,6 +219,16 @@ public void onClick(DialogInterface dialog, int which) {
+                     }
+                 });
+             }
++
++            view.setOnClickListener(new View.OnClickListener() {
++                @Override
++                public void onClick(View v) {
++                    //do nothing if the active book is tapped
++                    if (!BooksDbAdapter.getInstance().getActiveBookUID().equals(bookUID)) {
++                        GnuCashApplication.loadBook(bookUID);
++                    }
++                }
++            });
+         }
+     }
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+index 3c298cee..c1a0b927 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+@@ -19,6 +19,7 @@
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
++import org.joda.time.DateTime;
+ import org.junit.Test;
+ 
+ import java.sql.Timestamp;
+@@ -89,6 +90,46 @@ public void settingRecurrence_shouldSetEndTime(){
+         assertThat(scheduledAction.getEndTime()).isEqualTo(endTime);
+     }
+ 
++    /**
++     * Checks that scheduled actions accurately compute the next run time based on the start date
++     * and the last time the action was run
++     */
++    @Test
++    public void testComputingNextScheduledExecution(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        PeriodType periodType = PeriodType.MONTH;
++        periodType.setMultiplier(2);
++
++        Recurrence recurrence = new Recurrence(periodType);
++        DateTime startDate = new DateTime(2015, 8, 15, 12, 0);
++        recurrence.setPeriodStart(new Timestamp(startDate.getMillis()));
++        scheduledAction.setRecurrence(recurrence);
++
++        assertThat(scheduledAction.computeNextScheduledExecutionTime()).isEqualTo(startDate.getMillis());
++
++        scheduledAction.setExecutionCount(3);
++        DateTime expectedTime = new DateTime(2016, 2, 15, 12, 0);
++        assertThat(scheduledAction.computeNextScheduledExecutionTime()).isEqualTo(expectedTime.getMillis());
++    }
++
++    @Test
++    public void testComputingTimeOfLastSchedule(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        PeriodType periodType = PeriodType.WEEK;
++        periodType.setMultiplier(2);
++        Recurrence recurrence = new Recurrence(periodType);
++        scheduledAction.setRecurrence(recurrence);
++        DateTime startDate = new DateTime(2016, 6, 6, 9, 0);
++        scheduledAction.setStartTime(startDate.getMillis());
++
++        assertThat(scheduledAction.getTimeOfLastSchedule()).isEqualTo(-1L);
++
++        scheduledAction.setExecutionCount(3);
++        DateTime expectedDate = new DateTime(2016, 7, 4, 9, 0);
++        assertThat(scheduledAction.getTimeOfLastSchedule()).isEqualTo(expectedDate.getMillis());
++
++    }
++
+     private long getTimeInMillis(int year, int month, int day) {
+         Calendar calendar = Calendar.getInstance();
+         calendar.set(year, month, day);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+new file mode 100644
+index 00000000..722fb26c
+--- /dev/null
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -0,0 +1,303 @@
++/*
++ * Copyright (c) 2016 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.test.unit.service;
++
++import android.database.sqlite.SQLiteDatabase;
++
++import org.gnucash.android.BuildConfig;
++import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
++import org.gnucash.android.db.adapter.DatabaseAdapter;
++import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
++import org.gnucash.android.db.adapter.TransactionsDbAdapter;
++import org.gnucash.android.export.ExportFormat;
++import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.export.Exporter;
++import org.gnucash.android.importer.GncXmlImporter;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Commodity;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.PeriodType;
++import org.gnucash.android.model.Recurrence;
++import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.service.SchedulerService;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
++import org.joda.time.DateTime;
++import org.joda.time.Weeks;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.BeforeClass;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
++import org.xml.sax.SAXException;
++
++import java.io.File;
++import java.io.IOException;
++import java.math.BigDecimal;
++import java.util.ArrayList;
++import java.util.List;
++
++import javax.xml.parsers.ParserConfigurationException;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/**
++ * Test the the scheduled actions service runs as expected
++ */
++@RunWith(GnucashTestRunner.class) //package is required so that resources can be found in dev mode
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android",
++        shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
++public class ScheduledActionServiceTest {
++
++    private static String mActionUID;
++    private SQLiteDatabase mDb;
++
++    private static Account mBaseAccount = new Account("Base Account");
++    private static Account mTransferAccount = new Account("Transfer Account");
++
++    private static Transaction mTemplateTransaction;
++
++    public void createAccounts(){
++        try {
++            String bookUID = GncXmlImporter.parse(GnuCashApplication.getAppContext().getResources().openRawResource(R.raw.default_accounts));
++            GnuCashApplication.loadBook(bookUID);
++            //initAdapters(bookUID);
++        } catch (ParserConfigurationException | SAXException | IOException e) {
++            e.printStackTrace();
++            throw new RuntimeException("Could not create default accounts");
++        }
++    }
++
++    @BeforeClass
++    public static void makeAccounts(){
++        mTemplateTransaction = new Transaction("Recurring Transaction");
++        mTemplateTransaction.setTemplate(true);
++
++        mActionUID = mTemplateTransaction.getUID();
++    }
++
++    @Before
++    public void setUp(){
++        mDb = GnuCashApplication.getActiveDb();
++        new CommoditiesDbAdapter(mDb); //initializes commodity static values
++        mBaseAccount.setCommodity(Commodity.DEFAULT_COMMODITY);
++        mTransferAccount.setCommodity(Commodity.DEFAULT_COMMODITY);
++        mTemplateTransaction.setCommodity(Commodity.DEFAULT_COMMODITY);
++
++        Split split1 = new Split(new Money(BigDecimal.TEN, Commodity.DEFAULT_COMMODITY), mBaseAccount.getUID());
++        Split split2 = split1.createPair(mTransferAccount.getUID());
++
++        mTemplateTransaction.addSplit(split1);
++        mTemplateTransaction.addSplit(split2);
++
++        AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++        accountsDbAdapter.addRecord(mBaseAccount);
++        accountsDbAdapter.addRecord(mTransferAccount);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        transactionsDbAdapter.addRecord(mTemplateTransaction, DatabaseAdapter.UpdateMethod.insert);
++
++    }
++
++    @Test
++    public void disabledScheduledActions_shouldNotRun(){
++        Recurrence recurrence = new Recurrence(PeriodType.WEEK);
++        ScheduledAction scheduledAction1 = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        scheduledAction1.setStartTime(System.currentTimeMillis() - 100000);
++        scheduledAction1.setEnabled(false);
++        scheduledAction1.setActionUID(mActionUID);
++        scheduledAction1.setRecurrence(recurrence);
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction1);
++
++        TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
++
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++        SchedulerService.processScheduledActions(actions, mDb);
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++    }
++
++    @Test
++    public void futureScheduledActions_shouldNotRun(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        scheduledAction.setStartTime(System.currentTimeMillis() + 100000);
++        scheduledAction.setEnabled(true);
++        scheduledAction.setRecurrence(new Recurrence(PeriodType.MONTH));
++        scheduledAction.setActionUID(mActionUID);
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++
++        TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
++
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++        SchedulerService.processScheduledActions(actions, mDb);
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++    }
++
++    /**
++     * Transactions whose execution count has reached or exceeded the planned execution count
++     */
++    @Test
++    public void exceededExecutionCounts_shouldNotRun(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        scheduledAction.setActionUID(mActionUID);
++        scheduledAction.setStartTime(new DateTime(2015, 5, 31, 14, 0).getMillis());
++        scheduledAction.setEnabled(true);
++        scheduledAction.setRecurrence(new Recurrence(PeriodType.WEEK));
++        scheduledAction.setTotalFrequency(4);
++        scheduledAction.setExecutionCount(4);
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++
++        TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++        SchedulerService.processScheduledActions(actions, mDb);
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++    }
++
++    /**
++     * Test that normal scheduled transactions would lead to new transaction entries
++     */
++    @Test
++    public void missedScheduledTransactions_shouldBeGenerated(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        DateTime startTime = new DateTime(2016, 6, 6, 9, 0);
++        scheduledAction.setStartTime(startTime.getMillis());
++        scheduledAction.setActionUID(mActionUID);
++
++        scheduledAction.setRecurrence(PeriodType.WEEK, 2);
++        ScheduledActionDbAdapter.getInstance().addRecord(scheduledAction, DatabaseAdapter.UpdateMethod.insert);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++        SchedulerService.processScheduledActions(actions, mDb);
++
++        int weeks = Weeks.weeksBetween(startTime, new DateTime(2016, 8, 29, 10, 0)).getWeeks();
++        int expectedTransactionCount = weeks/2;
++
++        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(expectedTransactionCount);
++    }
++
++    public void endTimeInTheFuture_shouldExecuteOnlyUntilPresent(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        DateTime startTime = new DateTime(2016, 6, 6, 9, 0);
++        scheduledAction.setStartTime(startTime.getMillis());
++        scheduledAction.setActionUID(mActionUID);
++
++        scheduledAction.setRecurrence(PeriodType.WEEK, 2);
++        scheduledAction.setEndTime(new DateTime(2017, 8, 16, 9, 0).getMillis());
++        ScheduledActionDbAdapter.getInstance().addRecord(scheduledAction, DatabaseAdapter.UpdateMethod.insert);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++        SchedulerService.processScheduledActions(actions, mDb);
++
++        int weeks = Weeks.weeksBetween(startTime, new DateTime(2016, 8, 29, 10, 0)).getWeeks();
++        int expectedTransactionCount = weeks/2; //multiplier from the PeriodType
++
++        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(expectedTransactionCount);
++    }
++
++    /**
++     * Test that the end time for scheduled actions should be respected
++     */
++    @Test
++    public void scheduledActionsWithEndTimeInPast_shouldBeExecuted(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        DateTime startTime = new DateTime(2016, 6, 6, 9, 0);
++        scheduledAction.setStartTime(startTime.getMillis());
++        scheduledAction.setActionUID(mActionUID);
++
++        scheduledAction.setRecurrence(PeriodType.WEEK, 2);
++        scheduledAction.setEndTime(new DateTime(2016, 8, 8, 9, 0).getMillis());
++        ScheduledActionDbAdapter.getInstance().addRecord(scheduledAction, DatabaseAdapter.UpdateMethod.insert);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++        SchedulerService.processScheduledActions(actions, mDb);
++
++        int expectedCount = 5;
++        assertThat(scheduledAction.getExecutionCount()).isEqualTo(expectedCount);
++        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(expectedCount); //would be 6 if the end time is not respected
++    }
++
++    /**
++     * Test that only scheduled actions with action UIDs are processed
++     */
++    @Test(expected = IllegalArgumentException.class)
++    public void recurringTransactions_shouldHaveScheduledActionUID(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        DateTime startTime = new DateTime(2016, 7, 4, 12 ,0);
++        scheduledAction.setStartTime(startTime.getMillis());
++        scheduledAction.setRecurrence(PeriodType.MONTH, 1);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++        SchedulerService.processScheduledActions(actions, mDb);
++    }
++
++    //// FIXME: 16.08.2016 Cannot find the file after export. But the export task is called and run
++    public void scheduledBackups_shouldRunOnlyOnce(){
++        ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
++        scheduledBackup.setStartTime(new DateTime(2016, 2, 17, 17, 0).getMillis());
++        scheduledBackup.setRecurrence(PeriodType.MONTH, 1);
++        scheduledBackup.setExecutionCount(2);
++
++        ExportParams backupParams = new ExportParams(ExportFormat.XML);
++        backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
++        scheduledBackup.setTag(backupParams.toCsv());
++
++        File backupFolder = new File(Exporter.getBackupFolderPath());
++        assertThat(backupFolder).exists();
++        assertThat(backupFolder.listFiles()).isEmpty();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledBackup);
++        SchedulerService.processScheduledActions(actions, mDb);
++
++        File[] backupFiles = backupFolder.listFiles();
++        assertThat(backupFiles).hasSize(1);
++        assertThat(backupFiles[0]).hasExtension("gnca");
++    }
++
++
++    @After
++    public void tearDown(){
++        TransactionsDbAdapter.getInstance().deleteAllRecords();
++    }
++}

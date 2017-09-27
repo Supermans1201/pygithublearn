@@ -1,0 +1,153 @@
+From 1adbfe3f02d6e03c15e871527c0734d116babece Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 21 May 2015 12:07:13 +0200
+Subject: [PATCH] Fixed: disabling of animations during testing for beta and
+ production builds
+
+Added waiting time between tests
+---
+ app/build.gradle                                   |  4 +--
+ .../android/test/ui/AccountsActivityTest.java      | 32 ++++++++++++----------
+ .../android/test/ui/TransactionsActivityTest.java  |  4 +--
+ app/src/debug/AndroidManifest.xml                  |  3 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  2 +-
+ 5 files changed, 25 insertions(+), 20 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index d4dec1f4..28a49465 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -132,8 +132,8 @@ afterEvaluate {
+         commandLine "$adb shell pm grant $android.productFlavors.development.applicationId android.permission.SET_ANIMATION_SCALE".split(' ')
+     }
+ 
+-    task grantAnimationPermissionProduction(type: Exec, dependsOn: ['installBetaDebug', 'installProductionDebug']){
+-        commandLine "$adb shell pm grant $android.productFlavors.production.applicationId android.permission.SET_ANIMATION_SCALE".split(' ')
++    task grantAnimationPermissionProduction(type: Exec, dependsOn: 'installProductionDebug'){
++        commandLine "$adb shell pm grant $android.defaultConfig.applicationId android.permission.SET_ANIMATION_SCALE".split(' ')
+     }
+     // When launching individual tests from Android Studio, it seems that only the assemble tasks
+     // get called directly, not the install* versions
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 605afa80..1757be19 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -96,7 +96,7 @@ public void setUp() throws Exception {
+         mSplitsDbAdapter = new SplitsDbAdapter(mDb);
+         mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
+         mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+-		
++
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+         account.setUID(DUMMY_ACCOUNT_UID);
+ 		account.setCurrency(Currency.getInstance(DUMMY_ACCOUNT_CURRENCY_CODE));
+@@ -246,16 +246,21 @@ public void testDeleteAccount() {
+         transaction.addSplit(new Split(Money.getZeroInstance(), DUMMY_ACCOUNT_UID));
+         mTransactionsDbAdapter.addTransaction(transaction);
+ 
+-        onView(withId(R.id.primary_text)).perform(longClick());
++        onView(withText(DUMMY_ACCOUNT_NAME)).perform(longClick());
+         onView(withId(R.id.context_menu_delete)).perform(click());
+-        onView(withText(R.string.label_delete_sub_accounts)).perform(click());
++
++        //the account has no sub-accounts
++        onView(withId(R.id.accounts_options)).check(matches(not(isDisplayed())));
++        onView(withId(R.id.transactions_options)).check(matches(isDisplayed()));
++
++        onView(withText(R.string.label_delete_transactions)).perform(click());
+         onView(withId(R.id.btn_save)).perform(click());
+ 
+         //should throw expected exception
+         mAccountsDbAdapter.getID(DUMMY_ACCOUNT_UID);
+ 
+         List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
+-        assertThat(transactions).hasSize(0);
++        assertThat(transactions).isEmpty();
+     }
+ 
+ 	//TODO: Test import of account file
+@@ -263,26 +268,25 @@ public void testDeleteAccount() {
+     @Test
+ 	public void testIntentAccountCreation(){
+ 		Intent intent = new Intent(Intent.ACTION_INSERT);
+-		intent.putExtra(Intent.EXTRA_TITLE, "Intent Account");
+-		intent.putExtra(Intent.EXTRA_UID, "intent-account");
++        intent.putExtra(Intent.EXTRA_TITLE, "Intent Account");
++        intent.putExtra(Intent.EXTRA_UID, "intent-account");
+         intent.putExtra(Account.EXTRA_CURRENCY_CODE, "EUR");
+         intent.setType(Account.MIME_TYPE);
+ 
+-        AccountCreator accountCreator = new AccountCreator();
+-        accountCreator.onReceive(mAcccountsActivity, intent);
++        new AccountCreator().onReceive(mAcccountsActivity, intent);
+ 
+ 		Account account = mAccountsDbAdapter.getAccount("intent-account");
+-		assertNotNull(account);
+-		assertEquals("Intent Account", account.getName());
+-		assertEquals("intent-account", account.getUID());
+-		assertEquals("EUR", account.getCurrency().getCurrencyCode());
++		assertThat(account).isNotNull();
++        assertThat(account.getName()).isEqualTo("Intent Account");
++        assertThat(account.getUID()).isEqualTo("intent-account");
++        assertThat(account.getCurrency().getCurrencyCode()).isEqualTo("EUR");
+ 	}
+ 	
+ 	@After
+ 	public void tearDown() throws Exception {
+         mAcccountsActivity.finish();
+-        Thread.sleep(1000);
+-        mAccountsDbAdapter.deleteAllRecords();
++        Thread.sleep(2000);
++        mAccountsDbAdapter.deleteAllRecords(); //clear the data
+ 		super.tearDown();
+ 	}
+ 
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 09bfbf0b..5b467776 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -125,7 +125,6 @@ public void setUp() throws Exception {
+         mSplitsDbAdapter = new SplitsDbAdapter(mDb);
+         mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
+         mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+-		mAccountsDbAdapter.deleteAllRecords();
+ 
+ 		mTransactionTimeMillis = System.currentTimeMillis();
+         Account account = new Account(DUMMY_ACCOUNT_NAME);
+@@ -541,7 +540,8 @@ private void clickOnView(int viewId){
+ 	@After
+ 	public void tearDown() throws Exception {
+ 		mTransactionsActivity.finish();
+-		Thread.sleep(1000);
++		Thread.sleep(2000);
++		mAccountsDbAdapter.deleteAllRecords();
+ 		super.tearDown();
+ 	}
+ }
+diff --git a/app/src/debug/AndroidManifest.xml b/app/src/debug/AndroidManifest.xml
+index 1400ea47..33c40643 100644
+--- a/app/src/debug/AndroidManifest.xml
++++ b/app/src/debug/AndroidManifest.xml
+@@ -15,7 +15,8 @@
+  limitations under the License.
+ -->
+ 
+-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++<manifest xmlns:android="http://schemas.android.com/apk/res/android"
++    package="org.gnucash.android">
+    <!-- Disable animations on debug builds so that the animations do not interfere with Espresso
+          tests.  Adding this permission to the manifest is not sufficient - you must also grant the
+          permission over adb! -->
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 81aedaed..af7381a8 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -301,7 +301,7 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+ 	 */
+     public List<Transaction> getAllTransactionsForAccount(String accountUID){
+ 		Cursor c = fetchAllTransactionsForAccount(accountUID);
+-		ArrayList<Transaction> transactionsList = new ArrayList<Transaction>();
++		ArrayList<Transaction> transactionsList = new ArrayList<>();
+         try {
+             while (c.moveToNext()) {
+                 transactionsList.add(buildTransactionInstance(c));

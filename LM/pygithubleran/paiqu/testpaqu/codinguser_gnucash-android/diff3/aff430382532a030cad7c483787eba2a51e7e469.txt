@@ -1,0 +1,157 @@
+From aff430382532a030cad7c483787eba2a51e7e469 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Thu, 18 Sep 2014 20:31:44 +0800
+Subject: [PATCH] Separate QIF export by currency
+
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  4 +-
+ .../gnucash/android/export/ExporterAsyncTask.java  | 54 +++++++++++++++++-----
+ .../gnucash/android/export/qif/QifExporter.java    | 11 ++++-
+ .../org/gnucash/android/export/qif/QifHelper.java  |  1 +
+ 4 files changed, 55 insertions(+), 15 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index bed881d0..d871ef3e 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -305,7 +305,7 @@ public Cursor fetchTransactionsWithSplits(String [] columns, String condition, S
+ 
+     }
+ 
+-    public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] columns, String condition, String orderBy) {
++    public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] columns, String where, String[] whereArgs, String orderBy) {
+         // table is :
+         // transactions, splits ON transactions.uid = splits.transaction_uid ,
+         // ( SELECT transactions.uid AS trans_acct_t_uid ,
+@@ -361,7 +361,7 @@ public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] column
+                 AccountEntry.TABLE_NAME + " AS account1 ON account1." + AccountEntry.COLUMN_UID +
+                 " = trans_acct.trans_acct_a_uid , " + AccountEntry.TABLE_NAME + " AS account2 ON account2." +
+                 AccountEntry.COLUMN_UID + " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID,
+-                columns, condition, null, null, null , orderBy);
++                columns, where, whereArgs, null, null , orderBy);
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/export/ExporterAsyncTask.java b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+index 796e1b58..d72aa6a6 100644
+--- a/app/src/org/gnucash/android/export/ExporterAsyncTask.java
++++ b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -32,6 +32,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.export.ofx.OfxExporter;
+ import org.gnucash.android.export.qif.QifExporter;
++import org.gnucash.android.export.qif.QifHelper;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.transaction.dialog.TransactionsDeleteConfirmationDialogFragment;
+@@ -223,21 +224,50 @@ private void shareFile(String path){
+      * @param dst Absolute path to the destination file
+      * @throws IOException if the file could not be copied
+      */
+-    public static void copyFile(File src, File dst) throws IOException
++    public void copyFile(File src, File dst) throws IOException
+     {
+         //TODO: Make this asynchronous at some time, t in the future.
+-        FileChannel inChannel = new FileInputStream(src).getChannel();
+-        FileChannel outChannel = new FileOutputStream(dst).getChannel();
+-        try
+-        {
+-            inChannel.transferTo(0, inChannel.size(), outChannel);
++        if (mExportParams.getExportFormat() == ExportFormat.QIF) {
++            // split only at the last dot
++            String[] pathParts = dst.getPath().split("(?=\\.[^\\.]+$)");
++            String line;
++            BufferedReader in = new BufferedReader(new FileReader(src));
++            BufferedWriter out = null;
++            try {
++                while ((line = in.readLine()) != null) {
++                    if (line.startsWith(QifHelper.INTERNAL_CURRENCY_PREFIX)) {
++                        String currencyCode = line.substring(1);
++                        if (out != null) {
++                            out.close();
++                        }
++                        out = new BufferedWriter(new FileWriter(pathParts[0] + "_" + currencyCode + pathParts[1]));
++                    }
++                    else {
++                        if (out == null) {
++                            out = new BufferedWriter(new FileWriter(pathParts[0] + pathParts[1]));
++                        }
++                        out.append(line).append('\n');
++                    }
++                }
++            }
++            finally {
++                in.close();
++                if (out != null) {
++                    out.close();
++                }
++            }
+         }
+-        finally
+-        {
+-            if (inChannel != null)
+-                inChannel.close();
+-            if (outChannel != null)
+-                outChannel.close();
++        else {
++            FileChannel inChannel = new FileInputStream(src).getChannel();
++            FileChannel outChannel = new FileOutputStream(dst).getChannel();
++            try {
++                inChannel.transferTo(0, inChannel.size(), outChannel);
++            } finally {
++                if (inChannel != null)
++                    inChannel.close();
++                if (outChannel != null)
++                    outChannel.close();
++            }
+         }
+     }
+ 
+diff --git a/app/src/org/gnucash/android/export/qif/QifExporter.java b/app/src/org/gnucash/android/export/qif/QifExporter.java
+index a6049f3d..92d271c3 100644
+--- a/app/src/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/org/gnucash/android/export/qif/QifExporter.java
+@@ -73,14 +73,18 @@ public void generateExport(Writer writer) throws ExporterException {
+                             mParameters.shouldExportAllTransactions() ?
+                                     "" : " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_EXPORTED + "== 0"
+                             ),
++                    null,
++                    // acct1_currency : group transaction with the same currency together
+                     // trans_time ASC : put transactions in time order
+                     // trans_uid ASC  : put splits from the same transaction together
+-                   "trans_time ASC, trans_uid ASC"
++                   "acct1_currency ASC, trans_time ASC, trans_uid ASC"
+                     );
+             try {
++                String currentCurrencyCode = "";
+                 String currentAccountUID = "";
+                 String currentTransactionUID = "";
+                 while (cursor.moveToNext()) {
++                    String currencyCode = cursor.getString(cursor.getColumnIndexOrThrow("acct1_currency"));
+                     String accountUID = cursor.getString(cursor.getColumnIndexOrThrow("acct1_uid"));
+                     String transactionUID = cursor.getString(cursor.getColumnIndexOrThrow("trans_uid"));
+                     if (!transactionUID.equals(currentTransactionUID)) {
+@@ -93,6 +97,11 @@ public void generateExport(Writer writer) throws ExporterException {
+                             //if (!currentAccountUID.equals("")) {
+                             //    // end last account
+                             //}
++                            if (!currencyCode.equals(currentCurrencyCode)) {
++                                currentCurrencyCode = currencyCode;
++                                writer.append(QifHelper.INTERNAL_CURRENCY_PREFIX)
++                                        .append(currencyCode);
++                            }
+                             // start new account
+                             currentAccountUID = accountUID;
+                             writer.append(QifHelper.ACCOUNT_HEADER).append(newLine);
+diff --git a/app/src/org/gnucash/android/export/qif/QifHelper.java b/app/src/org/gnucash/android/export/qif/QifHelper.java
+index 3a5e3d08..13374ded 100644
+--- a/app/src/org/gnucash/android/export/qif/QifHelper.java
++++ b/app/src/org/gnucash/android/export/qif/QifHelper.java
+@@ -43,6 +43,7 @@
+     public static final String ACCOUNT_HEADER           = "!Account";
+     public static final String ACCOUNT_NAME_PREFIX      = "N";
+ 
++    public static final String INTERNAL_CURRENCY_PREFIX = "*";
+ 
+     public static final String ENTRY_TERMINATOR = "^";
+     private static final SimpleDateFormat QIF_DATE_FORMATTER = new SimpleDateFormat("yyyy/M/d");

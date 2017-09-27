@@ -1,0 +1,178 @@
+From b636b28373359695d397f2e8fe7b6a2288142dd3 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 22 Sep 2014 23:53:19 +0200
+Subject: [PATCH] Fixed several bugs from crash logs
+
+Fixed: Random crash in transaction delete confirmation dialog
+Fixed: Transaction type label word wraps around button - fixes #203
+Fixed: Negative sign not displayed for amount when entering a debit in a new transaction
+---
+ app/res/layout/item_split_entry.xml                 |  2 +-
+ .../gnucash/android/importer/ImportAsyncTask.java   |  4 +++-
+ .../DeleteAllTransacationsConfirmationDialog.java   |  2 +-
+ .../ScheduledTransactionsListFragment.java          | 10 +++++++++-
+ .../ui/transaction/TransactionFormFragment.java     | 21 ++++++++++++++++++++-
+ .../dialog/SplitEditorDialogFragment.java           |  8 +++-----
+ 6 files changed, 37 insertions(+), 10 deletions(-)
+
+diff --git a/app/res/layout/item_split_entry.xml b/app/res/layout/item_split_entry.xml
+index 363563de..da992141 100644
+--- a/app/res/layout/item_split_entry.xml
++++ b/app/res/layout/item_split_entry.xml
+@@ -47,7 +47,7 @@ limitations under the License.
+ 
+         <org.gnucash.android.ui.util.TransactionTypeToggleButton android:id="@+id/btn_split_type"
+                       android:layout_width="0dp"
+-                      android:layout_weight="2"
++                      android:layout_weight="3"
+                       android:layout_height="wrap_content"
+                       android:textOn="@string/label_debit"
+                       android:textOff="@string/label_credit"
+diff --git a/app/src/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+index 52173029..e24f376f 100644
+--- a/app/src/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -53,11 +53,13 @@ protected void onPreExecute() {
+         progressDialog.setTitle(R.string.title_progress_importing_accounts);
+         progressDialog.setIndeterminate(true);
+         progressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
++        progressDialog.show();
+         if (Build.VERSION.SDK_INT > Build.VERSION_CODES.HONEYCOMB){
++            //these methods must be called after progressDialog.show()
+             progressDialog.setProgressNumberFormat(null);
+             progressDialog.setProgressPercentFormat(null);
+         }
+-        progressDialog.show();
++
+     }
+ 
+     @Override
+diff --git a/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java b/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+index 89aca3fb..578e5bf2 100644
+--- a/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
++++ b/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+@@ -57,7 +57,7 @@ public Dialog onCreateDialog(Bundle savedInstanceState) {
+                             public void onClick(DialogInterface dialog, int whichButton) {
+                                 GncXmlExporter.createBackup();
+ 
+-                                Context context = getDialog().getContext();
++                                Context context = getActivity();
+                                 AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
+                                 List<Transaction> openingBalances = new ArrayList<Transaction>();
+                                 boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
+diff --git a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index ce142492..005a8e92 100644
+--- a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -183,7 +183,15 @@ public void onListItemClick(ListView l, View v, int position, long id) {
+             checkbox.setChecked(!checkbox.isChecked());
+             return;
+         }
+-        String accountUID = mTransactionsDbAdapter.getTransaction(id).getSplits().get(0).getAccountUID();
++        Transaction transaction = mTransactionsDbAdapter.getTransaction(id);
++
++        //this should actually never happen, but has happened once. So perform check for the future
++        if (transaction.getSplits().size() == 0){
++            Toast.makeText(getActivity(), "The selected transaction has no splits and cannot be opened", Toast.LENGTH_SHORT).show();
++            return;
++        }
++
++        String accountUID = transaction.getSplits().get(0).getAccountUID();
+         openTransactionForEdit(accountUID, mTransactionsDbAdapter.getUID(id));
+     }
+ 
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index e8b9b1b3..aa993df4 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -23,6 +23,7 @@
+ import java.util.*;
+ 
+ import android.support.v4.app.FragmentManager;
++import android.text.Editable;
+ import android.widget.*;
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.*;
+@@ -473,7 +474,7 @@ private void openSplitEditor(){
+ 	 * Sets click listeners for the dialog buttons
+ 	 */
+ 	private void setListeners() {
+-        mAmountInputFormatter = new AmountInputFormatter(mAmountEditText);
++        mAmountInputFormatter = new AmountTextWatcher(mAmountEditText); //new AmountInputFormatter(mAmountEditText);
+         mAmountEditText.addTextChangedListener(mAmountInputFormatter);
+ 
+         mOpenSplitsButton.setOnClickListener(new View.OnClickListener() {
+@@ -790,6 +791,8 @@ public static String stripCurrencyFormatting(String s){
+ 		//remove all currency formatting and anything else which is not a number
+         String sign = s.trim().substring(0,1);
+         String stripped = s.trim().replaceAll("\\D*", "");
++        if (stripped.length() == 0)
++            return "";
+         if (sign.equals("+") || sign.equals("-")){
+             stripped = sign + stripped;
+         }
+@@ -814,5 +817,21 @@ public static BigDecimal parseInputToDecimal(String amountString){
+ 		return amount;
+ 	}
+ 
++    private class AmountTextWatcher extends AmountInputFormatter {
+ 
++        public AmountTextWatcher(EditText amountInput) {
++            super(amountInput);
++        }
++
++        @Override
++        public void afterTextChanged(Editable s) {
++            String value = s.toString();
++            if (mTransactionTypeButton.isChecked()){
++                if (s.charAt(0) != '-'){
++                    s = Editable.Factory.getInstance().newEditable("-" + value);
++                }
++            }
++            super.afterTextChanged(s);
++        }
++    }
+ }
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 02e1e780..09de0d8b 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -62,7 +62,6 @@
+     private Cursor mCursor;
+     private SimpleCursorAdapter mCursorAdapter;
+     private List<View> mSplitItemViewList;
+-    private long mAccountId;
+     private String mAccountUID;
+ 
+     private BalanceTextWatcher mBalanceUpdater = new BalanceTextWatcher();
+@@ -156,11 +155,10 @@ private void initArgs() {
+ 
+         Bundle args     = getArguments();
+         mAccountUID      = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
+-        mAccountId     = mAccountsDbAdapter.getID(mAccountUID);
+         mBaseAmount     = new BigDecimal(args.getString(UxArgument.AMOUNT_STRING));
+ 
+         String conditions = "(" //+ AccountEntry._ID + " != " + mAccountId + " AND "
+-                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountId)
++                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountUID)
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                 + ")";
+@@ -196,7 +194,7 @@ public void onClick(View view) {
+         updateTransferAccountsList(accountsSpinner);
+         accountsSpinner.setOnItemSelectedListener(new TypeButtonLabelUpdater(splitTypeButton));
+ 
+-        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountId));
++        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountUID));
+         splitCurrencyTextView.setText(accountCurrency.getSymbol());
+         splitTypeButton.setAmountFormattingListener(splitAmountEditText, splitCurrencyTextView);
+         splitTypeButton.setChecked(mBaseAmount.signum() > 0);
+@@ -307,7 +305,7 @@ public void onClick(View view) {
+      */
+     private void updateTotal(){
+         List<Split> splitList   = extractSplitsFromView();
+-        String currencyCode     = mAccountsDbAdapter.getCurrencyCode(mAccountId);
++        String currencyCode     = mAccountsDbAdapter.getCurrencyCode(mAccountUID);
+         Money splitSum          = Money.createZeroInstance(currencyCode);
+ 
+         for (Split split : splitList) {

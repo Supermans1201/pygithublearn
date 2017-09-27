@@ -1,0 +1,182 @@
+From bfb771844890f22875d147cc45b988de5e83dc5f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Wed, 23 Nov 2016 09:09:15 +0100
+Subject: [PATCH 1/2] Make ExportAsyncTask.moveExportToGoogleDrive()
+ synchronous as expected by its caller.
+
+Otherwise we might end up reporting the export as successful when it's
+not even finished yet.
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 91 ++++++++++------------
+ 1 file changed, 40 insertions(+), 51 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index cf762681..2e8ef6c7 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -80,6 +80,7 @@
+ import java.util.ArrayList;
+ import java.util.Date;
+ import java.util.List;
++import java.util.concurrent.TimeUnit;
+ 
+ /**
+  * Asynchronous task for exporting transactions.
+@@ -276,62 +277,50 @@ protected void onPostExecute(Boolean exportResult) {
+ 
+     private void moveExportToGoogleDrive(){
+         Log.i(TAG, "Moving exported file to Google Drive");
++        final long TIMEOUT = 5; // seconds
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+         googleApiClient.blockingConnect();
+-        final ResultCallback<DriveFolder.DriveFileResult> fileCallback = new
+-                ResultCallback<DriveFolder.DriveFileResult>() {
+-                    @Override
+-                    public void onResult(DriveFolder.DriveFileResult result) {
+-                        if (!result.getStatus().isSuccess())
+-                            Log.e(TAG, "Error while trying to sync to Google Drive");
+-                        else
+-                            Log.i(TAG, "Created a file with content: " + result.getDriveFile().getDriveId());
+-                    }
+-                };
+-
+-        Drive.DriveApi.newDriveContents(googleApiClient).setResultCallback(new ResultCallback<DriveApi.DriveContentsResult>() {
+-            @Override
+-            public void onResult(DriveApi.DriveContentsResult result) {
+-                if (!result.getStatus().isSuccess()) {
+-                    Log.e(TAG, "Error while trying to create new file contents");
+-                    return;
+-                }
+-                final DriveContents driveContents = result.getDriveContents();
+-                try {
+-                    // write content to DriveContents
+-                    OutputStream outputStream = driveContents.getOutputStream();
+-                    for (String exportedFilePath : mExportedFiles) {
+-                        File exportedFile = new File(exportedFilePath);
+-                        FileInputStream fileInputStream = new FileInputStream(exportedFile);
+-                        byte[] buffer = new byte[1024];
+-                        int count;
+-
+-                        while ((count = fileInputStream.read(buffer)) >= 0) {
+-                            outputStream.write(buffer, 0, count);
+-                        }
+-                        fileInputStream.close();
+-                        outputStream.flush();
+-                        exportedFile.delete();
+-
+-                        MetadataChangeSet changeSet = new MetadataChangeSet.Builder()
+-                                .setTitle(exportedFile.getName())
+-                                .setMimeType(mExporter.getExportMimeType())
+-                                .build();
+-
+-                        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
+-                        String folderId = sharedPreferences.getString(mContext.getString(R.string.key_google_drive_app_folder_id), "");
+-                        DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
+-                        // create a file on root folder
+-                        folder.createFile(googleApiClient, changeSet, driveContents)
+-                                .setResultCallback(fileCallback);
+-                    }
+ 
+-                } catch (IOException e) {
+-                    Crashlytics.logException(e);
+-                    Log.e(TAG, e.getMessage());
++        DriveApi.DriveContentsResult driveContentsResult =
++                Drive.DriveApi.newDriveContents(googleApiClient).await(TIMEOUT, TimeUnit.SECONDS);
++        if (!driveContentsResult.getStatus().isSuccess()) {
++            Log.e(TAG, "Error while trying to create new file contents");
++            return;
++        }
++        final DriveContents driveContents = driveContentsResult.getDriveContents();
++        DriveFolder.DriveFileResult driveFileResult = null;
++        try {
++            // write content to DriveContents
++            OutputStream outputStream = driveContents.getOutputStream();
++            for (String exportedFilePath : mExportedFiles) {
++                File exportedFile = new File(exportedFilePath);
++                FileInputStream fileInputStream = new FileInputStream(exportedFile);
++                byte[] buffer = new byte[1024];
++                int count;
++
++                while ((count = fileInputStream.read(buffer)) >= 0) {
++                    outputStream.write(buffer, 0, count);
+                 }
++                fileInputStream.close();
++                outputStream.flush();
++                exportedFile.delete();
++
++                MetadataChangeSet changeSet = new MetadataChangeSet.Builder()
++                        .setTitle(exportedFile.getName())
++                        .setMimeType(mExporter.getExportMimeType())
++                        .build();
++
++                SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
++                String folderId = sharedPreferences.getString(mContext.getString(R.string.key_google_drive_app_folder_id), "");
++                DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
++                // create a file on root folder
++                driveFileResult = folder.createFile(googleApiClient, changeSet, driveContents)
++                                                .await(TIMEOUT, TimeUnit.SECONDS);
+             }
+-        });
++        } catch (IOException e) {
++            Crashlytics.logException(e);
++            Log.e(TAG, e.getMessage());
++        }
+     }
+ 
+     private void moveExportToDropbox() {
+
+From a082531763c310186d7f0ee69a5aed29474ce293 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Thu, 8 Dec 2016 19:53:18 +0100
+Subject: [PATCH 2/2] Show an error message if there's an error exporting to
+ Google Drive.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/616
+---
+ .../org/gnucash/android/export/ExportAsyncTask.java | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 2e8ef6c7..9f392c80 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -40,7 +40,6 @@
+ import com.dropbox.sync.android.DbxFileSystem;
+ import com.dropbox.sync.android.DbxPath;
+ import com.google.android.gms.common.api.GoogleApiClient;
+-import com.google.android.gms.common.api.ResultCallback;
+ import com.google.android.gms.drive.Drive;
+ import com.google.android.gms.drive.DriveApi;
+ import com.google.android.gms.drive.DriveContents;
+@@ -321,6 +320,16 @@ private void moveExportToGoogleDrive(){
+             Crashlytics.logException(e);
+             Log.e(TAG, e.getMessage());
+         }
++
++        if (driveFileResult == null)
++            return;
++
++        if (!driveFileResult.getStatus().isSuccess()) {
++            Log.e(TAG, "Error creating file in Google Drive");
++            showToastFromNonUiThread("Couldn't create the file in Google Drive", Toast.LENGTH_LONG);
++        } else {
++            Log.i(TAG, "Created file with id: " + driveFileResult.getDriveFile().getDriveId());
++        }
+     }
+ 
+     private void moveExportToDropbox() {
+@@ -525,4 +534,14 @@ public void moveFile(String src, String dst) throws IOException {
+         srcFile.delete();
+     }
+ 
++    private void showToastFromNonUiThread(final String message, final int duration) {
++        if (mContext instanceof Activity) {
++            ((Activity) mContext).runOnUiThread(new Runnable() {
++                @Override
++                public void run() {
++                    Toast.makeText(mContext, message, duration).show();
++                }
++            });
++        }
++    }
+ }

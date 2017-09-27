@@ -1,0 +1,725 @@
+From aba812f6c2c05573b0317a71c5613ae485d26101 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 9 Sep 2014 20:33:10 +0800
+Subject: [PATCH] Switch to the new interface of exporter.
+
+For OFX, the old interface is used as a proxy.
+For QIF and GncXML, old interface and related methods in QifExpoter, GncXmlExport, Account (toQIF, toGncXML), Transaction (toQIF, toGncXML), and Split (toGncXML) are removed
+---
+ .../org/gnucash/android/db/MigrationHelper.java    |   2 +-
+ app/src/org/gnucash/android/export/Exporter.java   |   5 +-
+ .../gnucash/android/export/ExporterAsyncTask.java  |  32 +----
+ .../gnucash/android/export/ofx/OfxExporter.java    |  14 ++-
+ .../gnucash/android/export/qif/QifExporter.java    |  37 +-----
+ .../gnucash/android/export/xml/GncXmlExporter.java | 137 +--------------------
+ app/src/org/gnucash/android/model/Account.java     | 101 ---------------
+ app/src/org/gnucash/android/model/Split.java       |  38 ------
+ app/src/org/gnucash/android/model/Transaction.java | 130 -------------------
+ 9 files changed, 32 insertions(+), 464 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/MigrationHelper.java b/app/src/org/gnucash/android/db/MigrationHelper.java
+index b71decf1..860746b5 100644
+--- a/app/src/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/org/gnucash/android/db/MigrationHelper.java
+@@ -136,7 +136,7 @@ static String exportDatabase(SQLiteDatabase db, ExportFormat format) throws IOEx
+ 
+         BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+                 new FileOutputStream(exportParams.getTargetFilepath()), "UTF-8"));
+-        writer.write(exporter.generateExport());
++        exporter.generateExport(writer);
+ 
+         writer.flush();
+         writer.close();
+diff --git a/app/src/org/gnucash/android/export/Exporter.java b/app/src/org/gnucash/android/export/Exporter.java
+index d70413f1..9865de12 100644
+--- a/app/src/org/gnucash/android/export/Exporter.java
++++ b/app/src/org/gnucash/android/export/Exporter.java
+@@ -24,6 +24,7 @@
+ 
+ import java.io.File;
+ import java.io.FileFilter;
++import java.io.Writer;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+ import java.util.Locale;
+@@ -134,10 +135,10 @@ public boolean accept(File file) {
+ 
+     /**
+      * Generates the export output
+-     * @return Export output as String
++     * @param writer A Writer to export result to
+      * @throws ExporterException if an error occurs during export
+      */
+-    public abstract String generateExport() throws ExporterException;
++    public abstract void generateExport(Writer writer) throws ExporterException;
+ 
+     public static class ExporterException extends RuntimeException{
+ 
+diff --git a/app/src/org/gnucash/android/export/ExporterAsyncTask.java b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+index 81711577..796e1b58 100644
+--- a/app/src/org/gnucash/android/export/ExporterAsyncTask.java
++++ b/app/src/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -108,18 +108,13 @@ protected Boolean doInBackground(ExportParams... params) {
+             }
+ 
+         try {
+-            if (mExportParams.getExportFormat() == ExportFormat.QIF) {
+-                File file = new File(mExportParams.getTargetFilepath());
+-                BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
+-                try {
+-                    ((QifExporter)mExporter).generateExport(writer);
+-                }
+-                finally {
+-                    writer.close();
+-                }
++            File file = new File(mExportParams.getTargetFilepath());
++            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
++            try {
++                mExporter.generateExport(writer);
+             }
+-            else {
+-                writeOutput(mExporter.generateExport());
++            finally {
++                writer.close();
+             }
+         } catch (Exception e) {
+             e.printStackTrace();
+@@ -199,21 +194,6 @@ protected void onPostExecute(Boolean exportResult) {
+     }
+ 
+     /**
+-     * Writes out the String containing the exported data to disk
+-     * @param exportOutput String containing exported data
+-     * @throws IOException if the write fails
+-     */
+-    private void writeOutput(String exportOutput) throws IOException {
+-        File file = new File(mExportParams.getTargetFilepath());
+-
+-        BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
+-        writer.write(exportOutput);
+-
+-        writer.flush();
+-        writer.close();
+-    }
+-
+-    /**
+      * Starts an intent chooser to allow the user to select an activity to receive
+      * the exported OFX file
+      * @param path String path to the file on disk
+diff --git a/app/src/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/org/gnucash/android/export/ofx/OfxExporter.java
+index ae40c2fc..c902c761 100644
+--- a/app/src/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -16,6 +16,7 @@
+ 
+ package org.gnucash.android.export.ofx;
+ 
++import java.io.IOException;
+ import java.io.StringWriter;
+ import java.io.Writer;
+ import java.util.List;
+@@ -100,7 +101,6 @@ private void generateOfx(Document doc, Element parent){
+ 		accountsDbAdapter.close();
+ 	}
+ 
+-    @Override
+     public String generateExport() throws ExporterException {
+         mAccountsList = mParameters.shouldExportAllTransactions() ?
+                 mAccountsDbAdapter.getAllAccounts() : mAccountsDbAdapter.getExportableAccounts();
+@@ -108,7 +108,7 @@ public String generateExport() throws ExporterException {
+ 
+         DocumentBuilderFactory docFactory = DocumentBuilderFactory
+                 .newInstance();
+-        DocumentBuilder docBuilder = null;
++        DocumentBuilder docBuilder;
+         try {
+             docBuilder = docFactory.newDocumentBuilder();
+         } catch (ParserConfigurationException e) {
+@@ -144,6 +144,16 @@ public String generateExport() throws ExporterException {
+         }
+     }
+ 
++    @Override
++    public void generateExport(Writer writer) throws ExporterException {
++        try {
++            writer.write(generateExport());
++        }
++        catch (IOException e) {
++            throw new ExporterException(mParameters, e);
++        }
++    }
++
+     /**
+      * Writes out the document held in <code>node</code> to <code>outputWriter</code>
+      * @param node {@link Node} containing the OFX document structure. Usually the parent node
+diff --git a/app/src/org/gnucash/android/export/qif/QifExporter.java b/app/src/org/gnucash/android/export/qif/QifExporter.java
+index 6f9e249c..8d8494b0 100644
+--- a/app/src/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/org/gnucash/android/export/qif/QifExporter.java
+@@ -25,21 +25,15 @@
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+-import org.gnucash.android.model.Account;
+-import org.gnucash.android.model.Transaction;
+ 
+ import java.io.IOException;
+ import java.io.Writer;
+ import java.math.BigDecimal;
+-import java.util.ArrayList;
+-import java.util.List;
+ 
+ /**
+  * @author Ngewi
+  */
+ public class QifExporter extends Exporter{
+-    private List<Account> mAccountsList;
+-
+     public QifExporter(ExportParams params){
+         super(params);
+     }
+@@ -48,33 +42,8 @@ public QifExporter(ExportParams params,  SQLiteDatabase db){
+         super(params, db);
+     }
+ 
+-    private String generateQIF(){
+-        StringBuffer qifBuffer = new StringBuffer();
+-
+-        List<String> exportedTransactions = new ArrayList<String>();
+-        for (Account account : mAccountsList) {
+-            if (account.getTransactionCount() == 0)
+-                continue;
+-
+-            qifBuffer.append(account.toQIF(mParameters.shouldExportAllTransactions(), exportedTransactions) + "\n");
+-
+-            //mark as exported
+-            mAccountsDbAdapter.markAsExported(account.getUID());
+-        }
+-        mAccountsDbAdapter.close();
+-
+-        return qifBuffer.toString();
+-    }
+-
+     @Override
+-    public String generateExport() throws ExporterException {
+-        mAccountsList = mParameters.shouldExportAllTransactions() ?
+-                mAccountsDbAdapter.getAllAccounts() : mAccountsDbAdapter.getExportableAccounts();
+-
+-        return generateQIF();
+-    }
+-
+-    public void generateExport(Writer writer) throws ExporterException , IOException {
++    public void generateExport(Writer writer) throws ExporterException {
+         final String newLine = "\n";
+         TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(GnuCashApplication.getAppContext());
+         try {
+@@ -180,6 +149,10 @@ public void generateExport(Writer writer) throws ExporterException , IOException
+             contentValues.put(TransactionEntry.COLUMN_EXPORTED, 1);
+             transactionsDbAdapter.updateTransaction(contentValues, null, null);
+         }
++        catch (IOException e)
++        {
++            throw new ExporterException(mParameters, e);
++        }
+         finally {
+             transactionsDbAdapter.close();
+         }
+diff --git a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+index 9d7e3451..b2a09103 100644
+--- a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -21,36 +21,19 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.util.Log;
+ 
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseSchema;
+ import static org.gnucash.android.db.DatabaseSchema.*;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+-import org.gnucash.android.model.Account;
+-import org.gnucash.android.model.Transaction;
+-import org.w3c.dom.Document;
+-import org.w3c.dom.Element;
+ import org.xmlpull.v1.XmlPullParserFactory;
+ import org.xmlpull.v1.XmlSerializer;
+ 
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.transform.OutputKeys;
+-import javax.xml.transform.Transformer;
+-import javax.xml.transform.TransformerFactory;
+-import javax.xml.transform.dom.DOMSource;
+-import javax.xml.transform.stream.StreamResult;
+-
+ import java.io.BufferedOutputStream;
+-import java.io.BufferedWriter;
+ import java.io.FileOutputStream;
+-import java.io.FileWriter;
+ import java.io.IOException;
+ import java.io.OutputStreamWriter;
+-import java.io.StringWriter;
+ import java.io.Writer;
+ import java.math.BigDecimal;
+ import java.util.ArrayList;
+@@ -66,7 +49,6 @@
+  */
+ public class GncXmlExporter extends Exporter{
+ 
+-    private Document mDocument;
+     private TransactionsDbAdapter mTransactionsDbAdapter;
+ 
+     public GncXmlExporter(ExportParams params){
+@@ -85,117 +67,6 @@ public GncXmlExporter(ExportParams params, SQLiteDatabase db){
+         mTransactionsDbAdapter = new TransactionsDbAdapter(db);
+     }
+ 
+-    /**
+-     * Generate GnuCash XML
+-     * @throws ParserConfigurationException if there was an error when generating the XML
+-     */
+-    private void generateGncXml() throws ParserConfigurationException {
+-        DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
+-//        docFactory.setNamespaceAware(true);
+-        DocumentBuilder documentBuilder = docFactory.newDocumentBuilder();
+-
+-        mDocument = documentBuilder.newDocument();
+-        mDocument.setXmlVersion("1.0");
+-        mDocument.setXmlStandalone(true);
+-
+-        Element rootElement = mDocument.createElement(GncXmlHelper.TAG_ROOT);
+-        rootElement.setAttribute("xmlns:gnc",    "http://www.gnucash.org/XML/gnc");
+-        rootElement.setAttribute("xmlns:act",    "http://www.gnucash.org/XML/act");
+-        rootElement.setAttribute("xmlns:book",   "http://www.gnucash.org/XML/book");
+-        rootElement.setAttribute("xmlns:cd",     "http://www.gnucash.org/XML/cd");
+-        rootElement.setAttribute("xmlns:cmdty",  "http://www.gnucash.org/XML/cmdty");
+-        rootElement.setAttribute("xmlns:price",  "http://www.gnucash.org/XML/price");
+-        rootElement.setAttribute("xmlns:slot",   "http://www.gnucash.org/XML/slot");
+-        rootElement.setAttribute("xmlns:split",  "http://www.gnucash.org/XML/split");
+-        rootElement.setAttribute("xmlns:trn",    "http://www.gnucash.org/XML/trn");
+-        rootElement.setAttribute("xmlns:ts",     "http://www.gnucash.org/XML/ts");
+-
+-        Element bookCountNode = mDocument.createElement(GncXmlHelper.TAG_COUNT_DATA);
+-        bookCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, GncXmlHelper.ATTR_VALUE_BOOK);
+-        bookCountNode.appendChild(mDocument.createTextNode("1"));
+-        rootElement.appendChild(bookCountNode);
+-
+-        Element bookNode = mDocument.createElement(GncXmlHelper.TAG_BOOK);
+-        bookNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+-        rootElement.appendChild(bookNode);
+-
+-        Element bookIdNode = mDocument.createElement(GncXmlHelper.TAG_BOOK_ID);
+-        bookIdNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+-        bookIdNode.appendChild(mDocument.createTextNode(UUID.randomUUID().toString().replaceAll("-", "")));
+-        bookNode.appendChild(bookIdNode);
+-
+-        Element cmdtyCountData = mDocument.createElement(GncXmlHelper.TAG_COUNT_DATA);
+-        cmdtyCountData.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "commodity");
+-        cmdtyCountData.appendChild(mDocument.createTextNode(String.valueOf(mAccountsDbAdapter.getCurrencies().size())));
+-        bookNode.appendChild(cmdtyCountData);
+-
+-        Element accountCountNode = mDocument.createElement(GncXmlHelper.TAG_COUNT_DATA);
+-        accountCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "account");
+-        int accountCount = mAccountsDbAdapter.getTotalAccountCount();
+-        accountCountNode.appendChild(mDocument.createTextNode(String.valueOf(accountCount)));
+-        bookNode.appendChild(accountCountNode);
+-
+-        Element transactionCountNode = mDocument.createElement(GncXmlHelper.TAG_COUNT_DATA);
+-        transactionCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "transaction");
+-        int transactionCount = mTransactionsDbAdapter.getTotalTransactionsCount();
+-        transactionCountNode.appendChild(mDocument.createTextNode(String.valueOf(transactionCount)));
+-        bookNode.appendChild(transactionCountNode);
+-
+-        String rootAccountUID = mAccountsDbAdapter.getGnuCashRootAccountUID();
+-        Account rootAccount = mAccountsDbAdapter.getAccount(rootAccountUID);
+-        if (rootAccount != null){
+-            rootAccount.toGncXml(mDocument, bookNode);
+-        }
+-        Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+-
+-        //create accounts hierarchically by ordering by full name
+-        if (accountsCursor != null){
+-            while (accountsCursor.moveToNext()){
+-                long id = accountsCursor.getLong(accountsCursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry._ID));
+-                Account account = mAccountsDbAdapter.getAccount(id);
+-                account.toGncXml(mDocument, bookNode);
+-            }
+-            accountsCursor.close();
+-        }
+-
+-        //more memory efficient approach than loading all transactions into memory first
+-        Cursor transactionsCursor = mTransactionsDbAdapter.fetchAllRecords();
+-        if (transactionsCursor != null){
+-            while (transactionsCursor.moveToNext()){
+-                Transaction transaction = mTransactionsDbAdapter.buildTransactionInstance(transactionsCursor);
+-                transaction.toGncXml(mDocument, bookNode);
+-            }
+-            transactionsCursor.close();
+-        }
+-
+-        mDocument.appendChild(rootElement);
+-        mAccountsDbAdapter.close();
+-        mTransactionsDbAdapter.close();
+-    }
+-
+-    @Override
+-    public String generateExport() throws ExporterException{
+-        StringWriter stringWriter = new StringWriter();
+-        try {
+-            generateGncXml();
+-            TransformerFactory transformerFactory = TransformerFactory.newInstance();
+-
+-            Transformer transformer = transformerFactory.newTransformer();
+-
+-            transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
+-            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+-            DOMSource source = new DOMSource(mDocument);
+-            StreamResult result = new StreamResult(stringWriter);
+-
+-            transformer.transform(source, result);
+-            stringWriter.flush();
+-        } catch (Exception e) {
+-            e.printStackTrace();
+-            throw new ExporterException(mParameters, e);
+-        }
+-        return stringWriter.toString();
+-    }
+-
+     private void exportSlots(XmlSerializer xmlSerializer,
+                              List<String> slotKey,
+                              List<String> slotType,
+@@ -320,8 +191,8 @@ public void exportTransactions(XmlSerializer xmlSerializer) throws IOException {
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " ASC ");
+ 
+         String lastTrxUID = "";
+-        Currency trxCurrency = null;
+-        int fractionDigits = 2;
++        Currency trxCurrency;
++        int fractionDigits;
+         BigDecimal denom = new BigDecimal(100);
+         String denomString = "100";
+         int recur = 0;
+@@ -349,7 +220,8 @@ public void exportTransactions(XmlSerializer xmlSerializer) throws IOException {
+                 String currency = cursor.getString(cursor.getColumnIndexOrThrow("trans_currency"));
+                 trxCurrency = Currency.getInstance(currency);
+                 fractionDigits = trxCurrency.getDefaultFractionDigits();
+-                int denomInt = (int) Math.pow(10, fractionDigits);
++                int denomInt;
++                denomInt = (int) Math.pow(10, fractionDigits);
+                 denom = new BigDecimal(denomInt);
+                 denomString = Integer.toString(denomInt);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_TRX_CURRENCY);
+@@ -450,6 +322,7 @@ public void exportTransactions(XmlSerializer xmlSerializer) throws IOException {
+         cursor.close();
+     }
+ 
++    @Override
+     public void generateExport(Writer writer) throws ExporterException{
+         try {
+             String[] namespaces = new String[] {"gnc", "act", "book", "cd", "cmdty", "price", "slot", "split", "trn", "ts"};
+diff --git a/app/src/org/gnucash/android/model/Account.java b/app/src/org/gnucash/android/model/Account.java
+index 319667e8..c51e9351 100644
+--- a/app/src/org/gnucash/android/model/Account.java
++++ b/app/src/org/gnucash/android/model/Account.java
+@@ -541,105 +541,4 @@ public void toOfx(Document doc, Element parent, boolean exportAllTransactions){
+ 		parent.appendChild(statementTransactions);
+ 				
+ 	}
+-
+-    /**
+-     * Exports the account info and transactions in the QIF format
+-     * @param exportAllTransactions Flag to determine whether to export all transactions, or only new transactions since last export
+-     * @param exportedTransactionUIDs List of unique IDs of transactions which have already been exported (in the current session). Used to avoid duplicating splits
+-     * @return QIF representation of the account information
+-     */
+-    public String toQIF(boolean exportAllTransactions, List<String> exportedTransactionUIDs) {
+-        StringBuilder accountQIFBuilder = new StringBuilder();
+-        final String newLine = "\n";
+-
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(GnuCashApplication.getAppContext());
+-        String fullyQualifiedAccountName = accountsDbAdapter.getFullyQualifiedAccountName(mUID);
+-        accountsDbAdapter.close();
+-
+-        accountQIFBuilder.append(QifHelper.ACCOUNT_HEADER).append(newLine);
+-        accountQIFBuilder.append(QifHelper.ACCOUNT_NAME_PREFIX).append(fullyQualifiedAccountName).append(newLine);
+-        accountQIFBuilder.append(QifHelper.ENTRY_TERMINATOR).append(newLine);
+-
+-        String header = QifHelper.getQifHeader(mAccountType);
+-        accountQIFBuilder.append(header + newLine);
+-
+-        for (Transaction transaction : mTransactionsList) {
+-            if (!exportAllTransactions && transaction.isExported())
+-                continue;
+-            if (exportedTransactionUIDs.contains(transaction.getUID()))
+-                continue;
+-
+-            accountQIFBuilder.append(transaction.toQIF(mUID) + newLine);
+-            exportedTransactionUIDs.add(transaction.getUID());
+-        }
+-        return accountQIFBuilder.toString();
+-    }
+-
+-    /**
+-     * Method which generates the GnuCash XML DOM for this account
+-     * @param doc {@link org.w3c.dom.Document} for creating nodes
+-     * @param rootNode {@link org.w3c.dom.Element} node to which to attach the XML
+-     */
+-    public void toGncXml(Document doc, Element rootNode) {
+-        Element nameNode = doc.createElement(GncXmlHelper.TAG_NAME);
+-        nameNode.appendChild(doc.createTextNode(mName));
+-
+-        Element idNode = doc.createElement(GncXmlHelper.TAG_ACCT_ID);
+-        idNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+-        idNode.appendChild(doc.createTextNode(mUID));
+-
+-        Element typeNode = doc.createElement(GncXmlHelper.TAG_TYPE);
+-        typeNode.appendChild(doc.createTextNode(mAccountType.name()));
+-
+-        Element commodityNode = doc.createElement(GncXmlHelper.TAG_COMMODITY);
+-        Element cmdtySpacenode = doc.createElement(GncXmlHelper.TAG_COMMODITY_SPACE);
+-        cmdtySpacenode.appendChild(doc.createTextNode("ISO4217"));
+-        commodityNode.appendChild(cmdtySpacenode);
+-        Element cmdtyIdNode = doc.createElement(GncXmlHelper.TAG_COMMODITY_ID);
+-        cmdtyIdNode.appendChild(doc.createTextNode(mCurrency.getCurrencyCode()));
+-        commodityNode.appendChild(cmdtyIdNode);
+-
+-        Element commodityScuNode = doc.createElement(GncXmlHelper.TAG_COMMODITY_SCU);
+-        int fractionDigits = mCurrency.getDefaultFractionDigits();
+-        commodityScuNode.appendChild(doc.createTextNode(Integer.toString((int) Math.pow(10, fractionDigits))));
+-
+-        Element descriptionNode = doc.createElement(GncXmlHelper.TAG_ACCT_DESCRIPTION);
+-        descriptionNode.appendChild(doc.createTextNode(mName));
+-
+-        Element acctSlotsNode = doc.createElement(GncXmlHelper.TAG_ACT_SLOTS);
+-        acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_PLACEHOLDER,
+-                Boolean.toString(mIsPlaceholderAccount), GncXmlHelper.ATTR_VALUE_STRING));
+-
+-        if (mColorCode != null && mColorCode.trim().length() > 0){
+-            acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_COLOR, mColorCode, GncXmlHelper.ATTR_VALUE_STRING));
+-        }
+-
+-        if (mDefaultTransferAccountUID != null && mDefaultTransferAccountUID.trim().length() > 0){
+-            acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_DEFAULT_TRANSFER_ACCOUNT, mDefaultTransferAccountUID, "guid"));
+-        }
+-
+-        acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc,
+-                GncXmlHelper.KEY_FAVORITE, Boolean.toString(mIsFavorite), GncXmlHelper.ATTR_VALUE_STRING));
+-
+-        Element accountNode = doc.createElement(GncXmlHelper.TAG_ACCOUNT);
+-        accountNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+-        accountNode.appendChild(nameNode);
+-        accountNode.appendChild(idNode);
+-        accountNode.appendChild(typeNode);
+-        accountNode.appendChild(commodityNode);
+-        accountNode.appendChild(commodityScuNode);
+-        accountNode.appendChild(descriptionNode);
+-        accountNode.appendChild(acctSlotsNode);
+-
+-
+-        if (mParentAccountUID != null && mParentAccountUID.trim().length() > 0){
+-            Element parentAccountNode = doc.createElement(GncXmlHelper.TAG_PARENT_UID);
+-            parentAccountNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+-            parentAccountNode.appendChild(doc.createTextNode(mParentAccountUID));
+-            accountNode.appendChild(parentAccountNode);
+-        }
+-
+-        rootNode.appendChild(accountNode);
+-    }
+-
+ }
+diff --git a/app/src/org/gnucash/android/model/Split.java b/app/src/org/gnucash/android/model/Split.java
+index 41961848..e62cb508 100644
+--- a/app/src/org/gnucash/android/model/Split.java
++++ b/app/src/org/gnucash/android/model/Split.java
+@@ -188,42 +188,4 @@ public static Split parseSplit(String splitString) {
+         }
+         return split;
+     }
+-
+-    /**
+-     * Creates a GnuCash XML representation of this split
+-     * @param doc XML {@link org.w3c.dom.Document} for creating the nodes
+-     * @param rootNode Parent node to append the split XML to
+-     */
+-    public void toGncXml(Document doc, Element rootNode) {
+-        Element idNode = doc.createElement(GncXmlHelper.TAG_SPLIT_ID);
+-        idNode.setAttribute("type", "guid");
+-        idNode.appendChild(doc.createTextNode(mUID));
+-
+-        Element memoNode = doc.createElement(GncXmlHelper.TAG_SPLIT_MEMO);
+-        if (mMemo != null)
+-            memoNode.appendChild(doc.createTextNode(mMemo));
+-
+-        Element stateNode = doc.createElement(GncXmlHelper.TAG_RECONCILED_STATE);
+-        stateNode.appendChild(doc.createTextNode("n"));
+-
+-        Element valueNode = doc.createElement(GncXmlHelper.TAG_SPLIT_VALUE);
+-        valueNode.appendChild(doc.createTextNode(GncXmlHelper.formatMoney(this)));
+-
+-        Element quantityNode = doc.createElement(GncXmlHelper.TAG_SPLIT_QUANTITY);
+-        quantityNode.appendChild(doc.createTextNode(GncXmlHelper.formatMoney(this)));
+-
+-        Element accountNode = doc.createElement(GncXmlHelper.TAG_SPLIT_ACCOUNT);
+-        accountNode.setAttribute("type", "guid");
+-        accountNode.appendChild(doc.createTextNode(mAccountUID));
+-
+-        Element splitNode = doc.createElement(GncXmlHelper.TAG_TRN_SPLIT);
+-        splitNode.appendChild(idNode);
+-        splitNode.appendChild(memoNode);
+-        splitNode.appendChild(stateNode);
+-        splitNode.appendChild(valueNode);
+-        splitNode.appendChild(quantityNode);
+-        splitNode.appendChild(accountNode);
+-
+-        rootNode.appendChild(splitNode);
+-    }
+ }
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index d76982ee..3c14e1b7 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -515,77 +515,6 @@ public Element toOFX(Document doc, String accountUID){
+ 	}
+ 
+     /**
+-     * Builds a QIF entry representing this transaction
+-     * @return String QIF representation of this transaction
+-     */
+-    public String toQIF(String accountUID){
+-        final String newLine = "\n";
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(GnuCashApplication.getAppContext());
+-        //all transactions are double transactions
+-        String imbalanceAccountName = AccountsDbAdapter.getImbalanceAccountName(Currency.getInstance(mCurrencyCode));
+-
+-        StringBuilder transactionQIFBuilder = new StringBuilder();
+-
+-        transactionQIFBuilder.append(QifHelper.DATE_PREFIX).append(QifHelper.formatDate(mTimestamp)).append(newLine);
+-        transactionQIFBuilder.append(QifHelper.MEMO_PREFIX).append(mDescription).append(newLine);
+-
+-        List<String> processedSplitUIDs = new ArrayList<String>();
+-        final List<Split> splitList = getSplits();
+-        if (splitList.size() > 2){
+-            for (Split split : splitList) {
+-                if (split.getAccountUID().equals(accountUID)){
+-                    Money amount = split.getAmount();
+-
+-                    if (split.getType() == TransactionType.CREDIT)
+-                        amount = amount.negate();
+-
+-                    transactionQIFBuilder.append(QifHelper.AMOUNT_PREFIX).append(amount.toPlainString())
+-                            .append(newLine);
+-                    processedSplitUIDs.add(split.getUID());
+-                    break;
+-                }
+-            }
+-        }
+-        for (Split split : splitList) {
+-            if (split.getAccountUID().equals(accountUID) || processedSplitUIDs.contains(split.getUID()))
+-                continue;
+-
+-            String splitAccountName = accountsDbAdapter.getFullyQualifiedAccountName(split.getAccountUID());
+-            transactionQIFBuilder.append(QifHelper.SPLIT_CATEGORY_PREFIX).append(splitAccountName).append(newLine);
+-
+-            String memo = split.getMemo();
+-            if (memo != null && memo.length() > 0) {
+-                transactionQIFBuilder.append(QifHelper.SPLIT_MEMO_PREFIX).append(memo).append(newLine);
+-            }
+-            Money amount = split.getAmount();
+-            if (split.getAccountUID().equals(accountUID)) {
+-                if (split.getType() == TransactionType.CREDIT)
+-                    amount = amount.negate();
+-            } else {
+-                if (split.getType() == TransactionType.DEBIT)
+-                    amount = amount.negate();
+-            }
+-            transactionQIFBuilder.append(QifHelper.SPLIT_AMOUNT_PREFIX).append(amount.asString()).append(newLine);
+-        }
+-        Money imbalanceAmount = getImbalance();
+-        if (imbalanceAmount.asBigDecimal().compareTo(new BigDecimal(0)) != 0){
+-            AccountType accountType = accountsDbAdapter.getAccountType(accountUID);
+-            TransactionType imbalanceType = Transaction.getTypeForBalance(accountType,imbalanceAmount.isNegative());
+-            imbalanceAmount = imbalanceAmount.absolute();
+-            if (imbalanceType == TransactionType.DEBIT){
+-                imbalanceAmount = imbalanceAmount.negate();
+-            }
+-            transactionQIFBuilder.append(QifHelper.SPLIT_CATEGORY_PREFIX).append(imbalanceAccountName).append(newLine);
+-            transactionQIFBuilder.append(QifHelper.SPLIT_AMOUNT_PREFIX).append(imbalanceAmount.asString()).append(newLine);
+-        }
+-
+-        transactionQIFBuilder.append(QifHelper.ENTRY_TERMINATOR).append(newLine);
+-
+-        accountsDbAdapter.close();
+-        return transactionQIFBuilder.toString();
+-    }
+-
+-    /**
+      * Creates an Intent with arguments from the <code>transaction</code>.
+      * This intent can be broadcast to create a new transaction
+      * @param transaction Transaction used to create intent
+@@ -604,63 +533,4 @@ public static Intent createIntent(Transaction transaction){
+         intent.putExtra(Transaction.EXTRA_SPLITS, stringBuilder.toString());
+         return intent;
+     }
+-
+-    public void toGncXml(Document doc, Element rootElement) {
+-        Element idNode = doc.createElement(GncXmlHelper.TAG_TRX_ID);
+-        idNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+-        idNode.appendChild(doc.createTextNode(mUID));
+-
+-        Element currencyNode = doc.createElement(GncXmlHelper.TAG_TRX_CURRENCY);
+-        Element cmdtySpacenode = doc.createElement(GncXmlHelper.TAG_COMMODITY_SPACE);
+-        cmdtySpacenode.appendChild(doc.createTextNode("ISO4217"));
+-        currencyNode.appendChild(cmdtySpacenode);
+-        Element cmdtyIdNode = doc.createElement(GncXmlHelper.TAG_COMMODITY_ID);
+-        cmdtyIdNode.appendChild(doc.createTextNode(mCurrencyCode));
+-        currencyNode.appendChild(cmdtyIdNode);
+-
+-        Element datePostedNode = doc.createElement(GncXmlHelper.TAG_DATE_POSTED);
+-        Element datePNode = doc.createElement(GncXmlHelper.TAG_DATE);
+-        datePNode.appendChild(doc.createTextNode(GncXmlHelper.formatDate(mTimestamp)));
+-        datePostedNode.appendChild(datePNode);
+-
+-        Element dateEneteredNode = doc.createElement(GncXmlHelper.TAG_DATE_ENTERED);
+-        Element dateENode = doc.createElement(GncXmlHelper.TAG_DATE);
+-        dateENode.appendChild(doc.createTextNode(GncXmlHelper.formatDate(mTimestamp)));
+-        dateEneteredNode.appendChild(dateENode);
+-
+-        Element descriptionNode = doc.createElement(GncXmlHelper.TAG_TRN_DESCRIPTION);
+-        if (mDescription != null) {
+-            descriptionNode.appendChild(doc.createTextNode(mDescription));
+-        }
+-
+-        Element trnSlotsNode = doc.createElement(GncXmlHelper.TAG_TRN_SLOTS);
+-        if (mNotes != null && mNotes.length() > 0) {
+-            trnSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_NOTES, mNotes, GncXmlHelper.ATTR_VALUE_STRING));
+-            //TODO: Consider adding future transactions date as slot here too
+-        }
+-        Element trnSplits = doc.createElement(GncXmlHelper.TAG_TRN_SPLITS);
+-        for (Split split : mSplitList) {
+-            split.toGncXml(doc, trnSplits);
+-        }
+-
+-        Element transactionNode = doc.createElement(GncXmlHelper.TAG_TRANSACTION);
+-        transactionNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+-        transactionNode.appendChild(idNode);
+-        transactionNode.appendChild(currencyNode);
+-        transactionNode.appendChild(datePostedNode);
+-        transactionNode.appendChild(dateEneteredNode);
+-        transactionNode.appendChild(descriptionNode);
+-        if (mNotes != null && mNotes.length() > 0){
+-            transactionNode.appendChild(trnSlotsNode);
+-        }
+-        //TODO: Improve xml compatibilty with desktop for scheduled actions
+-        if (mRecurrencePeriod != 0) {
+-            Element recurrenceNode = doc.createElement(GncXmlHelper.TAG_RECURRENCE_PERIOD);
+-            recurrenceNode.appendChild(doc.createTextNode(String.valueOf(mRecurrencePeriod)));
+-            transactionNode.appendChild(recurrenceNode);
+-        }
+-        transactionNode.appendChild(trnSplits);
+-
+-        rootElement.appendChild(transactionNode);
+-    }
+ }

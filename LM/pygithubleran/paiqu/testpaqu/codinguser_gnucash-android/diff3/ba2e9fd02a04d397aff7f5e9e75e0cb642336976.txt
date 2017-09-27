@@ -1,0 +1,78 @@
+From ba2e9fd02a04d397aff7f5e9e75e0cb642336976 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Sat, 29 Apr 2017 19:40:37 +0200
+Subject: [PATCH] Fix ScheduledActions throwing an exception if no weedays have
+ been set
+
+Fixes an issue introduced in commit 8087978. We assumed at least one
+weekday was always set in the recurrence of weekly actions. The UI
+dialog enforces it. However, GnuCash desktop doesn't. So we must check
+it for the case of imported scheduled actions.
+---
+ .../org/gnucash/android/model/ScheduledAction.java   |  9 ++++++++-
+ .../android/test/unit/model/ScheduledActionTest.java | 20 ++++++++++++++++++++
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index c6391782..92fdac1a 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -241,12 +241,19 @@ private long computeNextScheduledExecutionTimeStartingAt(long startTime) {
+      * Computes the next time that this weekly scheduled action is supposed to be
+      * executed starting at startTime.
+      *
++     * If no weekdays have been set (GnuCash desktop allows it), it will return a
++     * date in the future to ensure ScheduledActionService doesn't execute it.
++     *
+      * @param startTime LocalDateTime to use as start to compute the next schedule.
+      *
+-     * @return Next run time as a LocalDateTime
++     * @return Next run time as a LocalDateTime. A date in the future, if no weekdays
++     *      were set in the Recurrence.
+      */
+     @NonNull
+     private LocalDateTime computeNextWeeklyExecutionStartingAt(LocalDateTime startTime) {
++        if (mRecurrence.getByDays().isEmpty())
++            return LocalDateTime.now().plusDays(1); // Just a date in the future
++
+         // Look into the week of startTime for another scheduled weekday
+         for (int weekDay : mRecurrence.getByDays() ) {
+             int jodaWeekDay = convertCalendarWeekdayToJoda(weekDay);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+index 19200482..0cfa7ced 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+@@ -20,6 +20,7 @@
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.joda.time.DateTime;
++import org.joda.time.LocalDateTime;
+ import org.junit.Test;
+ 
+ import java.sql.Timestamp;
+@@ -176,6 +177,25 @@ public void weeklyActionsWithMultiplier_shouldBeDueOnTheWeekdaySet() {
+                 .isEqualTo(expectedNextDueDate);
+     }
+ 
++    /**
++     * Weekly actions should return a date in the future when no
++     * weekdays have been set in the recurrence.
++     *
++     * See ScheduledAction.computeNextTimeBasedScheduledExecutionTime()
++     */
++    @Test
++    public void weeklyActionsWithoutWeekdaySet_shouldReturnDateInTheFuture() {
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
++        Recurrence recurrence = new Recurrence(PeriodType.WEEK);
++        recurrence.setByDays(Collections.<Integer>emptyList());
++        scheduledAction.setRecurrence(recurrence);
++        scheduledAction.setStartTime(new DateTime(2016, 6, 6, 9, 0).getMillis());
++        scheduledAction.setLastRun(new DateTime(2017, 4, 12, 9, 0).getMillis());
++
++        long now = LocalDateTime.now().toDate().getTime();
++        assertThat(scheduledAction.computeNextTimeBasedScheduledExecutionTime()).isGreaterThan(now);
++    }
++
+     private long getTimeInMillis(int year, int month, int day) {
+         Calendar calendar = Calendar.getInstance();
+         calendar.set(year, month, day);

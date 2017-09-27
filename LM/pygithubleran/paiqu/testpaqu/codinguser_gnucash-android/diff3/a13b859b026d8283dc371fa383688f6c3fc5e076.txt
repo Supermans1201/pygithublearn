@@ -1,0 +1,75 @@
+From a13b859b026d8283dc371fa383688f6c3fc5e076 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Sat, 15 Apr 2017 23:43:00 +0200
+Subject: [PATCH] Fix export to Google Drive failing with multicurrency QIFs
+
+When transactions with multiple currencies are exported to QIF, a file
+for each currency is created in some cases. The problem is the code that
+sent the files to Google Drive was creating just one file through
+Drive.DriveApi.newDriveContents to which it wrote each of exported
+files. For some reason this cause an IOException and nothing was created
+on the target directory.
+
+Now we just create a new DriveContents for each exported file.
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 33 +++++++++-------------
+ 1 file changed, 14 insertions(+), 19 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 0f364859..e5536cdd 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -271,18 +271,16 @@ private void moveExportToGoogleDrive() throws Exporter.ExporterException {
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+         googleApiClient.blockingConnect();
+ 
+-        DriveApi.DriveContentsResult driveContentsResult =
+-                Drive.DriveApi.newDriveContents(googleApiClient).await(1, TimeUnit.MINUTES);
+-        if (!driveContentsResult.getStatus().isSuccess()) {
+-            throw new Exporter.ExporterException(mExportParams,
+-                    "Error while trying to create new file contents");
+-        }
+-        final DriveContents driveContents = driveContentsResult.getDriveContents();
+-        DriveFolder.DriveFileResult driveFileResult = null;
+         try {
+-            // write content to DriveContents
+-            OutputStream outputStream = driveContents.getOutputStream();
+             for (String exportedFilePath : mExportedFiles) {
++                DriveApi.DriveContentsResult driveContentsResult =
++                        Drive.DriveApi.newDriveContents(googleApiClient).await(1, TimeUnit.MINUTES);
++                if (!driveContentsResult.getStatus().isSuccess()) {
++                    throw new Exporter.ExporterException(mExportParams,
++                                                "Error while trying to create new file contents");
++                }
++                final DriveContents driveContents = driveContentsResult.getDriveContents();
++                OutputStream outputStream = driveContents.getOutputStream();
+                 File exportedFile = new File(exportedFilePath);
+                 FileInputStream fileInputStream = new FileInputStream(exportedFile);
+                 byte[] buffer = new byte[1024];
+@@ -304,20 +302,17 @@ private void moveExportToGoogleDrive() throws Exporter.ExporterException {
+                 String folderId = sharedPreferences.getString(mContext.getString(R.string.key_google_drive_app_folder_id), "");
+                 DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
+                 // create a file on root folder
+-                driveFileResult = folder.createFile(googleApiClient, changeSet, driveContents)
++                DriveFolder.DriveFileResult driveFileResult =
++                        folder.createFile(googleApiClient, changeSet, driveContents)
+                                                 .await(1, TimeUnit.MINUTES);
++                if (!driveFileResult.getStatus().isSuccess())
++                    throw new Exporter.ExporterException(mExportParams, "Error creating file in Google Drive");
++
++                Log.i(TAG, "Created file with id: " + driveFileResult.getDriveFile().getDriveId());
+             }
+         } catch (IOException e) {
+             throw new Exporter.ExporterException(mExportParams, e);
+         }
+-
+-        if (driveFileResult == null)
+-            throw new Exporter.ExporterException(mExportParams, "No result received");
+-
+-        if (!driveFileResult.getStatus().isSuccess())
+-            throw new Exporter.ExporterException(mExportParams, "Error creating file in Google Drive");
+-
+-        Log.i(TAG, "Created file with id: " + driveFileResult.getDriveFile().getDriveId());
+     }
+ 
+     /**

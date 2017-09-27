@@ -1,0 +1,1777 @@
+From f657d81a9fc7fa42c98941334c36ad1f9a32d47b Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sun, 14 Sep 2014 22:37:58 +0200
+Subject: [PATCH] Use the GUIDs of accounts and transactions as arguments for
+ UI components. The IDs which were previously used will change whenever
+ records are updated
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 34 +++++----
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 14 ++++
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 20 +++---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 38 ++++++----
+ .../receivers/TransactionAppWidgetProvider.java    | 15 ++--
+ app/src/org/gnucash/android/ui/UxArgument.java     | 27 ++++---
+ .../android/ui/account/AccountFormFragment.java    | 68 ++++++++----------
+ .../android/ui/account/AccountsActivity.java       | 26 +++----
+ .../android/ui/account/AccountsListFragment.java   | 82 ++++++++++++---------
+ .../android/ui/passcode/PassLockActivity.java      |  5 +-
+ .../ui/passcode/PasscodeLockScreenActivity.java    |  2 +-
+ .../ScheduledTransactionsListFragment.java         | 14 ++--
+ .../ui/transaction/TransactionFormFragment.java    | 48 ++++++-------
+ .../ui/transaction/TransactionsActivity.java       | 83 +++++++++++-----------
+ .../ui/transaction/TransactionsListFragment.java   | 37 +++++-----
+ .../transaction/dialog/BulkMoveDialogFragment.java | 19 +++--
+ .../dialog/SplitEditorDialogFragment.java          |  4 +-
+ .../android/ui/util/AccountBalanceTask.java        |  6 +-
+ .../android/ui/util/OnAccountClickedListener.java  |  4 +-
+ .../ui/util/OnTransactionClickedListener.java      |  8 +--
+ .../org/gnucash/android/ui/util/Refreshable.java   |  4 +-
+ .../ui/widget/WidgetConfigurationActivity.java     | 27 +++----
+ .../android/test/ui/TransactionsActivityTest.java  |  4 +-
+ 23 files changed, 309 insertions(+), 280 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index acae0520..8e15a1a6 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -21,18 +21,14 @@
+ import android.content.Context;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+-import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
+ import android.text.TextUtils;
+ 
+ import android.util.Log;
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.export.xml.GncXmlHelper;
+ import org.gnucash.android.model.*;
+-import org.xmlpull.v1.XmlSerializer;
+ 
+-import java.io.IOException;
+ import java.math.BigDecimal;
+ import java.util.*;
+ 
+@@ -473,7 +469,7 @@ public Account getAccount(long rowId){
+ 	 * @return {@link Account} object for unique ID <code>uid</code>
+ 	 */
+ 	public Account getAccount(String uid){
+-		return getAccount(getId(uid));
++		return getAccount(getID(uid));
+ 	}	
+ 	
+     /**
+@@ -913,12 +909,14 @@ public Money getAccountBalance(String accountUID){
+ 
+     /**
+      * Returns a cursor to the dataset containing sub-accounts of the account with record ID <code>accoundId</code>
+-     * @param accountId Record ID of the parent account
++     * @param accountUID GUID of the parent account
+      * @return {@link Cursor} to the sub accounts data set
+      */
+-    public Cursor fetchSubAccounts(long accountId){
+-        Log.v(TAG, "Fetching sub accounts for account id " + accountId);
+-        String accountUID = getAccountUID(accountId);
++    public Cursor fetchSubAccounts(String accountUID){
++        if (accountUID == null)
++            throw new IllegalArgumentException("Account UID cannot be null");
++
++        Log.v(TAG, "Fetching sub accounts for account id " + accountUID);
+         return mDb.query(AccountEntry.TABLE_NAME,
+                 null,
+                 AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = '" + accountUID + "'",
+@@ -999,15 +997,14 @@ public String getGnuCashRootAccountUID(){
+ 
+     /**
+      * Returns the number of accounts for which the account with ID <code>accoundId</code> is a first level parent
+-     * @param accountId Database ID of parent account
++     * @param accountUID String Unique ID (GUID) of the account
+      * @return Number of sub accounts
+      */
+-    public int getSubAccountCount(long accountId){
++    public int getSubAccountCount(String accountUID){
+         //TODO: at some point when API level 11 and above only is supported, use DatabaseUtils.queryNumEntries
+ 
+         String queryCount = "SELECT COUNT(*) FROM " + AccountEntry.TABLE_NAME + " WHERE "
+                 + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ?";
+-        String accountUID = getAccountUID(accountId);
+         if (accountUID == null) //if the account UID is null, then the accountId param was invalid. Just return
+             return 0;
+         Cursor cursor = mDb.rawQuery(queryCount, new String[]{accountUID});
+@@ -1038,7 +1035,8 @@ public int getTotalAccountCount(){
+ 	 * @param accountUID String Unique ID of the account
+ 	 * @return Record ID belonging to account UID
+ 	 */
+-	public long getId(String accountUID){
++    @Override
++	public long getID(String accountUID){
+ 		long id = -1;
+ 		Cursor c = mDb.query(AccountEntry.TABLE_NAME,
+ 				new String[]{AccountEntry._ID},
+@@ -1052,8 +1050,13 @@ public long getId(String accountUID){
+         }
+ 		return id;
+ 	}
+-	
+-	/**
++
++    @Override
++    public String getUID(long id) {
++        return getAccountUID(id);
++    }
++
++    /**
+ 	 * Returns currency code of account with database ID <code>id</code>
+ 	 * @param id Record ID of the account to be removed
+ 	 * @return Currency code of the account
+@@ -1318,4 +1321,5 @@ public int deleteAllRecords(){
+         mDb.delete(SplitEntry.TABLE_NAME, null, null);
+         return mDb.delete(AccountEntry.TABLE_NAME, null, null);
+ 	}
++
+ }
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index 82d53123..39726893 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -272,6 +272,20 @@ public long getAccountID(String accountUID){
+     }
+ 
+     /**
++     * Returns the database record ID of the entry
++     * @param uid GUID of the record
++     * @return Long database identifier of the record
++     */
++    public abstract long getID(String uid);
++
++    /**
++     * Returns the global unique identifier of the record
++     * @param id Database record ID of the entry
++     * @return String GUID of the record
++     */
++    public abstract String getUID(long id);
++
++    /**
+      * Updates a record in the table
+      * @param recordId Database ID of the record to be updated
+      * @param columnKey Name of column to be updated
+diff --git a/app/src/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+index cea52d41..edc6011d 100644
+--- a/app/src/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -24,22 +24,19 @@
+ import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
+ import android.text.TextUtils;
+-
+ import android.util.Log;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+-import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+ 
+ import java.math.BigDecimal;
+-import java.math.MathContext;
+-import java.math.RoundingMode;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.List;
+ 
+-import static org.gnucash.android.db.DatabaseSchema.*;
++import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+ 
+ /**
+  * Database adapter for managing transaction splits in the database
+@@ -325,6 +322,7 @@ public Cursor fetchSplits(String condition, String sortOrder){
+      * @param uid Unique Identifier String of the split transaction
+      * @return Database record ID of split
+      */
++    @Override
+     public long getID(String uid){
+         if (uid == null)
+             return 0;
+@@ -348,6 +346,7 @@ public long getID(String uid){
+      * @param id Database record ID of the split
+      * @return String unique identifier of the split
+      */
++    @Override
+     public String getUID(long id){
+         Cursor cursor = mDb.query(SplitEntry.TABLE_NAME,
+                 new String[]{SplitEntry.COLUMN_UID},
+@@ -526,17 +525,15 @@ public boolean deleteSplitsForTransaction(long transactionId){
+ 
+     /**
+      * Deletes splits for a specific transaction and account and the transaction itself
+-     * @param transactionId Database record ID of the transaction
+-     * @param accountId Database ID of the account
++     * @param transactionUID String unique ID of transaction
++     * @param accountUID String unique ID of account
+      * @return Number of records deleted
+      */
+-    public int deleteSplitsForTransactionAndAccount(long transactionId, long accountId){
+-        String transactionUID  = getTransactionUID(transactionId);
+-        String accountUID      = getAccountUID(accountId);
++    public int deleteSplitsForTransactionAndAccount(String transactionUID, String accountUID){
+         int deletedCount = mDb.delete(SplitEntry.TABLE_NAME,
+                 SplitEntry.COLUMN_TRANSACTION_UID + "= ? AND " + SplitEntry.COLUMN_ACCOUNT_UID + "= ?",
+                 new String[]{transactionUID, accountUID});
+-        deleteTransaction(transactionId);
++        deleteTransaction(getID(transactionUID));
+         return deletedCount;
+     }
+ 
+@@ -552,4 +549,5 @@ private boolean deleteTransaction(long transactionId) {
+     public int deleteAllRecords() {
+         return deleteAllRecords(SplitEntry.TABLE_NAME);
+     }
++
+ }
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 05852e88..bed881d0 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -441,13 +441,11 @@ public String getCurrencyCode(long accountId){
+     /**
+      * Returns the transaction balance for the transaction for the specified account.
+      * <p>We consider only those splits which belong to this account</p>
+-     * @param transactionId Database record ID of the transaction
+-     * @param accountId Database record id of the account
++     * @param transactionUID GUID of the transaction
++     * @param accountUID GUID of the account
+      * @return {@link org.gnucash.android.model.Money} balance of the transaction for that account
+      */
+-    public Money getBalance(long transactionId, long accountId){
+-        String accountUID = getAccountUID(accountId);
+-        String transactionUID = getUID(transactionId);
++    public Money getBalance(String transactionUID, String accountUID){
+         List<Split> splitList = mSplitsDbAdapter.getSplitsForTransactionInAccount(
+                 transactionUID, accountUID);
+ 
+@@ -459,6 +457,7 @@ public Money getBalance(long transactionId, long accountId){
+      * @param transactionId Database record ID of transaction
+      * @return String unique identifier of the transaction
+      */
++    @Override
+     public String getUID(long transactionId){
+         String uid = null;
+         Cursor c = mDb.query(TransactionEntry.TABLE_NAME,
+@@ -503,20 +502,19 @@ public boolean deleteTransaction(String uid){
+ 	public int deleteAllRecords(){
+ 		return deleteAllRecords(TransactionEntry.TABLE_NAME);
+ 	}
+-	
+-	/**
++
++    /**
+ 	 * Assigns transaction with id <code>rowId</code> to account with id <code>accountId</code>
+-	 * @param rowId Record ID of the transaction to be assigned
+-     * @param srcAccountId Record Id of the account from which the transaction is to be moved
+-	 * @param dstAccountId Record Id of the account to which the transaction will be assigned
++	 * @param transactionUID GUID of the transaction
++     * @param srcAccountUID GUID of the account from which the transaction is to be moved
++	 * @param dstAccountUID GUID of the account to which the transaction will be assigned
+ 	 * @return Number of transactions splits affected
+ 	 */
+-	public int moveTranscation(long rowId, long srcAccountId, long dstAccountId){
+-		Log.i(TAG, "Moving transaction ID " + rowId + " splits from " + srcAccountId + " to account " + dstAccountId);
+-		String srcAccountUID = getAccountUID(srcAccountId);
+-        String dstAccountUID = getAccountUID(dstAccountId);
++	public int moveTranscation(String transactionUID, String srcAccountUID, String dstAccountUID){
++		Log.i(TAG, "Moving transaction ID " + transactionUID
++                + " splits from " + srcAccountUID + " to account " + dstAccountUID);
+ 
+-		List<Split> splits = mSplitsDbAdapter.getSplitsForTransactionInAccount(getUID(rowId), srcAccountUID);
++		List<Split> splits = mSplitsDbAdapter.getSplitsForTransactionInAccount(transactionUID, srcAccountUID);
+         for (Split split : splits) {
+             split.setAccountUID(dstAccountUID);
+             mSplitsDbAdapter.addSplit(split);
+@@ -557,6 +555,7 @@ public long getAllTransactionsCount(){
+      * @param transactionUID Unique idendtifier of the transaction
+      * @return Database record ID for the transaction
+      */
++    @Override
+     public long getID(String transactionUID){
+         long id = -1;
+         Cursor c = mDb.query(TransactionEntry.TABLE_NAME,
+@@ -632,4 +631,13 @@ public void scheduleTransaction(Transaction recurringTransaction) {
+         alarmManager.setRepeating(AlarmManager.RTC_WAKEUP, firstRunMillis,
+                 recurrencePeriodMillis, recurringPendingIntent);
+     }
++
++    /**
++     * Returns a transaction for the given transaction GUID
++     * @param transactionUID GUID of the transaction
++     * @return Retrieves a transaction from the database
++     */
++    public Transaction getTransaction(String transactionUID) {
++        return getTransaction(getID(transactionUID));
++    }
+ }
+diff --git a/app/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java b/app/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+index 52435d7e..ee62139b 100644
+--- a/app/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
++++ b/app/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+@@ -42,15 +42,14 @@ public void onUpdate(Context context, AppWidgetManager appWidgetManager,
+         // Perform this loop procedure for each App Widget that belongs to this provider
+         for (int i=0; i<N; i++) {
+             int appWidgetId = appWidgetIds[i];
+-            
+-            long accountId = PreferenceManager
+-            		.getDefaultSharedPreferences(context)
+-            		.getLong(UxArgument.SELECTED_ACCOUNT_ID + appWidgetId, -1);
+-            
+-            if (accountId <= 0)
++
++            String accountUID = PreferenceManager
++                    .getDefaultSharedPreferences(context)
++                    .getString(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId, null);
++            if (accountUID == null)
+             	return;
+             
+-            WidgetConfigurationActivity.updateWidget(context, appWidgetId, accountId);            
++            WidgetConfigurationActivity.updateWidget(context, appWidgetId, accountUID);
+         }
+ 	}
+ 
+@@ -66,7 +65,7 @@ public void onDeleted(Context context, int[] appWidgetIds) {
+ 		Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
+ 		
+ 		for (int appWidgetId : appWidgetIds) {
+-			editor.remove(UxArgument.SELECTED_ACCOUNT_ID + appWidgetId);
++			editor.remove(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId);
+ 		}
+ 		editor.commit();		
+ 	}
+diff --git a/app/src/org/gnucash/android/ui/UxArgument.java b/app/src/org/gnucash/android/ui/UxArgument.java
+index 0bc60732..9230bd2c 100644
+--- a/app/src/org/gnucash/android/ui/UxArgument.java
++++ b/app/src/org/gnucash/android/ui/UxArgument.java
+@@ -23,15 +23,9 @@
+ public final class UxArgument {
+ 
+     /**
+-     * Arguments key for database ID of transaction.
+-     * Is used to pass a transaction ID into a bundle or intent
++     * Key for passing the transaction GUID as parameter in a bundle
+      */
+-    public static final String SELECTED_TRANSACTION_ID  = "selected_transaction_id";
+-
+-    /**
+-     * Key for passing the selected account ID as an argument in a bundle or intent
+-     */
+-    public static final String SELECTED_ACCOUNT_ID 		= "selected_account_id";
++    public static final String SELECTED_TRANSACTION_UID  = "selected_transaction_uid";
+ 
+     /**
+ 	 * Key for passing list of IDs selected transactions as an argument in a bundle or intent
+@@ -41,12 +35,7 @@
+     /**
+ 	 * Key for the origin account as argument when moving accounts
+ 	 */
+-	public static final String ORIGIN_ACCOUNT_ID        = "origin_acccount_id";
+-
+-    /**
+-     * Key for passing argument for the parent account ID.
+-     */
+-    public static final String PARENT_ACCOUNT_ID        = "parent_account_id";
++	public static final String ORIGIN_ACCOUNT_UID = "origin_acccount_uid";
+ 
+     /**
+      * Key for checking whether the passcode is enabled or not.
+@@ -68,6 +57,16 @@
+      */
+     public static final String PASSCODE_CLASS_CALLER = "passcode_class_caller";
+ 
++    /**
++     * Key for passing the account unique ID as argument to UI
++     */
++    public static final String SELECTED_ACCOUNT_UID = "account_uid";
++
++    /**
++     * Key for passing argument for the parent account GUID.
++     */
++    public static final String PARENT_ACCOUNT_UID = "parent_account_uid";
++
+     //prevent initialization of instances of this class
+     private UxArgument(){
+         //prevent even the native class from calling the ctor
+diff --git a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+index b5acebf4..28db64eb 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -29,7 +29,6 @@
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.text.TextUtils;
+-import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+@@ -52,11 +51,7 @@
+ import org.gnucash.android.ui.colorpicker.ColorSquare;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.Currency;
+-import java.util.HashMap;
+-import java.util.List;
++import java.util.*;
+ 
+ /**
+  * Fragment used for creating and editing accounts
+@@ -95,19 +90,13 @@
+ 	 * List of all currency codes (ISO 4217) supported by the app
+ 	 */
+ 	private List<String> mCurrencyCodes;
+-	
+-	/**
+-	 * Record ID of the account which was selected
+-	 * This is used if we are editing an account instead of creating one
+-	 */
+-	private long mSelectedAccountId = 0;
+ 
+     /**
+-     * Database ID of the parent account
++     * GUID of the parent account
+      * This value is set to the parent account of the transaction being edited or
+      * the account in which a new sub-account is being created
+      */
+-    private long mParentAccountId = -1;
++    private String mParentAccountUID = null;
+ 
+     /**
+      * Account ID of the root account
+@@ -125,6 +114,11 @@
+ 	private Account mAccount = null;
+ 
+     /**
++     * Unique ID string of account being edited
++     */
++    private String mAccountUID = null;
++
++    /**
+      * Cursor which will hold set of eligible parent accounts
+      */
+ 	private Cursor mParentAccountCursor;
+@@ -201,6 +195,7 @@ public void onColorSelected(int color) {
+         }
+     };
+ 
++
+     /**
+ 	 * Default constructor
+ 	 * Required, else the app crashes on screen rotation
+@@ -251,7 +246,7 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+             @Override
+             public void onItemSelected(AdapterView<?> parentView, View selectedItemView, int position, long id) {
+                 loadParentAccountList(getSelectedAccountType());
+-                setParentAccountSelection(mParentAccountId);
++                setParentAccountSelection(mAccountsDbAdapter.getID(mParentAccountUID));
+             }
+ 
+             @Override
+@@ -311,9 +306,10 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		currencyArrayAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+ 		mCurrencySpinner.setAdapter(currencyArrayAdapter);
+ 
+-        mSelectedAccountId = getArguments().getLong(UxArgument.SELECTED_ACCOUNT_ID);
+-        if (mSelectedAccountId > 0) {
+-            mAccount = mAccountsDbAdapter.getAccount(mSelectedAccountId);
++        mAccountUID = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
++
++        if (mAccountUID != null) {
++            mAccount = mAccountsDbAdapter.getAccount(mAccountUID);
+             getSherlockActivity().getSupportActionBar().setTitle(R.string.title_edit_account);
+         }
+         mRootAccountUID = mAccountsDbAdapter.getGnuCashRootAccountUID();
+@@ -343,12 +339,12 @@ private void initializeViewsWithAccount(Account account){
+             throw new IllegalArgumentException("Account cannot be null");
+ 
+         loadParentAccountList(account.getAccountType());
+-        mParentAccountId = mAccountsDbAdapter.getAccountID(account.getParentUID());
+-        if (mParentAccountId == -1) {
++        mParentAccountUID = account.getParentUID();
++        if (mParentAccountUID == null) {
+             // null parent, set Parent as root
+-            mParentAccountId = mRootAccountId;
++            mParentAccountUID = mRootAccountUID;
+         }
+-        setParentAccountSelection(mParentAccountId);
++        setParentAccountSelection(mAccountsDbAdapter.getID(mParentAccountUID));
+ 
+         String currencyCode = account.getCurrency().getCurrencyCode();
+         setSelectedCurrency(currencyCode);
+@@ -372,23 +368,16 @@ private void initializeViewsWithAccount(Account account){
+     private void initializeViews(){
+         setSelectedCurrency(Money.DEFAULT_CURRENCY_CODE);
+         mColorSquare.setBackgroundColor(Color.LTGRAY);
+-        mParentAccountId = getArguments().getLong(UxArgument.PARENT_ACCOUNT_ID);
++        mParentAccountUID = getArguments().getString(UxArgument.PARENT_ACCOUNT_UID);
+ 
+ 
+-        if (mParentAccountId > 0) {
+-            AccountType parentAccountType = mAccountsDbAdapter.getAccountType(mParentAccountId);
++        if (mParentAccountUID != null) {
++            AccountType parentAccountType = mAccountsDbAdapter.getAccountType(mParentAccountUID);
+             setAccountTypeSelection(parentAccountType);
+             loadParentAccountList(parentAccountType);
+-            setParentAccountSelection(mParentAccountId);
+-//            String colorHex = mAccountsDbAdapter.getAccountColorCode(parentAccountId);
+-//            initializeColorSquarePreview(colorHex);
+-//            mSelectedColor = colorHex;
++            setParentAccountSelection(mAccountsDbAdapter.getID(mParentAccountUID));
+         }
+ 
+-        //this must be called after changing account type
+-        //because changing account type reloads list of eligible parent accounts
+-
+-
+     }
+ 
+     /**
+@@ -533,7 +522,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+      * Initializes the default transfer account spinner with eligible accounts
+      */
+     private void loadDefaultTransferAccountList(){
+-        String condition = DatabaseSchema.AccountEntry._ID + " != " + mSelectedAccountId
++        String condition = DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountUID + "' "
+                 + " AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + "=0"
+                 + " AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID() + "'";
+         /*
+@@ -563,10 +552,10 @@ private void loadParentAccountList(AccountType accountType){
+ 
+         if (mAccount != null){  //if editing an account
+             mDescendantAccountUIDs = mAccountsDbAdapter.getDescendantAccountUIDs(mAccount.getUID(), null, null);
++            mDescendantAccountUIDs.add(mAccountUID); //cannot set self as parent
+             // limit cyclic account hierarchies.
+             condition += " AND (" + DatabaseSchema.AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IS NULL "
+-                    + " OR " + DatabaseSchema.AccountEntry.COLUMN_UID + " NOT IN ( '" + TextUtils.join("','", mDescendantAccountUIDs) + "' ) )"
+-                    + " AND " + DatabaseSchema.AccountEntry._ID + " != " + mSelectedAccountId;
++                    + " OR " + DatabaseSchema.AccountEntry.COLUMN_UID + " NOT IN ( '" + TextUtils.join("','", mDescendantAccountUIDs) + "' ) )";
+         }
+ 
+         //if we are reloading the list, close the previous cursor first
+@@ -737,8 +726,9 @@ private void saveAccount() {
+             mAccount.setDefaultTransferAccountUID(null);
+         }
+ 
++        long parentAccountId = mAccountsDbAdapter.getID(mParentAccountUID);
+         // update full names
+-        if (mDescendantAccountUIDs == null || newParentAccountId != mParentAccountId) {
++        if (mDescendantAccountUIDs == null || newParentAccountId != parentAccountId) {
+             // new Account or parent account changed
+             String newAccountFullName;
+             if (newParentAccountId == mRootAccountId){
+@@ -751,7 +741,7 @@ private void saveAccount() {
+             mAccount.setFullName(newAccountFullName);
+             if (mDescendantAccountUIDs != null) {
+                 // modifying existing account
+-                if (mParentAccountId != newParentAccountId && mDescendantAccountUIDs.size() > 0) {
++                if (parentAccountId != newParentAccountId && mDescendantAccountUIDs.size() > 0) {
+                     // parent change, update all full names of descent accounts
+                     accountsToUpdate.addAll(mAccountsDbAdapter.getSimpleAccountList(
+                             DatabaseSchema.AccountEntry.COLUMN_UID + " IN ('" +
+@@ -800,7 +790,7 @@ private AccountType getSelectedAccountType() {
+ 
+     /**
+ 	 * Retrieves the name of the account which has been entered in the EditText
+-	 * @return
++	 * @return Name of the account which has been entered in the EditText
+ 	 */
+ 	public String getEnteredName(){
+ 		return mNameEditText.getText().toString().trim();
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+index 0b6cc94f..28fb5717 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -223,12 +223,12 @@ public void onCreate(Bundle savedInstanceState) {
+             mPager.setVisibility(View.GONE);
+             titlePageIndicator.setVisibility(View.GONE);
+ 
+-            long accountId = intent.getLongExtra(UxArgument.SELECTED_ACCOUNT_ID, 0L);
+-            if (accountId > 0)
+-                showEditAccountFragment(accountId);
++            String accountUID = intent.getStringExtra(UxArgument.SELECTED_ACCOUNT_UID);
++            if (accountUID != null)
++                showEditAccountFragment(accountUID);
+             else {
+-                long parentAccountId = intent.getLongExtra(UxArgument.PARENT_ACCOUNT_ID, 0L);
+-                showAddAccountFragment(parentAccountId);
++                String parentAccountUID = intent.getStringExtra(UxArgument.PARENT_ACCOUNT_UID);
++                showAddAccountFragment(parentAccountUID);
+             }
+         } else if (action != null && action.equals(ACTION_VIEW_RECURRING)) {
+             mPager.setVisibility(View.GONE);
+@@ -360,11 +360,11 @@ private Intent createNewAccountIntent(){
+ 
+     /**
+      * Shows form fragment for creating a new account
+-     * @param parentAccountId Record ID of the parent account present. Can be 0 for top-level account
++     * @param parentAccountUID GUID of the parent account present. Can be 0 for top-level account
+      */
+-    private void showAddAccountFragment(long parentAccountId){
++    private void showAddAccountFragment(String parentAccountUID){
+         Bundle args = new Bundle();
+-        args.putLong(UxArgument.PARENT_ACCOUNT_ID, parentAccountId);
++        args.putString(UxArgument.PARENT_ACCOUNT_UID, parentAccountUID);
+         showAccountFormFragment(args);
+     }
+ 
+@@ -385,11 +385,11 @@ private void showRecurringTransactionsFragment(){
+     }
+     /**
+      * Shows the form fragment for editing the account with record ID <code>accountId</code>
+-     * @param accountId Record ID of the account to be edited
++     * @param accountUID GUID of the account to be edited
+      */
+-    private void showEditAccountFragment(long accountId) {
++    private void showEditAccountFragment(String accountUID) {
+         Bundle args = new Bundle();
+-        args.putLong(UxArgument.SELECTED_ACCOUNT_ID, accountId);
++        args.putString(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+         showAccountFormFragment(args);
+     }
+ 
+@@ -503,10 +503,10 @@ public static void start(Context context){
+     }
+ 
+     @Override
+-	public void accountSelected(long accountRowId) {
++	public void accountSelected(String accountUID) {
+ 		Intent intent = new Intent(this, TransactionsActivity.class);
+ 		intent.setAction(Intent.ACTION_VIEW);
+-		intent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, accountRowId);
++		intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+ 
+ 		startActivity(intent);
+ 	}
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
+index 372f0ad3..060b2ed9 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -127,7 +127,13 @@
+      * Database record ID of the account whose children will be loaded by the list fragment.
+      * If no parent account is specified, then all top-level accounts are loaded.
+      */
+-    private long mParentAccountId = -1;
++//    private long mParentAccountId = -1;
++
++    /**
++     * GUID of the account whose children will be loaded in the list fragment.
++     * If no parent account is specified, then all top-level accounts are loaded.
++     */
++    private String mParentAccountUID = null;
+ 
+     /**
+      * Filter for which accounts should be displayed. Used by search interface
+@@ -204,7 +210,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 
+         Bundle args = getArguments();
+         if (args != null)
+-            mParentAccountId = args.getLong(UxArgument.PARENT_ACCOUNT_ID);
++            mParentAccountUID = args.getString(UxArgument.PARENT_ACCOUNT_UID);
+ 
+         mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+         mAccountsCursorAdapter = new AccountsCursorAdapter(
+@@ -260,7 +266,7 @@ public void onListItemClick(ListView listView, View view, int position, long id)
+             listView.setItemChecked(position, true);
+             return;
+         }
+-        mAccountSelectedListener.accountSelected(id);
++        mAccountSelectedListener.accountSelected(mAccountsDbAdapter.getAccountUID(id));
+     }
+ 
+     @Override
+@@ -296,7 +302,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+      */
+     public void tryDeleteAccount(long rowId) {
+         Account acc = mAccountsDbAdapter.getAccount(rowId);
+-        if (acc.getTransactionCount() > 0 || mAccountsDbAdapter.getSubAccountCount(rowId) > 0) {
++        if (acc.getTransactionCount() > 0 || mAccountsDbAdapter.getSubAccountCount(acc.getUID()) > 0) {
+             showConfirmationDialog(rowId);
+         } else {
+             deleteAccount(rowId, false);
+@@ -327,7 +333,8 @@ protected void deleteAccount(long rowId, boolean deleteSubAccounts) {
+      * @param id Record ID of account to be deleted after confirmation
+      */
+     public void showConfirmationDialog(long id) {
+-        DeleteConfirmationDialogFragment alertFragment = DeleteConfirmationDialogFragment.newInstance(R.string.title_confirm_delete, id);
++        DeleteConfirmationDialogFragment alertFragment =
++                DeleteConfirmationDialogFragment.newInstance(R.string.title_confirm_delete, mAccountsDbAdapter.getAccountUID(id));
+         alertFragment.setTargetFragment(this, 0);
+         alertFragment.show(getSherlockActivity().getSupportFragmentManager(), "dialog");
+     }
+@@ -345,7 +352,7 @@ public void finishEditMode() {
+ 
+     @Override
+     public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+-        if (mParentAccountId > 0)
++        if (mParentAccountUID != null)
+             inflater.inflate(R.menu.sub_account_actions, menu);
+         else {
+             inflater.inflate(R.menu.account_actions, menu);
+@@ -371,7 +378,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+             case R.id.menu_add_account:
+                 Intent addAccountIntent = new Intent(getActivity(), AccountsActivity.class);
+                 addAccountIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-                addAccountIntent.putExtra(UxArgument.PARENT_ACCOUNT_ID, mParentAccountId);
++                addAccountIntent.putExtra(UxArgument.PARENT_ACCOUNT_UID, mParentAccountUID);
+                 startActivityForResult(addAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);
+                 return true;
+ 
+@@ -385,8 +392,8 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     }
+ 
+     @Override
+-    public void refresh(long parentAccountId) {
+-        getArguments().putLong(UxArgument.PARENT_ACCOUNT_ID, parentAccountId);
++    public void refresh(String parentAccountUID) {
++        getArguments().putString(UxArgument.PARENT_ACCOUNT_UID, parentAccountUID);
+         refresh();
+     }
+ 
+@@ -428,13 +435,13 @@ public void onDestroy() {
+         mAccountsCursorAdapter.close();
+     }
+ 
+-    public void showAddAccountFragment(long accountId) {
++    public void showAddAccountFragment(String accountUID) {
+         FragmentManager fragmentManager = getSherlockActivity().getSupportFragmentManager();
+         FragmentTransaction fragmentTransaction = fragmentManager
+                 .beginTransaction();
+ 
+         Bundle args = new Bundle();
+-        args.putLong(UxArgument.SELECTED_ACCOUNT_ID, accountId);
++        args.putString(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+         AccountFormFragment accountFormFragment = AccountFormFragment.newInstance(mAccountsDbAdapter);
+         accountFormFragment.setArguments(args);
+ 
+@@ -453,7 +460,7 @@ public void showAddAccountFragment(long accountId) {
+     public void openCreateOrEditActivity(long accountId){
+         Intent editAccountIntent = new Intent(AccountsListFragment.this.getActivity(), AccountsActivity.class);
+         editAccountIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-        editAccountIntent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, accountId);
++        editAccountIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountsDbAdapter.getAccountUID(accountId));
+         startActivityForResult(editAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);
+     }
+ 
+@@ -477,13 +484,13 @@ public void showExportDialog() {
+     @Override
+     public Loader<Cursor> onCreateLoader(int id, Bundle args) {
+         Log.d(TAG, "Creating the accounts loader");
+-        Bundle fragmentArguments = getArguments();
+-        long accountId = fragmentArguments == null ? -1 : fragmentArguments.getLong(UxArgument.PARENT_ACCOUNT_ID);
++        Bundle arguments = getArguments();
++        String accountUID = arguments == null ? null : arguments.getString(UxArgument.PARENT_ACCOUNT_UID);
+ 
+         if (mCurrentFilter != null){
+             return new AccountsCursorLoader(getActivity(), mCurrentFilter);
+         } else {
+-            return new AccountsCursorLoader(this.getActivity(), accountId, mDisplayMode);
++            return new AccountsCursorLoader(this.getActivity(), accountUID, mDisplayMode);
+         }
+     }
+ 
+@@ -538,11 +545,17 @@ public boolean onClose() {
+      */
+     public static class DeleteConfirmationDialogFragment extends SherlockDialogFragment {
+ 
+-        public static DeleteConfirmationDialogFragment newInstance(int title, long id) {
++        /**
++         * Creates new instance of the delete confirmation dialog and provides parameters for it
++         * @param title Title to use for the dialog
++         * @param uid GUID of the account to be deleted
++         * @return New instance of the delete confirmation dialog
++         */
++        public static DeleteConfirmationDialogFragment newInstance(int title, String uid) {
+             DeleteConfirmationDialogFragment frag = new DeleteConfirmationDialogFragment();
+             Bundle args = new Bundle();
+             args.putInt("title", title);
+-            args.putLong(UxArgument.SELECTED_ACCOUNT_ID, id);
++            args.putString(UxArgument.SELECTED_ACCOUNT_UID, uid);
+             frag.setArguments(args);
+             return frag;
+         }
+@@ -550,7 +563,8 @@ public static DeleteConfirmationDialogFragment newInstance(int title, long id) {
+         @Override
+         public Dialog onCreateDialog(Bundle savedInstanceState) {
+             int title = getArguments().getInt("title");
+-            final long rowId = getArguments().getLong(UxArgument.SELECTED_ACCOUNT_ID);
++            final String uid = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
++
+             LayoutInflater layoutInflater = getSherlockActivity().getLayoutInflater();
+             final View dialogLayout = layoutInflater.inflate(R.layout.dialog_account_delete, (ViewGroup) getView());
+             AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(getActivity())
+@@ -561,16 +575,17 @@ public Dialog onCreateDialog(Bundle savedInstanceState) {
+                             new DialogInterface.OnClickListener() {
+                                 public void onClick(DialogInterface dialog, int whichButton) {
+                                     Context context = getDialog().getContext();
+-                                    if (rowId < 0) {
+-                                        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
++                                    AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
++                                    if (uid == null) {
+                                         accountsDbAdapter.deleteAllRecords();
+-                                        accountsDbAdapter.close();
+                                         Toast.makeText(context, R.string.toast_all_accounts_deleted, Toast.LENGTH_SHORT).show();
+                                     } else {
+                                         CheckBox deleteSubAccountsCheckBox = (CheckBox) dialogLayout
+                                                 .findViewById(R.id.checkbox_delete_sub_accounts);
++                                        long rowId = accountsDbAdapter.getID(uid);
+                                         ((AccountsListFragment) getTargetFragment()).deleteAccount(rowId, deleteSubAccountsCheckBox.isChecked());
+                                     }
++                                    accountsDbAdapter.close();
+                                 }
+                             })
+                     .setNegativeButton(R.string.alert_dialog_cancel,
+@@ -595,7 +610,7 @@ public void onClick(DialogInterface dialog, int whichButton) {
+      * @author Ngewi Fet <ngewif@gmail.com>
+      */
+     private static final class AccountsCursorLoader extends DatabaseCursorLoader {
+-        private long mParentAccountId = -1;
++        private String mParentAccountUID = null;
+         private String mFilter;
+         private DisplayMode mDisplayMode = DisplayMode.TOP_LEVEL;
+ 
+@@ -604,11 +619,11 @@ public void onClick(DialogInterface dialog, int whichButton) {
+          * If the <code>parentAccountId <= 0</code> then only top-level accounts are loaded.
+          * Else only the child accounts of the <code>parentAccountId</code> will be loaded
+          * @param context Application context
+-         * @param parentAccountId Record ID of the parent account
++         * @param parentAccountUID GUID of the parent account
+          */
+-        public AccountsCursorLoader(Context context, long parentAccountId, DisplayMode displayMode) {
++        public AccountsCursorLoader(Context context, String parentAccountUID, DisplayMode displayMode) {
+             super(context);
+-            mParentAccountId = parentAccountId;
++            this.mParentAccountUID = parentAccountUID;
+             this.mDisplayMode = displayMode;
+         }
+ 
+@@ -632,8 +647,8 @@ public Cursor loadInBackground() {
+                 cursor = ((AccountsDbAdapter)mDatabaseAdapter)
+                         .fetchAccounts(DatabaseSchema.AccountEntry.COLUMN_NAME + " LIKE '%" + mFilter + "%'");
+             } else {
+-                if (mParentAccountId > 0)
+-                    cursor = ((AccountsDbAdapter) mDatabaseAdapter).fetchSubAccounts(mParentAccountId);
++                if (mParentAccountUID != null && mParentAccountUID.length() > 0)
++                    cursor = ((AccountsDbAdapter) mDatabaseAdapter).fetchSubAccounts(mParentAccountUID);
+                 else {
+                     switch (this.mDisplayMode){
+                         case RECENT:
+@@ -677,14 +692,14 @@ public void close() {
+         }
+ 
+         @Override
+-        public void bindView(View v, Context context, Cursor cursor) {
++        public void bindView(View v, Context context, final Cursor cursor) {
+             // perform the default binding
+             super.bindView(v, context, cursor);
+ 
+-            final long accountId = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry._ID));
++            final String accountUID = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_UID));
+ 
+             TextView subAccountTextView = (TextView) v.findViewById(R.id.secondary_text);
+-            int subAccountCount = mAccountsDbAdapter.getSubAccountCount(accountId);
++            int subAccountCount = mAccountsDbAdapter.getSubAccountCount(accountUID);
+             if (subAccountCount > 0) {
+                 subAccountTextView.setVisibility(View.VISIBLE);
+                 String text = getResources().getQuantityString(R.plurals.label_sub_accounts, subAccountCount, subAccountCount);
+@@ -695,7 +710,7 @@ public void bindView(View v, Context context, Cursor cursor) {
+             // add a summary of transactions to the account view
+             TextView accountBalanceTextView = (TextView) v
+                     .findViewById(R.id.transactions_summary);
+-            new AccountBalanceTask(accountBalanceTextView, getActivity()).execute(accountId);
++            new AccountBalanceTask(accountBalanceTextView, getActivity()).execute(accountUID);
+ 
+             View colorStripView = v.findViewById(R.id.account_color_strip);
+             String accountColor = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_COLOR_CODE));
+@@ -706,7 +721,7 @@ public void bindView(View v, Context context, Cursor cursor) {
+                 colorStripView.setBackgroundColor(Color.TRANSPARENT);
+             }
+ 
+-            boolean isPlaceholderAccount = mAccountsDbAdapter.isPlaceholderAccount(accountId);
++            boolean isPlaceholderAccount = mAccountsDbAdapter.isPlaceholderAccount(accountUID);
+             ImageButton newTransactionButton = (ImageButton) v.findViewById(R.id.btn_new_transaction);
+             if (isPlaceholderAccount){
+                 newTransactionButton.setVisibility(View.GONE);
+@@ -718,7 +733,8 @@ public void bindView(View v, Context context, Cursor cursor) {
+                     public void onClick(View v) {
+                         Intent intent = new Intent(getActivity(), TransactionsActivity.class);
+                         intent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-                        intent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, accountId);
++                        String accountUID = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_UID));
++                        intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+                         getActivity().startActivity(intent);
+                     }
+                 });
+diff --git a/app/src/org/gnucash/android/ui/passcode/PassLockActivity.java b/app/src/org/gnucash/android/ui/passcode/PassLockActivity.java
+index 3972a2ac..e9f8b208 100644
+--- a/app/src/org/gnucash/android/ui/passcode/PassLockActivity.java
++++ b/app/src/org/gnucash/android/ui/passcode/PassLockActivity.java
+@@ -29,7 +29,8 @@ protected void onResume() {
+             startActivity(new Intent(this, PasscodeLockScreenActivity.class)
+                     .setAction(getIntent().getAction())
+                     .putExtra(UxArgument.PASSCODE_CLASS_CALLER, this.getClass().getName())
+-                    .putExtra(UxArgument.SELECTED_ACCOUNT_ID, getIntent().getLongExtra(UxArgument.SELECTED_ACCOUNT_ID, 0L))
++                    .putExtra(UxArgument.SELECTED_ACCOUNT_UID,
++                            getIntent().getLongExtra(UxArgument.SELECTED_ACCOUNT_UID, 0L))
+             );
+         }
+     }
+@@ -45,7 +46,7 @@ protected void onPause() {
+      */
+     private boolean isSessionActive() {
+         return System.currentTimeMillis() - GnuCashApplication.PASSCODE_SESSION_INIT_TIME
+-                < GnuCashApplication.SESSION_TIMEOUT ? true : false;
++                < GnuCashApplication.SESSION_TIMEOUT;
+     }
+ 
+ }
+diff --git a/app/src/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java b/app/src/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
+index 9bac9665..ba7b55f1 100644
+--- a/app/src/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
++++ b/app/src/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
+@@ -55,7 +55,7 @@ public void onPasscodeEntered(String pass) {
+                     .setClassName(this, getIntent().getStringExtra(UxArgument.PASSCODE_CLASS_CALLER))
+                     .setAction(getIntent().getAction())
+                     .setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+-                    .putExtra(UxArgument.SELECTED_ACCOUNT_ID, getIntent().getLongExtra(UxArgument.SELECTED_ACCOUNT_ID, 0L))
++                    .putExtra(UxArgument.SELECTED_ACCOUNT_UID, getIntent().getLongExtra(UxArgument.SELECTED_ACCOUNT_UID, 0L))
+             );
+         } else {
+             Toast.makeText(this, R.string.toast_wrong_passcode, Toast.LENGTH_SHORT).show();
+diff --git a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index d5a37b39..3cdd9008 100644
+--- a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -184,21 +184,19 @@ public void onListItemClick(ListView l, View v, int position, long id) {
+             return;
+         }
+         String accountUID = mTransactionsDbAdapter.getTransaction(id).getSplits().get(0).getAccountUID();
+-        long accountID = mTransactionsDbAdapter.getAccountID(accountUID);
+-
+-        openTransactionForEdit(accountID, id);
++        openTransactionForEdit(accountUID, mTransactionsDbAdapter.getUID(id));
+     }
+ 
+     /**
+      * Opens the transaction editor to enable editing of the transaction
+-     * @param accountId Account ID of the transaction
+-     * @param transactionId Transaction to be edited
++     * @param accountUID GUID of account to which transaction belongs
++     * @param transactionUID GUID of transaction to be edited
+      */
+-    public void openTransactionForEdit(long accountId, long transactionId){
++    public void openTransactionForEdit(String accountUID, String transactionUID){
+         Intent createTransactionIntent = new Intent(getActivity(), TransactionsActivity.class);
+         createTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-        createTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, accountId);
+-        createTransactionIntent.putExtra(UxArgument.SELECTED_TRANSACTION_ID, transactionId);
++        createTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
++        createTransactionIntent.putExtra(UxArgument.SELECTED_TRANSACTION_UID, transactionUID);
+         startActivity(createTransactionIntent);
+     }
+ 
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index df9184c6..529e0537 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -173,7 +173,7 @@
+     private AmountInputFormatter mAmountInputFormatter;
+ 
+     private Button mOpenSplitsButton;
+-    private long mAccountId;
++    private String mAccountUID;
+ 
+     private List<Split> mSplitsList = new ArrayList<Split>();
+ 
+@@ -215,8 +215,11 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             mOpenSplitsButton.setVisibility(View.GONE);
+ 		}
+ 
+-		//updateTransferAccountsList must only be called after creating mAccountsDbAdapter
++        mAccountUID = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
++        mAccountType = mAccountsDbAdapter.getAccountType(mAccountUID);
++
++        //updateTransferAccountsList must only be called after initializing mAccountsDbAdapter
+ 		updateTransferAccountsList();
+ 
+         ArrayAdapter<CharSequence> recurrenceAdapter = ArrayAdapter.createFromResource(getActivity(),
+@@ -224,19 +227,16 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         recurrenceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+         mRecurringTransactionSpinner.setAdapter(recurrenceAdapter);
+ 
+-        long transactionId = getArguments().getLong(UxArgument.SELECTED_TRANSACTION_ID);
++        String transactionUID = getArguments().getString(UxArgument.SELECTED_TRANSACTION_UID);
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+-		mTransaction = mTransactionsDbAdapter.getTransaction(transactionId);
+-
+-        mAccountId = getArguments().getLong(UxArgument.SELECTED_ACCOUNT_ID);
+-        mAccountType = mAccountsDbAdapter.getAccountType(mAccountId);
++		mTransaction = mTransactionsDbAdapter.getTransaction(transactionUID);
+ 
+         mDoubleAccountSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+             @Override
+             public void onItemSelected(AdapterView<?> adapterView, View view, int position, long id) {
+                 if (mSplitsList.size() == 2){ //when handling simple transfer to one account
+                     for (Split split : mSplitsList) {
+-                        if (!split.getAccountUID().equals(mAccountsDbAdapter.getAccountUID(mAccountId))){
++                        if (!split.getAccountUID().equals(mAccountUID)){
+                             split.setAccountUID(mAccountsDbAdapter.getAccountUID(id));
+                         }
+                         // else case is handled when saving the transactions
+@@ -325,13 +325,12 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+ 	private void initializeViewsWithTransaction(){
+ 		mDescriptionEditText.setText(mTransaction.getDescription());
+ 
+-        String accountUID = mAccountsDbAdapter.getAccountUID(mAccountId);
+         mTransactionTypeButton.setAccountType(mAccountType);
+-        mTransactionTypeButton.setChecked(mTransaction.getBalance(accountUID).isNegative());
++        mTransactionTypeButton.setChecked(mTransaction.getBalance(mAccountUID).isNegative());
+ 
+ 		if (!mAmountInputFormatter.isInputModified()){
+             //when autocompleting, only change the amount if the user has not manually changed it already
+-            mAmountEditText.setText(mTransaction.getBalance(accountUID).toPlainString());
++            mAmountEditText.setText(mTransaction.getBalance(mAccountUID).toPlainString());
+         }
+ 		mCurrencyTextView.setText(mTransaction.getCurrency().getSymbol(Locale.getDefault()));
+ 		mNotesEditText.setText(mTransaction.getNote());
+@@ -348,7 +347,7 @@ private void initializeViewsWithTransaction(){
+         } else {
+             for (Split split : mTransaction.getSplits()) {
+                 //two splits, one belongs to this account and the other to another account
+-                if (mUseDoubleEntry && !split.getAccountUID().equals(accountUID)) {
++                if (mUseDoubleEntry && !split.getAccountUID().equals(mAccountUID)) {
+                     setSelectedTransferAccount(mAccountsDbAdapter.getAccountID(split.getAccountUID()));
+                 }
+             }
+@@ -356,7 +355,7 @@ private void initializeViewsWithTransaction(){
+         mSplitsList = new ArrayList<Split>(mTransaction.getSplits()); //we need a copy so we can modify with impunity
+         mAmountEditText.setEnabled(mSplitsList.size() <= 2);
+ 
+-		String currencyCode = mTransactionsDbAdapter.getCurrencyCode(mAccountId);
++		String currencyCode = mTransactionsDbAdapter.getCurrencyCode(mAccountUID);
+ 		Currency accountCurrency = Currency.getInstance(currencyCode);
+ 		mCurrencyTextView.setText(accountCurrency.getSymbol());
+ 
+@@ -381,15 +380,16 @@ private void initalizeViews() {
+ 		String typePref = PreferenceManager.getDefaultSharedPreferences(getActivity()).getString(getString(R.string.key_default_transaction_type), "DEBIT");
+         mTransactionTypeButton.setChecked(TransactionType.valueOf(typePref));
+ 
+-		final long accountId = getArguments().getLong(UxArgument.SELECTED_ACCOUNT_ID);
++		final String accountUID = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
+ 		String code = Money.DEFAULT_CURRENCY_CODE;
+-		if (accountId != 0){
+-			code = mTransactionsDbAdapter.getCurrencyCode(accountId);
++		if (accountUID != null){
++			code = mTransactionsDbAdapter.getCurrencyCode(mAccountUID);
+ 		}
+ 		Currency accountCurrency = Currency.getInstance(code);
+ 		mCurrencyTextView.setText(accountCurrency.getSymbol());
+ 
+         if (mUseDoubleEntry){
++            long accountId = mAccountsDbAdapter.getID(mAccountUID);
+             long defaultTransferAccountID = mAccountsDbAdapter.getDefaultTransferAccountID(accountId);
+             if (defaultTransferAccountID > 0){
+                 setSelectedTransferAccount(defaultTransferAccountID);
+@@ -422,10 +422,10 @@ private void setSelectedRecurrenceOption() {
+      * Only accounts with the same currency can be transferred to
+      */
+ 	private void updateTransferAccountsList(){
+-		long accountId = ((TransactionsActivity)getActivity()).getCurrentAccountID();
++		String accountUID = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
+ 
+-		String conditions = "(" + DatabaseSchema.AccountEntry._ID + " != " + accountId + " AND "
+-							+ DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(accountId)
++		String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + accountUID
++                            + "' AND " + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(accountUID)
+                             + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                             + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                             + ")";
+@@ -574,9 +574,8 @@ private void saveNewTransaction() {
+ 		String notes = mNotesEditText.getText().toString();
+ 		BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
+ 
+-		long accountID 	= ((TransactionsActivity) getSherlockActivity()).getCurrentAccountID();
+-        String accountUID = mAccountsDbAdapter.getAccountUID(accountID);
+-		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getCurrencyCode(accountID));
++		String accountUID 	= ((TransactionsActivity) getSherlockActivity()).getCurrentAccountUID();
++		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getCurrencyCode(accountUID));
+ 		Money amount 	= new Money(amountBigd, currency).absolute();
+ 
+         //capture any edits which were done directly (not using split editor)
+@@ -637,7 +636,7 @@ private void saveNewTransaction() {
+                 mTransaction.setSplits(mSplitsList);
+             }
+ 		}
+-        mTransaction.setCurrencyCode(mAccountsDbAdapter.getCurrencyCode(accountID));
++        mTransaction.setCurrencyCode(mAccountsDbAdapter.getCurrencyCode(mAccountUID));
+ 		mTransaction.setTime(cal.getTimeInMillis());
+ 		mTransaction.setNote(notes);
+ 
+@@ -717,8 +716,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+      */
+     public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+         mSplitsList = splitList;
+-        String accountUID = mAccountsDbAdapter.getAccountUID(mAccountId);
+-        Money balance = Transaction.computeBalance(accountUID, mSplitsList);
++        Money balance = Transaction.computeBalance(mAccountUID, mSplitsList);
+ 
+         mAmountEditText.setText(balance.toPlainString());
+         //once we set the split list, do not allow direct editing of the total
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 47dd7c51..87d06394 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -104,8 +104,13 @@
+     /**
+ 	 * Database ID of {@link Account} whose transactions are displayed 
+ 	 */
+-	private long mAccountId 	= 0;
+-		
++//	private long mAccountId 	= 0;
++
++    /**
++     * GUID of {@link Account} whose transactions are displayed
++     */
++    private String mAccountUID = null;
++
+ 	/**
+ 	 * Flag which is used to determine if the activity is running or not. 
+ 	 * Basically if onCreate has already been called or not. It is used
+@@ -134,8 +139,7 @@
+ 
+ 		  @Override
+ 		  public boolean onNavigationItemSelected(int position, long itemId) {
+-			mAccountId = itemId;
+-
++            mAccountUID = mAccountsDbAdapter.getAccountUID(itemId);
+             FragmentManager fragmentManager = getSupportFragmentManager();
+ 
+ 		    //inform new accounts fragment that account was changed
+@@ -222,7 +226,7 @@ public int getCount() {
+         private AccountsListFragment prepareSubAccountsListFragment(){
+             AccountsListFragment subAccountsListFragment = new AccountsListFragment();
+             Bundle args = new Bundle();
+-            args.putLong(UxArgument.PARENT_ACCOUNT_ID, mAccountId);
++            args.putString(UxArgument.PARENT_ACCOUNT_UID, mAccountUID);
+             subAccountsListFragment.setArguments(args);
+             return subAccountsListFragment;
+         }
+@@ -234,10 +238,9 @@ private AccountsListFragment prepareSubAccountsListFragment(){
+         private TransactionsListFragment prepareTransactionsListFragment(){
+             TransactionsListFragment transactionsListFragment = new TransactionsListFragment();
+             Bundle args = new Bundle();
+-            args.putLong(UxArgument.SELECTED_ACCOUNT_ID,
+-                    mAccountId);
++            args.putString(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
+             transactionsListFragment.setArguments(args);
+-            Log.i(TAG, "Opening transactions for account id " +  mAccountId);
++            Log.i(TAG, "Opening transactions for account:  " +  mAccountUID);
+             return transactionsListFragment;
+         }
+     }
+@@ -247,23 +250,23 @@ private TransactionsListFragment prepareTransactionsListFragment(){
+      * @return <code>true</code> is the current account is a placeholder account, <code>false</code> otherwise.
+      */
+     private boolean isPlaceHolderAccount(){
+-        return mAccountsDbAdapter.isPlaceholderAccount(mAccountId);
++        return mAccountsDbAdapter.isPlaceholderAccount(mAccountUID);
+     }
+ 
+     /**
+      * Refreshes the fragments currently in the transactions activity
+      */
+     @Override
+-    public void refresh(long accountId) {
++    public void refresh(String accountUID) {
+         for (int i = 0; i < mFragmentPageReferenceMap.size(); i++) {
+-            mFragmentPageReferenceMap.valueAt(i).refresh(accountId);
++            mFragmentPageReferenceMap.valueAt(i).refresh(accountUID);
+         }
+         mTitlePageIndicator.notifyDataSetChanged();
+     }
+ 
+     @Override
+     public void refresh(){
+-        refresh(mAccountId);
++        refresh(mAccountUID);
+         setTitleIndicatorColor();
+     }
+ 
+@@ -276,8 +279,7 @@ protected void onCreate(Bundle savedInstanceState) {
+         mTitlePageIndicator = (TitlePageIndicator) findViewById(R.id.titles);
+         mSectionHeaderTransactions = (TextView) findViewById(R.id.section_header_transactions);
+ 
+-		mAccountId = getIntent().getLongExtra(
+-                UxArgument.SELECTED_ACCOUNT_ID, -1);
++		mAccountUID = getIntent().getStringExtra(UxArgument.SELECTED_ACCOUNT_UID);
+ 
+         mAccountsDbAdapter = new AccountsDbAdapter(this);
+ 
+@@ -306,15 +308,15 @@ protected void onCreate(Bundle savedInstanceState) {
+      * Loads the fragment for creating/editing transactions and initializes it to be displayed
+      */
+     private void initializeCreateOrEditTransaction() {
+-        long transactionId = getIntent().getLongExtra(UxArgument.SELECTED_TRANSACTION_ID, -1);
++        String transactionUID = getIntent().getStringExtra(UxArgument.SELECTED_TRANSACTION_UID);
+         Bundle args = new Bundle();
+-        if (transactionId > 0) {
++        if (transactionUID != null) {
+             mSectionHeaderTransactions.setText(R.string.title_edit_transaction);
+-            args.putLong(UxArgument.SELECTED_TRANSACTION_ID, transactionId);
+-            args.putLong(UxArgument.SELECTED_ACCOUNT_ID, mAccountId);
++            args.putString(UxArgument.SELECTED_TRANSACTION_UID, transactionUID);
++            args.putString(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
+         } else {
+             mSectionHeaderTransactions.setText(R.string.title_add_transaction);
+-            args.putLong(UxArgument.SELECTED_ACCOUNT_ID, mAccountId);
++            args.putString(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
+         }
+         showTransactionFormFragment(args);
+     }
+@@ -331,12 +333,12 @@ protected void onResume() {
+     private void setTitleIndicatorColor() {
+         //Basically, if we are in a top level account, use the default title color.
+         //but propagate a parent account's title color to children who don't have own color
+-        String colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountId);
++        String colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountsDbAdapter.getAccountID(mAccountUID));
+         int iColor = -1;
+         if (colorCode != null){
+             iColor = Color.parseColor(colorCode);
+         } else {
+-            String accountUID = mAccountsDbAdapter.getAccountUID(mAccountId);
++            String accountUID = mAccountUID;
+             while ((accountUID = mAccountsDbAdapter.getParentAccountUID(accountUID)) != null) {
+                 colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountsDbAdapter.getAccountID(accountUID));
+                 if (colorCode != null) {
+@@ -389,8 +391,8 @@ public void updateNavigationSelection() {
+ 		int i = 0;
+ 		Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+         while (accountsCursor.moveToNext()) {
+-            long id = accountsCursor.getLong(accountsCursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry._ID));
+-            if (mAccountId == id) {
++            String uid = accountsCursor.getString(accountsCursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_UID));
++            if (mAccountUID.equals(uid)) {
+                 getSupportActionBar().setSelectedNavigationItem(i);
+                 break;
+             }
+@@ -408,7 +410,7 @@ public boolean onPrepareOptionsMenu(Menu menu) {
+             return super.onPrepareOptionsMenu(menu);
+ 
+         AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(this);
+-        boolean isFavoriteAccount = accountsDbAdapter.isFavoriteAccount(mAccountId);
++        boolean isFavoriteAccount = accountsDbAdapter.isFavoriteAccount(mAccountsDbAdapter.getAccountID(mAccountUID));
+         accountsDbAdapter.close();
+ 
+         int favoriteIcon = isFavoriteAccount ? android.R.drawable.btn_star_big_on : android.R.drawable.btn_star_big_off;
+@@ -434,9 +436,10 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 
+             case R.id.menu_favorite_account:
+                 AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(this);
+-                boolean isFavorite = accountsDbAdapter.isFavoriteAccount(mAccountId);
++                long accountId = accountsDbAdapter.getAccountID(mAccountUID);
++                boolean isFavorite = accountsDbAdapter.isFavoriteAccount(accountId);
+                 //toggle favorite preference
+-                accountsDbAdapter.updateAccount(mAccountId, DatabaseSchema.AccountEntry.COLUMN_FAVORITE, isFavorite ? "0" : "1");
++                accountsDbAdapter.updateAccount(accountId, DatabaseSchema.AccountEntry.COLUMN_FAVORITE, isFavorite ? "0" : "1");
+                 accountsDbAdapter.close();
+                 supportInvalidateOptionsMenu();
+                 return true;
+@@ -444,7 +447,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+             case R.id.menu_edit_account:
+                 Intent editAccountIntent = new Intent(this, AccountsActivity.class);
+                 editAccountIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-                editAccountIntent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, mAccountId);
++                editAccountIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
+                 startActivityForResult(editAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);
+                 return true;
+ 
+@@ -470,11 +473,11 @@ protected void onDestroy() {
+ 	}
+ 	
+ 	/**
+-	 * Returns the database row ID of the current account
+-	 * @return Database row ID of the current account
++	 * Returns the global unique ID of the current account
++	 * @return GUID of the current account
+ 	 */
+-	public long getCurrentAccountID(){
+-		return mAccountId;
++	public String getCurrentAccountUID(){
++		return mAccountUID;
+ 	}
+ 	
+ 	/**
+@@ -483,7 +486,7 @@ public long getCurrentAccountID(){
+ 	 * @param v View which triggered this method
+ 	 */
+ 	public void onNewTransactionClick(View v){
+-		createNewTransaction(mAccountId);
++		createNewTransaction(mAccountUID);
+ 	}
+ 
+ 
+@@ -494,7 +497,7 @@ public void onNewTransactionClick(View v){
+     public void onNewAccountClick(View v) {
+         Intent addAccountIntent = new Intent(this, AccountsActivity.class);
+         addAccountIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-        addAccountIntent.putExtra(UxArgument.PARENT_ACCOUNT_ID, mAccountId);
++        addAccountIntent.putExtra(UxArgument.PARENT_ACCOUNT_UID, mAccountUID);
+         startActivityForResult(addAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);
+     }
+ 
+@@ -533,27 +536,27 @@ public static void displayBalance(TextView balanceTextView, Money balance){
+     }
+ 
+ 	@Override
+-	public void createNewTransaction(long accountRowId) {
++	public void createNewTransaction(String accountUID) {
+         Intent createTransactionIntent = new Intent(this.getApplicationContext(), TransactionsActivity.class);
+         createTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-        createTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, accountRowId);
++        createTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+         startActivity(createTransactionIntent);
+ 	}
+ 
+ 	@Override
+-	public void editTransaction(long transactionId){
++	public void editTransaction(String transactionUID){
+         Intent createTransactionIntent = new Intent(this.getApplicationContext(), TransactionsActivity.class);
+         createTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-        createTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, mAccountId);
+-        createTransactionIntent.putExtra(UxArgument.SELECTED_TRANSACTION_ID, transactionId);
++        createTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
++        createTransactionIntent.putExtra(UxArgument.SELECTED_TRANSACTION_UID, transactionUID);
+         startActivity(createTransactionIntent);
+ 	}
+ 
+     @Override
+-    public void accountSelected(long accountRowId) {
++    public void accountSelected(String accountUID) {
+         Intent restartIntent = new Intent(this.getApplicationContext(), TransactionsActivity.class);
+         restartIntent.setAction(Intent.ACTION_VIEW);
+-        restartIntent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, accountRowId);
++        restartIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+         startActivity(restartIntent);
+     }
+ }
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 0e1beaf4..bc986e78 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -76,7 +76,8 @@
+ 	private SimpleCursorAdapter mCursorAdapter;
+ 	private ActionMode mActionMode = null;
+ 	private boolean mInEditMode = false;
+-	private long mAccountID;
++//	private long mAccountID;
++    private String mAccountUID;
+ 
+ 	/**
+ 	 * Callback listener for editing transactions
+@@ -118,7 +119,7 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+ 			case R.id.context_menu_delete:
+                 SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
+ 				for (long id : getListView().getCheckedItemIds()) {
+-                    splitsDbAdapter.deleteSplitsForTransactionAndAccount(id, mAccountID);
++                    splitsDbAdapter.deleteSplitsForTransactionAndAccount(mTransactionsDbAdapter.getUID(id), mAccountUID);
+ 				}
+                 splitsDbAdapter.close();
+ 				refresh();
+@@ -142,7 +143,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 		super.onCreate(savedInstanceState);
+ 		setHasOptionsMenu(true);
+ 		Bundle args = getArguments();
+-		mAccountID = args.getLong(UxArgument.SELECTED_ACCOUNT_ID);
++		mAccountUID = args.getString(UxArgument.SELECTED_ACCOUNT_UID);
+ 
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+ 		mCursorAdapter = new TransactionsCursorAdapter(
+@@ -173,11 +174,11 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 
+     /**
+      * Refresh the list with transactions from account with ID <code>accountId</code>
+-     * @param accountId Database ID of account to load transactions from
++     * @param accountUID GUID of account to load transactions from
+      */
+     @Override
+-	public void refresh(long accountId){
+-		mAccountID = accountId;
++	public void refresh(String accountUID){
++		mAccountUID = accountUID;
+ 		refresh();
+ 	}
+ 
+@@ -189,7 +190,7 @@ public void refresh(){
+ 		getLoaderManager().restartLoader(0, null, this);
+ 
+         mSumTextView = (TextView) getView().findViewById(R.id.transactions_sum);
+-        new AccountBalanceTask(mSumTextView, getActivity()).execute(mAccountID);
++        new AccountBalanceTask(mSumTextView, getActivity()).execute(mAccountUID);
+ 
+ 	}
+ 			
+@@ -207,7 +208,7 @@ public void onAttach(Activity activity) {
+ 	public void onResume() {
+ 		super.onResume();
+ 		((TransactionsActivity)getSherlockActivity()).updateNavigationSelection();		
+-		refresh(((TransactionsActivity) getActivity()).getCurrentAccountID());
++		refresh(((TransactionsActivity) getActivity()).getCurrentAccountUID());
+ 	}
+ 	
+ 	@Override
+@@ -224,7 +225,7 @@ public void onListItemClick(ListView l, View v, int position, long id) {
+ 			checkbox.setChecked(!checkbox.isChecked());
+ 			return;
+ 		}
+-		mTransactionEditListener.editTransaction(id);
++		mTransactionEditListener.editTransaction(mTransactionsDbAdapter.getUID(id));
+ 	}
+ 	
+ 	@Override
+@@ -236,7 +237,7 @@ public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+ 	public boolean onOptionsItemSelected(MenuItem item) {
+ 		switch (item.getItemId()) {
+             case R.id.menu_add_transaction:
+-                mTransactionEditListener.createNewTransaction(mAccountID);
++                mTransactionEditListener.createNewTransaction(mAccountUID);
+                 return true;
+ 
+             default:
+@@ -247,7 +248,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	@Override
+ 	public Loader<Cursor> onCreateLoader(int arg0, Bundle arg1) {
+ 		Log.d(LOG_TAG, "Creating transactions loader");
+-		return new TransactionsCursorLoader(getActivity(), mAccountID);
++		return new TransactionsCursorLoader(getActivity(), mAccountUID);
+ 	}
+ 
+ 	@Override
+@@ -337,7 +338,7 @@ protected void showBulkMoveDialog(){
+ 	    // Create and show the dialog.
+ 	    DialogFragment bulkMoveFragment = new BulkMoveDialogFragment();
+ 	    Bundle args = new Bundle();
+-	    args.putLong(UxArgument.ORIGIN_ACCOUNT_ID, mAccountID);
++	    args.putString(UxArgument.ORIGIN_ACCOUNT_UID, mAccountUID);
+ 	    args.putLongArray(UxArgument.SELECTED_TRANSACTION_IDS, getListView().getCheckedItemIds());
+ 	    bulkMoveFragment.setArguments(args);
+         bulkMoveFragment.setTargetFragment(this, 0);
+@@ -414,8 +415,8 @@ public void run() {
+ 		public void bindView(View view, Context context, Cursor cursor) {
+ 			super.bindView(view, context, cursor);
+ 
+-            long transactionId = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry._ID));
+-			Money amount = mTransactionsDbAdapter.getBalance(transactionId, mAccountID);
++            String transactionUID = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_UID));
++			Money amount = mTransactionsDbAdapter.getBalance(transactionUID, mAccountUID);
+ 			TextView amountTextView = (TextView) view.findViewById(R.id.transaction_amount);
+             TransactionsActivity.displayBalance(amountTextView, amount);
+ 
+@@ -485,17 +486,17 @@ private boolean isSameDay(long timeMillis1, long timeMillis2){
+ 	 * @author Ngewi Fet <ngewif@gmail.com>
+ 	 */
+ 	protected static class TransactionsCursorLoader extends DatabaseCursorLoader {
+-		private long accountID; 
++		private String accountUID;
+ 		
+-		public TransactionsCursorLoader(Context context, long accountID) {
++		public TransactionsCursorLoader(Context context, String accountUID) {
+ 			super(context);			
+-			this.accountID = accountID;
++			this.accountUID = accountUID;
+ 		}
+ 		
+ 		@Override
+ 		public Cursor loadInBackground() {
+ 			mDatabaseAdapter = new TransactionsDbAdapter(getContext());
+-			Cursor c = ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllTransactionsForAccount(accountID);
++			Cursor c = ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllTransactionsForAccount(accountUID);
+ 			if (c != null)
+ 				registerContentObserver(c);
+ 			return c;
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+index cb6b4dda..af55c964 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+@@ -18,7 +18,6 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.ui.UxArgument;
+@@ -29,7 +28,6 @@
+ import android.database.Cursor;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+-import android.support.v4.app.Fragment;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.view.LayoutInflater;
+ import android.view.View;
+@@ -67,9 +65,9 @@
+ 	long[] mTransactionIds = null;
+ 	
+ 	/**
+-	 * Account from which to move the transactions
++	 * GUID of account from which to move the transactions
+ 	 */
+-	long mOriginAccountId = -1;
++	String mOriginAccountUID = null;
+ 	
+ 	/**
+ 	 * Accounts database adapter
+@@ -99,15 +97,15 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		
+ 		Bundle args = getArguments();
+ 		mTransactionIds = args.getLongArray(UxArgument.SELECTED_TRANSACTION_IDS);
+-		mOriginAccountId = args.getLong(UxArgument.ORIGIN_ACCOUNT_ID);
++		mOriginAccountUID = args.getString(UxArgument.ORIGIN_ACCOUNT_UID);
+ 		
+ 		String title = getActivity().getString(R.string.title_move_transactions, 
+ 				mTransactionIds.length);
+ 		getDialog().setTitle(title);
+ 		
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+-        String conditions = "(" + DatabaseSchema.AccountEntry._ID           + " != " + mOriginAccountId + " AND "
+-                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY               + " = '" + mAccountsDbAdapter.getCurrencyCode(mOriginAccountId)
++        String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID    + " != '" + mOriginAccountUID + "' AND "
++                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY               + " = '" + mAccountsDbAdapter.getCurrencyCode(mOriginAccountUID)
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID         + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                 + ")";
+@@ -142,13 +140,14 @@ public void onClick(View v) {
+ 				
+ 				long dstAccountId = mDestinationAccountSpinner.getSelectedItemId();
+ 				TransactionsDbAdapter trxnAdapter = new TransactionsDbAdapter(getActivity());
+-				if (!trxnAdapter.getCurrencyCode(dstAccountId).equals(trxnAdapter.getCurrencyCode(mOriginAccountId))){
++				if (!trxnAdapter.getCurrencyCode(dstAccountId).equals(trxnAdapter.getCurrencyCode(mOriginAccountUID))){
+ 					Toast.makeText(getActivity(), R.string.toast_incompatible_currency, Toast.LENGTH_LONG).show();
+ 					return;
+ 				}
+-                long accountId      = ((TransactionsActivity)getActivity()).getCurrentAccountID();
++                String srcAccountUID    = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
++                String dstAccountUID    = trxnAdapter.getAccountUID(dstAccountId);
+ 				for (long trxnId : mTransactionIds) {
+-					trxnAdapter.moveTranscation(trxnId, accountId, dstAccountId);
++					trxnAdapter.moveTranscation(trxnAdapter.getUID(trxnId), srcAccountUID, dstAccountUID);
+ 				}
+ 				trxnAdapter.close();
+ 
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 59875cd2..02e1e780 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -155,8 +155,8 @@ private void initArgs() {
+         mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+ 
+         Bundle args     = getArguments();
+-        mAccountId      = ((TransactionsActivity)getActivity()).getCurrentAccountID();
+-        mAccountUID     = mAccountsDbAdapter.getAccountUID(mAccountId);
++        mAccountUID      = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
++        mAccountId     = mAccountsDbAdapter.getID(mAccountUID);
+         mBaseAmount     = new BigDecimal(args.getString(UxArgument.AMOUNT_STRING));
+ 
+         String conditions = "(" //+ AccountEntry._ID + " != " + mAccountId + " AND "
+diff --git a/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java b/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
+index dcb6a068..2deef3bc 100644
+--- a/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
++++ b/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
+@@ -32,7 +32,7 @@
+  * This is done asynchronously because in cases of deeply nested accounts,
+  * it can take some time and would block the UI thread otherwise.
+  */
+-public class AccountBalanceTask extends AsyncTask<Long, Void, Money> {
++public class AccountBalanceTask extends AsyncTask<String, Void, Money> {
+     public static final String LOG_TAG = AccountBalanceTask.class.getName();
+ 
+     private final WeakReference<TextView> accountBalanceTextViewReference;
+@@ -44,7 +44,7 @@ public AccountBalanceTask(TextView balanceTextView, Context context){
+     }
+ 
+     @Override
+-    protected Money doInBackground(Long... params) {
++    protected Money doInBackground(String... params) {
+         //if the view for which we are doing this job is dead, kill the job as well
+         if (accountBalanceTextViewReference.get() == null){
+             cancel(true);
+@@ -53,7 +53,7 @@ protected Money doInBackground(Long... params) {
+ 
+         Money balance = Money.getZeroInstance();
+         try {
+-            balance = accountsDbAdapter.getAccountBalance(accountsDbAdapter.getAccountUID(params[0]));
++            balance = accountsDbAdapter.getAccountBalance(params[0]);
+         } catch (IllegalArgumentException ex){
+             //sometimes a load computation has been started and the data set changes.
+             //the account ID may no longer exist. So we catch that exception here and do nothing
+diff --git a/app/src/org/gnucash/android/ui/util/OnAccountClickedListener.java b/app/src/org/gnucash/android/ui/util/OnAccountClickedListener.java
+index 1ca69018..fb75cba2 100644
+--- a/app/src/org/gnucash/android/ui/util/OnAccountClickedListener.java
++++ b/app/src/org/gnucash/android/ui/util/OnAccountClickedListener.java
+@@ -27,8 +27,8 @@
+ 
+ 	/**
+ 	 * Callback when an account is selected (clicked) from in a list of accounts
+-	 * @param accountRowId Database row ID of the selected account
++	 * @param accountUID GUID of the selected account
+ 	 */
+-	public void accountSelected(long accountRowId);
++	public void accountSelected(String accountUID);
+ 	
+ }
+diff --git a/app/src/org/gnucash/android/ui/util/OnTransactionClickedListener.java b/app/src/org/gnucash/android/ui/util/OnTransactionClickedListener.java
+index c4639a20..9be53905 100644
+--- a/app/src/org/gnucash/android/ui/util/OnTransactionClickedListener.java
++++ b/app/src/org/gnucash/android/ui/util/OnTransactionClickedListener.java
+@@ -28,13 +28,13 @@
+ 
+ 	/**
+ 	 * Callback for creating a new transaction
+-	 * @param accountRowId Database row ID of the account in which to create the new transaction
++	 * @param accountUID GUID of the account in which to create the new transaction
+ 	 */
+-	public void createNewTransaction(long accountRowId);
++	public void createNewTransaction(String accountUID);
+ 	
+ 	/**
+ 	 * Callback request to edit a transaction
+-	 * @param transactionId Database row Id of the transaction to be edited
++	 * @param transactionUID GUID of the transaction to be edited
+ 	 */
+-	public void editTransaction(long transactionId);	
++	public void editTransaction(String transactionUID);
+ }
+diff --git a/app/src/org/gnucash/android/ui/util/Refreshable.java b/app/src/org/gnucash/android/ui/util/Refreshable.java
+index 7ca7f377..eb1c78c0 100644
+--- a/app/src/org/gnucash/android/ui/util/Refreshable.java
++++ b/app/src/org/gnucash/android/ui/util/Refreshable.java
+@@ -28,7 +28,7 @@
+ 
+     /**
+      * Refresh the list with modified parameters
+-     * @param id Record ID of relevant item to be refreshed
++     * @param uid GUID of relevant item to be refreshed
+      */
+-    public void refresh(long id);
++    public void refresh(String uid);
+ }
+diff --git a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 726becd8..ff582b7f 100644
+--- a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -115,12 +115,13 @@ public void onClick(View v) {
+ 				}					
+ 				
+ 				long accountId = mAccountsSpinner.getSelectedItemId();
++                String accountUID = mAccountsDbAdapter.getUID(accountId);
+ 				SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(WidgetConfigurationActivity.this);
+ 				Editor editor = prefs.edit();
+-				editor.putLong(UxArgument.SELECTED_ACCOUNT_ID + mAppWidgetId, accountId);
++				editor.putString(UxArgument.SELECTED_ACCOUNT_UID + mAppWidgetId, accountUID);
+ 				editor.commit();	
+ 				
+-				updateWidget(WidgetConfigurationActivity.this, mAppWidgetId, accountId);
++				updateWidget(WidgetConfigurationActivity.this, mAppWidgetId, accountUID);
+ 						
+ 				Intent resultValue = new Intent();
+ 				resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, mAppWidgetId);
+@@ -143,14 +144,14 @@ public void onClick(View v) {
+ 	 * account with record ID <code>accountId</code>
+      * If the account has been deleted, then a notice is posted in the widget
+      * @param appWidgetId ID of the widget to be updated
+-     * @param accountId Database ID of the account tied to the widget
++     * @param accountUID GUID of the account tied to the widget
+ 	 */
+-	public static void updateWidget(Context context, int appWidgetId, long accountId) {
++	public static void updateWidget(Context context, int appWidgetId, String accountUID) {
+ 		Log.i("WidgetConfiguration", "Updating widget: " + appWidgetId);
+ 		AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
+ 
+ 		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
+-		Account account = accountsDbAdapter.getAccount(accountId);
++		Account account = accountsDbAdapter.getAccount(accountUID);
+ 
+ 		
+ 		if (account == null){
+@@ -167,7 +168,7 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 			views.setOnClickPendingIntent(R.id.btn_new_transaction, pendingIntent);
+ 			appWidgetManager.updateAppWidget(appWidgetId, views);
+ 			Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
+-			editor.remove(UxArgument.SELECTED_ACCOUNT_ID + appWidgetId);
++			editor.remove(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId);
+ 			editor.commit();
+ 			return;
+ 		}
+@@ -175,7 +176,7 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 		RemoteViews views = new RemoteViews(context.getPackageName(),
+ 				R.layout.widget_4x1);
+ 		views.setTextViewText(R.id.account_name, account.getName());
+-        Money accountBalance = accountsDbAdapter.getAccountBalance(accountId);
++        Money accountBalance = accountsDbAdapter.getAccountBalance(accountUID);
+ 
+         views.setTextViewText(R.id.transactions_summary,
+ 				accountBalance.formattedString(Locale.getDefault()));
+@@ -187,7 +188,7 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 		Intent accountViewIntent = new Intent(context, TransactionsActivity.class);
+ 		accountViewIntent.setAction(Intent.ACTION_VIEW);
+ 		accountViewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_CLEAR_TASK);
+-		accountViewIntent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, accountId);
++		accountViewIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+ 		PendingIntent accountPendingIntent = PendingIntent
+ 				.getActivity(context, appWidgetId, accountViewIntent, 0);
+ 		views.setOnClickPendingIntent(R.id.widget_layout, accountPendingIntent);
+@@ -195,7 +196,7 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 		Intent newTransactionIntent = new Intent(context, TransactionsActivity.class);
+ 		newTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+ 		newTransactionIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_CLEAR_TASK);
+-		newTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, accountId);
++		newTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+ 		PendingIntent pendingIntent = PendingIntent
+ 				.getActivity(context, appWidgetId, newTransactionIntent, 0);	            
+ 		views.setOnClickPendingIntent(R.id.btn_new_transaction, pendingIntent);
+@@ -216,12 +217,12 @@ public static void updateAllWidgets(Context context){
+ 
+         SharedPreferences defaultSharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
+ 		for (int widgetId : appWidgetIds) {
+-			long accountId = defaultSharedPrefs
+-            		.getLong(UxArgument.SELECTED_ACCOUNT_ID + widgetId, -1);
++			String accountUID = defaultSharedPrefs
++            		.getString(UxArgument.SELECTED_ACCOUNT_UID + widgetId, null);
+             
+-			if (accountId <= 0)
++			if (accountUID == null)
+ 				continue;
+-			updateWidget(context, widgetId, accountId);
++			updateWidget(context, widgetId, accountUID);
+ 		}
+ 	}
+ }
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java b/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 1a1cff23..974896b5 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -80,7 +80,7 @@ protected void setUp() throws Exception {
+         assertTrue(id > 0);
+ 
+         Intent intent = new Intent(Intent.ACTION_VIEW);
+-        intent.putExtra(UxArgument.SELECTED_ACCOUNT_ID, id);
++        intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, id);
+         setActivityIntent(intent);
+ 
+         mSolo = new Solo(getInstrumentation(), getActivity());
+@@ -330,7 +330,7 @@ public void testDeleteTransaction(){
+ 		clickSherlockActionBarItem(R.id.context_menu_delete);
+ 		
+ 		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		long id = accountsDbAdapter.getId(DUMMY_ACCOUNT_UID);
++		long id = accountsDbAdapter.getID(DUMMY_ACCOUNT_UID);
+ 		TransactionsDbAdapter adapter = new TransactionsDbAdapter(getActivity());
+ 		assertEquals(0, adapter.getTransactionsCount(id));
+ 		

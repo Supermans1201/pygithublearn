@@ -1,0 +1,134 @@
+From 9fda27e9a499ddbd83131c2232b2c956e2f6c517 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 2 Feb 2013 16:51:10 +0100
+Subject: [PATCH] Fixed: crash on rotating phone when creating account Fixed:
+ Deleting an account with a widget causes app to crash when creating any new
+ transactions
+
+---
+ .../android/ui/accounts/AddAccountFragment.java    | 16 ++++++-------
+ .../ui/widget/WidgetConfigurationActivity.java     | 26 +++++++++++++---------
+ 2 files changed, 24 insertions(+), 18 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/accounts/AddAccountFragment.java b/app/src/org/gnucash/android/ui/accounts/AddAccountFragment.java
+index bb9577a8..5687a09c 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AddAccountFragment.java
++++ b/app/src/org/gnucash/android/ui/accounts/AddAccountFragment.java
+@@ -26,7 +26,6 @@
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.ui.transactions.TransactionsListFragment;
+-import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import android.content.Context;
+ import android.database.Cursor;
+@@ -117,7 +116,10 @@ static public AddAccountFragment newInstance(AccountsDbAdapter dbAdapter){
+ 	@Override
+ 	public void onCreate(Bundle savedInstanceState) {
+ 		super.onCreate(savedInstanceState);
+-		setHasOptionsMenu(true);		
++		setHasOptionsMenu(true);
++        if (mAccountsDbAdapter == null){
++            mAccountsDbAdapter = new AccountsDbAdapter(getSherlockActivity());
++        }
+ 	}
+ 	
+ 	/**
+@@ -216,7 +218,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 			return true;
+ 
+ 		case R.id.menu_cancel:
+-			finish();
++			finishFragment();
+ 			return true;
+ 		}
+ 		
+@@ -241,7 +243,7 @@ private void loadParentAccountList(){
+ 	 * Finishes the fragment appropriately.
+ 	 * Depends on how the fragment was loaded, it might have a backstack or not
+ 	 */
+-	private void finish() {
++	private void finishFragment() {
+ 		InputMethodManager imm = (InputMethodManager) getSherlockActivity().getSystemService(
+ 			      Context.INPUT_METHOD_SERVICE);
+ 			imm.hideSoftInputFromWindow(mNameEditText.getWindowToken(), 0);
+@@ -286,10 +288,8 @@ private void saveAccount() {
+ 		if (mAccountsDbAdapter == null)
+ 			mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+ 		mAccountsDbAdapter.addAccount(mAccount);
+-		
+-		WidgetConfigurationActivity.updateAllWidgets(getActivity()
+-				.getApplicationContext());
+-		finish();
++
++		finishFragment();
+ 	}
+ 	
+ 	/**
+diff --git a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 938e0a8f..374c20f2 100644
+--- a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -23,6 +23,7 @@
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.receivers.TransactionAppWidgetProvider;
++import org.gnucash.android.ui.accounts.AccountsActivity;
+ import org.gnucash.android.ui.transactions.TransactionsActivity;
+ import org.gnucash.android.ui.transactions.TransactionsListFragment;
+ 
+@@ -145,12 +146,14 @@ public void onClick(View v) {
+ 	/**
+ 	 * Updates the widget with id <code>appWidgetId</code> with information from the 
+ 	 * account with record ID <code>accountId</code>
+-	 * @param appWidgetManager
++     * If the account has been deleted, then a notice is posted in the widget
++     * @param appWidgetId ID of the widget to be updated
++     * @param accountId Database ID of the account tied to the widget
+ 	 */
+ 	public static void updateWidget(Context context, int appWidgetId, long accountId) {
+-		Log.i("WidgetConfigruation", "Updating widget: " + appWidgetId);
++		Log.i("WidgetConfiguration", "Updating widget: " + appWidgetId);
+ 		AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
+-		
++
+ 		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
+ 		Account account = accountsDbAdapter.getAccount(accountId);
+ 		accountsDbAdapter.close();
+@@ -162,8 +165,11 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 					R.layout.widget_4x1);
+ 			views.setTextViewText(R.id.account_name, context.getString(R.string.toast_account_deleted));
+ 			views.setTextViewText(R.id.transactions_summary, "");
+-			views.setOnClickPendingIntent(R.id.widget_layout, null);
+-			views.setOnClickPendingIntent(R.id.btn_new_transaction, null);
++            //set it to simply open the app
++            PendingIntent pendingIntent = PendingIntent.getActivity(context, 0,
++                    new Intent(context, AccountsActivity.class), 0);
++			views.setOnClickPendingIntent(R.id.widget_layout, pendingIntent);
++			views.setOnClickPendingIntent(R.id.btn_new_transaction, pendingIntent);
+ 			appWidgetManager.updateAppWidget(appWidgetId, views);
+ 			Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
+ 			editor.remove(TransactionsListFragment.SELECTED_ACCOUNT_ID + appWidgetId);
+@@ -203,17 +209,17 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 	 * @param context Application context
+ 	 */
+ 	public static void updateAllWidgets(Context context){
+-		Log.i("WidgetConfigruation", "Updating all widgets");
++		Log.i("WidgetConfiguration", "Updating all widgets");
+ 		AppWidgetManager widgetManager = AppWidgetManager.getInstance(context);
+ 		ComponentName componentName = new ComponentName(context, TransactionAppWidgetProvider.class);
+ 		int[] appWidgetIds = widgetManager.getAppWidgetIds(componentName);
+-		
++
++        SharedPreferences defaultSharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
+ 		for (int widgetId : appWidgetIds) {
+-			long accountId = PreferenceManager
+-            		.getDefaultSharedPreferences(context)
++			long accountId = defaultSharedPrefs
+             		.getLong(TransactionsListFragment.SELECTED_ACCOUNT_ID + widgetId, -1);
+             
+-			if (accountId < 0)
++			if (accountId <= 0)
+ 				continue;
+ 			updateWidget(context, widgetId, accountId);
+ 		}

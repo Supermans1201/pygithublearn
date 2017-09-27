@@ -1,0 +1,161 @@
+From 8b8f1944285e299d13ef1e00ded080c4a074170a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 17:58:12 +0100
+Subject: [PATCH] Fix: setup wizard won't  complete if manual account creation
+ is selected
+
+Fix dialog not shown during initial account import
+Fix: setting last import date when only accounts are imported (no transactions)
+
+Fixes #443
+Fixes #428
+Fixes #438
+---
+ CHANGELOG.md                                               |  3 ++-
+ .../java/org/gnucash/android/db/TransactionsDbAdapter.java | 14 ++++++++++----
+ .../java/org/gnucash/android/importer/GncXmlImporter.java  |  1 -
+ .../org/gnucash/android/ui/account/AccountsActivity.java   |  5 +++--
+ .../org/gnucash/android/ui/common/BaseDrawerActivity.java  |  2 +-
+ .../org/gnucash/android/ui/settings/SettingsActivity.java  |  2 +-
+ .../gnucash/android/ui/wizard/FirstRunWizardActivity.java  | 11 +++++++++--
+ 7 files changed, 26 insertions(+), 12 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 77ac5089..3a274fca 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,7 +4,8 @@ Version 2.0.4 *(2015-12-xx)*
+ ----------------------------
+ * Fixed: Transaction export time not always working reliably
+ * Fixed: Renaming account causes transactions to be deleted
+-
++* Fixed: Progress dialog not displayed during initial import
++* Fixed: Unable to finish first-run wizard if choosing to create accounts manually
+ 
+ Version 2.0.3 *(2015-11-21)*
+ ----------------------------
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index bf3d19af..64920a7b 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -636,17 +636,23 @@ public long getTimestampOfLatestTransaction(AccountType type, String currencyCod
+ 
+     /**
+      * Returns the most recent `modified_at` timestamp of non-template transactions in the database
+-     * @return Last moodified time in milliseconds or null if no such transactions exist
++     * @return Last moodified time in milliseconds or current time if there is none in the database
+      */
+     public Timestamp getTimestampOfLastModification(){
+         Cursor cursor = mDb.query(TransactionEntry.TABLE_NAME,
+                 new String[]{"MAX(" + TransactionEntry.COLUMN_MODIFIED_AT + ")"},
+-                TransactionEntry.COLUMN_TEMPLATE + " = 0", null, null, null, null);
++                null, null, null, null, null);
++
+         Timestamp timestamp = null;
+-        if (cursor.moveToNext()){
++        if (cursor.moveToFirst()){
+             String timeString = cursor.getString(0);
+-            timestamp = Timestamp.valueOf(timeString);
++            if (timeString == null) //in case there were no transactions in the XML file (account structure only)
++                timestamp = new Timestamp(System.currentTimeMillis());
++            else {
++                timestamp = Timestamp.valueOf(timeString);
++            }
+         }
++        cursor.close();
+         return timestamp;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index a6734ed1..eb9eea9a 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -94,7 +94,6 @@ public static void parse(InputStream gncXmlInputStream) throws ParserConfigurati
+         xr.parse(new InputSource(bos));
+         long endTime = System.nanoTime();
+ 
+-
+         Timestamp timeStamp = TransactionsDbAdapter.getInstance().getTimestampOfLastModification();
+         PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
+                 .edit()
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 494d817b..34e9e3c8 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -525,10 +525,11 @@ public static void startXmlFileChooser(Activity activity) {
+      * <p>This method is usually called in response to {@link AccountsActivity#startXmlFileChooser(Activity)}</p>
+      * @param context Activity context
+      * @param data Intent data containing the XML uri
++     * @param onFinishTask Task to be executed when import is complete
+      */
+-    public static void importXmlFileFromIntent(Activity context, Intent data) {
++    public static void importXmlFileFromIntent(Activity context, Intent data, TaskDelegate onFinishTask) {
+         GncXmlExporter.createBackup();
+-        new ImportAsyncTask(context).execute(data.getData());
++        new ImportAsyncTask(context, onFinishTask).execute(data.getData());
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index 6d12529f..c0b3460b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -193,7 +193,7 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 
+         switch (requestCode) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+-                AccountsActivity.importXmlFileFromIntent(this, data);
++                AccountsActivity.importXmlFileFromIntent(this, data, null);
+                 break;
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 250a799c..6cd389c4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -578,7 +578,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+         switch (requestCode) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 if (resultCode == Activity.RESULT_OK && data != null) {
+-                    AccountsActivity.importXmlFileFromIntent(this, data);
++                    AccountsActivity.importXmlFileFromIntent(this, data, null);
+                 }
+                 break;
+             case GeneralPreferenceFragment.PASSCODE_REQUEST_CODE:
+diff --git a/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java b/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
+index 850d8032..71732849 100644
+--- a/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
+@@ -52,6 +52,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.ui.account.AccountsActivity;
++import org.gnucash.android.ui.util.TaskDelegate;
+ 
+ import java.io.FileNotFoundException;
+ import java.io.InputStream;
+@@ -212,6 +213,8 @@ private void createAccountsAndFinish() {
+             finish();
+         } else if (mAccountOptions.equals(getString(R.string.wizard_option_import_my_accounts))){
+             AccountsActivity.startXmlFileChooser(this);
++        } else {
++            finish();
+         }
+     }
+ 
+@@ -252,9 +255,13 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+         switch (requestCode){
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 if (resultCode == Activity.RESULT_OK && data != null) {
+-                    AccountsActivity.importXmlFileFromIntent(this, data);
++                    AccountsActivity.importXmlFileFromIntent(this, data, new TaskDelegate() {
++                        @Override
++                        public void onTaskComplete() {
++                            finish();
++                        }
++                    });
+                 }
+-                finish();
+                 break;
+         }
+     }

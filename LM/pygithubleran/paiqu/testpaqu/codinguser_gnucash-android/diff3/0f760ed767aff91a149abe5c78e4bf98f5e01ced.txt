@@ -1,0 +1,377 @@
+From 0f760ed767aff91a149abe5c78e4bf98f5e01ced Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 27 Aug 2013 12:52:42 +0200
+Subject: [PATCH] Improved speed of computation of account balances Fixed crash
+ when updating widget or creating new transaction Numerous bug fixes
+
+---
+ CHANGELOG.md                                       |  4 +-
+ app/AndroidManifest.xml                            |  4 +-
+ app/src/org/gnucash/android/data/Money.java        |  2 +-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 18 ++----
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 65 +++++++++-------------
+ .../android/ui/accounts/AccountsListFragment.java  |  2 -
+ .../ui/transactions/BulkMoveDialogFragment.java    |  1 -
+ .../ui/transactions/NewTransactionFragment.java    |  2 -
+ .../ui/transactions/TransactionsActivity.java      | 43 +++++++-------
+ .../TransactionsDeleteConfirmationDialog.java      |  1 -
+ .../ui/widget/WidgetConfigurationActivity.java     |  5 +-
+ 11 files changed, 62 insertions(+), 85 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d3dc478a..512fca1e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,10 +1,12 @@
+ Change Log
+ ===============================================================================
+-Version 1.2.3.beta *(2013-08-26)*
++Version 1.2.3.beta2 *(2013-08-27)*
+ ----------------------------
+ * Feature: Added Chinese language translation
+ * Feature: Autocomplete transaction descriptions
++* Fixed: crash when creating transactions or updating widget
+ * Improved reliability of importing stock accounts
++* Improved speed of loading account balance
+ 
+ Version 1.2.2 *(2013-06-23)*
+ ----------------------------
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index 7a4bd704..55b85238 100644
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -17,8 +17,8 @@
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+-    android:versionCode="11"
+-    android:versionName="1.2.3.beta" >
++    android:versionCode="12"
++    android:versionName="1.2.3.beta2" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="15"/>
+     
+diff --git a/app/src/org/gnucash/android/data/Money.java b/app/src/org/gnucash/android/data/Money.java
+index ce9622ec..068125b4 100644
+--- a/app/src/org/gnucash/android/data/Money.java
++++ b/app/src/org/gnucash/android/data/Money.java
+@@ -85,7 +85,7 @@
+      * A zero instance with the currency of the default locale.
+      * This can be used anywhere where a starting amount is required without having to create a new object
+      */
+-    public static final Money sDefaultZero = Money.createInstance(Currency.getInstance(Locale.getDefault()).getCurrencyCode());
++    private static final Money sDefaultZero = Money.createInstance(Currency.getInstance(Locale.getDefault()).getCurrencyCode());
+ 
+     /**
+      * Returns a Money instance initialized to the local currency and value 0
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 962b1b73..472f4e66 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -373,31 +373,21 @@ public Cursor fetchAccounts(String condition){
+ 		return cursor;
+ 	}
+ 	
+-	/**
+-	 * Returns the balance of all accounts with each transaction counted only once
+-	 * This does not take into account the currencies and double entry 
+-	 * transactions are not considered as well.
+-	 * @return Balance of all accounts in the database
+-	 * @see AccountsDbAdapter#getDoubleEntryAccountsBalance()
+-	 */
+-	public Money getAllAccountsBalance(){
+-		return mTransactionsAdapter.getAllTransactionsSum();
+-	}
+-
+     /**
+      * Returns the balance of an account while taking sub-accounts into consideration
+      * @return Account Balance of an account including sub-accounts
+      */
+     public Money getAccountBalance(long accountId){
+-        List<Long> subAccounts = getSubAccountIds(accountId);
+         Money balance = Money.createInstance(getCurrencyCode(accountId));
++
++        List<Long> subAccounts = getSubAccountIds(accountId);
+         for (long id : subAccounts){
+             //recurse because arbitrary nesting depth is allowed
+             Money subBalance = getAccountBalance(id);
+             if (subBalance.getCurrency().equals(balance.getCurrency())){
+                 //only add the balances if they are of the same currency
+                 //ignore sub accounts of different currency just like GnuCash desktop does
+-                balance = balance.add(getAccountBalance(id));
++                balance = balance.add(subBalance);
+             }
+         }
+         return balance.add(mTransactionsAdapter.getTransactionsSum(accountId));
+@@ -416,7 +406,7 @@ public Money getAccountBalance(long accountId){
+ 
+         if (cursor != null){
+             while (cursor.moveToNext()){
+-                subAccounts.add(cursor.getLong(0));
++                subAccounts.add(cursor.getLong(DatabaseAdapter.COLUMN_ROW_ID));
+             }
+             cursor.close();
+         }
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index a3a546e7..c25be1e1 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -310,54 +310,39 @@ public long getAllTransactionsCount(){
+ 	/**
+ 	 * Returns the sum of transactions belonging to the account with id <code>accountId</code>
+      * Double entry accounting is taken into account and the balance reflects the transfer transactions.
+-     * This means if the accounts are properly balanced, this method should return 0
+ 	 * @param accountId Record ID of the account
+ 	 * @return Sum of transactions belonging to the account
+ 	 */
+ 	public Money getTransactionsSum(long accountId){
+-		Cursor c = fetchAllTransactionsForAccount(accountId);
++        String accountUID = getAccountUID(accountId);
+ 
+-		//transactions will have the currency of the account
+-		String currencyCode = getCurrencyCode(accountId);
++        String querySum = "SELECT TOTAL(" + DatabaseHelper.KEY_AMOUNT
++                + ") FROM " + DatabaseHelper.TRANSACTIONS_TABLE_NAME
++                + " WHERE " + DatabaseHelper.KEY_ACCOUNT_UID + " = ?";
+ 
+-        Money amountSum = new Money("0", currencyCode);
++        Cursor sumCursor = mDb.rawQuery(querySum, new String[]{accountUID});
++        double sum = 0d;
+ 
+-		if (c == null || c.getCount() <= 0)
+-			return amountSum;
++        if (sumCursor != null && sumCursor.moveToFirst()){
++            sum += sumCursor.getFloat(0);
++            sumCursor.close();
++        }
+ 
+-		while(c.moveToNext()){
+-			Money money = new Money(c.getString(DatabaseAdapter.COLUMN_AMOUNT), currencyCode);
+-			String doubleEntryAccountUID = c.getString(DatabaseAdapter.COLUMN_DOUBLE_ENTRY_ACCOUNT_UID);
+-			if (doubleEntryAccountUID != null && doubleEntryAccountUID.equals(getAccountUID(accountId))){
+-				amountSum = amountSum.add(money.negate());
+-			} else {
+-				amountSum = amountSum.add(money);
+-			}
+-		}
+-		c.close();
+-		
+-		return amountSum;
+-	}
+-	
+-	/**
+-	 * Returns the balance of all accounts with each transaction counted only once
+-	 * This does not take into account the currencies and double entry 
+-	 * transactions are not considered as well.
+-	 * @return Balance of all accounts in the database
+-	 * @see AccountsDbAdapter#getDoubleEntryAccountsBalance()
+-	 */
+-	public Money getAllTransactionsSum(){
+-        //TODO: Take double entry into account
+-		String query = "SELECT TOTAL(" + DatabaseHelper.KEY_AMOUNT
+-                + ") FROM " + DatabaseHelper.TRANSACTIONS_TABLE_NAME;
+-		Cursor c = mDb.rawQuery(query, null); 
+-//				new String[]{DatabaseHelper.KEY_AMOUNT, DatabaseHelper.TRANSACTIONS_TABLE_NAME});
+-		double result = 0;
+-		if (c != null && c.moveToFirst()){
+-			result = c.getDouble(0);	
+-		}
+-		c.close();
+-		return new Money(new BigDecimal(result));	
++        querySum = "SELECT TOTAL(" + DatabaseHelper.KEY_AMOUNT
++                + ") FROM " + DatabaseHelper.TRANSACTIONS_TABLE_NAME
++                + " WHERE " + DatabaseHelper.KEY_DOUBLE_ENTRY_ACCOUNT_UID + " = ?";
++
++        sumCursor = mDb.rawQuery(querySum, new String[]{accountUID});
++
++        if (sumCursor != null && sumCursor.moveToFirst()){
++            sum -= sumCursor.getFloat(0);
++            sumCursor.close();
++        }
++
++        BigDecimal sumDecimal = new BigDecimal(sum);
++        Currency currency = Currency.getInstance(getCurrencyCode(accountUID));
++        Money transactionSum = new Money(sumDecimal, currency);
++        return transactionSum;
+ 	}
+ 	
+ 	/**
+diff --git a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 936f6a2d..1c50c6f2 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -647,11 +647,9 @@ protected Money doInBackground(Long... params) {
+             //if the view for which we are doing this job is dead, kill the job as well
+             if (accountBalanceTextViewReference == null || accountBalanceTextViewReference.get() == null){
+                 cancel(true);
+-                accountsDbAdapter.close();
+                 return Money.getZeroInstance();
+             }
+             Money balance = accountsDbAdapter.getAccountBalance(params[0]);
+-            accountsDbAdapter.close();
+             return balance;
+         }
+ 
+diff --git a/app/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java b/app/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
+index 9094d128..c526bbcc 100644
+--- a/app/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
+@@ -162,6 +162,5 @@ public void onClick(View v) {
+ 	@Override
+ 	public void onDestroyView() {
+ 		super.onDestroyView();
+-		mAccountsDbAdapter.close();
+ 	}
+ }
+diff --git a/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index 176e4366..c1c31d6d 100644
+--- a/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -440,7 +440,6 @@ public void onAccountChanged(long newAccountId){
+ 		String currencyCode = accountsDbAdapter.getCurrencyCode(newAccountId);
+ 		Currency currency = Currency.getInstance(currencyCode);
+ 		mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
+-		accountsDbAdapter.close();
+ 		
+ 		updateTransferAccountsList();
+ 	}
+@@ -493,7 +492,6 @@ private void saveNewTransaction() {
+ 		
+ 		
+ 		mTransactionsDbAdapter.addTransaction(mTransaction);
+-		mTransactionsDbAdapter.close();
+ 		
+ 		//update widgets, if any
+ 		WidgetConfigurationActivity.updateAllWidgets(getActivity().getApplicationContext());
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+index 9a751ca2..90c97299 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+@@ -16,18 +16,6 @@
+ 
+ package org.gnucash.android.ui.transactions;
+ 
+-import android.support.v4.app.Fragment;
+-import android.widget.TextView;
+-import org.gnucash.android.R;
+-import org.gnucash.android.data.Account;
+-import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.DatabaseAdapter;
+-import org.gnucash.android.db.DatabaseHelper;
+-import org.gnucash.android.ui.accounts.AccountsActivity;
+-import org.gnucash.android.ui.accounts.AccountsListFragment;
+-import org.gnucash.android.util.OnAccountClickedListener;
+-import org.gnucash.android.util.OnTransactionClickedListener;
+-
+ import android.content.Context;
+ import android.content.Intent;
+ import android.database.Cursor;
+@@ -40,11 +28,20 @@
+ import android.view.View;
+ import android.view.inputmethod.InputMethodManager;
+ import android.widget.SpinnerAdapter;
+-
++import android.widget.TextView;
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.ActionBar.OnNavigationListener;
+ import com.actionbarsherlock.app.SherlockFragmentActivity;
+ import com.actionbarsherlock.view.MenuItem;
++import org.gnucash.android.R;
++import org.gnucash.android.data.Account;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseAdapter;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.ui.accounts.AccountsActivity;
++import org.gnucash.android.ui.accounts.AccountsListFragment;
++import org.gnucash.android.util.OnAccountClickedListener;
++import org.gnucash.android.util.OnTransactionClickedListener;
+ 
+ /**
+  * Activity for displaying, creating and editing transactions
+@@ -84,6 +81,16 @@
+ 	 */
+ 	private boolean mActivityRunning = false;
+ 
++    /**
++     * Account database adapter for manipulating the accounts list in navigation
++     */
++    private AccountsDbAdapter mAccountsDbAdapter;
++
++    /**
++     * Spinner adapter for the action bar navigation list of accounts
++     */
++    private SpinnerAdapter mSpinnerAdapter;
++
+     TextView mSectionHeaderSubAccounts;
+     TextView mSectionHeaderTransactions;
+     View mSubAccountsContainer;
+@@ -112,6 +119,9 @@ public boolean onNavigationItemSelected(int position, long itemId) {
+ 		  }
+ 	};
+ 
++    /**
++     * Refreshes the fragments currently in the transactions activity
++     */
+     private void refresh() {
+         FragmentManager fragmentManager = getSupportFragmentManager();
+         TransactionsListFragment transactionsListFragment = (TransactionsListFragment) fragmentManager
+@@ -134,10 +144,6 @@ private void refresh() {
+             fragmentTransaction.commit();
+         }
+     }
+-
+-    private AccountsDbAdapter mAccountsDbAdapter;
+-
+-	private SpinnerAdapter mSpinnerAdapter;
+ 				
+ 	@Override
+ 	protected void onCreate(Bundle savedInstanceState) {
+@@ -187,7 +193,6 @@ private void setupActionBarNavigation() {
+ 				new int[] { android.R.id.text1 }, 0);
+ 		((ResourceCursorAdapter) mSpinnerAdapter)
+ 				.setDropDownViewResource(R.layout.sherlock_spinner_dropdown_item);
+-
+ 		ActionBar actionBar = getSupportActionBar();
+ 		actionBar.setNavigationMode(ActionBar.NAVIGATION_MODE_LIST);
+ 		actionBar.setListNavigationCallbacks(mSpinnerAdapter,
+@@ -214,7 +219,7 @@ public void updateNavigationSelection() {
+ 			}
+ 			++i;
+ 		} while (accountsCursor.moveToNext());
+-
++        accountsCursor.close();
+ 	}
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsDeleteConfirmationDialog.java b/app/src/org/gnucash/android/ui/transactions/TransactionsDeleteConfirmationDialog.java
+index 11dd7419..5d00c0d6 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsDeleteConfirmationDialog.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsDeleteConfirmationDialog.java
+@@ -45,7 +45,6 @@ public void onClick(DialogInterface dialog, int whichButton) {
+                             } else {
+                             	adapter.deleteRecord(rowId);
+                             }
+-                            adapter.close();
+                             if (getTargetFragment() instanceof AccountsListFragment){                            	
+                             	((AccountsListFragment)getTargetFragment()).refreshList();
+                             }                                                        
+diff --git a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 900cb8ad..d56dc216 100644
+--- a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -182,12 +182,13 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 				R.layout.widget_4x1);
+ 		views.setTextViewText(R.id.account_name, account.getName());
+         Money accountBalance = accountsDbAdapter.getAccountBalance(accountId);
+-		views.setTextViewText(R.id.transactions_summary, 
++
++        views.setTextViewText(R.id.transactions_summary,
+ 				accountBalance.formattedString(Locale.getDefault()));
+ 		int color = account.getBalance().isNegative() ? R.color.debit_red : R.color.credit_green;
+ 		views.setTextColor(R.id.transactions_summary, context.getResources().getColor(color));
+ 
+-        accountsDbAdapter.close();
++
+ 
+ 		Intent accountViewIntent = new Intent(context, TransactionsActivity.class);
+ 		accountViewIntent.setAction(Intent.ACTION_VIEW);

@@ -1,0 +1,1045 @@
+From 847e1c88a5565c19eafb1952f8f206269405a05f Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 21 Jun 2013 20:16:13 +0200
+Subject: [PATCH 1/5] Compute account balances asynchronously to improve UI
+ responsiveness
+
+---
+ app/src/org/gnucash/android/data/Money.java        | 26 +++++++++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 11 ++++-
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 18 ++++++-
+ .../android/ui/accounts/AccountsListFragment.java  | 56 ++++++++++++++++++----
+ .../ui/transactions/TransactionsListFragment.java  | 40 +++++++---------
+ 5 files changed, 116 insertions(+), 35 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/data/Money.java b/app/src/org/gnucash/android/data/Money.java
+index 0aae2528..ce9622ec 100644
+--- a/app/src/org/gnucash/android/data/Money.java
++++ b/app/src/org/gnucash/android/data/Money.java
+@@ -80,7 +80,21 @@
+ 	 * otherwise US dollars are used
+ 	 */
+ 	public static String DEFAULT_CURRENCY_CODE 	= "USD";
+-	
++
++    /**
++     * A zero instance with the currency of the default locale.
++     * This can be used anywhere where a starting amount is required without having to create a new object
++     */
++    public static final Money sDefaultZero = Money.createInstance(Currency.getInstance(Locale.getDefault()).getCurrencyCode());
++
++    /**
++     * Returns a Money instance initialized to the local currency and value 0
++     * @return Money instance of value 0 in locale currency
++     */
++    public static Money getZeroInstance(){
++        return sDefaultZero;
++    }
++
+ 	/**
+ 	 * Default constructor
+ 	 * Initializes the object with an amount of 0 and currency set to the device default locale
+@@ -229,7 +243,15 @@ public String formattedString(Locale locale){
+ 		formatter.setMaximumFractionDigits(DECIMAL_PLACES);
+ 		return formatter.format(asDouble()) + " " + mCurrency.getSymbol(locale);
+ 	}
+-	
++
++    /**
++     * Equivalent to calling formattedString(Locale.getDefault())
++     * @return String formatted Money representation in default locale
++     */
++    public String formattedString(){
++        return formattedString(Locale.getDefault());
++    }
++
+ 	/**
+ 	 * Returns a new Money object whose amount is the negated value of this object amount.
+ 	 * The original <code>Money</code> object remains unchanged.
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 5e77bfcc..10727926 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -453,7 +453,15 @@ public String getGnuCashRootAccountUID(){
+      * @return Number of sub accounts
+      */
+     public int getSubAccountCount(long accountId){
+-        return getSubAccountIds(accountId).size();
++        //TODO: at some point when API level 11 and above only is supported, use DatabaseUtils.queryNumEntries
++
++        String queryCount = "SELECT COUNT(*) FROM " + DatabaseHelper.ACCOUNTS_TABLE_NAME + " WHERE "
++                + DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " = ?";
++        Cursor cursor = mDb.rawQuery(queryCount, new String[]{getAccountUID(accountId)});
++        cursor.moveToFirst();
++        int count = cursor.getInt(0);
++        cursor.close();
++        return count;
+     }
+ 
+ 	/**
+@@ -524,5 +532,4 @@ public int deleteAllRecords(){
+         return mDb.delete(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, null);
+ 	}
+ 
+-
+ }
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index f943645d..7fa6b42f 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -101,7 +101,23 @@ public void close(){
+ 		mDbHelper.close();
+ 		mDb.close();
+ 	}
+-	
++
++    /**
++     * Checks if the database is open
++     * @return <code>true</code> if the database is open, <code>false</code> otherwise
++     */
++    public boolean isOpen(){
++        return mDb.isOpen();
++    }
++
++    /**
++     * Returns the context used to create this adapter
++     * @return Android application context
++     */
++    public Context getContext(){
++        return mContext.getApplicationContext();
++    }
++
+ 	/**
+ 	 * Retrieves record with id <code>rowId</code> from table <code>tableName</code>
+ 	 * @param tableName Name of table where record is found
+diff --git a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 062a31c7..41474bfb 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -23,6 +23,7 @@
+ import android.content.DialogInterface;
+ import android.content.Intent;
+ import android.database.Cursor;
++import android.os.AsyncTask;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+ import android.support.v4.app.Fragment;
+@@ -55,6 +56,7 @@
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ import org.gnucash.android.util.OnAccountClickedListener;
+ 
++import java.lang.ref.WeakReference;
+ import java.util.Locale;
+ 
+ /**
+@@ -589,9 +591,6 @@ public void bindView(View v, Context context, Cursor cursor) {
+             // perform the default binding
+             super.bindView(v, context, cursor);
+ 
+-            // add a summary of transactions to the account view
+-            TextView summary = (TextView) v
+-                    .findViewById(R.id.transactions_summary);
+             final long accountId = cursor.getLong(DatabaseAdapter.COLUMN_ROW_ID);
+ 
+             TextView subAccountTextView = (TextView) v.findViewById(R.id.secondary_text);
+@@ -603,11 +602,10 @@ public void bindView(View v, Context context, Cursor cursor) {
+             } else
+                 subAccountTextView.setVisibility(View.GONE);
+ 
+-            Money balance = mAccountsDbAdapter.getAccountBalance(accountId);
+-            summary.setText(balance.formattedString(Locale.getDefault()));
+-            int fontColor = balance.isNegative() ? getResources().getColor(R.color.debit_red) :
+-                    getResources().getColor(R.color.credit_green);
+-            summary.setTextColor(fontColor);
++            // add a summary of transactions to the account view
++            TextView summary = (TextView) v
++                    .findViewById(R.id.transactions_summary);
++            new AccountBalanceTask(summary, getActivity()).execute(accountId);
+ 
+             ImageView newTransactionButton = (ImageView) v.findViewById(R.id.btn_new_transaction);
+             if (inSubAcccount()){
+@@ -628,4 +626,46 @@ public void onClick(View v) {
+         }
+     }
+ 
++    /**
++     * An asynchronous task for computing the account balance of an account.
++     * This is done asynchronously because in cases of deeply nested accounts,
++     * it can take some time and would block the UI thread otherwise.
++     */
++    public static class AccountBalanceTask extends AsyncTask<Long, Void, Money> {
++        private final WeakReference<TextView> accountBalanceTextViewReference;
++        private final AccountsDbAdapter accountsDbAdapter;
++
++        public AccountBalanceTask(TextView balanceTextView, Context context){
++            accountBalanceTextViewReference = new WeakReference<TextView>(balanceTextView);
++            accountsDbAdapter = new AccountsDbAdapter(context);
++        }
++
++        @Override
++        protected Money doInBackground(Long... params) {
++            //if the view for which we are doing this job is dead, kill the job as well
++            if (accountBalanceTextViewReference == null || accountBalanceTextViewReference.get() == null){
++                cancel(true);
++                accountsDbAdapter.close();
++                return Money.getZeroInstance();
++            }
++            Money balance = accountsDbAdapter.getAccountBalance(params[0]);
++            accountsDbAdapter.close();
++            return balance;
++        }
++
++        @Override
++        protected void onPostExecute(Money balance) {
++            if (accountBalanceTextViewReference != null && balance != null){
++                final Context context = accountsDbAdapter.getContext();
++                final TextView balanceTextView = accountBalanceTextViewReference.get();
++                if (balanceTextView != null){
++                    balanceTextView.setText(balance.formattedString());
++                    int fontColor = balance.isNegative() ? context.getResources().getColor(R.color.debit_red) :
++                            context.getResources().getColor(R.color.credit_green);
++                    balanceTextView.setTextColor(fontColor);
++                }
++            }
++        }
++    }
++
+ }
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java b/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+index 70ddbe95..592331f8 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+@@ -16,17 +16,6 @@
+ 
+ package org.gnucash.android.ui.transactions;
+ 
+-import java.text.SimpleDateFormat;
+-import java.util.Date;
+-import java.util.HashMap;
+-import java.util.Locale;
+-
+-import org.gnucash.android.R;
+-import org.gnucash.android.data.Money;
+-import org.gnucash.android.db.*;
+-import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+-import org.gnucash.android.util.OnTransactionClickedListener;
+-
+ import android.app.Activity;
+ import android.content.Context;
+ import android.database.Cursor;
+@@ -48,13 +37,26 @@
+ import android.widget.CompoundButton.OnCheckedChangeListener;
+ import android.widget.ListView;
+ import android.widget.TextView;
+-
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockListFragment;
+ import com.actionbarsherlock.view.ActionMode;
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
++import org.gnucash.android.R;
++import org.gnucash.android.data.Money;
++import org.gnucash.android.db.DatabaseAdapter;
++import org.gnucash.android.db.DatabaseCursorLoader;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.ui.accounts.AccountsListFragment;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
++import org.gnucash.android.util.OnTransactionClickedListener;
++
++import java.text.SimpleDateFormat;
++import java.util.Date;
++import java.util.HashMap;
++import java.util.Locale;
+ 
+ /**
+  * List Fragment for displaying list of transactions for an account
+@@ -213,15 +215,9 @@ public void refreshList(long accountId){
+ 	public void refreshList(){
+ 		getLoaderManager().restartLoader(0, null, this);
+ 
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		Money sum = accountsDbAdapter.getAccountBalance(mAccountID);// mTransactionsDbAdapter.getTransactionsSum(mAccountID);
+-        accountsDbAdapter.close();
+-		mSumTextView = (TextView) getView().findViewById(R.id.transactions_sum);
+-		mSumTextView.setText(sum.formattedString(Locale.getDefault()));
+-		if (sum.isNegative())
+-			mSumTextView.setTextColor(getResources().getColor(R.color.debit_red));
+-		else
+-			mSumTextView.setTextColor(getResources().getColor(R.color.credit_green));			
++        mSumTextView = (TextView) getView().findViewById(R.id.transactions_sum);
++        new AccountsListFragment.AccountBalanceTask(mSumTextView, getActivity()).execute(mAccountID);
++
+ 	}
+ 			
+ 	@Override
+@@ -481,7 +477,7 @@ public void bindView(View view, Context context, Cursor cursor) {
+ 			long transactionTime = cursor.getLong(DatabaseAdapter.COLUMN_TIMESTAMP);
+ 			int position = cursor.getPosition();
+ 						
+-			boolean hasSectionHeader = false;
++			boolean hasSectionHeader;
+ 			if (position == 0){
+ 				hasSectionHeader = true;
+ 			} else {
+
+From 677f939a0b669b56e2ff068f0cc347fe98b1b135 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 21 Jun 2013 21:06:09 +0200
+Subject: [PATCH 2/5] Import accounts in an asynchronous task Show progress
+ dialog while importing accounts
+
+---
+ app/res/values-de/strings.xml                      |  1 +
+ app/res/values-el/strings.xml                      |  1 +
+ app/res/values-es-rMX/strings.xml                  |  1 +
+ app/res/values-es/strings.xml                      |  1 +
+ app/res/values-fr/strings.xml                      |  1 +
+ app/res/values-hu/strings.xml                      |  1 +
+ app/res/values-it/strings.xml                      |  1 +
+ app/res/values-nb/strings.xml                      |  1 +
+ app/res/values-nl/strings.xml                      |  1 +
+ app/res/values-pt-rBR/strings.xml                  |  1 +
+ app/res/values-ru/strings.xml                      |  1 +
+ app/res/values/strings.xml                         |  1 +
+ .../android/ui/accounts/AccountsActivity.java      | 67 +++++++++++++++++++---
+ .../android/ui/settings/SettingsActivity.java      | 10 +---
+ .../ui/transactions/TransactionsActivity.java      |  5 +-
+ 15 files changed, 75 insertions(+), 19 deletions(-)
+
+diff --git a/app/res/values-de/strings.xml b/app/res/values-de/strings.xml
+index ea933664..813c2325 100644
+--- a/app/res/values-de/strings.xml
++++ b/app/res/values-de/strings.xml
+@@ -337,6 +337,7 @@
+     <string name="summary_delete_all_transactions">All transactions in all accounts will be deleted!</string>
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d Unterkonto</item>
+         <item quantity="other">%d Unterkonten</item>
+diff --git a/app/res/values-el/strings.xml b/app/res/values-el/strings.xml
+index c6145ec5..44b1c03f 100644
+--- a/app/res/values-el/strings.xml
++++ b/app/res/values-el/strings.xml
+@@ -351,6 +351,7 @@
+     <string name="title_delete_all_transactions">   </string>
+     <string name="toast_all_transactions_deleted">   
+ 	 !</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d -</item>
+         <item quantity="other">%d -</item>
+diff --git a/app/res/values-es-rMX/strings.xml b/app/res/values-es-rMX/strings.xml
+index dfdedd04..b12b7cf9 100644
+--- a/app/res/values-es-rMX/strings.xml
++++ b/app/res/values-es-rMX/strings.xml
+@@ -334,6 +334,7 @@
+     <string name="summary_delete_all_transactions">&#161;Todas las transaccipnes en todas las cuentas ser&#225;n borradas!</string>
+     <string name="title_delete_all_transactions">Borrar todas las transacciones</string>
+     <string name="toast_all_transactions_deleted">&#161;Todas las transacciones han sido borradas con exit&#243;samente!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d subcuenta</item>
+         <item quantity="other">%d subcuentas</item>
+diff --git a/app/res/values-es/strings.xml b/app/res/values-es/strings.xml
+index 4922ac25..25041a20 100644
+--- a/app/res/values-es/strings.xml
++++ b/app/res/values-es/strings.xml
+@@ -335,6 +335,7 @@
+     <string name="summary_delete_all_transactions">Todas las transaccipnes en todas las cuentas ser&#225;n borradas</string>
+     <string name="title_delete_all_transactions">Borrar todas las transacciones</string>
+     <string name="toast_all_transactions_deleted">Todas las transacciones han sido borradas con &#233;xito</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-cuenta</item>
+         <item quantity="other">%d sub-cuentas</item>
+diff --git a/app/res/values-fr/strings.xml b/app/res/values-fr/strings.xml
+index e724905a..b40d4f21 100644
+--- a/app/res/values-fr/strings.xml
++++ b/app/res/values-fr/strings.xml
+@@ -333,6 +333,7 @@
+     <string name="summary_delete_all_transactions">Toutes les transactions sur tous les comptes seront supprim&#233;s!</string>
+     <string name="title_delete_all_transactions">Supprimer toutes les transactions</string>
+     <string name="toast_all_transactions_deleted">Toutes les transactions ont &#233;t&#233; supprim&#233;es avec succ&#232;s!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sous-compte</item>
+         <item quantity="other">%d sous-comptes</item>
+diff --git a/app/res/values-hu/strings.xml b/app/res/values-hu/strings.xml
+index 977a6650..8a8880be 100644
+--- a/app/res/values-hu/strings.xml
++++ b/app/res/values-hu/strings.xml
+@@ -336,6 +336,7 @@
+     <string name="summary_delete_all_transactions">All transactions in all accounts will be deleted!</string>
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-account</item>
+         <item quantity="other">%d sub-accounts</item>
+diff --git a/app/res/values-it/strings.xml b/app/res/values-it/strings.xml
+index c3e51fc2..d5a3160e 100644
+--- a/app/res/values-it/strings.xml
++++ b/app/res/values-it/strings.xml
+@@ -336,6 +336,7 @@
+     <string name="summary_delete_all_transactions">Verranno eliminate tutte le transazioni in tutti i conti</string>
+     <string name="title_delete_all_transactions">Elimina tutte le transazioni</string>
+     <string name="toast_all_transactions_deleted">Tutte le transazioni sono state eliminate!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sotto-conto</item>
+         <item quantity="other">%d sotto-conti</item>
+diff --git a/app/res/values-nb/strings.xml b/app/res/values-nb/strings.xml
+index 5f2daac3..f6367022 100644
+--- a/app/res/values-nb/strings.xml
++++ b/app/res/values-nb/strings.xml
+@@ -338,6 +338,7 @@ format og importeres i regnskapsprogrammet GnuCash for PC.</string>
+     <string name="summary_delete_all_transactions">Alle transaksjoner i alle kontoer vil bli slettet!</string>
+     <string name="title_delete_all_transactions">Slette alle transaksjoner</string>
+     <string name="toast_all_transactions_deleted">Alle transaksjoner slettet!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d under-konto</item>
+         <item quantity="other">%d under-kontoer</item>
+diff --git a/app/res/values-nl/strings.xml b/app/res/values-nl/strings.xml
+index 516f9411..7714d35b 100644
+--- a/app/res/values-nl/strings.xml
++++ b/app/res/values-nl/strings.xml
+@@ -337,6 +337,7 @@
+     <string name="summary_delete_all_transactions">All transactions in all accounts will be deleted!</string>
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-account</item>
+         <item quantity="other">%d sub-accounts</item>
+diff --git a/app/res/values-pt-rBR/strings.xml b/app/res/values-pt-rBR/strings.xml
+index e6a31d41..3ce7d40f 100644
+--- a/app/res/values-pt-rBR/strings.xml
++++ b/app/res/values-pt-rBR/strings.xml
+@@ -336,6 +336,7 @@
+     <string name="summary_delete_all_transactions">All transactions in all accounts will be deleted!</string>
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-account</item>
+         <item quantity="other">%d sub-accounts</item>
+diff --git a/app/res/values-ru/strings.xml b/app/res/values-ru/strings.xml
+index 959f6205..0ef42c1e 100644
+--- a/app/res/values-ru/strings.xml
++++ b/app/res/values-ru/strings.xml
+@@ -333,6 +333,7 @@
+     <string name="summary_delete_all_transactions">      !</string>
+     <string name="title_delete_all_transactions">  </string>
+     <string name="toast_all_transactions_deleted">  !</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d  </item>
+         <item quantity="other">%d .  </item>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 5f921a8d..4680075a 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -533,6 +533,7 @@
+     <string name="summary_delete_all_transactions">All transactions in all accounts will be deleted!</string>
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
++    <string name="title_progress_importing_accounts">Importing accounts</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-account</item>
+         <item quantity="other">%d sub-accounts</item>
+diff --git a/app/src/org/gnucash/android/ui/accounts/AccountsActivity.java b/app/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+index ab178a4e..3384e281 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AccountsActivity.java
++++ b/app/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+@@ -17,12 +17,16 @@
+ package org.gnucash.android.ui.accounts;
+ 
+ import android.app.AlertDialog;
++import android.app.ProgressDialog;
++import android.content.Context;
+ import android.content.DialogInterface;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
+ import android.content.pm.PackageInfo;
+ import android.content.pm.PackageManager.NameNotFoundException;
++import android.net.Uri;
++import android.os.AsyncTask;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.Fragment;
+@@ -46,6 +50,7 @@
+ import org.gnucash.android.util.OnAccountClickedListener;
+ 
+ import java.io.FileNotFoundException;
++import java.io.InputStream;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.Locale;
+@@ -384,17 +389,22 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 
+         switch (requestCode){
+             case AccountsListFragment.REQUEST_PICK_ACCOUNTS_FILE:
+-                try {
+-                    GnucashAccountXmlHandler.parse(this, getContentResolver().openInputStream(data.getData()));
+-                    Toast.makeText(this, R.string.toast_success_importing_accounts, Toast.LENGTH_LONG).show();
+-                } catch (FileNotFoundException e) {
+-                    Toast.makeText(this, R.string.toast_error_importing_accounts, Toast.LENGTH_LONG).show();
+-                    e.printStackTrace();
+-                }
++                new AccountImporterTask(this).execute(data.getData());
+                 break;
+         }
+     }
+ 
++    /**
++     * Starts the AccountsActivity and clears the activity stack
++     * @param context Application context
++     */
++    public static void start(Context context){
++        Intent accountsActivityIntent = new Intent(context, AccountsActivity.class);
++        accountsActivityIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
++        accountsActivityIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++        context.startActivity(accountsActivityIntent);
++    }
++
+     @Override
+ 	public void accountSelected(long accountRowId) {
+ 		Intent intent = new Intent(this, TransactionsActivity.class);
+@@ -414,4 +424,47 @@ private void removeFirstRunFlag(){
+ 		editor.commit();
+ 	}
+ 
++    /**
++     * Imports a GnuCash (desktop) account file and displays a progress dialog.
++     * The AccountsActivity is opened when importing is done.
++     */
++    public static class AccountImporterTask extends AsyncTask<Uri, Void, Boolean>{
++        private final Context context;
++        private ProgressDialog progressDialog;
++
++        public AccountImporterTask(Context context){
++            this.context = context;
++        }
++
++        @Override
++        protected void onPreExecute() {
++            super.onPreExecute();
++            progressDialog = new ProgressDialog(context);
++            progressDialog.setTitle(R.string.title_progress_importing_accounts);
++            progressDialog.setIndeterminate(true);
++            progressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
++            progressDialog.show();
++        }
++
++        @Override
++        protected Boolean doInBackground(Uri... uris) {
++            try {
++                GnucashAccountXmlHandler.parse(context, context.getContentResolver().openInputStream(uris[0]));
++            } catch (Exception exception){
++                exception.printStackTrace();
++                return false;
++            }
++            return true;
++        }
++
++        @Override
++        protected void onPostExecute(Boolean importSuccess) {
++            progressDialog.dismiss();
++
++            int message = importSuccess ? R.string.toast_success_importing_accounts : R.string.toast_error_importing_accounts;
++            Toast.makeText(context, message, Toast.LENGTH_LONG).show();
++
++            AccountsActivity.start(context);
++        }
++    }
+ }
+\ No newline at end of file
+diff --git a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+index d35be2ff..f276cfe8 100644
+--- a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -33,6 +33,7 @@
+ import com.actionbarsherlock.view.MenuItem;
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Money;
++import org.gnucash.android.ui.accounts.AccountsActivity;
+ import org.gnucash.android.ui.accounts.AccountsListFragment;
+ import org.gnucash.android.util.GnucashAccountXmlHandler;
+ 
+@@ -167,14 +168,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 
+         switch (requestCode){
+             case AccountsListFragment.REQUEST_PICK_ACCOUNTS_FILE:
+-                try {
+-                    GnucashAccountXmlHandler.parse(this, getContentResolver().openInputStream(data.getData()));
+-
+-                    Toast.makeText(this, R.string.toast_success_importing_accounts, Toast.LENGTH_LONG).show();
+-                } catch (FileNotFoundException e) {
+-                    Toast.makeText(this, R.string.toast_error_importing_accounts, Toast.LENGTH_LONG).show();
+-                    e.printStackTrace();
+-                }
++                new AccountsActivity.AccountImporterTask(this).execute(data.getData());
+                 break;
+         }
+     }
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+index b4e9d7a7..9a751ca2 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+@@ -248,10 +248,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	        if (fm.getBackStackEntryCount() > 0) {
+ 	            fm.popBackStack();
+ 	        } else {
+-	        	Intent accountsActivityIntent = new Intent(this, AccountsActivity.class);
+-	        	accountsActivityIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+-	        	accountsActivityIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+-	        	startActivity(accountsActivityIntent);
++	        	AccountsActivity.start(this);
+ 	        	finish();
+ 	        }
+ 	        return true;
+
+From f7a9b7465718b26fdbe43b72ac270030dc519d5f Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 21 Jun 2013 21:15:28 +0200
+Subject: [PATCH 3/5] Updated README and CHANGELOG
+
+---
+ CHANGELOG.md | 5 +++++
+ README.md    | 2 +-
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index abd70228..95b71414 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,10 @@
+ Change Log
+ ===============================================================================
++Version 1.2.1 *(2013-xx-xx)*
++----------------------------
++* Improved performance for loading list of accounts 
++* Show progress dialog for importing accounts and improve reliability
++
+ Version 1.2.0 *(2013-06-20)*
+ ----------------------------
+ * Feature: Import GnuCash desktop account structure
+diff --git a/README.md b/README.md
+index a4012599..fb0b1f9f 100644
+--- a/README.md
++++ b/README.md
+@@ -37,7 +37,7 @@ After satisfying those requirements, the build is pretty simple:
+ You might find that your device doesn't let you install your build if you
+ already have the version from the Android Market installed.  This is standard
+ Android security as it it won't let you directly replace an app that's been
+-signed with a different key.  Manually uninstall Gauges from your device and
++signed with a different key.  Manually uninstall GnuCash from your device and
+ you will then be able to install your own built version.
+ 
+ 
+
+From 0168c508afc11f488cc4bd51c13b3a251a20657c Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 22 Jun 2013 17:26:28 +0200
+Subject: [PATCH 4/5] Fixed: crash when opening Settings on devices with API
+ level 10 and below Implemented deleting all accounts and transactions for
+ devices with API level 10 and below Closes #95
+
+---
+ app/res/values-de/strings.xml                      |  1 +
+ app/res/values-el/strings.xml                      |  1 +
+ app/res/values-es-rMX/strings.xml                  |  1 +
+ app/res/values-es/strings.xml                      |  1 +
+ app/res/values-fr/strings.xml                      |  1 +
+ app/res/values-hu/strings.xml                      |  1 +
+ app/res/values-it/strings.xml                      |  1 +
+ app/res/values-nb/strings.xml                      |  1 +
+ app/res/values-nl/strings.xml                      |  1 +
+ app/res/values-pt-rBR/strings.xml                  |  1 +
+ app/res/values-ru/strings.xml                      |  1 +
+ app/res/values/strings.xml                         |  1 +
+ app/res/xml/fragment_account_preferences.xml       |  3 +
+ app/res/xml/fragment_transaction_preferences.xml   |  3 +
+ .../android/ui/settings/SettingsActivity.java      | 76 ++++++++++++++++++++--
+ 15 files changed, 90 insertions(+), 4 deletions(-)
+
+diff --git a/app/res/values-de/strings.xml b/app/res/values-de/strings.xml
+index 813c2325..e6733bd3 100644
+--- a/app/res/values-de/strings.xml
++++ b/app/res/values-de/strings.xml
+@@ -338,6 +338,7 @@
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d Unterkonto</item>
+         <item quantity="other">%d Unterkonten</item>
+diff --git a/app/res/values-el/strings.xml b/app/res/values-el/strings.xml
+index 44b1c03f..b7d1f48c 100644
+--- a/app/res/values-el/strings.xml
++++ b/app/res/values-el/strings.xml
+@@ -352,6 +352,7 @@
+     <string name="toast_all_transactions_deleted">   
+ 	 !</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d -</item>
+         <item quantity="other">%d -</item>
+diff --git a/app/res/values-es-rMX/strings.xml b/app/res/values-es-rMX/strings.xml
+index b12b7cf9..31d92ed2 100644
+--- a/app/res/values-es-rMX/strings.xml
++++ b/app/res/values-es-rMX/strings.xml
+@@ -335,6 +335,7 @@
+     <string name="title_delete_all_transactions">Borrar todas las transacciones</string>
+     <string name="toast_all_transactions_deleted">&#161;Todas las transacciones han sido borradas con exit&#243;samente!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d subcuenta</item>
+         <item quantity="other">%d subcuentas</item>
+diff --git a/app/res/values-es/strings.xml b/app/res/values-es/strings.xml
+index 25041a20..4aab1006 100644
+--- a/app/res/values-es/strings.xml
++++ b/app/res/values-es/strings.xml
+@@ -336,6 +336,7 @@
+     <string name="title_delete_all_transactions">Borrar todas las transacciones</string>
+     <string name="toast_all_transactions_deleted">Todas las transacciones han sido borradas con &#233;xito</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-cuenta</item>
+         <item quantity="other">%d sub-cuentas</item>
+diff --git a/app/res/values-fr/strings.xml b/app/res/values-fr/strings.xml
+index b40d4f21..bd37ecfc 100644
+--- a/app/res/values-fr/strings.xml
++++ b/app/res/values-fr/strings.xml
+@@ -334,6 +334,7 @@
+     <string name="title_delete_all_transactions">Supprimer toutes les transactions</string>
+     <string name="toast_all_transactions_deleted">Toutes les transactions ont &#233;t&#233; supprim&#233;es avec succ&#232;s!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sous-compte</item>
+         <item quantity="other">%d sous-comptes</item>
+diff --git a/app/res/values-hu/strings.xml b/app/res/values-hu/strings.xml
+index 8a8880be..bb0cc986 100644
+--- a/app/res/values-hu/strings.xml
++++ b/app/res/values-hu/strings.xml
+@@ -337,6 +337,7 @@
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-account</item>
+         <item quantity="other">%d sub-accounts</item>
+diff --git a/app/res/values-it/strings.xml b/app/res/values-it/strings.xml
+index d5a3160e..bdc72ffb 100644
+--- a/app/res/values-it/strings.xml
++++ b/app/res/values-it/strings.xml
+@@ -337,6 +337,7 @@
+     <string name="title_delete_all_transactions">Elimina tutte le transazioni</string>
+     <string name="toast_all_transactions_deleted">Tutte le transazioni sono state eliminate!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sotto-conto</item>
+         <item quantity="other">%d sotto-conti</item>
+diff --git a/app/res/values-nb/strings.xml b/app/res/values-nb/strings.xml
+index f6367022..10d42997 100644
+--- a/app/res/values-nb/strings.xml
++++ b/app/res/values-nb/strings.xml
+@@ -339,6 +339,7 @@ format og importeres i regnskapsprogrammet GnuCash for PC.</string>
+     <string name="title_delete_all_transactions">Slette alle transaksjoner</string>
+     <string name="toast_all_transactions_deleted">Alle transaksjoner slettet!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d under-konto</item>
+         <item quantity="other">%d under-kontoer</item>
+diff --git a/app/res/values-nl/strings.xml b/app/res/values-nl/strings.xml
+index 7714d35b..5fab60b3 100644
+--- a/app/res/values-nl/strings.xml
++++ b/app/res/values-nl/strings.xml
+@@ -338,6 +338,7 @@
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-account</item>
+         <item quantity="other">%d sub-accounts</item>
+diff --git a/app/res/values-pt-rBR/strings.xml b/app/res/values-pt-rBR/strings.xml
+index 3ce7d40f..53530a6f 100644
+--- a/app/res/values-pt-rBR/strings.xml
++++ b/app/res/values-pt-rBR/strings.xml
+@@ -337,6 +337,7 @@
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-account</item>
+         <item quantity="other">%d sub-accounts</item>
+diff --git a/app/res/values-ru/strings.xml b/app/res/values-ru/strings.xml
+index 0ef42c1e..2542f302 100644
+--- a/app/res/values-ru/strings.xml
++++ b/app/res/values-ru/strings.xml
+@@ -334,6 +334,7 @@
+     <string name="title_delete_all_transactions">  </string>
+     <string name="toast_all_transactions_deleted">  !</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d  </item>
+         <item quantity="other">%d .  </item>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 4680075a..77c94b19 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -534,6 +534,7 @@
+     <string name="title_delete_all_transactions">Delete all transactions</string>
+     <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
+     <string name="title_progress_importing_accounts">Importing accounts</string>
++    <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+     <plurals name="label_sub_accounts">
+         <item quantity="one">%d sub-account</item>
+         <item quantity="other">%d sub-accounts</item>
+diff --git a/app/res/xml/fragment_account_preferences.xml b/app/res/xml/fragment_account_preferences.xml
+index db0a5403..6272ebb2 100644
+--- a/app/res/xml/fragment_account_preferences.xml
++++ b/app/res/xml/fragment_account_preferences.xml
+@@ -11,4 +11,7 @@
+     <Preference android:key="@string/key_import_accounts"
+                 android:summary="@string/summary_import_accounts"
+                 android:title="@string/title_import_accounts" />
++    <Preference android:key="@string/key_delete_all_accounts"
++                android:summary="@string/summary_delete_all_accounts"
++                android:title="@string/title_delete_all_accounts" />
+ </PreferenceScreen>
+\ No newline at end of file
+diff --git a/app/res/xml/fragment_transaction_preferences.xml b/app/res/xml/fragment_transaction_preferences.xml
+index de2e357e..e1670ccd 100644
+--- a/app/res/xml/fragment_transaction_preferences.xml
++++ b/app/res/xml/fragment_transaction_preferences.xml
+@@ -24,4 +24,7 @@
+     <CheckBoxPreference android:summary="@string/summary_use_double_entry"
+                         android:key="@string/key_use_double_entry"
+                         android:title="@string/title_use_double_entry"/>
++    <Preference android:key="@string/key_delete_all_transactions"
++                android:summary="@string/summary_delete_all_transactions"
++                android:title="@string/title_delete_all_transactions" />
+ </PreferenceScreen>
+diff --git a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+index f276cfe8..d09f590b 100644
+--- a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -27,18 +27,22 @@
+ import android.preference.Preference.OnPreferenceChangeListener;
+ import android.preference.PreferenceManager;
+ import android.util.Log;
++import android.view.View;
++import android.widget.AdapterView;
+ import android.widget.Toast;
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
+ import com.actionbarsherlock.view.MenuItem;
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Money;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.ui.accounts.AccountsActivity;
+ import org.gnucash.android.ui.accounts.AccountsListFragment;
+-import org.gnucash.android.util.GnucashAccountXmlHandler;
+ 
+-import java.io.FileNotFoundException;
+ import java.util.List;
++import java.util.Timer;
++import java.util.TimerTask;
+ 
+ /**
+  * Activity for displaying settings and information about the application
+@@ -47,6 +51,21 @@
+  */
+ public class SettingsActivity extends SherlockPreferenceActivity implements OnPreferenceChangeListener, Preference.OnPreferenceClickListener{
+ 
++    public static final int DOUBLE_TAP_DELAY = 2000;
++    /**
++     * Counts the number of times the preference for deleting all accounts has been clicked.
++     * It is reset every time the SettingsActivity is resumed.
++     * Only useful on devices with API level < 11
++     */
++    private int mDeleteAccountsClickCount;
++
++    /**
++     * Counts the number of times the preference for deleting all transactions has been clicked.
++     * It is reset every time the SettingsActivity is resumed.
++     * Only useful on devices with API level < 11
++     */
++    private int mDeleteTransactionsClickCount;
++
+ 	/**
+ 	 * Constructs the headers to display in the header list when the Settings activity is first opened
+ 	 * Only available on Honeycomb and above
+@@ -100,8 +119,15 @@ protected void onCreate(Bundle savedInstanceState) {
+             pref.setOnPreferenceClickListener(this);
+ 		}
+ 	}
+-		
+-	@Override
++
++    @Override
++    protected void onResume() {
++        super.onResume();
++        mDeleteAccountsClickCount = 0;
++        mDeleteTransactionsClickCount = 0;
++    }
++
++    @Override
+ 	public boolean onOptionsItemSelected(MenuItem item) {
+ 		switch (item.getItemId()) {
+ 		case android.R.id.home:		
+@@ -148,9 +174,51 @@ public boolean onPreferenceClick(Preference preference) {
+             return true;
+         }
+ 
++        //since we cannot get a support FragmentManager in the SettingsActivity pre H0NEYCOMB,
++        //we will just use 2 taps within 2 seconds as confirmation
++        if (key.equals(getString(R.string.key_delete_all_accounts))){
++            mDeleteAccountsClickCount++;
++            if (mDeleteAccountsClickCount < 2){
++                Toast.makeText(this, R.string.toast_tap_again_to_confirm_delete, Toast.LENGTH_SHORT).show();
++            } else {
++                AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(this);
++                accountsDbAdapter.deleteAllRecords();
++                accountsDbAdapter.close();
++                Toast.makeText(this, R.string.toast_all_accounts_deleted, Toast.LENGTH_LONG).show();
++            }
++            Timer timer = new Timer();
++            timer.schedule(new ResetCounter(), DOUBLE_TAP_DELAY);
++        }
++
++        if (key.equals(getString(R.string.key_delete_all_transactions))){
++            mDeleteTransactionsClickCount++;
++            if (mDeleteTransactionsClickCount < 2){
++                Toast.makeText(this, R.string.toast_tap_again_to_confirm_delete, Toast.LENGTH_SHORT).show();
++            } else {
++                TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(this);
++                transactionsDbAdapter.deleteAllRecords();
++                transactionsDbAdapter.close();
++                Toast.makeText(this, R.string.toast_all_transactions_deleted, Toast.LENGTH_LONG).show();
++            }
++            Timer timer = new Timer();
++            timer.schedule(new ResetCounter(), DOUBLE_TAP_DELAY);
++        }
++
+         return false;
+     }
+ 
++    /**
++     * Resets the tap counter for preferences which need to be double-tapped
++     */
++    private class ResetCounter extends TimerTask{
++
++        @Override
++        public void run() {
++            mDeleteAccountsClickCount = 0;
++            mDeleteTransactionsClickCount = 0;
++        }
++    };
++
+     public void importAccounts() {
+         Intent pickIntent = new Intent(Intent.ACTION_GET_CONTENT);
+         pickIntent.setType("application/octet-stream");
+
+From 69c28763a1ae01bb24ef64253040e45febf669f1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 22 Jun 2013 17:39:42 +0200
+Subject: [PATCH 5/5] Updated strings and change log for 1.2.1 release
+
+---
+ CHANGELOG.md              | 5 +++--
+ app/AndroidManifest.xml   | 4 ++--
+ app/pom.xml               | 2 +-
+ integration-tests/pom.xml | 2 +-
+ pom.xml                   | 2 +-
+ 5 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 95b71414..c364067a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,8 +1,9 @@
+ Change Log
+ ===============================================================================
+-Version 1.2.1 *(2013-xx-xx)*
++Version 1.2.1 *(2013-06-22)*
+ ----------------------------
+-* Improved performance for loading list of accounts 
++* Fixed: crash when opening Settings on devices with Gingerbread or earlier
++* Improved performance for loading list of accounts and transactions
+ * Show progress dialog for importing accounts and improve reliability
+ 
+ Version 1.2.0 *(2013-06-20)*
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index 58fb059e..8608200d 100644
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -17,8 +17,8 @@
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+-    android:versionCode="8"
+-    android:versionName="1.2.0" >
++    android:versionCode="9"
++    android:versionName="1.2.1" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="15"/>
+     
+diff --git a/app/pom.xml b/app/pom.xml
+index 358b927d..1f578e5f 100644
+--- a/app/pom.xml
++++ b/app/pom.xml
+@@ -22,7 +22,7 @@
+     <description>Gnucash Android companion application</description>
+ 
+     <parent>
+-        <version>1.2.0-SNAPSHOT</version>
++        <version>1.2.1</version>
+         <groupId>org.gnucash.android</groupId>
+         <artifactId>gnucash-android-parent</artifactId>
+     </parent>
+diff --git a/integration-tests/pom.xml b/integration-tests/pom.xml
+index 3b6cb4c6..5cc11206 100644
+--- a/integration-tests/pom.xml
++++ b/integration-tests/pom.xml
+@@ -17,7 +17,7 @@
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+     <parent>
+-		<version>1.2.0-SNAPSHOT</version>
++		<version>1.2.1</version>
+ 		<groupId>org.gnucash.android</groupId>
+ 		<artifactId>gnucash-android-parent</artifactId>
+ 	</parent>
+diff --git a/pom.xml b/pom.xml
+index 7bd70c8a..2caf2e19 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -17,7 +17,7 @@
+ 
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+-	<version>1.2.0-SNAPSHOT</version>
++	<version>1.2.1</version>
+     <groupId>org.gnucash.android</groupId>
+     <artifactId>gnucash-android-parent</artifactId>
+     <name>GnuCash Android parent</name>

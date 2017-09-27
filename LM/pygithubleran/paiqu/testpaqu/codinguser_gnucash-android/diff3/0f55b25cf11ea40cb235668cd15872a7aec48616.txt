@@ -1,0 +1,387 @@
+From 0f55b25cf11ea40cb235668cd15872a7aec48616 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 19 Jun 2012 23:05:30 +0200
+Subject: [PATCH] Fixed: app crashes when saving transactions with no amount
+ (now does validation) Fixed: keyboard remains visible after saving
+ transaction Fixed: transactions list does not refresh when returning from
+ edit Fixed: keyboard not shown when starting transaction edit in pre-4.0
+ devices Feature: Ellipsize transaction names in list view
+
+---
+ .../res/layout/fragment_new_transaction.xml        |  3 +-
+ GnucashMobile/res/layout/list_item_transaction.xml |  4 +-
+ .../org/gnucash/android/ui/AccountsActivity.java   | 14 +++-
+ .../gnucash/android/ui/AccountsListFragment.java   |  6 +-
+ .../gnucash/android/ui/NewTransactionFragment.java | 74 +++++++++++++++++-----
+ .../android/ui/TransactionsListFragment.java       | 33 +++++++---
+ ...tedListener.java => OnItemClickedListener.java} |  4 +-
+ 7 files changed, 103 insertions(+), 35 deletions(-)
+ rename GnucashMobile/src/org/gnucash/android/util/{OnAccountSelectedListener.java => OnItemClickedListener.java} (63%)
+
+diff --git a/GnucashMobile/res/layout/fragment_new_transaction.xml b/GnucashMobile/res/layout/fragment_new_transaction.xml
+index a2eec95e..f2f9bc93 100644
+--- a/GnucashMobile/res/layout/fragment_new_transaction.xml
++++ b/GnucashMobile/res/layout/fragment_new_transaction.xml
+@@ -15,8 +15,7 @@
+         android:layout_marginBottom="10dp"
+         android:inputType="textCapWords"
+         style="@style/ListItemText">
+-		
+-        <requestFocus />
++
+     </EditText>
+ 
+     <LinearLayout 
+diff --git a/GnucashMobile/res/layout/list_item_transaction.xml b/GnucashMobile/res/layout/list_item_transaction.xml
+index 205ada0f..6941dacd 100644
+--- a/GnucashMobile/res/layout/list_item_transaction.xml
++++ b/GnucashMobile/res/layout/list_item_transaction.xml
+@@ -38,7 +38,9 @@
+             android:layout_width="0dp"
+             android:layout_height="match_parent"
+             android:layout_weight="1"
+-            android:text="@string/label_transaction_name"                 
++            android:text="@string/label_transaction_name"                     
++	        android:singleLine="true"
++	        android:ellipsize="end"                
+             style="@style/ListItemText" /> 
+      
+ 	<TextView android:id="@+id/transaction_amount" 
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java b/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
+index 92e25747..e345a1d2 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
+@@ -25,7 +25,7 @@
+ package org.gnucash.android.ui;
+ 
+ import org.gnucash.android.R;
+-import org.gnucash.android.util.OnAccountSelectedListener;
++import org.gnucash.android.util.OnItemClickedListener;
+ 
+ import android.os.Bundle;
+ import android.support.v4.app.FragmentManager;
+@@ -43,7 +43,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  * 
+  */
+-public class AccountsActivity extends SherlockFragmentActivity implements OnAccountSelectedListener {
++public class AccountsActivity extends SherlockFragmentActivity implements OnItemClickedListener {
+ 
+ 	private static final String FRAGMENT_ACCOUNTS_LIST 		= "accounts_list";
+ 	private static final String FRAGMENT_TRANSACTIONS_LIST 	= "transactions_list";
+@@ -83,6 +83,10 @@ public boolean onCreateOptionsMenu(Menu menu) {
+ 		return true;
+ 	}
+ 
++	/**
++	 * Opens a dialog fragment to create a new account
++	 * @param v View which triggered this callback
++	 */
+ 	public void onNewAccountClick(View v) {
+ 		AccountsListFragment accountFragment = (AccountsListFragment) getSupportFragmentManager()
+ 				.findFragmentByTag(FRAGMENT_ACCOUNTS_LIST);
+@@ -90,6 +94,11 @@ public void onNewAccountClick(View v) {
+ 			accountFragment.showAddAccountDialog(0);
+ 	}
+ 
++	/**
++	 * Opens a fragment to create a new transaction. 
++	 * Is called from the XML views
++	 * @param v View which triggered this method
++	 */
+ 	public void onNewTransactionClick(View v){
+ 		createNewTransaction(0);
+ 	}
+@@ -144,4 +153,5 @@ public void editTransaction(long transactionId){
+ 		fragmentTransaction.addToBackStack(null);
+ 		fragmentTransaction.commit();
+ 	}
++
+ }
+\ No newline at end of file
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+index 216e1a79..74286867 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+@@ -32,7 +32,7 @@
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.util.OnAccountSelectedListener;
++import org.gnucash.android.util.OnItemClickedListener;
+ 
+ import android.app.Activity;
+ import android.app.AlertDialog;
+@@ -78,7 +78,7 @@
+ 	AccountsCursorAdapter mCursorAdapter;
+ 	NewAccountDialogFragment mAddAccountFragment;
+ 	private AccountsDbAdapter mAccountsDbAdapter;	
+-	private OnAccountSelectedListener mAccountSelectedListener;	
++	private OnItemClickedListener mAccountSelectedListener;	
+ 	private boolean mInEditMode = false;
+ 	private ActionMode mActionMode = null;
+ 	private int mSelectedViewPosition = -1;
+@@ -203,7 +203,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 	public void onAttach(Activity activity) {
+ 		super.onAttach(activity);
+ 		try {
+-			mAccountSelectedListener = (OnAccountSelectedListener) activity;
++			mAccountSelectedListener = (OnItemClickedListener) activity;
+ 		} catch (ClassCastException e) {
+ 			throw new ClassCastException(activity.toString() + " must implement OnAccountSelectedListener");
+ 		}	
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
+index 318adea1..cfd12ab2 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
+@@ -42,6 +42,7 @@
+ 
+ import android.app.DatePickerDialog.OnDateSetListener;
+ import android.app.TimePickerDialog.OnTimeSetListener;
++import android.content.Context;
+ import android.database.Cursor;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+@@ -52,6 +53,7 @@
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
++import android.view.inputmethod.InputMethodManager;
+ import android.widget.CompoundButton;
+ import android.widget.CompoundButton.OnCheckedChangeListener;
+ import android.widget.DatePicker;
+@@ -91,6 +93,8 @@
+ 	private AccountsDbAdapter mAccountsDbAdapter;
+ 	private SimpleCursorAdapter mCursorAdapter; 
+ 	
++	private MenuItem mSaveMenuItem;
++	
+ 	@Override
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+@@ -145,7 +149,8 @@ private void initializeViewsWithTransaction(){
+ 				
+ 		mNameEditText.setText(mTransaction.getName());
+ 		mTransactionTypeButton.setChecked(mTransaction.getTransactionType() == TransactionType.DEBIT);
+-		mAmountEditText.setText(Double.toString(mTransaction.getAmount()));
++		//multiply to balance out division by the TextWatcher attached to this view
++		mAmountEditText.setText(Double.toString(mTransaction.getAmount() * 10)); 
+ 		mDescriptionEditText.setText(mTransaction.getDescription());
+ 		mDateTextView.setText(DATE_FORMATTER.format(mTransaction.getTimeMillis()));
+ 		mTimeTextView.setText(TIME_FORMATTER.format(mTransaction.getTimeMillis()));
+@@ -160,6 +165,7 @@ private void initializeViewsWithTransaction(){
+ 		
+ 		ActionBar actionBar = getSherlockActivity().getSupportActionBar();
+ 		actionBar.setHomeButtonEnabled(true);
++		actionBar.setDisplayHomeAsUpEnabled(true);
+ 		actionBar.setTitle(R.string.edit_transaction);
+ 	}
+ 	
+@@ -184,7 +190,11 @@ private void initalizeViews() {
+ 	 * Sets click listeners for the dismiss buttons
+ 	 */
+ 	private void setListeners() {
+-		mAmountEditText.addTextChangedListener(new AmountInputWatcher());
++		ValidationsWatcher validations = new ValidationsWatcher();
++		mAmountEditText.addTextChangedListener(validations);
++		mNameEditText.addTextChangedListener(validations);
++		
++		mAmountEditText.addTextChangedListener(new AmountInputFormatter());
+ 		
+ 		mTransactionTypeButton.setOnCheckedChangeListener(new OnCheckedChangeListener() {
+ 			
+@@ -225,18 +235,6 @@ public void onClick(View v) {
+ 		});
+ 	}	
+ 	
+-	@Override
+-	public void onDestroyView() {
+-		super.onDestroyView();
+-		mAccountsDbAdapter.close();
+-		mTransactionsDbAdapter.close();
+-	}
+-	
+-	@Override
+-	public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+-		inflater.inflate(R.menu.new_transaction_actions, menu);
+-	}
+-	
+ 	private void saveNewTransaction() {
+ 		String name = mNameEditText.getText().toString();
+ 		String description = mDescriptionEditText.getText().toString();
+@@ -269,14 +267,31 @@ private void saveNewTransaction() {
+ 		mTransactionsDbAdapter.addTransaction(mTransaction);
+ 		mTransactionsDbAdapter.close();
+ 		
+-		getSherlockActivity().onBackPressed();
++		getSherlockActivity().getSupportFragmentManager().popBackStack();
++		InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
++		imm.hideSoftInputFromWindow(mNameEditText.getWindowToken(), 0);
++	}
++
++	@Override
++	public void onDestroyView() {
++		super.onDestroyView();
++		mAccountsDbAdapter.close();
++		mTransactionsDbAdapter.close();
++	}
++	
++	@Override
++	public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
++		inflater.inflate(R.menu.new_transaction_actions, menu);
++		mSaveMenuItem = menu.findItem(R.id.menu_save);
++		//only initially enable if we are editing a transaction
++		mSaveMenuItem.setEnabled(mTransactionId > 0);
+ 	}
+ 	
+ 	@Override
+ 	public boolean onOptionsItemSelected(MenuItem item) {
+ 		switch (item.getItemId()) {
+ 		case R.id.menu_cancel:
+-			getSherlockActivity().onBackPressed();
++			getSherlockActivity().getSupportFragmentManager().popBackStack();
+ 			return true;
+ 			
+ 		case R.id.menu_save:
+@@ -314,7 +329,32 @@ private static String stripCurrencyFormatting(String s){
+ 		return s.replaceAll(regex, "");
+ 	}
+ 	
+-	private class AmountInputWatcher implements TextWatcher {
++	private class ValidationsWatcher implements TextWatcher {
++
++		@Override
++		public void afterTextChanged(Editable s) {
++			boolean valid = (mNameEditText.getText().length() > 0) && 
++					(mAmountEditText.getText().length() > 0);
++			mSaveMenuItem.setEnabled(valid);
++		}
++
++		@Override
++		public void beforeTextChanged(CharSequence s, int start, int count,
++				int after) {
++			// TODO Auto-generated method stub
++			
++		}
++
++		@Override
++		public void onTextChanged(CharSequence s, int start, int before,
++				int count) {
++			// TODO Auto-generated method stub
++			
++		}
++		
++	}
++	
++	private class AmountInputFormatter implements TextWatcher {
+ 		private String current = null;
+ 		
+ 		@Override
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
+index f41967f7..d0869e8f 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
+@@ -32,7 +32,7 @@
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.util.OnAccountSelectedListener;
++import org.gnucash.android.util.OnItemClickedListener;
+ 
+ import android.app.Activity;
+ import android.content.Context;
+@@ -60,6 +60,8 @@
+ public class TransactionsListFragment extends SherlockListFragment implements 
+ 	LoaderCallbacks<Cursor> {
+ 
++	private static final String SAVED_SELECTED_ITEMS = "selected_items";
++
+ 	protected static final String TAG = "TransactionsListFragment";
+ 	
+ 	public static final String SELECTED_ACCOUNT_ID = "selected_account_id";
+@@ -70,8 +72,8 @@
+ 	private boolean mInEditMode = false;
+ 	private long mAccountID;
+ 	private HashMap<Integer, Long> mSelectedIds = new HashMap<Integer, Long>();
+-	
+-	private OnAccountSelectedListener mTransactionEditListener;
++
++	private OnItemClickedListener mTransactionEditListener;
+ 	
+ 	private ActionMode.Callback mActionModeCallbacks = new ActionMode.Callback() {
+ 		
+@@ -135,6 +137,20 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+ 		return inflater.inflate(R.layout.fragment_transactions_list, container, false);		
+ 	}
++		
++	@Override
++	public void onSaveInstanceState(Bundle outState) {
++		super.onSaveInstanceState(outState);
++		
++		int[] selectedPositions = new int[mSelectedIds.size()];
++		int i = 0;
++		for (Integer id : mSelectedIds.keySet()) {
++			if (id == null)
++				continue;
++			selectedPositions[i++] = id;			
++		}
++		outState.putIntArray(SAVED_SELECTED_ITEMS, selectedPositions);
++	}
+ 	
+ 	@Override
+ 	public void onActivityCreated(Bundle savedInstanceState) {		
+@@ -149,11 +165,12 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 			sumTextView.setTextColor(getResources().getColor(R.color.debit_red));
+ 		else
+ 			sumTextView.setTextColor(getResources().getColor(R.color.credit_green));
+-		
++			
+ 		setHasOptionsMenu(true);		
+-		getLoaderManager().initLoader(0, null, this);
++		refreshList();
++		
+ 	}
+-
++	
+ 	public void refreshList(){
+ 		getLoaderManager().restartLoader(0, null, this);
+ 	}
+@@ -162,7 +179,7 @@ public void refreshList(){
+ 	public void onAttach(Activity activity) {
+ 		super.onAttach(activity);
+ 		try {
+-			 mTransactionEditListener = (OnAccountSelectedListener) activity;
++			 mTransactionEditListener = (OnItemClickedListener) activity;
+ 		} catch (ClassCastException e) {
+ 			throw new ClassCastException(activity.toString() + " must implement OnAccountSelectedListener");
+ 		}	
+@@ -212,7 +229,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	public void onLoadFinished(Loader<Cursor> loader, Cursor cursor) {
+ 		Log.d(TAG, "Transactions loader finished. Swapping in cursor");
+ 		mCursorAdapter.swapCursor(cursor);
+-		mCursorAdapter.notifyDataSetChanged();
++		mCursorAdapter.notifyDataSetChanged();		
+ 	}
+ 
+ 	@Override
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OnAccountSelectedListener.java b/GnucashMobile/src/org/gnucash/android/util/OnItemClickedListener.java
+similarity index 63%
+rename from GnucashMobile/src/org/gnucash/android/util/OnAccountSelectedListener.java
+rename to GnucashMobile/src/org/gnucash/android/util/OnItemClickedListener.java
+index 850b1567..972a3208 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OnAccountSelectedListener.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OnItemClickedListener.java
+@@ -1,10 +1,10 @@
+ package org.gnucash.android.util;
+ 
+-public interface OnAccountSelectedListener {
++public interface OnItemClickedListener {
+ 
+ 	public void accountSelected(long accountRowId, String accountName);
+ 	
+ 	public void createNewTransaction(long accountRowId);
+ 	
+-	public void editTransaction(long transactionId);
++	public void editTransaction(long transactionId);	
+ }

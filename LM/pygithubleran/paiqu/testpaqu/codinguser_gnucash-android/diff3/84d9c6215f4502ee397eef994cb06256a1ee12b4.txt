@@ -1,0 +1,117 @@
+From 84d9c6215f4502ee397eef994cb06256a1ee12b4 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Thu, 12 Mar 2015 15:53:03 +0200
+Subject: [PATCH] Improved computing account balances
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 20 ++++++++
+ .../android/ui/chart/LineChartActivity.java        | 57 ++++++++--------------
+ 2 files changed, 40 insertions(+), 37 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 0003f664..cf9bd17f 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -874,6 +874,26 @@ private Money computeBalance(String accountUID, long startTimestamp, long endTim
+     }
+ 
+     /**
++     * Returns the absolute balance of account list within the specified time range while taking sub-accounts
++     * into consideration. The default currency takes as base currency.
++     * @param accountUIDList list of account UIDs
++     * @param startTimestamp the start timestamp of the time range
++     * @param endTimestamp the end timestamp of the time range
++     * @return the absolute balance of account list
++     */
++    public Money getAccountsBalance(List<String> accountUIDList, long startTimestamp, long endTimestamp) {
++        String currencyCode = GnuCashApplication.getDefaultCurrency();
++        Money balance = Money.createZeroInstance(currencyCode);
++
++        SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
++        Money splitSum = (startTimestamp == -1 && endTimestamp == -1)
++                ? splitsDbAdapter.computeSplitBalance(accountUIDList, currencyCode, true)
++                : splitsDbAdapter.computeSplitBalance(accountUIDList, currencyCode, true, startTimestamp, endTimestamp);
++
++        return balance.add(splitSum).absolute();
++    }
++
++    /**
+      * Retrieve all descendant accounts of an account
+      * Note, in filtering, once an account is filtered out, all its descendants
+      * will also be filtered out, even they don't meet the filter where
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
+index 9439226a..70ca0da9 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
+@@ -76,51 +76,34 @@ protected void onCreate(Bundle savedInstanceState) {
+     }
+ 
+     private ArrayList<Entry> setData(AccountType accountType) {
+-        LocalDateTime earliest = new LocalDateTime(mEarliestTimestampsMap.get(accountType));
+-        LocalDateTime latest = new LocalDateTime(mLatestTimestampsMap.get(accountType));
+-        Log.w(TAG, "START: " + earliest.toString("dd MM yyyy"));
+-        Log.w(TAG, "END: " + latest.toString("dd MM yyyy"));
+-        int diff = Months.monthsBetween(earliest.withDayOfMonth(1).withMillisOfDay(0), latest.withDayOfMonth(1).withMillisOfDay(0)).getMonths();
+-        Log.w(TAG, "DIFF: " + diff);
+-        // TODO change type to float
+-        double[] months = new double[diff + 1];
+-
+-        List<String> skippedUUID = new ArrayList<String>();
++        List<String> accountUIDList = new ArrayList<String>();
+         for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+             if (account.getAccountType() == accountType && !account.isPlaceholderAccount()) {
+-                // TODO sum of sub accounts?
+-                if (mAccountsDbAdapter.getSubAccountCount(account.getUID()) > 0) {
+-                    skippedUUID.addAll(mAccountsDbAdapter.getDescendantAccountUIDs(account.getUID(), null, null));
+-                }
+-                if (!skippedUUID.contains(account.getUID())) {
+-                    LocalDateTime tmpDate = earliest;
+-                    for (int i = 0; i < months.length; i++) {
+-                        Log.i(TAG, "ACCOUNT " + account.getName());
+-                        Log.i(TAG, "MONTHS " + tmpDate.toString("MMMM yyyy"));
+-
+-                        long start = tmpDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
+-                        long end = tmpDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+-                        double balance = mAccountsDbAdapter.getAccountBalance(account.getUID(), start, end).absolute().asDouble();
+-                        months[i] += balance;
+-
+-                        Log.i(TAG, "Balance of current month " + balance);
+-                        Log.i(TAG, "Balance total " + months[i]);
+-
+-                        tmpDate = tmpDate.plusMonths(1);
+-                    }
+-                }
++                accountUIDList.add(account.getUID());
+             }
+         }
+ 
++        LocalDateTime earliest = new LocalDateTime(mEarliestTimestampsMap.get(accountType));
++        LocalDateTime latest = new LocalDateTime(mLatestTimestampsMap.get(accountType));
++        Log.w(TAG, "START: " + earliest.toString("dd MM yyyy"));
++        Log.w(TAG, "END: " + latest.toString("dd MM yyyy"));
++        int months = Months.monthsBetween(earliest.withDayOfMonth(1).withMillisOfDay(0),
++                latest.withDayOfMonth(1).withMillisOfDay(0)).getMonths();
++
+         int offset = getXAxisOffset(accountType);
+         Log.w(TAG, "OFFSET OF " + accountType + " IS " + offset);
+-        ArrayList<Entry> values = new ArrayList<Entry>();
+-        for (int i = 0; i < months.length; i++) {
+-            Log.w(TAG, accountType + " MONTH " + months[i]);
+-            values.add(new Entry((float) months[i], i + offset));
+-        }
++        ArrayList<Entry> values = new ArrayList<Entry>(months + 1);
++        for (int i = 0; i < months + 1; i++) {
++            long start = earliest.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
++            long end = earliest.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+ 
+-        Log.w(TAG, accountType + " ENTRY SIZE " + values.size());
++            float balance = (float) mAccountsDbAdapter.getAccountsBalance(accountUIDList, start, end).asDouble();
++            values.add(new Entry(balance, i + offset));
++
++            Log.w(TAG, accountType + earliest.toString(" MMMM yyyy") + ", balance = " + balance);
++
++            earliest = earliest.plusMonths(1);
++        }
+ 
+         return values;
+     }

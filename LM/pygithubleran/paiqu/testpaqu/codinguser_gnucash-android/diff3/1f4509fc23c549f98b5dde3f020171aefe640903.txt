@@ -1,0 +1,336 @@
+From 1f4509fc23c549f98b5dde3f020171aefe640903 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Sat, 11 Apr 2015 19:46:15 +0300
+Subject: [PATCH] Group smaller pie chart slices
+
+---
+ .../gnucash/android/ui/chart/BarChartActivity.java |  1 +
+ .../android/ui/chart/LineChartActivity.java        |  1 +
+ .../gnucash/android/ui/chart/PieChartActivity.java | 71 ++++++++++++++++------
+ app/src/main/res/menu/chart_actions.xml            |  4 ++
+ app/src/main/res/values-de/strings.xml             |  2 +
+ app/src/main/res/values-el/strings.xml             |  2 +
+ app/src/main/res/values-es-rMX/strings.xml         |  2 +
+ app/src/main/res/values-es/strings.xml             |  2 +
+ app/src/main/res/values-fr/strings.xml             |  2 +
+ app/src/main/res/values-hu/strings.xml             |  2 +
+ app/src/main/res/values-it/strings.xml             |  2 +
+ app/src/main/res/values-nb/strings.xml             |  2 +
+ app/src/main/res/values-nl/strings.xml             |  2 +
+ app/src/main/res/values-pt-rBR/strings.xml         |  2 +
+ app/src/main/res/values-ru/strings.xml             |  2 +
+ app/src/main/res/values-zh/strings.xml             |  2 +
+ app/src/main/res/values/strings.xml                |  2 +
+ 17 files changed, 85 insertions(+), 18 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 8cab7015..fcd26fa7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -205,6 +205,7 @@ public boolean onPrepareOptionsMenu(Menu menu) {
+         menu.findItem(R.id.menu_order_by_size).setVisible(false);
+         menu.findItem(R.id.menu_toggle_labels).setVisible(false);
+         menu.findItem(R.id.menu_toggle_average_lines).setVisible(false);
++        menu.findItem(R.id.menu_group_other_slice).setVisible(false);
+         return true;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
+index ba6040f3..4cedb2a7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
+@@ -210,6 +210,7 @@ public boolean onPrepareOptionsMenu(Menu menu) {
+         menu.findItem(R.id.menu_order_by_size).setVisible(false);
+         menu.findItem(R.id.menu_toggle_labels).setVisible(false);
+         menu.findItem(R.id.menu_percentage_mode).setVisible(false);
++        menu.findItem(R.id.menu_group_other_slice).setVisible(false);
+         return true;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
+index e6830e08..fdbcd49a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
+@@ -23,6 +23,7 @@
+ import android.graphics.drawable.Drawable;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
++import android.util.Log;
+ import android.view.View;
+ import android.widget.AdapterView;
+ import android.widget.AdapterView.OnItemSelectedListener;
+@@ -55,6 +56,8 @@
+ import java.util.Arrays;
+ import java.util.List;
+ 
++import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
++
+ /**
+  * Activity used for drawing a pie chart
+  *
+@@ -94,6 +97,8 @@
+ 
+     private boolean mChartDataPresent = true;
+ 
++    private double mSlicePercentThreshold = 6;
++
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         //it is necessary to set the view first before calling super because of the nav drawer in BaseDrawerActivity
+@@ -174,31 +179,55 @@ private void setData(boolean forCurrentMonth) {
+      * @return {@code PieData} instance
+      */
+     private PieData getPieData(boolean forCurrentMonth) {
++        List<Account> accountList = mAccountsDbAdapter.getSimpleAccountList(
++                AccountEntry.COLUMN_TYPE + " = ? AND " + AccountEntry.COLUMN_PLACEHOLDER + " = ?",
++                new String[]{ mAccountType.name(), "0" }, null);
++        List<String> uidList = new ArrayList<String>();
++        for (Account account : accountList) {
++            uidList.add(account.getUID());
++        }
++        double sum = mAccountsDbAdapter.getAccountsBalance(uidList, -1, -1).absolute().asDouble();
++        if (forCurrentMonth) {
++            long start = mChartDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
++            long end = mChartDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
++            sum = mAccountsDbAdapter.getAccountsBalance(uidList, start, end).absolute().asDouble();
++        }
++        Log.w("Tag", "Total Balance " + sum);
++
++        double otherSlice = 0;
+         PieDataSet dataSet = new PieDataSet(null, "");
+         ArrayList<String> names = new ArrayList<String>();
+         List<String> skipUUID = new ArrayList<String>();
+-        for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+-            if (account.getAccountType() == mAccountType && !account.isPlaceholderAccount()) {
+-                if (mAccountsDbAdapter.getSubAccountCount(account.getUID()) > 0) {
+-                    skipUUID.addAll(mAccountsDbAdapter.getDescendantAccountUIDs(account.getUID(), null, null));
++        for (Account account : accountList) {
++            if (mAccountsDbAdapter.getSubAccountCount(account.getUID()) > 0) {
++                skipUUID.addAll(mAccountsDbAdapter.getDescendantAccountUIDs(account.getUID(), null, null));
++            }
++            if (!skipUUID.contains(account.getUID())) {
++                double balance;
++                if (forCurrentMonth) {
++                    long start = mChartDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
++                    long end = mChartDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
++                    balance = mAccountsDbAdapter.getAccountBalance(account.getUID(), start, end).absolute().asDouble();
++                } else {
++                    balance = mAccountsDbAdapter.getAccountBalance(account.getUID()).absolute().asDouble();
+                 }
+-                if (!skipUUID.contains(account.getUID())) {
+-                    double balance;
+-                    if (forCurrentMonth) {
+-                        long start = mChartDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
+-                        long end = mChartDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+-                        balance = mAccountsDbAdapter.getAccountBalance(account.getUID(), start, end).absolute().asDouble();
+-                    } else {
+-                        balance = mAccountsDbAdapter.getAccountBalance(account.getUID()).absolute().asDouble();
+-                    }
+-                    if (balance > 0) {
+-                        dataSet.addEntry(new Entry((float) balance, dataSet.getEntryCount()));
+-                        dataSet.addColor(COLORS[(dataSet.getEntryCount() - 1) % COLORS.length]);
+-                        names.add(account.getName());
+-                    }
++
++                Log.w("Tag", "Percent = " + balance / sum * 100);
++                if (balance / sum * 100 > mSlicePercentThreshold) {
++                    dataSet.addEntry(new Entry((float) balance, dataSet.getEntryCount()));
++                    dataSet.addColor(COLORS[(dataSet.getEntryCount() - 1) % COLORS.length]);
++                    names.add(account.getName());
++                } else {
++                    otherSlice += balance;
++                    Log.w("Tag", "Other = " + otherSlice);
+                 }
+             }
+         }
++        if (otherSlice > 0) {
++            dataSet.addEntry(new Entry((float) otherSlice, dataSet.getEntryCount()));
++            dataSet.getColors().set(dataSet.getColors().size() - 1, Color.LTGRAY);
++            names.add(getResources().getString(R.string.label_other_slice));
++        }
+ 
+         if (dataSet.getEntryCount() == 0) {
+             mChartDataPresent = false;
+@@ -304,6 +333,7 @@ public boolean onCreateOptionsMenu(Menu menu) {
+     public boolean onPrepareOptionsMenu(Menu menu) {
+         menu.findItem(R.id.menu_order_by_size).setVisible(mChartDataPresent);
+         menu.findItem(R.id.menu_toggle_labels).setVisible(mChartDataPresent);
++        menu.findItem(R.id.menu_group_other_slice).setVisible(mChartDataPresent);
+         // hide line/bar chart specific menu items
+         menu.findItem(R.id.menu_percentage_mode).setVisible(false);
+         menu.findItem(R.id.menu_toggle_average_lines).setVisible(false);
+@@ -331,6 +361,11 @@ public boolean onOptionsItemSelected(MenuItem item) {
+                 mChart.invalidate();
+                 break;
+             }
++            case R.id.menu_group_other_slice: {
++                mSlicePercentThreshold = Math.abs(mSlicePercentThreshold - 6);
++                setData(false);
++                break;
++            }
+             case android.R.id.home: {
+                 finish();
+                 break;
+diff --git a/app/src/main/res/menu/chart_actions.xml b/app/src/main/res/menu/chart_actions.xml
+index 9dbd9954..9e977e21 100644
+--- a/app/src/main/res/menu/chart_actions.xml
++++ b/app/src/main/res/menu/chart_actions.xml
+@@ -37,4 +37,8 @@
+           android:title="@string/menu_toggle_average_lines"
+           android:showAsAction="never" />
+ 
++    <item android:id="@+id/menu_group_other_slice"
++          android:title="@string/menu_group_smaller_slices"
++          android:showAsAction="never" />
++
+ </menu>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index b0026d01..12be57c2 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -438,4 +438,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++    <string name="label_other_slice">Other</string>
++	<string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index cf742333..0da0579f 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -463,4 +463,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++	<string name="label_other_slice">Other</string>
++	<string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index bd957b88..6a5a6ac7 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -448,4 +448,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++    <string name="label_other_slice">Other</string>
++    <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index a43b78ee..414d9f93 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -445,4 +445,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++	<string name="label_other_slice">Other</string>
++	<string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index bbaee9ea..4b8394c7 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -445,4 +445,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++    <string name="label_other_slice">Other</string>
++    <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index bf6ea0c2..cd75a03f 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -449,4 +449,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++    <string name="label_other_slice">Other</string>
++    <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index fa957b9f..8ec665ac 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -449,4 +449,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++    <string name="label_other_slice">Other</string>
++    <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index e7036774..89695953 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -445,4 +445,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++	<string name="label_other_slice">Other</string>
++	<string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 10129f15..723152e5 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -450,4 +450,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++    <string name="label_other_slice">Other</string>
++    <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index c26b1352..41e6ad29 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -448,4 +448,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++	<string name="label_other_slice">Other</string>
++	<string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 32277272..356d23e4 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -451,4 +451,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++    <string name="label_other_slice">Other</string>
++    <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index f8f748e5..63229bca 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -442,4 +442,6 @@
+     <string name="title_bar_chart">Bar Chart</string>
+     <string name="title_line_chart">Line Chart</string>
+     <string name="title_reports">Reports</string>
++    <string name="label_other_slice">Other</string>
++    <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 40925a09..4bd97fa0 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -447,9 +447,11 @@
+     <string name="menu_toggle_labels">Toggle labels</string>
+     <string name="menu_toggle_percentage_mode">Toggle percentage</string>
+     <string name="menu_toggle_average_lines">Toggle average lines</string>
++    <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+     <string name="label_chart_no_data">No chart data available</string>
+     <string name="label_chart_overall">Overall</string>
+     <string name="label_chart_total">Total\n</string>
++    <string name="label_other_slice">Other</string>
+     <string name="toast_chart_percentage_mode_total">The percentage of selected value calculated from the total amount</string>
+     <string name="toast_chart_percentage_mode_current_bar">The percentage of selected value calculated from the current stacked bar amount</string>
+ </resources>

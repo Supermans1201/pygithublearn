@@ -1,0 +1,314 @@
+From a6aa211734accf94664da91316cf6e26bed0de92 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Sat, 1 Oct 2016 17:55:01 +0200
+Subject: [PATCH 1/2] Fix issues with scheduled exports running too much or not
+ at all.
+
+In one issue, the scheduled exports were being run with every service
+run, when executions had been missed.
+
+In the other, the scheduled exports wouldn't be run due to bug #583
+having incremented too much the execution count, yielding a next
+scheduled time too far in the future.
+
+Fixes:
+ https://github.com/codinguser/gnucash-android/issues/591
+ https://github.com/codinguser/gnucash-android/issues/594
+---
+ .../org/gnucash/android/model/ScheduledAction.java | 55 +++++++++++++++++-----
+ .../android/service/ScheduledActionService.java    | 28 +++++++----
+ .../test/unit/model/ScheduledActionTest.java       |  4 +-
+ .../unit/service/ScheduledActionServiceTest.java   | 29 +++++++++++-
+ 4 files changed, 89 insertions(+), 27 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index f7279af5..ff27fc76 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -173,35 +173,64 @@ public long getTimeOfLastSchedule(){
+     }
+ 
+     /**
+-     * Computes the next time that this scheduled action is supposed to be executed
++     * Computes the next time that this scheduled action is supposed to be
++     * executed based on the execution count.
++     *
+      * <p>This method does not consider the end time, or number of times it should be run.
+-     * It only considers when the next execution would theoretically be due</p>
++     * It only considers when the next execution would theoretically be due.</p>
++     *
+      * @return Next run time in milliseconds
+      */
+-    public long computeNextScheduledExecutionTime(){
+-        int multiplier = mRecurrence.getPeriodType().getMultiplier();
+-        //this is the last planned time for the action to occur, not the last run time
+-        long lastActionTime = getTimeOfLastSchedule(); //mStartDate + ((mExecutionCount-1)*getPeriod());
+-        if (lastActionTime < 0){
++    public long computeNextCountBasedScheduledExecutionTime(){
++        return computeNextScheduledExecutionTimeStartingAt(getTimeOfLastSchedule());
++    }
++
++    /**
++     * Computes the next time that this scheduled action is supposed to be
++     * executed based on the time of the last run.
++     *
++     * <p>This method does not consider the end time, or number of times it should be run.
++     * It only considers when the next execution would theoretically be due.</p>
++     *
++     * @return Next run time in milliseconds
++     */
++    public long computeNextTimeBasedScheduledExecutionTime() {
++        return computeNextScheduledExecutionTimeStartingAt(getLastRunTime());
++    }
++
++    /**
++     * Computes the next time that this scheduled action is supposed to be
++     * executed starting at startTime.
++     *
++     * <p>This method does not consider the end time, or number of times it should be run.
++     * It only considers when the next execution would theoretically be due.</p>
++     *
++     * @param startTime time in milliseconds to use as start to compute the next schedule.
++     *
++     * @return Next run time in milliseconds
++     */
++    private long computeNextScheduledExecutionTimeStartingAt(long startTime) {
++        if (startTime <= 0){ // has never been run
+             return mStartDate;
+         }
+ 
+-        LocalDateTime localDate = LocalDateTime.fromDateFields(new Date(lastActionTime));
++        int multiplier = mRecurrence.getPeriodType().getMultiplier();
++        LocalDateTime nextScheduledExecution = LocalDateTime.fromDateFields(new Date(startTime));
+         switch (mRecurrence.getPeriodType()) {
+             case DAY:
+-                localDate = localDate.plusDays(multiplier);
++                nextScheduledExecution = nextScheduledExecution.plusDays(multiplier);
+                 break;
+             case WEEK:
+-                localDate = localDate.plusWeeks(multiplier);
++                nextScheduledExecution = nextScheduledExecution.plusWeeks(multiplier);
+                 break;
+             case MONTH:
+-                localDate = localDate.plusMonths(multiplier);
++                nextScheduledExecution = nextScheduledExecution.plusMonths(multiplier);
+                 break;
+             case YEAR:
+-                localDate = localDate.plusYears(multiplier);
++                nextScheduledExecution = nextScheduledExecution.plusYears(multiplier);
+                 break;
+         }
+-        return localDate.toDate().getTime();
++        return nextScheduledExecution.toDate().getTime();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index fb70d62a..a8ee68b0 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -142,9 +142,10 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+         //the last run time is computed instead of just using "now" so that if the more than
+         // one period has been skipped, all intermediate transactions can be created
+ 
++        scheduledAction.setLastRun(System.currentTimeMillis());
+         //update the last run time and execution count
+         ContentValues contentValues = new ContentValues();
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, System.currentTimeMillis());
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, scheduledAction.getLastRunTime());
+         contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, executionCount);
+         db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
+                 DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
+@@ -162,13 +163,7 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+      */
+     private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase db) {
+         int executionCount = 0;
+-        long now = System.currentTimeMillis();
+-        long endTime = scheduledAction.getEndTime();
+-
+-        if (endTime > 0 && endTime < now)
+-            return executionCount;
+-
+-        if (scheduledAction.computeNextScheduledExecutionTime() > now)
++        if (!shouldExecuteScheduledBackup(scheduledAction))
+             return 0;
+ 
+         ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
+@@ -183,6 +178,19 @@ private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase
+         return executionCount;
+     }
+ 
++    private static boolean shouldExecuteScheduledBackup(ScheduledAction scheduledAction) {
++        long now = System.currentTimeMillis();
++        long endTime = scheduledAction.getEndTime();
++
++        if (endTime > 0 && endTime < now)
++            return false;
++
++        if (scheduledAction.computeNextTimeBasedScheduledExecutionTime() > now)
++            return false;
++
++        return true;
++    }
++
+     /**
+      * Executes scheduled transactions which are to be added to the database.
+      * <p>If a schedule was missed, all the intervening transactions will be generated, even if
+@@ -214,7 +222,7 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+ 
+         //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+         //so compute the actual transaction time from pre-known values
+-        long transactionTime = scheduledAction.computeNextScheduledExecutionTime();
++        long transactionTime = scheduledAction.computeNextCountBasedScheduledExecutionTime();
+         while (transactionTime <= endTime) {
+             Transaction recurringTrxn = new Transaction(trxnTemplate, true);
+             recurringTrxn.setTime(transactionTime);
+@@ -224,7 +232,7 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+ 
+             if (totalPlannedExecutions > 0 && executionCount >= totalPlannedExecutions)
+                 break; //if we hit the total planned executions set, then abort
+-            transactionTime = scheduledAction.computeNextScheduledExecutionTime();
++            transactionTime = scheduledAction.computeNextCountBasedScheduledExecutionTime();
+         }
+ 
+         transactionsDbAdapter.bulkAddRecords(transactions, DatabaseAdapter.UpdateMethod.insert);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+index c1a0b927..89b0fe43 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+@@ -105,11 +105,11 @@ public void testComputingNextScheduledExecution(){
+         recurrence.setPeriodStart(new Timestamp(startDate.getMillis()));
+         scheduledAction.setRecurrence(recurrence);
+ 
+-        assertThat(scheduledAction.computeNextScheduledExecutionTime()).isEqualTo(startDate.getMillis());
++        assertThat(scheduledAction.computeNextCountBasedScheduledExecutionTime()).isEqualTo(startDate.getMillis());
+ 
+         scheduledAction.setExecutionCount(3);
+         DateTime expectedTime = new DateTime(2016, 2, 15, 12, 0);
+-        assertThat(scheduledAction.computeNextScheduledExecutionTime()).isEqualTo(expectedTime.getMillis());
++        assertThat(scheduledAction.computeNextCountBasedScheduledExecutionTime()).isEqualTo(expectedTime.getMillis());
+     }
+ 
+     @Test
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 3827398d..4b8dfda7 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -280,12 +280,28 @@ public void recurringTransactions_shouldHaveScheduledActionUID(){
+         assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
+     }
+ 
++    /**
++     * Scheduled backups should run only once.
++     *
++     * <p>Backups may have been missed since the last run, but still only
++     * one should be done.</p>
++     *
++     * <p>For example, if we have set up a daily backup, the last one
++     * was done on Monday and it's Thursday, two backups have been
++     * missed. Doing the two missed backups plus today's wouldn't be
++     * useful, so just one should be done.</p>
++     *
++     * <p><i>Note</i>: the execution count will include the missed runs
++     * as computeNextCountBasedScheduledExecutionTime depends on it.</p>
++     */
+     @Test
+     public void scheduledBackups_shouldRunOnlyOnce(){
+         ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
+-        scheduledBackup.setStartTime(new DateTime(2016, 2, 17, 17, 0).getMillis());
++        scheduledBackup.setStartTime(LocalDateTime.now()
++                .minusMonths(4).minusDays(2).toDate().getTime());
+         scheduledBackup.setRecurrence(PeriodType.MONTH, 1);
+         scheduledBackup.setExecutionCount(2);
++        scheduledBackup.setLastRun(LocalDateTime.now().minusMonths(2).toDate().getTime());
+ 
+         ExportParams backupParams = new ExportParams(ExportFormat.XML);
+         backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
+@@ -297,12 +313,20 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+ 
+         List<ScheduledAction> actions = new ArrayList<>();
+         actions.add(scheduledBackup);
+-        ScheduledActionService.processScheduledActions(actions, mDb);
+ 
++        // Check there's not a backup for each missed run
++        ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(scheduledBackup.getExecutionCount()).isEqualTo(3);
+         File[] backupFiles = backupFolder.listFiles();
+         assertThat(backupFiles).hasSize(1);
+         assertThat(backupFiles[0]).exists().hasExtension("gnca");
++
++        // Check also across service runs
++        ScheduledActionService.processScheduledActions(actions, mDb);
++        assertThat(scheduledBackup.getExecutionCount()).isEqualTo(3);
++        backupFiles = backupFolder.listFiles();
++        assertThat(backupFiles).hasSize(1);
++        assertThat(backupFiles[0]).exists().hasExtension("gnca");
+     }
+ 
+     /**
+@@ -315,6 +339,7 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+     public void scheduledBackups_shouldNotRunBeforeNextScheduledExecution(){
+         ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
+         scheduledBackup.setStartTime(LocalDateTime.now().minusDays(2).toDate().getTime());
++        scheduledBackup.setLastRun(scheduledBackup.getStartTime());
+         scheduledBackup.setExecutionCount(1);
+         scheduledBackup.setRecurrence(PeriodType.WEEK, 1);
+ 
+
+From b2e9bf7f38a287985656e48ec6b13979a070dcd0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Fri, 7 Oct 2016 20:09:04 +0200
+Subject: [PATCH 2/2] Reorder and simplify statements to avoid confusion.
+
+---
+ .../gnucash/android/service/ScheduledActionService.java   | 15 +++++++--------
+ 1 file changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index a8ee68b0..58770873 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -143,15 +143,16 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+         // one period has been skipped, all intermediate transactions can be created
+ 
+         scheduledAction.setLastRun(System.currentTimeMillis());
++        //set the execution count in the object because it will be checked for the next iteration in the calling loop
++        scheduledAction.setExecutionCount(executionCount); //this call is important, do not remove!!
+         //update the last run time and execution count
+         ContentValues contentValues = new ContentValues();
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, scheduledAction.getLastRunTime());
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, executionCount);
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN,
++                          scheduledAction.getLastRunTime());
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT,
++                          scheduledAction.getExecutionCount());
+         db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
+                 DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
+-
+-        //set the execution count in the object because it will be checked for the next iteration in the calling loop
+-        scheduledAction.setExecutionCount(executionCount); //this call is important, do not remove!!
+     }
+ 
+     /**
+@@ -162,7 +163,6 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+      * @return Number of times backup is executed. This should either be 1 or 0
+      */
+     private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase db) {
+-        int executionCount = 0;
+         if (!shouldExecuteScheduledBackup(scheduledAction))
+             return 0;
+ 
+@@ -170,12 +170,11 @@ private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase
+         try {
+             //wait for async task to finish before we proceed (we are holding a wake lock)
+             new ExportAsyncTask(GnuCashApplication.getAppContext(), db).execute(params).get();
+-            scheduledAction.setExecutionCount(++executionCount);
+         } catch (InterruptedException | ExecutionException e) {
+             Crashlytics.logException(e);
+             Log.e(LOG_TAG, e.getMessage());
+         }
+-        return executionCount;
++        return 1;
+     }
+ 
+     private static boolean shouldExecuteScheduledBackup(ScheduledAction scheduledAction) {

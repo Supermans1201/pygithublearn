@@ -1,0 +1,216 @@
+From faf5606cbf443882f49bf649e8c5a0828b9e1702 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 1 Sep 2014 11:01:49 +0200
+Subject: [PATCH 1/2] Fixed: Cannot edit transactions when in single-entry mode
+ Fixed: Transaction type button sometimes hidden in single-entry mode Fixed:
+ Creating transactions from templates always saves the template amount, even
+ if edited
+
+---
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 14 +++++++++++
+ .../ui/transaction/TransactionFormFragment.java    | 28 +++++++++++++++++-----
+ 2 files changed, 36 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+index b5437388..bba50dc3 100644
+--- a/app/src/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -286,6 +286,9 @@ public String getUID(long id){
+      * @return Cursor to splits
+      */
+     public Cursor fetchSplitsForTransaction(String transactionUID){
++        if (transactionUID == null)
++            throw new IllegalArgumentException("Transaction UID cannot be null");
++
+         Log.v(TAG, "Fetching all splits for transaction UID " + transactionUID);
+         return mDb.query(SplitEntry.TABLE_NAME,
+                 null, SplitEntry.COLUMN_TRANSACTION_UID + " = ?",
+@@ -391,6 +394,17 @@ public boolean deleteRecord(long rowId) {
+     }
+ 
+     /**
++     * Deletes a split from the database.
++     * This is a convenience method which essentially calls {@link #deleteRecord(long)}
++     * @param uid String unique ID of split
++     * @return <code>true</code> if the split was deleted, <code>false</code> otherwise
++     */
++    public boolean deleteSplit(String uid){
++        long id = getID(uid);
++        return deleteRecord(id);
++    }
++
++    /**
+      * Returns the database record ID for the specified transaction UID
+      * @param transactionUID Unique idendtifier of the transaction
+      * @return Database record ID for the transaction
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 2f391b2a..df9184c6 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -209,7 +209,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		actionBar.setDisplayShowTitleEnabled(false);
+ 
+ 		SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+-		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), true);
++		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
+ 		if (!mUseDoubleEntry){
+ 			getView().findViewById(R.id.layout_double_entry).setVisibility(View.GONE);
+             mOpenSplitsButton.setVisibility(View.GONE);
+@@ -306,7 +306,9 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+                         mSplitsList.clear();
+                         setAmountEditViewVisible(View.VISIBLE);
+                     } else {
+-                        setAmountEditViewVisible(View.GONE);
++                        if (mUseDoubleEntry) { //don't hide the view in single entry mode
++                            setAmountEditViewVisible(View.GONE);
++                        }
+                     }
+                 }
+                 mTransaction = null; //we are creating a new transaction after all
+@@ -346,7 +348,7 @@ private void initializeViewsWithTransaction(){
+         } else {
+             for (Split split : mTransaction.getSplits()) {
+                 //two splits, one belongs to this account and the other to another account
+-                if (!split.getAccountUID().equals(accountUID)) {
++                if (mUseDoubleEntry && !split.getAccountUID().equals(accountUID)) {
+                     setSelectedTransferAccount(mAccountsDbAdapter.getAccountID(split.getAccountUID()));
+                 }
+             }
+@@ -593,15 +595,30 @@ private void saveNewTransaction() {
+ 
+ 		if (mTransaction != null){
+             if (!mUseDoubleEntry){
++                //first remove old splits for this transaction, since there is only one split
++                SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
++                for (Split split : mTransaction.getSplits()) {
++                    splitsDbAdapter.deleteSplit(split.getUID());
++                }
++                splitsDbAdapter.close();
++
+                 Split split = new Split(amount, accountUID);
+                 split.setType(mTransactionTypeButton.getTransactionType());
+                 mTransaction.getSplits().clear();
+                 mTransaction.addSplit(split);
+-            } else
++            } else {
+                 mTransaction.setSplits(mSplitsList);
++            }
+ 			mTransaction.setDescription(description);
+ 		} else {
+ 			mTransaction = new Transaction(description);
++            if (!mUseDoubleEntry){
++                Split split = new Split(amount, accountUID);
++                split.setType(mTransactionTypeButton.getTransactionType());
++                mSplitsList.clear();
++                mSplitsList.add(split);
++            }
++
+             if (mSplitsList.isEmpty()) { //amount entered in the simple interface (not using splits Editor)
+                 Split split = new Split(amount, accountUID);
+                 split.setType(mTransactionTypeButton.getTransactionType());
+@@ -707,8 +724,7 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+         //once we set the split list, do not allow direct editing of the total
+         if (mSplitsList.size() > 1){
+             mAmountEditText.setEnabled(false);
+-            mTransactionTypeButton.setVisibility(View.GONE);
+-            getView().findViewById(R.id.layout_double_entry).setVisibility(View.GONE);
++            setAmountEditViewVisible(View.GONE);
+         }
+ 
+         SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
+
+From e4c569661da7aab0a62f897e5784cd7c1d2b8662 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 8 Sep 2014 11:14:02 +0200
+Subject: [PATCH 2/2] Updated version numbers for 1.4.3 release
+
+---
+ CHANGELOG.md               | 6 ++++++
+ app/AndroidManifest.xml    | 2 +-
+ app/pom.xml                | 2 +-
+ app/res/values/strings.xml | 2 +-
+ integration-tests/pom.xml  | 2 +-
+ pom.xml                    | 2 +-
+ 6 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1e06fdac..5c6e8367 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,11 @@
+ Change Log
+ ===============================================================================
++Version 1.4.3 *(2014-09-09)*
++----------------------------
++* Fixed: Cannot edit transactions when in single-entry mode
++* Fixed: Transaction type button sometimes hidden in single-entry mode
++* Fixed: Problems saving new transactions from templates
++
+ Version 1.4.2 *(2014-08-30)*
+ ----------------------------
+ * Fixed: Newly added transactions cannot be exported
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index cc818e0d..3bf8f69d 100644
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -17,7 +17,7 @@
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+-    android:versionCode="39"
++    android:versionCode="40"
+     android:versionName="@string/app_version_name" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="16"/>
+diff --git a/app/pom.xml b/app/pom.xml
+index 02505ab3..7f873c84 100644
+--- a/app/pom.xml
++++ b/app/pom.xml
+@@ -22,7 +22,7 @@
+     <description>Gnucash Android companion application</description>
+ 
+     <parent>
+-        <version>1.4.2-SNAPSHOT</version>
++        <version>1.4.3-SNAPSHOT</version>
+         <groupId>org.gnucash.android</groupId>
+         <artifactId>gnucash-android-parent</artifactId>
+     </parent>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 83ace0a8..3318d317 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -17,7 +17,7 @@
+ 
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="app_name">GnuCash</string>
+-    <string name="app_version_name">1.4.2</string>
++    <string name="app_version_name">1.4.3</string>
+     <string name="title_add_account">Create Account</string>
+     <string name="title_edit_account">Edit Account</string>
+     <string name="info_details">Info</string>
+diff --git a/integration-tests/pom.xml b/integration-tests/pom.xml
+index 60ae2938..cba85f06 100644
+--- a/integration-tests/pom.xml
++++ b/integration-tests/pom.xml
+@@ -17,7 +17,7 @@
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+     <parent>
+-		<version>1.4.2-SNAPSHOT</version>
++		<version>1.4.3-SNAPSHOT</version>
+ 		<groupId>org.gnucash.android</groupId>
+ 		<artifactId>gnucash-android-parent</artifactId>
+ 	</parent>
+diff --git a/pom.xml b/pom.xml
+index 996fc3e8..aa8501da 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -17,7 +17,7 @@
+ 
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+-	<version>1.4.2-SNAPSHOT</version>
++	<version>1.4.3-SNAPSHOT</version>
+     <groupId>org.gnucash.android</groupId>
+     <artifactId>gnucash-android-parent</artifactId>
+     <name>GnuCash Android parent</name>

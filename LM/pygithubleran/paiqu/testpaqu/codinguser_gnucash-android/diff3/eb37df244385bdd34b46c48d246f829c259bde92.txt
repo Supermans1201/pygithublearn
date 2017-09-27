@@ -1,0 +1,1442 @@
+From eb37df244385bdd34b46c48d246f829c259bde92 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 17 Mar 2015 17:09:23 +0100
+Subject: [PATCH] Code refactoring - optimized imports over all classes in
+ project
+
+---
+ app/src/main/AndroidManifest.xml                   |  2 +-
+ .../gnucash/android/app/GnuCashApplication.java    |  7 +-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 21 ++++--
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  7 +-
+ .../gnucash/android/db/DatabaseCursorLoader.java   |  2 +-
+ .../org/gnucash/android/db/DatabaseHelper.java     |  4 +-
+ .../org/gnucash/android/db/DatabaseSchema.java     |  2 +-
+ .../org/gnucash/android/db/MigrationHelper.java    |  9 +--
+ .../android/db/ScheduledActionDbAdapter.java       |  8 +--
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 15 ++++-
+ .../android/export/ExportDialogFragment.java       | 10 ++-
+ .../gnucash/android/export/ExporterAsyncTask.java  | 11 +++-
+ .../gnucash/android/export/ofx/OfxExporter.java    | 19 ++++--
+ .../gnucash/android/export/qif/QifExporter.java    |  6 +-
+ .../gnucash/android/export/xml/GncXmlExporter.java | 14 ++--
+ .../gnucash/android/importer/GncXmlHandler.java    | 16 +++--
+ .../gnucash/android/importer/GncXmlImporter.java   | 10 +--
+ .../gnucash/android/importer/ImportAsyncTask.java  |  2 +-
+ .../java/org/gnucash/android/model/Account.java    |  4 +-
+ .../main/java/org/gnucash/android/model/Split.java |  6 --
+ .../org/gnucash/android/model/Transaction.java     |  5 +-
+ .../gnucash/android/receivers/AccountCreator.java  | 11 ++--
+ .../receivers/TransactionAppWidgetProvider.java    |  6 +-
+ .../android/receivers/TransactionRecorder.java     |  7 +-
+ .../org/gnucash/android/ui/BaseDrawerActivity.java |  8 +--
+ .../android/ui/account/AccountFormFragment.java    | 17 ++++-
+ .../android/ui/account/AccountsActivity.java       |  8 +--
+ .../android/ui/account/AccountsListFragment.java   | 22 +++++--
+ .../android/ui/colorpicker/ColorPickerDialog.java  |  2 +
+ .../android/ui/colorpicker/ColorPickerSwatch.java  |  4 +-
+ .../android/ui/colorpicker/ColorSquare.java        |  1 +
+ .../android/ui/colorpicker/ColorStateDrawable.java |  8 +--
+ .../android/ui/colorpicker/HsvColorComparator.java |  2 +
+ .../ui/settings/AboutPreferenceFragment.java       |  4 +-
+ .../DeleteAllAccountsConfirmationDialog.java       |  2 +-
+ .../DeleteAllTransacationsConfirmationDialog.java  |  1 +
+ .../ui/settings/GeneralPreferenceFragment.java     |  8 +--
+ .../settings/TransactionsPreferenceFragment.java   |  2 +
+ ...Activity.java => ScheduledActionsActivity.java} | 12 ++--
+ .../ui/transaction/TransactionFormFragment.java    | 76 ++++++++++++++--------
+ .../ui/transaction/TransactionsListFragment.java   | 17 +++--
+ .../transaction/dialog/BulkMoveDialogFragment.java | 19 +++---
+ .../dialog/DatePickerDialogFragment.java           |  7 +-
+ .../dialog/SplitEditorDialogFragment.java          | 17 ++++-
+ .../dialog/TimePickerDialogFragment.java           |  6 +-
+ ...ansactionsDeleteConfirmationDialogFragment.java | 14 ++--
+ .../android/ui/util/AccountBalanceTask.java        |  1 +
+ .../android/ui/util/AmountInputFormatter.java      |  1 +
+ .../gnucash/android/ui/util/RecurrenceParser.java  |  2 +
+ .../ui/util/TransactionTypeToggleButton.java       |  1 +
+ .../ui/widget/WidgetConfigurationActivity.java     | 23 ++++---
+ .../util/QualifiedAccountNameCursorAdapter.java    |  4 +-
+ 52 files changed, 309 insertions(+), 184 deletions(-)
+ rename app/src/main/java/org/gnucash/android/ui/transaction/{ScheduledEventsActivity.java => ScheduledActionsActivity.java} (88%)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index c1be1b1e..7fe66d94 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -66,7 +66,7 @@
+             android:windowSoftInputMode="stateAlwaysHidden">
+         </activity>
+         <activity android:name=".ui.settings.SettingsActivity"/>
+-        <activity android:name=".ui.transaction.ScheduledEventsActivity" />
++        <activity android:name=".ui.transaction.ScheduledActionsActivity" />
+         <activity android:name=".ui.passcode.PasscodePreferenceActivity" />
+         <activity android:name=".ui.transaction.TransactionsActivity"
+             android:configChanges="orientation|screenSize">
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index c4615c3f..5eb60ae8 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -25,8 +25,13 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.preference.PreferenceManager;
+ import android.util.Log;
++
+ import org.gnucash.android.R;
+-import org.gnucash.android.db.*;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
++import org.gnucash.android.db.SplitsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.service.SchedulerService;
+ 
+ import java.util.Currency;
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 0003f664..d7389fb1 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -23,16 +23,27 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
+ import android.text.TextUtils;
+-
+ import android.util.Log;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.model.*;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
+ 
+ import java.math.BigDecimal;
+-import java.util.*;
+-
+-import static org.gnucash.android.db.DatabaseSchema.*;
++import java.util.ArrayList;
++import java.util.Currency;
++import java.util.HashMap;
++import java.util.LinkedList;
++import java.util.List;
++
++import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
++import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+ 
+ /**
+  * Manages persistence of {@link Account}s in the database
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 05d8375b..267d3448 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -19,10 +19,13 @@
+ import android.content.ContentValues;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+-
+ import android.support.annotation.NonNull;
+ import android.util.Log;
+-import org.gnucash.android.db.DatabaseSchema.*;
++
++import org.gnucash.android.db.DatabaseSchema.AccountEntry;
++import org.gnucash.android.db.DatabaseSchema.CommonColumns;
++import org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.BaseModel;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseCursorLoader.java b/app/src/main/java/org/gnucash/android/db/DatabaseCursorLoader.java
+index 25597999..21a426e1 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseCursorLoader.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseCursorLoader.java
+@@ -17,9 +17,9 @@
+ package org.gnucash.android.db;
+ 
+ import android.content.Context;
+-import android.support.v4.content.Loader;
+ import android.database.Cursor;
+ import android.support.v4.content.AsyncTaskLoader;
++import android.support.v4.content.Loader;
+ 
+ /**
+  * Abstract base class for asynchronously loads records from a database and manages the cursor.
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 80656e32..93c49114 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -27,9 +27,9 @@
+ import org.gnucash.android.model.AccountType;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
++import static org.gnucash.android.db.DatabaseSchema.ScheduledActionEntry;
+ import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
+ import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+-import static org.gnucash.android.db.DatabaseSchema.ScheduledActionEntry;
+ /**
+  * Helper class for managing the SQLite database.
+  * Creates the database and handles upgrades
+@@ -113,7 +113,7 @@
+     public static final String SCHEDULED_ACTIONS_TABLE_CREATE = "CREATE TABLE " + ScheduledActionEntry.TABLE_NAME + " ("
+             + ScheduledActionEntry._ID                   + " integer primary key autoincrement, "
+             + ScheduledActionEntry.COLUMN_UID            + " varchar(255) not null UNIQUE, "
+-            + ScheduledActionEntry.COLUMN_EVENT_UID      + " varchar(255) not null, "
++            + ScheduledActionEntry.COLUMN_ACTION_UID + " varchar(255) not null, "
+             + ScheduledActionEntry.COLUMN_TYPE           + " varchar(255) not null, "
+             + ScheduledActionEntry.COLUMN_PERIOD         + " integer not null, "
+             + ScheduledActionEntry.COLUMN_LAST_RUN       + " integer default 0, "
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 21b0b556..3aee09a9 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -107,7 +107,7 @@ private DatabaseSchema(){}
+         public static final String TABLE_NAME           = "scheduled_actions";
+ 
+         public static final String COLUMN_TYPE          = "type";
+-        public static final String COLUMN_EVENT_UID     = "action_uid";
++        public static final String COLUMN_ACTION_UID    = "action_uid";
+         public static final String COLUMN_START_TIME    = "start_time";
+         public static final String COLUMN_END_TIME      = "end_time";
+         public static final String COLUMN_LAST_RUN      = "last_run";
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 87fa1f3b..c84e7cbd 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -18,17 +18,12 @@
+ 
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+-import android.os.Environment;
+ import android.util.Log;
+-import org.gnucash.android.export.ExportFormat;
+-import org.gnucash.android.export.ExportParams;
+-import org.gnucash.android.export.Exporter;
+-import org.gnucash.android.export.xml.GncXmlExporter;
++
+ import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.model.AccountType;
+ 
+-import javax.xml.parsers.ParserConfigurationException;
+-import java.io.*;
++import java.io.FileInputStream;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index a5983c69..fed08fb6 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -27,7 +27,7 @@
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+-import static org.gnucash.android.db.DatabaseSchema.*;
++import static org.gnucash.android.db.DatabaseSchema.ScheduledActionEntry;
+ 
+ /**
+  * Database adapter for fetching/saving/modifying scheduled events
+@@ -55,7 +55,7 @@ public static ScheduledActionDbAdapter getInstance(){
+      */
+     public long addScheduledEvent(ScheduledAction scheduledAction){
+         ContentValues contentValues = getContentValues(scheduledAction);
+-        contentValues.put(ScheduledActionEntry.COLUMN_EVENT_UID, scheduledAction.getEventUID());
++        contentValues.put(ScheduledActionEntry.COLUMN_ACTION_UID, scheduledAction.getEventUID());
+         contentValues.put(ScheduledActionEntry.COLUMN_PERIOD,    scheduledAction.getPeriod());
+         contentValues.put(ScheduledActionEntry.COLUMN_START_TIME, scheduledAction.getStartTime());
+         contentValues.put(ScheduledActionEntry.COLUMN_END_TIME,  scheduledAction.getEndTime());
+@@ -77,7 +77,7 @@ public long addScheduledEvent(ScheduledAction scheduledAction){
+      * @return ScheduledEvent object instance
+      */
+     private ScheduledAction buildScheduledEventInstance(final Cursor cursor){
+-        String eventUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_EVENT_UID));
++        String eventUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
+         long period     = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
+         long startTime  = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
+         long endTime    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_END_TIME));
+@@ -128,7 +128,7 @@ public ScheduledAction getScheduledEvent(String uid){
+      */
+     public List<ScheduledAction> getScheduledEventsWithUID(@NonNull String eventUID){
+         Cursor cursor = mDb.query(ScheduledActionEntry.TABLE_NAME, null,
+-                ScheduledActionEntry.COLUMN_EVENT_UID + "= ?",
++                ScheduledActionEntry.COLUMN_ACTION_UID + "= ?",
+                 new String[]{eventUID}, null, null, null);
+ 
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 8da5e910..ae57cc1c 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -27,13 +27,22 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.model.*;
++import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
+ 
+-import static org.gnucash.android.db.DatabaseSchema.*;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.List;
+ 
++import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
++import static org.gnucash.android.db.DatabaseSchema.SPLITS_DB_VERSION;
++import static org.gnucash.android.db.DatabaseSchema.ScheduledActionEntry;
++import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
++
+ /**
+  * Manages persistence of {@link Transaction}s in the database
+  * Handles adding, modifying and deleting of transaction records.
+@@ -242,7 +251,7 @@ public Cursor fetchAllScheduledTransactions(){
+         SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
+         queryBuilder.setTables(TransactionEntry.TABLE_NAME + " INNER JOIN " + ScheduledActionEntry.TABLE_NAME + " ON "
+                 + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
+-                + ScheduledActionEntry.TABLE_NAME + "." + ScheduledActionEntry.COLUMN_EVENT_UID);
++                + ScheduledActionEntry.TABLE_NAME + "." + ScheduledActionEntry.COLUMN_ACTION_UID);
+ 
+         String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
+         String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_DESCRIPTION + " ASC";
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+index 5ba8b9c9..422005e7 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+@@ -19,16 +19,20 @@
+ import android.app.Activity;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+-import android.os.Build;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.DialogFragment;
+-import android.text.AndroidCharacter;
+ import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import android.widget.*;
++import android.widget.ArrayAdapter;
++import android.widget.Button;
++import android.widget.CheckBox;
++import android.widget.RadioButton;
++import android.widget.Spinner;
++import android.widget.TextView;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/ExporterAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExporterAsyncTask.java
+index 6763aa0d..6e4ddc7b 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExporterAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExporterAsyncTask.java
+@@ -30,6 +30,7 @@
+ import android.support.v4.app.FragmentActivity;
+ import android.util.Log;
+ import android.widget.Toast;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.export.ofx.OfxExporter;
+ import org.gnucash.android.export.qif.QifExporter;
+@@ -38,7 +39,15 @@
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.transaction.dialog.TransactionsDeleteConfirmationDialogFragment;
+ 
+-import java.io.*;
++import java.io.BufferedReader;
++import java.io.BufferedWriter;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.FileReader;
++import java.io.FileWriter;
++import java.io.IOException;
++import java.io.OutputStreamWriter;
+ import java.nio.channels.FileChannel;
+ import java.text.SimpleDateFormat;
+ import java.util.ArrayList;
+diff --git a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+index d317e2e1..9876a7ed 100644
+--- a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -17,27 +17,32 @@
+ 
+ package org.gnucash.android.export.ofx;
+ 
+-import java.io.IOException;
+-import java.io.StringWriter;
+-import java.io.Writer;
+-import java.util.List;
+-
+ import android.preference.PreferenceManager;
++
+ import org.gnucash.android.R;
++import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.Transaction;
+-import org.gnucash.android.db.AccountsDbAdapter;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+ import org.w3c.dom.ProcessingInstruction;
+ 
++import java.io.IOException;
++import java.io.StringWriter;
++import java.io.Writer;
++import java.util.List;
++
+ import javax.xml.parsers.DocumentBuilder;
+ import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.transform.*;
++import javax.xml.transform.OutputKeys;
++import javax.xml.transform.Transformer;
++import javax.xml.transform.TransformerConfigurationException;
++import javax.xml.transform.TransformerException;
++import javax.xml.transform.TransformerFactory;
+ import javax.xml.transform.dom.DOMSource;
+ import javax.xml.transform.stream.StreamResult;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index bf122cf5..b8847019 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -19,8 +19,6 @@
+ import android.content.ContentValues;
+ import android.database.Cursor;
+ 
+-import static org.gnucash.android.db.DatabaseSchema.*;
+-
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportParams;
+@@ -31,6 +29,10 @@
+ import java.math.BigDecimal;
+ import java.util.Currency;
+ 
++import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
++import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
++
+ /**
+  * Exports the accounts and transactions in the database to the QIF format
+  *
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 134e970f..2c7db1db 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -22,8 +22,6 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.db.DatabaseSchema;
+-import static org.gnucash.android.db.DatabaseSchema.*;
+-
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+@@ -31,7 +29,11 @@
+ import org.xmlpull.v1.XmlPullParserFactory;
+ import org.xmlpull.v1.XmlSerializer;
+ 
+-import java.io.*;
++import java.io.BufferedOutputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.OutputStreamWriter;
++import java.io.Writer;
+ import java.math.BigDecimal;
+ import java.sql.Timestamp;
+ import java.util.ArrayList;
+@@ -40,6 +42,10 @@
+ import java.util.UUID;
+ import java.util.zip.GZIPOutputStream;
+ 
++import static org.gnucash.android.db.DatabaseSchema.ScheduledActionEntry;
++import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
++
+ /**
+  * Creates a GnuCash XML representation of the accounts and transactions
+  *
+@@ -376,7 +382,7 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             }
+             //Ignoring GnuCash XML template account: <sx:templ-acct type="guid">2da76df09056540bb3a37e4a04547d82</sx:templ-acct>
+ 
+-            String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_EVENT_UID));
++            String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_TEMPL_ACTION);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_VALUE_GUID, actionUID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_TEMPL_ACTION);
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 3b6ee9dd..d51e520a 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -17,26 +17,30 @@
+ 
+ package org.gnucash.android.importer;
+ 
+-import android.content.Context;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.util.Log;
+-import org.gnucash.android.app.GnuCashApplication;
++
++import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.xml.GncXmlHelper;
+-import org.gnucash.android.model.*;
+-import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
+ import org.xml.sax.Attributes;
+ import org.xml.sax.SAXException;
+ import org.xml.sax.helpers.DefaultHandler;
+ 
+ import java.text.ParseException;
++import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.HashMap;
++import java.util.List;
+ import java.util.Stack;
+ import java.util.regex.Pattern;
+-import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  * Handler for parsing the GnuCash XML file.
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index 59636544..588e3888 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -19,19 +19,21 @@
+ import android.content.Context;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.util.Log;
++
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+ import org.xml.sax.XMLReader;
+ 
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.parsers.SAXParser;
+-import javax.xml.parsers.SAXParserFactory;
+ import java.io.BufferedInputStream;
+-import java.io.PushbackInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
++import java.io.PushbackInputStream;
+ import java.util.zip.GZIPInputStream;
+ 
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.parsers.SAXParser;
++import javax.xml.parsers.SAXParserFactory;
++
+ /**
+  * Importer for Gnucash XML files and GNCA (GnuCash Android) XML files
+  *
+diff --git a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+index a144c078..864d076d 100644
+--- a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -18,11 +18,11 @@
+ import android.annotation.TargetApi;
+ import android.app.Activity;
+ import android.app.ProgressDialog;
+-import android.content.Context;
+ import android.os.AsyncTask;
+ import android.os.Build;
+ import android.util.Log;
+ import android.widget.Toast;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.util.TaskDelegate;
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index c35f09a5..d7ec854a 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -21,7 +21,9 @@
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ 
+-import java.util.*;
++import java.util.ArrayList;
++import java.util.Currency;
++import java.util.List;
+ import java.util.regex.Pattern;
+ 
+ /**
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 91a72e92..60a498f3 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -1,12 +1,6 @@
+ package org.gnucash.android.model;
+ 
+ 
+-import org.gnucash.android.export.xml.GncXmlHelper;
+-import org.w3c.dom.Document;
+-import org.w3c.dom.Element;
+-
+-import java.util.UUID;
+-
+ /**
+  * A split amount in a transaction.
+  * Every transaction is made up of at least two splits (representing a double entry transaction)
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index e6ee2fd3..1a699443 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -24,7 +24,10 @@
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ 
+-import java.util.*;
++import java.util.ArrayList;
++import java.util.Currency;
++import java.util.Date;
++import java.util.List;
+ 
+ /**
+  * Represents a financial transaction, either credit or debit.
+diff --git a/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java b/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
+index ba4b3039..8f0c172f 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
++++ b/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
+@@ -16,18 +16,17 @@
+ 
+ package org.gnucash.android.receivers;
+ 
+-import java.util.Currency;
+-
+-import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.model.Account;
+-import org.gnucash.android.db.AccountsDbAdapter;
+-
+ import android.content.BroadcastReceiver;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.os.Bundle;
+ import android.util.Log;
+ 
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.model.Account;
++
++import java.util.Currency;
++
+ /**
+  * Broadcast receiver responsible for creating {@link Account}s received through intents.
+  * In order to create an <code>Account</code>, you need to broadcast an {@link Intent} with arguments 
+diff --git a/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java b/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+index ee62139b..34974ff8 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
++++ b/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+@@ -15,15 +15,15 @@
+  */
+ package org.gnucash.android.receivers;
+ 
+-import org.gnucash.android.ui.UxArgument;
+-import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+-
+ import android.appwidget.AppWidgetManager;
+ import android.appwidget.AppWidgetProvider;
+ import android.content.Context;
+ import android.content.SharedPreferences.Editor;
+ import android.preference.PreferenceManager;
+ 
++import org.gnucash.android.ui.UxArgument;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
++
+ /**
+  * {@link AppWidgetProvider} which is responsible for managing widgets on the homescreen
+  * It receives broadcasts related to updating and deleting widgets
+diff --git a/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java b/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
+index dd188b14..226a376f 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
++++ b/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
+@@ -22,9 +22,12 @@
+ import android.os.Bundle;
+ import android.util.Log;
+ 
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.model.*;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import java.io.BufferedReader;
+diff --git a/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
+index a2655160..a38e1b84 100644
+--- a/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
+@@ -38,7 +38,7 @@
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.chart.PieChartActivity;
+ import org.gnucash.android.ui.settings.SettingsActivity;
+-import org.gnucash.android.ui.transaction.ScheduledEventsActivity;
++import org.gnucash.android.ui.transaction.ScheduledActionsActivity;
+ 
+ import java.io.FileNotFoundException;
+ import java.io.InputStream;
+@@ -196,10 +196,10 @@ protected void selectItem(int position) {
+                 break;
+ 
+             case 5: { //show scheduled transactions
+-                Intent intent = new Intent(this, ScheduledEventsActivity.class);
++                Intent intent = new Intent(this, ScheduledActionsActivity.class);
+                 intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP);
+-                intent.putExtra(ScheduledEventsActivity.EXTRA_DISPLAY_MODE,
+-                        ScheduledEventsActivity.DisplayMode.TRANSACTION_EVENTS);
++                intent.putExtra(ScheduledActionsActivity.EXTRA_DISPLAY_MODE,
++                        ScheduledActionsActivity.DisplayMode.TRANSACTION_ACTIONS);
+                 startActivity(intent);
+             }
+                 break;
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 32f05bba..9bd2574f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -34,14 +34,21 @@
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.view.inputmethod.InputMethodManager;
+-import android.widget.*;
++import android.widget.AdapterView;
++import android.widget.ArrayAdapter;
++import android.widget.CheckBox;
++import android.widget.CompoundButton;
+ import android.widget.CompoundButton.OnCheckedChangeListener;
++import android.widget.EditText;
++import android.widget.Spinner;
++import android.widget.Toast;
++
+ import com.actionbarsherlock.app.SherlockFragment;
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
++
+ import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.model.Account;
+@@ -53,7 +60,11 @@
+ import org.gnucash.android.ui.colorpicker.ColorSquare;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+-import java.util.*;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Currency;
++import java.util.HashMap;
++import java.util.List;
+ 
+ /**
+  * Fragment used for creating and editing accounts
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 07076059..985d0d05 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -58,7 +58,7 @@
+ import org.gnucash.android.ui.chart.PieChartActivity;
+ import org.gnucash.android.ui.passcode.PassLockActivity;
+ import org.gnucash.android.ui.settings.SettingsActivity;
+-import org.gnucash.android.ui.transaction.ScheduledEventsActivity;
++import org.gnucash.android.ui.transaction.ScheduledActionsActivity;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+ import org.gnucash.android.ui.util.OnAccountClickedListener;
+ import org.gnucash.android.ui.util.Refreshable;
+@@ -382,9 +382,9 @@ public boolean onOptionsItemSelected(MenuItem item) {
+                 return super.onOptionsItemSelected(item);
+ 
+             case R.id.menu_recurring_transactions:
+-                Intent intent = new Intent(this, ScheduledEventsActivity.class);
+-                intent.putExtra(ScheduledEventsActivity.EXTRA_DISPLAY_MODE,
+-                        ScheduledEventsActivity.DisplayMode.TRANSACTION_EVENTS);
++                Intent intent = new Intent(this, ScheduledActionsActivity.class);
++                intent.putExtra(ScheduledActionsActivity.EXTRA_DISPLAY_MODE,
++                        ScheduledActionsActivity.DisplayMode.TRANSACTION_ACTIONS);
+                 startActivity(intent);
+                 return true;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 97c436f5..80ec5239 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -36,8 +36,15 @@
+ import android.view.TouchDelegate;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import android.widget.*;
++import android.widget.AdapterView;
+ import android.widget.AdapterView.OnItemLongClickListener;
++import android.widget.CheckBox;
++import android.widget.ImageButton;
++import android.widget.ListAdapter;
++import android.widget.ListView;
++import android.widget.TextView;
++import android.widget.Toast;
++
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockDialogFragment;
+ import com.actionbarsherlock.app.SherlockListFragment;
+@@ -46,16 +53,19 @@
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
++
+ import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseCursorLoader;
++import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
+-import org.gnucash.android.db.*;
+-import org.gnucash.android.ui.util.AccountBalanceTask;
+-import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+-import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
++import org.gnucash.android.ui.util.AccountBalanceTask;
+ import org.gnucash.android.ui.util.OnAccountClickedListener;
++import org.gnucash.android.ui.util.Refreshable;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ /**
+  * Fragment for displaying the list of accounts in the database
+diff --git a/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorPickerDialog.java b/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorPickerDialog.java
+index add26068..4e3f4495 100644
+--- a/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorPickerDialog.java
++++ b/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorPickerDialog.java
+@@ -23,7 +23,9 @@
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.widget.ProgressBar;
++
+ import com.actionbarsherlock.app.SherlockDialogFragment;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.ui.colorpicker.ColorPickerSwatch.OnColorSelectedListener;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorPickerSwatch.java b/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorPickerSwatch.java
+index 8c0f768d..d7ea7422 100644
+--- a/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorPickerSwatch.java
++++ b/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorPickerSwatch.java
+@@ -18,14 +18,12 @@
+ 
+ 
+ import android.content.Context;
+-import android.graphics.PorterDuff.Mode;
+-import android.graphics.drawable.ColorDrawable;
+ import android.graphics.drawable.Drawable;
+-import android.graphics.drawable.LayerDrawable;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.widget.FrameLayout;
+ import android.widget.ImageView;
++
+ import org.gnucash.android.R;
+ 
+ /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorSquare.java b/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorSquare.java
+index c123988a..34e3539b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorSquare.java
++++ b/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorSquare.java
+@@ -20,6 +20,7 @@
+ import android.graphics.drawable.Drawable;
+ import android.util.AttributeSet;
+ import android.widget.QuickContactBadge;
++
+ import org.gnucash.android.R;
+ 
+ /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorStateDrawable.java b/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorStateDrawable.java
+index 35fd180a..936ebaab 100644
+--- a/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorStateDrawable.java
++++ b/app/src/main/java/org/gnucash/android/ui/colorpicker/ColorStateDrawable.java
+@@ -16,10 +16,10 @@
+ 
+ package org.gnucash.android.ui.colorpicker;
+ 
+-        import android.graphics.Color;
+-        import android.graphics.PorterDuff;
+-        import android.graphics.drawable.Drawable;
+-        import android.graphics.drawable.LayerDrawable;
++import android.graphics.Color;
++import android.graphics.PorterDuff;
++import android.graphics.drawable.Drawable;
++import android.graphics.drawable.LayerDrawable;
+ 
+ /**
+  * A drawable which sets its color filter to a color specified by the user, and changes to a
+diff --git a/app/src/main/java/org/gnucash/android/ui/colorpicker/HsvColorComparator.java b/app/src/main/java/org/gnucash/android/ui/colorpicker/HsvColorComparator.java
+index 17b3d408..e504dee3 100644
+--- a/app/src/main/java/org/gnucash/android/ui/colorpicker/HsvColorComparator.java
++++ b/app/src/main/java/org/gnucash/android/ui/colorpicker/HsvColorComparator.java
+@@ -15,7 +15,9 @@
+  */
+ 
+ package org.gnucash.android.ui.colorpicker;
++
+ import android.graphics.Color;
++
+ import java.util.Comparator;
+ 
+ /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/AboutPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/AboutPreferenceFragment.java
+index 717d5836..381edfb7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/AboutPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/AboutPreferenceFragment.java
+@@ -16,8 +16,6 @@
+ 
+ package org.gnucash.android.ui.settings;
+ 
+-import org.gnucash.android.R;
+-
+ import android.annotation.TargetApi;
+ import android.content.SharedPreferences;
+ import android.os.Bundle;
+@@ -27,6 +25,8 @@
+ 
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
++
++import org.gnucash.android.R;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ 
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
+index 91e66491..f1d73baf 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
+@@ -24,8 +24,8 @@
+ import android.content.DialogInterface;
+ import android.os.Bundle;
+ import android.widget.Toast;
++
+ import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+index b99892e6..20554a4b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+@@ -24,6 +24,7 @@
+ import android.content.DialogInterface;
+ import android.os.Bundle;
+ import android.widget.Toast;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
+index a60a99ef..aac7aea9 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
+@@ -16,20 +16,20 @@
+ 
+ package org.gnucash.android.ui.settings;
+ 
+-import org.gnucash.android.R;
+-import org.gnucash.android.model.Money;
+-
+ import android.annotation.TargetApi;
+ import android.content.SharedPreferences;
+ import android.os.Bundle;
+ import android.preference.Preference;
++import android.preference.Preference.OnPreferenceChangeListener;
+ import android.preference.PreferenceFragment;
+ import android.preference.PreferenceManager;
+-import android.preference.Preference.OnPreferenceChangeListener;
+ 
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
+ 
++import org.gnucash.android.R;
++import org.gnucash.android.model.Money;
++
+ 
+ /**
+  * Fragment for displaying general preferences
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
+index 0922554e..29e2cb36 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
+@@ -23,8 +23,10 @@
+ import android.preference.Preference.OnPreferenceChangeListener;
+ import android.preference.PreferenceFragment;
+ import android.preference.PreferenceManager;
++
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
++
+ import org.gnucash.android.R;
+ 
+ /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledEventsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsActivity.java
+similarity index 88%
+rename from app/src/main/java/org/gnucash/android/ui/transaction/ScheduledEventsActivity.java
+rename to app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsActivity.java
+index ada3f79b..013fec49 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledEventsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsActivity.java
+@@ -28,13 +28,13 @@
+  * Activity for displaying scheduled actions
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class ScheduledEventsActivity extends PassLockActivity {
++public class ScheduledActionsActivity extends PassLockActivity {
+ 
+-    public enum DisplayMode {ALL_EVENTS, TRANSACTION_EVENTS, EXPORT_EVENTS}
++    public enum DisplayMode {ALL_ACTIONS, TRANSACTION_ACTIONS, EXPORT_ACTIONS}
+ 
+     public static final String EXTRA_DISPLAY_MODE = "org.gnucash.android.extra.DISPLAY_MODE";
+ 
+-    private DisplayMode mDisplayMode = DisplayMode.ALL_EVENTS;
++    private DisplayMode mDisplayMode = DisplayMode.ALL_ACTIONS;
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+@@ -46,15 +46,15 @@ protected void onCreate(Bundle savedInstanceState) {
+             throw new MissingFormatArgumentException("Missing argument for which kind of scheduled events to display");
+ 
+         switch (mDisplayMode){
+-            case ALL_EVENTS:
++            case ALL_ACTIONS:
+                 showAllScheduledEventsFragment();
+                 break;
+ 
+-            case TRANSACTION_EVENTS:
++            case TRANSACTION_ACTIONS:
+                 showScheduledTransactionsFragment();
+                 break;
+ 
+-            case EXPORT_EVENTS:
++            case EXPORT_ACTIONS:
+ 
+                 break;
+         }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 6af4b081..f96a66cc 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -16,32 +16,6 @@
+ 
+ package org.gnucash.android.ui.transaction;
+ 
+-import java.math.BigDecimal;
+-import java.math.RoundingMode;
+-import java.text.DateFormat;
+-import java.text.ParseException;
+-import java.util.*;
+-
+-import android.support.v4.app.FragmentManager;
+-import android.text.format.Time;
+-import android.text.Editable;
+-import android.widget.*;
+-import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence;
+-import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrenceFormatter;
+-import com.doomonafireball.betterpickers.recurrencepicker.RecurrencePickerDialog;
+-import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.*;
+-import org.gnucash.android.model.*;
+-import org.gnucash.android.ui.transaction.dialog.DatePickerDialogFragment;
+-import org.gnucash.android.ui.transaction.dialog.SplitEditorDialogFragment;
+-import org.gnucash.android.ui.transaction.dialog.TimePickerDialogFragment;
+-import org.gnucash.android.ui.UxArgument;
+-import org.gnucash.android.ui.util.AmountInputFormatter;
+-import org.gnucash.android.ui.util.RecurrenceParser;
+-import org.gnucash.android.ui.util.TransactionTypeToggleButton;
+-import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+-
+ import android.app.DatePickerDialog;
+ import android.app.DatePickerDialog.OnDateSetListener;
+ import android.app.TimePickerDialog;
+@@ -52,21 +26,71 @@
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.DialogFragment;
++import android.support.v4.app.FragmentManager;
+ import android.support.v4.app.FragmentTransaction;
+ import android.support.v4.widget.SimpleCursorAdapter;
++import android.text.Editable;
++import android.text.format.Time;
+ import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.view.inputmethod.InputMethodManager;
++import android.widget.AdapterView;
++import android.widget.AutoCompleteTextView;
++import android.widget.Button;
++import android.widget.CheckBox;
++import android.widget.DatePicker;
++import android.widget.EditText;
++import android.widget.FilterQueryProvider;
++import android.widget.Spinner;
++import android.widget.TextView;
++import android.widget.TimePicker;
++import android.widget.Toast;
+ 
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockFragment;
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
++import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence;
++import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrenceFormatter;
++import com.doomonafireball.betterpickers.recurrencepicker.RecurrencePickerDialog;
++
++import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.ui.UxArgument;
++import org.gnucash.android.ui.transaction.dialog.DatePickerDialogFragment;
++import org.gnucash.android.ui.transaction.dialog.SplitEditorDialogFragment;
++import org.gnucash.android.ui.transaction.dialog.TimePickerDialogFragment;
++import org.gnucash.android.ui.util.AmountInputFormatter;
++import org.gnucash.android.ui.util.RecurrenceParser;
++import org.gnucash.android.ui.util.TransactionTypeToggleButton;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
++import java.math.BigDecimal;
++import java.math.RoundingMode;
++import java.text.DateFormat;
++import java.text.ParseException;
++import java.util.ArrayList;
++import java.util.Calendar;
++import java.util.Currency;
++import java.util.Date;
++import java.util.GregorianCalendar;
++import java.util.List;
++import java.util.Locale;
++
+ /**
+  * Fragment for creating or editing transactions
+  * @author Ngewi Fet <ngewif@gmail.com>
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 2a8c1ed2..7804cc91 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -36,24 +36,31 @@
+ import android.view.TouchDelegate;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import android.widget.*;
++import android.widget.AdapterView;
++import android.widget.CheckBox;
++import android.widget.CompoundButton;
+ import android.widget.CompoundButton.OnCheckedChangeListener;
++import android.widget.ListView;
++import android.widget.TextView;
++
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockListFragment;
+ import com.actionbarsherlock.view.ActionMode;
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
++
+ import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.*;
++import org.gnucash.android.db.DatabaseCursorLoader;
++import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Money;
++import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.transaction.dialog.BulkMoveDialogFragment;
+ import org.gnucash.android.ui.util.AccountBalanceTask;
++import org.gnucash.android.ui.util.OnTransactionClickedListener;
+ import org.gnucash.android.ui.util.Refreshable;
+-import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+-import org.gnucash.android.ui.util.OnTransactionClickedListener;
+ 
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+index d9b09e5e..465743f5 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+@@ -16,16 +16,6 @@
+ 
+ package org.gnucash.android.ui.transaction.dialog;
+ 
+-import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.DatabaseSchema;
+-import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.ui.UxArgument;
+-import org.gnucash.android.ui.transaction.TransactionsActivity;
+-import org.gnucash.android.ui.util.Refreshable;
+-import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+-
+ import android.database.Cursor;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+@@ -37,6 +27,15 @@
+ import android.widget.Button;
+ import android.widget.Spinner;
+ import android.widget.Toast;
++
++import org.gnucash.android.R;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.ui.UxArgument;
++import org.gnucash.android.ui.transaction.TransactionsActivity;
++import org.gnucash.android.ui.util.Refreshable;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/DatePickerDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/DatePickerDialogFragment.java
+index 1707aa99..f2a70e9d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/DatePickerDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/DatePickerDialogFragment.java
+@@ -16,16 +16,15 @@
+ 
+ package org.gnucash.android.ui.transaction.dialog;
+ 
+-import java.util.Calendar;
+-import java.util.Date;
+-import java.util.GregorianCalendar;
+-
+ import android.app.DatePickerDialog;
+ import android.app.DatePickerDialog.OnDateSetListener;
+ import android.app.Dialog;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+ 
++import java.util.Calendar;
++import java.util.GregorianCalendar;
++
+ /**
+  * Fragment for displaying a date picker dialog
+  * @author Ngewi Fet <ngewif@gmail.com>
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 3dbaecbf..0f9f0b71 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -25,13 +25,24 @@
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.view.WindowManager;
+-import android.widget.*;
++import android.widget.AdapterView;
++import android.widget.Button;
++import android.widget.EditText;
++import android.widget.ImageButton;
++import android.widget.LinearLayout;
++import android.widget.Spinner;
++import android.widget.TextView;
++import android.widget.Toast;
++
+ import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.SplitsDbAdapter;
+-import org.gnucash.android.model.*;
++import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TimePickerDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TimePickerDialogFragment.java
+index 6ad72c50..700f3865 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TimePickerDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TimePickerDialogFragment.java
+@@ -15,15 +15,15 @@
+  */
+ package org.gnucash.android.ui.transaction.dialog;
+ 
+-import java.util.Calendar;
+-import java.util.GregorianCalendar;
+-
+ import android.app.Dialog;
+ import android.app.TimePickerDialog;
+ import android.app.TimePickerDialog.OnTimeSetListener;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+ 
++import java.util.Calendar;
++import java.util.GregorianCalendar;
++
+ /**
+  * Fragment for displaying a time choose dialog
+  * @author Ngewi Fet <ngewif@gmail.com>
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
+index c6816689..e7549048 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
+@@ -16,6 +16,13 @@
+  */
+ package org.gnucash.android.ui.transaction.dialog;
+ 
++import android.app.AlertDialog;
++import android.app.Dialog;
++import android.content.DialogInterface;
++import android.os.Bundle;
++
++import com.actionbarsherlock.app.SherlockDialogFragment;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+@@ -24,13 +31,6 @@
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.account.AccountsListFragment;
+-
+-import android.app.AlertDialog;
+-import android.app.Dialog;
+-import android.content.DialogInterface;
+-import android.os.Bundle;
+-
+-import com.actionbarsherlock.app.SherlockDialogFragment;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import java.util.ArrayList;
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java b/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
+index 32dd4240..4317f1d7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
+@@ -21,6 +21,7 @@
+ import android.os.AsyncTask;
+ import android.util.Log;
+ import android.widget.TextView;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/AmountInputFormatter.java b/app/src/main/java/org/gnucash/android/ui/util/AmountInputFormatter.java
+index abead0c4..8b711150 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/AmountInputFormatter.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/AmountInputFormatter.java
+@@ -18,6 +18,7 @@
+ import android.text.Editable;
+ import android.text.TextWatcher;
+ import android.widget.EditText;
++
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ 
+ import java.math.BigDecimal;
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index e40530be..70c8c16d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -17,7 +17,9 @@
+ package org.gnucash.android.ui.util;
+ 
+ import android.text.format.Time;
++
+ import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence;
++
+ import org.gnucash.android.model.ScheduledAction;
+ 
+ import java.util.ArrayList;
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/TransactionTypeToggleButton.java b/app/src/main/java/org/gnucash/android/ui/util/TransactionTypeToggleButton.java
+index 022141e6..5db2ee27 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/TransactionTypeToggleButton.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/TransactionTypeToggleButton.java
+@@ -22,6 +22,7 @@
+ import android.widget.EditText;
+ import android.widget.TextView;
+ import android.widget.ToggleButton;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Transaction;
+diff --git a/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 856295a2..cafc498a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -16,18 +16,6 @@
+ 
+ package org.gnucash.android.ui.widget;
+ 
+-import java.util.Locale;
+-
+-import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.model.Account;
+-import org.gnucash.android.model.Money;
+-import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.receivers.TransactionAppWidgetProvider;
+-import org.gnucash.android.ui.UxArgument;
+-import org.gnucash.android.ui.account.AccountsActivity;
+-import org.gnucash.android.ui.transaction.TransactionsActivity;
+-
+ import android.app.Activity;
+ import android.app.PendingIntent;
+ import android.appwidget.AppWidgetManager;
+@@ -46,8 +34,19 @@
+ import android.widget.RemoteViews;
+ import android.widget.Spinner;
+ import android.widget.Toast;
++
++import org.gnucash.android.R;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.receivers.TransactionAppWidgetProvider;
++import org.gnucash.android.ui.UxArgument;
++import org.gnucash.android.ui.account.AccountsActivity;
++import org.gnucash.android.ui.transaction.TransactionsActivity;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
++import java.util.Locale;
++
+ /**
+  * Activity for configuration which account to display on a widget.
+  * The activity is opened each time a widget is added to the homescreen
+diff --git a/app/src/main/java/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java b/app/src/main/java/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
+index 90e7f854..dbd779b1 100644
+--- a/app/src/main/java/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
++++ b/app/src/main/java/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
+@@ -22,9 +22,7 @@
+ import android.text.TextUtils;
+ import android.view.View;
+ import android.widget.TextView;
+-import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.DatabaseAdapter;
+-import org.gnucash.android.db.DatabaseHelper;
++
+ import org.gnucash.android.db.DatabaseSchema;
+ 
+ /**

@@ -1,0 +1,484 @@
+From 314a9d66f0644f65edaa99321a357a0432ce7c03 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 19 Sep 2014 13:49:46 +0200
+Subject: [PATCH] Re-implements old method of GncXML exports to suppport
+ database migrations from version 1.3.x of the app
+
+---
+ app/src/org/gnucash/android/db/DatabaseHelper.java |   4 +-
+ .../org/gnucash/android/db/MigrationHelper.java    |  31 +++--
+ .../gnucash/android/export/xml/GncXmlExporter.java | 128 ++++++++++++++++++++-
+ app/src/org/gnucash/android/model/Account.java     |  71 +++++++++++-
+ app/src/org/gnucash/android/model/Split.java       |  39 +++++++
+ app/src/org/gnucash/android/model/Transaction.java |  67 ++++++++++-
+ 6 files changed, 310 insertions(+), 30 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index f44bbdc6..7a95bd6c 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -16,7 +16,6 @@
+ 
+ package org.gnucash.android.db;
+ 
+-import android.app.ProgressDialog;
+ import android.content.ContentValues;
+ import android.content.Context;
+ import android.database.Cursor;
+@@ -24,7 +23,6 @@
+ import android.database.sqlite.SQLiteOpenHelper;
+ import android.util.Log;
+ import android.widget.Toast;
+-import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.model.AccountType;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.*;
+@@ -234,7 +232,7 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ //                }
+ 
+                 try {
+-                    String filepath = MigrationHelper.exportDatabase(db, ExportFormat.GNC_XML);
++                    String filepath = MigrationHelper.exportGnucashXML(db);
+ 
+                     dropAllDatabaseTables(db);
+                     createDatabaseTables(db);
+diff --git a/app/src/org/gnucash/android/db/MigrationHelper.java b/app/src/org/gnucash/android/db/MigrationHelper.java
+index 860746b5..61fa8175 100644
+--- a/app/src/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/org/gnucash/android/db/MigrationHelper.java
+@@ -23,11 +23,11 @@
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+-import org.gnucash.android.export.qif.QifExporter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.model.AccountType;
+ 
++import javax.xml.parsers.ParserConfigurationException;
+ import java.io.*;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
+@@ -112,34 +112,31 @@ private static String getGnuCashRootAccountUID(SQLiteDatabase db){
+      * Exports the database to a GnuCash XML file and returns the path to the file
+      * @return String with exported GnuCash XML
+      */
+-    static String exportDatabase(SQLiteDatabase db, ExportFormat format) throws IOException {
++    static String exportGnucashXML(SQLiteDatabase db) throws IOException {
+         Log.i(LOG_TAG, "Exporting database to GnuCash XML");
+-        ExportParams exportParams = new ExportParams(format);
++        ExportParams exportParams = new ExportParams(ExportFormat.GNC_XML);
+         exportParams.setExportAllTransactions(true);
+         exportParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
+         exportParams.setDeleteTransactionsAfterExport(false);
+ 
+         new File(Environment.getExternalStorageDirectory() + "/gnucash/").mkdirs();
+         exportParams.setTargetFilepath(Environment.getExternalStorageDirectory()
+-                + "/gnucash/" + Exporter.buildExportFilename(format));
++                + "/gnucash/" + Exporter.buildExportFilename(ExportFormat.GNC_XML));
+ 
+         //we do not use the ExporterAsyncTask here because we want to use an already open db
+-        Exporter exporter = null;
+-        switch (format){
+-            case QIF:
+-                exporter = new QifExporter(exportParams, db);
+-                break;
+-            case GNC_XML:
+-            default:
+-                exporter = new GncXmlExporter(exportParams, db);
+-        }
+-
++        GncXmlExporter exporter = new GncXmlExporter(exportParams, db);
+         BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+                 new FileOutputStream(exportParams.getTargetFilepath()), "UTF-8"));
+-        exporter.generateExport(writer);
++        try {
++            String xml = exporter.generateXML();
++            writer.write(xml);
++        } catch (ParserConfigurationException e) {
++            e.printStackTrace();
++        } finally {
++            writer.flush();
++            writer.close();
++        }
+ 
+-        writer.flush();
+-        writer.close();
+         return exportParams.getTargetFilepath();
+     }
+ 
+diff --git a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+index 9922ff63..5601d02e 100644
+--- a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -27,14 +27,22 @@
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Transaction;
++import org.w3c.dom.Document;
++import org.w3c.dom.Element;
+ import org.xmlpull.v1.XmlPullParserFactory;
+ import org.xmlpull.v1.XmlSerializer;
+ 
+-import java.io.BufferedOutputStream;
+-import java.io.FileOutputStream;
+-import java.io.IOException;
+-import java.io.OutputStreamWriter;
+-import java.io.Writer;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.DocumentBuilderFactory;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.transform.OutputKeys;
++import javax.xml.transform.Transformer;
++import javax.xml.transform.TransformerFactory;
++import javax.xml.transform.dom.DOMSource;
++import javax.xml.transform.stream.StreamResult;
++import java.io.*;
+ import java.math.BigDecimal;
+ import java.util.ArrayList;
+ import java.util.Currency;
+@@ -394,4 +402,114 @@ public static void createBackup(){
+             Log.e("GncXmlExporter", "Error creating backup", e);
+         }
+     }
++
++    /**
++     * Generate GnuCash XML by loading the accounts and transactions from the database and exporting each one.
++     * This method consumes a lot of memory and is slow, but exists for database migrations for backwards compatibility.
++     * <p>The normal exporter interface should be used to generate GncXML files</p>
++     * @return String with the generated XML
++     * @throws ParserConfigurationException if there was an error when generating the XML
++     * @deprecated Use the {@link #generateExport(java.io.Writer)} to generate XML
++     */
++    public String generateXML() throws ParserConfigurationException {
++        DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
++        DocumentBuilder documentBuilder = docFactory.newDocumentBuilder();
++
++        Document document = documentBuilder.newDocument();
++        document.setXmlVersion("1.0");
++        document.setXmlStandalone(true);
++
++        Element rootElement = document.createElement(GncXmlHelper.TAG_ROOT);
++        rootElement.setAttribute("xmlns:gnc",    "http://www.gnucash.org/XML/gnc");
++        rootElement.setAttribute("xmlns:act",    "http://www.gnucash.org/XML/act");
++        rootElement.setAttribute("xmlns:book",   "http://www.gnucash.org/XML/book");
++        rootElement.setAttribute("xmlns:cd",     "http://www.gnucash.org/XML/cd");
++        rootElement.setAttribute("xmlns:cmdty",  "http://www.gnucash.org/XML/cmdty");
++        rootElement.setAttribute("xmlns:price",  "http://www.gnucash.org/XML/price");
++        rootElement.setAttribute("xmlns:slot",   "http://www.gnucash.org/XML/slot");
++        rootElement.setAttribute("xmlns:split",  "http://www.gnucash.org/XML/split");
++        rootElement.setAttribute("xmlns:trn",    "http://www.gnucash.org/XML/trn");
++        rootElement.setAttribute("xmlns:ts",     "http://www.gnucash.org/XML/ts");
++
++        Element bookCountNode = document.createElement(GncXmlHelper.TAG_COUNT_DATA);
++        bookCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, GncXmlHelper.ATTR_VALUE_BOOK);
++        bookCountNode.appendChild(document.createTextNode("1"));
++        rootElement.appendChild(bookCountNode);
++
++        Element bookNode = document.createElement(GncXmlHelper.TAG_BOOK);
++        bookNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
++        rootElement.appendChild(bookNode);
++
++        Element bookIdNode = document.createElement(GncXmlHelper.TAG_BOOK_ID);
++        bookIdNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++        bookIdNode.appendChild(document.createTextNode(UUID.randomUUID().toString().replaceAll("-", "")));
++        bookNode.appendChild(bookIdNode);
++
++        Element cmdtyCountData = document.createElement(GncXmlHelper.TAG_COUNT_DATA);
++        cmdtyCountData.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "commodity");
++        cmdtyCountData.appendChild(document.createTextNode(String.valueOf(mAccountsDbAdapter.getCurrencies().size())));
++        bookNode.appendChild(cmdtyCountData);
++
++        Element accountCountNode = document.createElement(GncXmlHelper.TAG_COUNT_DATA);
++        accountCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "account");
++        int accountCount = mAccountsDbAdapter.getTotalAccountCount();
++        accountCountNode.appendChild(document.createTextNode(String.valueOf(accountCount)));
++        bookNode.appendChild(accountCountNode);
++
++        Element transactionCountNode = document.createElement(GncXmlHelper.TAG_COUNT_DATA);
++        transactionCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "transaction");
++        int transactionCount = mTransactionsDbAdapter.getTotalTransactionsCount();
++        transactionCountNode.appendChild(document.createTextNode(String.valueOf(transactionCount)));
++        bookNode.appendChild(transactionCountNode);
++
++        String rootAccountUID = mAccountsDbAdapter.getGnuCashRootAccountUID();
++        Account rootAccount = mAccountsDbAdapter.getAccount(rootAccountUID);
++        if (rootAccount != null){
++            rootAccount.toGncXml(document, bookNode);
++        }
++        Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
++
++        //create accounts hierarchically by ordering by full name
++        if (accountsCursor != null){
++            while (accountsCursor.moveToNext()){
++                long id = accountsCursor.getLong(accountsCursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry._ID));
++                Account account = mAccountsDbAdapter.getAccount(id);
++                account.toGncXml(document, bookNode);
++            }
++            accountsCursor.close();
++        }
++
++        //more memory efficient approach than loading all transactions into memory first
++        Cursor transactionsCursor = mTransactionsDbAdapter.fetchAllRecords();
++        if (transactionsCursor != null){
++            while (transactionsCursor.moveToNext()){
++                Transaction transaction = mTransactionsDbAdapter.buildTransactionInstance(transactionsCursor);
++                transaction.toGncXml(document, bookNode);
++            }
++            transactionsCursor.close();
++        }
++
++        document.appendChild(rootElement);
++        mAccountsDbAdapter.close();
++        mTransactionsDbAdapter.close();
++
++        StringWriter stringWriter = new StringWriter();
++        try {
++            TransformerFactory transformerFactory = TransformerFactory.newInstance();
++
++            Transformer transformer = transformerFactory.newTransformer();
++
++            transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
++            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
++            DOMSource source = new DOMSource(document);
++            StreamResult result = new StreamResult(stringWriter);
++
++            transformer.transform(source, result);
++            stringWriter.flush();
++        } catch (Exception e) {
++            e.printStackTrace();
++            throw new ExporterException(mParameters, e);
++        }
++        return stringWriter.toString();
++    }
+ }
+diff --git a/app/src/org/gnucash/android/model/Account.java b/app/src/org/gnucash/android/model/Account.java
+index c51e9351..32244e8a 100644
+--- a/app/src/org/gnucash/android/model/Account.java
++++ b/app/src/org/gnucash/android/model/Account.java
+@@ -16,10 +16,7 @@
+ 
+ package org.gnucash.android.model;
+ 
+-import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.export.ofx.OfxHelper;
+-import org.gnucash.android.export.qif.QifHelper;
+ import org.gnucash.android.export.xml.GncXmlHelper;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+@@ -541,4 +538,72 @@ public void toOfx(Document doc, Element parent, boolean exportAllTransactions){
+ 		parent.appendChild(statementTransactions);
+ 				
+ 	}
++
++    /**
++     * Method which generates the GnuCash XML DOM for this account
++     * @param doc {@link org.w3c.dom.Document} for creating nodes
++     * @param rootNode {@link org.w3c.dom.Element} node to which to attach the XML
++     * @deprecated Use the {@link org.gnucash.android.export.xml.GncXmlExporter} to generate XML
++     */
++    public void toGncXml(Document doc, Element rootNode) {
++        Element nameNode = doc.createElement(GncXmlHelper.TAG_NAME);
++        nameNode.appendChild(doc.createTextNode(mName));
++
++        Element idNode = doc.createElement(GncXmlHelper.TAG_ACCT_ID);
++        idNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++        idNode.appendChild(doc.createTextNode(mUID));
++
++        Element typeNode = doc.createElement(GncXmlHelper.TAG_TYPE);
++        typeNode.appendChild(doc.createTextNode(mAccountType.name()));
++
++        Element commodityNode = doc.createElement(GncXmlHelper.TAG_COMMODITY);
++        Element cmdtySpacenode = doc.createElement(GncXmlHelper.TAG_COMMODITY_SPACE);
++        cmdtySpacenode.appendChild(doc.createTextNode("ISO4217"));
++        commodityNode.appendChild(cmdtySpacenode);
++        Element cmdtyIdNode = doc.createElement(GncXmlHelper.TAG_COMMODITY_ID);
++        cmdtyIdNode.appendChild(doc.createTextNode(mCurrency.getCurrencyCode()));
++        commodityNode.appendChild(cmdtyIdNode);
++
++        Element commodityScuNode = doc.createElement(GncXmlHelper.TAG_COMMODITY_SCU);
++        int fractionDigits = mCurrency.getDefaultFractionDigits();
++        commodityScuNode.appendChild(doc.createTextNode(Integer.toString((int) Math.pow(10, fractionDigits))));
++
++        Element descriptionNode = doc.createElement(GncXmlHelper.TAG_ACCT_DESCRIPTION);
++        descriptionNode.appendChild(doc.createTextNode(mName));
++
++        Element acctSlotsNode = doc.createElement(GncXmlHelper.TAG_ACT_SLOTS);
++        acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_PLACEHOLDER,
++                Boolean.toString(mIsPlaceholderAccount), GncXmlHelper.ATTR_VALUE_STRING));
++
++        if (mColorCode != null && mColorCode.trim().length() > 0){
++            acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_COLOR, mColorCode, GncXmlHelper.ATTR_VALUE_STRING));
++        }
++
++        if (mDefaultTransferAccountUID != null && mDefaultTransferAccountUID.trim().length() > 0){
++            acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_DEFAULT_TRANSFER_ACCOUNT, mDefaultTransferAccountUID, "guid"));
++        }
++
++        acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc,
++                GncXmlHelper.KEY_FAVORITE, Boolean.toString(mIsFavorite), GncXmlHelper.ATTR_VALUE_STRING));
++
++        Element accountNode = doc.createElement(GncXmlHelper.TAG_ACCOUNT);
++        accountNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
++        accountNode.appendChild(nameNode);
++        accountNode.appendChild(idNode);
++        accountNode.appendChild(typeNode);
++        accountNode.appendChild(commodityNode);
++        accountNode.appendChild(commodityScuNode);
++        accountNode.appendChild(descriptionNode);
++        accountNode.appendChild(acctSlotsNode);
++
++
++        if (mParentAccountUID != null && mParentAccountUID.trim().length() > 0){
++            Element parentAccountNode = doc.createElement(GncXmlHelper.TAG_PARENT_UID);
++            parentAccountNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++            parentAccountNode.appendChild(doc.createTextNode(mParentAccountUID));
++            accountNode.appendChild(parentAccountNode);
++        }
++
++        rootNode.appendChild(accountNode);
++    }
+ }
+diff --git a/app/src/org/gnucash/android/model/Split.java b/app/src/org/gnucash/android/model/Split.java
+index e62cb508..9c99fb8e 100644
+--- a/app/src/org/gnucash/android/model/Split.java
++++ b/app/src/org/gnucash/android/model/Split.java
+@@ -172,6 +172,45 @@ public String toCsv(){
+     }
+ 
+     /**
++     * Creates a GnuCash XML representation of this split
++     * @param doc XML {@link org.w3c.dom.Document} for creating the nodes
++     * @param rootNode Parent node to append the split XML to
++     * @deprecated Use the {@link org.gnucash.android.export.xml.GncXmlExporter} to generate XML
++     */
++    public void toGncXml(Document doc, Element rootNode) {
++        Element idNode = doc.createElement(GncXmlHelper.TAG_SPLIT_ID);
++        idNode.setAttribute("type", "guid");
++        idNode.appendChild(doc.createTextNode(mUID));
++
++        Element memoNode = doc.createElement(GncXmlHelper.TAG_SPLIT_MEMO);
++        if (mMemo != null)
++            memoNode.appendChild(doc.createTextNode(mMemo));
++
++        Element stateNode = doc.createElement(GncXmlHelper.TAG_RECONCILED_STATE);
++        stateNode.appendChild(doc.createTextNode("n"));
++
++        Element valueNode = doc.createElement(GncXmlHelper.TAG_SPLIT_VALUE);
++        valueNode.appendChild(doc.createTextNode(GncXmlHelper.formatMoney(this)));
++
++        Element quantityNode = doc.createElement(GncXmlHelper.TAG_SPLIT_QUANTITY);
++        quantityNode.appendChild(doc.createTextNode(GncXmlHelper.formatMoney(this)));
++
++        Element accountNode = doc.createElement(GncXmlHelper.TAG_SPLIT_ACCOUNT);
++        accountNode.setAttribute("type", "guid");
++        accountNode.appendChild(doc.createTextNode(mAccountUID));
++
++        Element splitNode = doc.createElement(GncXmlHelper.TAG_TRN_SPLIT);
++        splitNode.appendChild(idNode);
++        splitNode.appendChild(memoNode);
++        splitNode.appendChild(stateNode);
++        splitNode.appendChild(valueNode);
++        splitNode.appendChild(quantityNode);
++        splitNode.appendChild(accountNode);
++
++        rootNode.appendChild(splitNode);
++    }
++
++    /**
+      * Parses a split which is in the format "<amount>;<currency_code>;<account_uid>;<type>;<memo>".
+      * The split input string is the same produced by the {@link Split#toCsv()} method
+      *
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index 3c14e1b7..ecdfe1ae 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -20,13 +20,11 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.export.ofx.OfxHelper;
+-import org.gnucash.android.export.qif.QifHelper;
+ import org.gnucash.android.export.xml.GncXmlHelper;
+ import org.gnucash.android.model.Account.OfxAccountType;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ 
+-import java.math.BigDecimal;
+ import java.util.*;
+ 
+ /**
+@@ -515,6 +513,71 @@ public Element toOFX(Document doc, String accountUID){
+ 	}
+ 
+     /**
++     * Generate the GncXML for the transaction and append to the DOM document
++     * @param doc XML document to which transaction should be added
++     * @param rootElement Parent node for the XML
++     * @deprecated Use the {@link org.gnucash.android.export.xml.GncXmlExporter} to generate XML
++     */
++    public void toGncXml(Document doc, Element rootElement) {
++        Element idNode = doc.createElement(GncXmlHelper.TAG_TRX_ID);
++        idNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++        idNode.appendChild(doc.createTextNode(mUID));
++
++        Element currencyNode = doc.createElement(GncXmlHelper.TAG_TRX_CURRENCY);
++        Element cmdtySpacenode = doc.createElement(GncXmlHelper.TAG_COMMODITY_SPACE);
++        cmdtySpacenode.appendChild(doc.createTextNode("ISO4217"));
++        currencyNode.appendChild(cmdtySpacenode);
++        Element cmdtyIdNode = doc.createElement(GncXmlHelper.TAG_COMMODITY_ID);
++        cmdtyIdNode.appendChild(doc.createTextNode(mCurrencyCode));
++        currencyNode.appendChild(cmdtyIdNode);
++
++        Element datePostedNode = doc.createElement(GncXmlHelper.TAG_DATE_POSTED);
++        Element datePNode = doc.createElement(GncXmlHelper.TAG_DATE);
++        datePNode.appendChild(doc.createTextNode(GncXmlHelper.formatDate(mTimestamp)));
++        datePostedNode.appendChild(datePNode);
++
++        Element dateEneteredNode = doc.createElement(GncXmlHelper.TAG_DATE_ENTERED);
++        Element dateENode = doc.createElement(GncXmlHelper.TAG_DATE);
++        dateENode.appendChild(doc.createTextNode(GncXmlHelper.formatDate(mTimestamp)));
++        dateEneteredNode.appendChild(dateENode);
++
++        Element descriptionNode = doc.createElement(GncXmlHelper.TAG_TRN_DESCRIPTION);
++        if (mDescription != null) {
++            descriptionNode.appendChild(doc.createTextNode(mDescription));
++        }
++
++        Element trnSlotsNode = doc.createElement(GncXmlHelper.TAG_TRN_SLOTS);
++        if (mNotes != null && mNotes.length() > 0) {
++            trnSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_NOTES, mNotes, GncXmlHelper.ATTR_VALUE_STRING));
++            //TODO: Consider adding future transactions date as slot here too
++        }
++        Element trnSplits = doc.createElement(GncXmlHelper.TAG_TRN_SPLITS);
++        for (Split split : mSplitList) {
++            split.toGncXml(doc, trnSplits);
++        }
++
++        Element transactionNode = doc.createElement(GncXmlHelper.TAG_TRANSACTION);
++        transactionNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
++        transactionNode.appendChild(idNode);
++        transactionNode.appendChild(currencyNode);
++        transactionNode.appendChild(datePostedNode);
++        transactionNode.appendChild(dateEneteredNode);
++        transactionNode.appendChild(descriptionNode);
++        if (mNotes != null && mNotes.length() > 0){
++            transactionNode.appendChild(trnSlotsNode);
++        }
++        //TODO: Improve xml compatibilty with desktop for scheduled actions
++        if (mRecurrencePeriod != 0) {
++            Element recurrenceNode = doc.createElement(GncXmlHelper.TAG_RECURRENCE_PERIOD);
++            recurrenceNode.appendChild(doc.createTextNode(String.valueOf(mRecurrencePeriod)));
++            transactionNode.appendChild(recurrenceNode);
++        }
++        transactionNode.appendChild(trnSplits);
++
++        rootElement.appendChild(transactionNode);
++    }
++
++    /**
+      * Creates an Intent with arguments from the <code>transaction</code>.
+      * This intent can be broadcast to create a new transaction
+      * @param transaction Transaction used to create intent

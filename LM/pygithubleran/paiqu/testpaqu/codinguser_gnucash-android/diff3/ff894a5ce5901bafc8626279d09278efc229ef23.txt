@@ -1,0 +1,475 @@
+From ff894a5ce5901bafc8626279d09278efc229ef23 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 19 Sep 2016 17:48:51 +0200
+Subject: [PATCH] Adds multibook support for the homescreen widget
+
+When adding a widget, there is now an option for choosing the book in addition to the account.
+Updates to an account in the relevant book will be reflected in the widget.
+This change handles no migration from the old widget structure. (Users need to remove and re-add widgets)
+---
+ .../gnucash/android/app/GnuCashApplication.java    |  18 +++-
+ .../java/org/gnucash/android/db/BookDbHelper.java  |  10 ++
+ .../gnucash/android/db/adapter/BooksDbAdapter.java |   2 +
+ .../receivers/TransactionAppWidgetProvider.java    |  13 ++-
+ .../android/ui/common/BaseDrawerActivity.java      |   6 ++
+ .../gnucash/android/ui/common/FormActivity.java    |   7 ++
+ .../org/gnucash/android/ui/common/UxArgument.java  |   5 +
+ .../ui/homescreen/WidgetConfigurationActivity.java | 105 ++++++++++++++++-----
+ app/src/main/res/layout/widget_configuration.xml   |  23 ++++-
+ 9 files changed, 153 insertions(+), 36 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 859e87b0..b8327546 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -126,7 +126,7 @@ public void onCreate(){
+         BookDbHelper bookDbHelper = new BookDbHelper(getApplicationContext());
+         mBooksDbAdapter = new BooksDbAdapter(bookDbHelper.getWritableDatabase());
+ 
+-        initDatabaseAdapters();
++        initializeDatabaseAdapters();
+         setDefaultCurrencyCode(getDefaultCurrencyCode());
+ 
+         if (BuildConfig.DEBUG && !isRoboUnitTest())
+@@ -137,7 +137,7 @@ public void onCreate(){
+      * Initialize database adapter singletons for use in the application
+      * This method should be called every time a new book is opened
+      */
+-    private static void initDatabaseAdapters() {
++    private static void initializeDatabaseAdapters() {
+         if (mDbHelper != null){ //close if open
+             mDbHelper.getReadableDatabase().close();
+         }
+@@ -205,16 +205,24 @@ public static BooksDbAdapter getBooksDbAdapter(){
+     }
+ 
+     /**
+-     * Loads the book with GUID {@code bookUID}
++     * Loads the book with GUID {@code bookUID} and opens the AccountsActivity
+      * @param bookUID GUID of the book to be loaded
+      */
+     public static void loadBook(@NonNull String bookUID){
+-        mBooksDbAdapter.setActive(bookUID);
+-        initDatabaseAdapters();
++        activateBook(bookUID);
+         AccountsActivity.start(getAppContext());
+     }
+ 
+     /**
++     * Activates the book with unique identifer {@code bookUID}, and refreshes the database adapters
++     * @param bookUID GUID of the book to be activated
++     */
++    public static void activateBook(@NonNull String bookUID){
++        mBooksDbAdapter.setActive(bookUID);
++        initializeDatabaseAdapters();
++    }
++
++    /**
+      * Returns the currently active database in the application
+      * @return Currently active {@link SQLiteDatabase}
+      */
+diff --git a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+index 87adc17d..6fa1a6eb 100644
+--- a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+@@ -125,6 +125,16 @@ public void onCreate(SQLiteDatabase db) {
+     }
+ 
+     /**
++     * Returns the database for the book
++     * @param bookUID GUID of the book
++     * @return SQLiteDatabase of the book
++     */
++    public static SQLiteDatabase getDatabase(String bookUID){
++        DatabaseHelper dbHelper = new DatabaseHelper(GnuCashApplication.getAppContext(), bookUID);
++        return dbHelper.getWritableDatabase();
++    }
++
++    /**
+      * Inserts the book into the database
+      * @param db Book database
+      * @param book Book to insert
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index 65e06c95..abbce802 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -31,6 +31,8 @@
+ import org.gnucash.android.ui.settings.PreferenceActivity;
+ import org.gnucash.android.util.TimestampHelper;
+ 
++import java.util.List;
++
+ /**
+  * Database adapter for creating/modifying book entries
+  */
+diff --git a/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java b/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+index 053c2a0f..2f6e4d81 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
++++ b/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+@@ -21,8 +21,11 @@
+ import android.content.SharedPreferences.Editor;
+ import android.preference.PreferenceManager;
+ 
++import org.gnucash.android.db.adapter.BooksDbAdapter;
++import org.gnucash.android.model.Book;
+ import org.gnucash.android.ui.common.UxArgument;
+ import org.gnucash.android.ui.homescreen.WidgetConfigurationActivity;
++import org.gnucash.android.ui.settings.PreferenceActivity;
+ 
+ /**
+  * {@link AppWidgetProvider} which is responsible for managing widgets on the homescreen
+@@ -43,13 +46,13 @@ public void onUpdate(Context context, AppWidgetManager appWidgetManager,
+         for (int i=0; i<N; i++) {
+             int appWidgetId = appWidgetIds[i];
+ 
+-            String accountUID = PreferenceManager
+-                    .getDefaultSharedPreferences(context)
++            String accountUID = PreferenceActivity.getActiveBookSharedPreferences()
+                     .getString(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId, null);
+             if (accountUID == null)
+             	return;
+             
+-            WidgetConfigurationActivity.updateWidget(context, appWidgetId, accountUID);
++            WidgetConfigurationActivity.updateWidget(context, appWidgetId, accountUID,
++					BooksDbAdapter.getInstance().getActiveBookUID());
+         }
+ 	}
+ 
+@@ -62,11 +65,11 @@ public void onEnabled(Context context) {
+     @Override
+ 	public void onDeleted(Context context, int[] appWidgetIds) {
+ 		super.onDeleted(context, appWidgetIds);		
+-		Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
++		Editor editor = PreferenceActivity.getActiveBookSharedPreferences().edit();
+ 		
+ 		for (int appWidgetId : appWidgetIds) {
+ 			editor.remove(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId);
+ 		}
+-		editor.commit();		
++		editor.apply();
+ 	}
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index eee5966c..89fa315a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -102,6 +102,12 @@ protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         setContentView(getContentView());
+ 
++        //if a parameter was passed to open an account within a specific book, then switch
++        String bookUID = getIntent().getStringExtra(UxArgument.BOOK_UID);
++        if (bookUID != null && !bookUID.equals(BooksDbAdapter.getInstance().getActiveBookUID())){
++            GnuCashApplication.activateBook(bookUID);
++        }
++
+         ButterKnife.bind(this);
+         setSupportActionBar(mToolbar);
+         final ActionBar actionBar = getSupportActionBar();
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java b/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
+index e078ba18..6d777f5f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
+@@ -29,6 +29,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.ui.account.AccountFormFragment;
+ import org.gnucash.android.ui.budget.BudgetAmountEditorFragment;
+ import org.gnucash.android.ui.budget.BudgetFormFragment;
+@@ -57,6 +58,12 @@ protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         setContentView(R.layout.activity_form);
+ 
++        //if a parameter was passed to open an account within a specific book, then switch
++        String bookUID = getIntent().getStringExtra(UxArgument.BOOK_UID);
++        if (bookUID != null && !bookUID.equals(BooksDbAdapter.getInstance().getActiveBookUID())){
++            GnuCashApplication.activateBook(bookUID);
++        }
++
+         Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
+         setSupportActionBar(toolbar);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java b/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
+index b2077c62..9a4a0733 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
+@@ -102,6 +102,11 @@
+      */
+     public static final String BUDGET_AMOUNT_LIST = "budget_amount_list";
+ 
++    /**
++     * GUID of a book which is relevant for a specific action
++     */
++    public static final String BOOK_UID = "book_uid";
++
+     //prevent initialization of instances of this class
+     private UxArgument(){
+         //prevent even the native class from calling the ctor
+diff --git a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+index eb13294f..d02acbca 100644
+--- a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+@@ -25,29 +25,39 @@
+ import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
+ import android.database.Cursor;
++import android.database.sqlite.SQLiteDatabase;
+ import android.os.Bundle;
+-import android.preference.PreferenceManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.util.Log;
+ import android.view.View;
++import android.widget.AdapterView;
+ import android.widget.Button;
+ import android.widget.RemoteViews;
+ import android.widget.Spinner;
+ import android.widget.Toast;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.db.BookDbHelper;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Book;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.receivers.TransactionAppWidgetProvider;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.common.FormActivity;
+ import org.gnucash.android.ui.common.UxArgument;
++import org.gnucash.android.ui.settings.PreferenceActivity;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ import java.util.Locale;
+ 
++import butterknife.Bind;
++import butterknife.ButterKnife;
++
+ /**
+  * Activity for configuration which account to display on a widget.
+  * The activity is opened each time a widget is added to the homescreen
+@@ -57,19 +67,42 @@
+ 	private AccountsDbAdapter mAccountsDbAdapter;
+     private int mAppWidgetId;
+ 	
+-	private Spinner mAccountsSpinner;
+-	private Button mOkButton;
+-	private Button mCancelButton;
+-	
++	@Bind(R.id.input_accounts_spinner) Spinner mAccountsSpinner;
++	@Bind(R.id.input_books_spinner) Spinner mBooksSpinner;
++
++	@Bind(R.id.btn_save) Button mOkButton;
++	@Bind(R.id.btn_cancel) Button mCancelButton;
++	private SimpleCursorAdapter mAccountsCursorAdapter;
++
++
+ 	@Override
+ 	public void onCreate(Bundle savedInstanceState) {		
+ 		super.onCreate(savedInstanceState);
+ 		setContentView(R.layout.widget_configuration);
+ 		setResult(RESULT_CANCELED);
+-		
+-		mAccountsSpinner = (Spinner) findViewById(R.id.input_accounts_spinner);
+-		mOkButton 		= (Button) findViewById(R.id.btn_save);
+-		mCancelButton 	= (Button) findViewById(R.id.btn_cancel);
++
++		ButterKnife.bind(this);
++
++		BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
++		Cursor booksCursor = booksDbAdapter.fetchAllRecords();
++		String currentBookUID = booksDbAdapter.getActiveBookUID();
++
++		//determine the position of the currently active book in the cursor
++		int position = 0;
++		while (booksCursor.moveToNext()){
++			String bookUID = booksCursor.getString(booksCursor.getColumnIndexOrThrow(DatabaseSchema.BookEntry.COLUMN_UID));
++			if (bookUID.equals(currentBookUID))
++				break;
++			++position;
++		}
++
++		SimpleCursorAdapter booksCursorAdapter = new SimpleCursorAdapter(this,
++				android.R.layout.simple_spinner_item, booksCursor,
++				new String[]{DatabaseSchema.BookEntry.COLUMN_DISPLAY_NAME},
++				new int[]{android.R.id.text1}, 0);
++		booksCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++		mBooksSpinner.setAdapter(booksCursorAdapter);
++		mBooksSpinner.setSelection(position);
+ 
+ 		mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+ 		Cursor cursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+@@ -79,10 +112,10 @@ public void onCreate(Bundle savedInstanceState) {
+ 			finish();
+ 		}
+ 
+-        SimpleCursorAdapter cursorAdapter = new QualifiedAccountNameCursorAdapter(this, cursor);
++		mAccountsCursorAdapter = new QualifiedAccountNameCursorAdapter(this, cursor);
+ 		//without this line, the app crashes when a user tries to select an account
+-		cursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-		mAccountsSpinner.setAdapter(cursorAdapter);
++		mAccountsCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++		mAccountsSpinner.setAdapter(mAccountsCursorAdapter);
+ 		
+ 		bindListeners();
+ 	}
+@@ -91,6 +124,24 @@ public void onCreate(Bundle savedInstanceState) {
+ 	 * Sets click listeners for the buttons in the dialog
+ 	 */
+ 	private void bindListeners() {
++		mBooksSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
++			@Override
++			public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
++				Book book = BooksDbAdapter.getInstance().getRecord(id);
++				SQLiteDatabase db = new DatabaseHelper(WidgetConfigurationActivity.this, book.getUID()).getWritableDatabase();
++				mAccountsDbAdapter = new AccountsDbAdapter(db);
++
++				Cursor cursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
++				mAccountsCursorAdapter.swapCursor(cursor);
++				mAccountsCursorAdapter.notifyDataSetChanged();
++			}
++
++			@Override
++			public void onNothingSelected(AdapterView<?> parent) {
++				//nothing to see here, move along
++			}
++		});
++
+ 		mOkButton.setOnClickListener(new View.OnClickListener() {
+ 			
+ 			@Override
+@@ -110,12 +161,17 @@ public void onClick(View v) {
+ 				
+ 				long accountId = mAccountsSpinner.getSelectedItemId();
+                 String accountUID = mAccountsDbAdapter.getUID(accountId);
+-				SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(WidgetConfigurationActivity.this);
++
++				long bookId = mBooksSpinner.getSelectedItemId();
++				String bookUID = BooksDbAdapter.getInstance().getUID(bookId);
++
++				SharedPreferences prefs = PreferenceActivity.getBookSharedPreferences(bookUID);
++				//PreferenceManager.getDefaultSharedPreferences(WidgetConfigurationActivity.this);
+ 				Editor editor = prefs.edit();
+ 				editor.putString(UxArgument.SELECTED_ACCOUNT_UID + mAppWidgetId, accountUID);
+-				editor.commit();	
++				editor.apply();
+ 				
+-				updateWidget(WidgetConfigurationActivity.this, mAppWidgetId, accountUID);
++				updateWidget(WidgetConfigurationActivity.this, mAppWidgetId, accountUID, bookUID);
+ 						
+ 				Intent resultValue = new Intent();
+ 				resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, mAppWidgetId);
+@@ -137,14 +193,16 @@ public void onClick(View v) {
+ 	 * Updates the widget with id <code>appWidgetId</code> with information from the 
+ 	 * account with record ID <code>accountId</code>
+      * If the account has been deleted, then a notice is posted in the widget
+-     * @param appWidgetId ID of the widget to be updated
++	 * @param appWidgetId ID of the widget to be updated
+      * @param accountUID GUID of the account tied to the widget
++	 * @param bookUID GUID of the book with the relevant account
+ 	 */
+-	public static void updateWidget(final Context context, int appWidgetId, String accountUID) {
++	public static void updateWidget(final Context context, int appWidgetId, String accountUID, String bookUID) {
+ 		Log.i("WidgetConfiguration", "Updating widget: " + appWidgetId);
+ 		AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
+ 
+-		AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(BookDbHelper.getDatabase(bookUID));
++
+ 		final Account account;
+         try {
+             account = accountsDbAdapter.getRecord(accountUID);
+@@ -161,9 +219,9 @@ public static void updateWidget(final Context context, int appWidgetId, String a
+ 			views.setOnClickPendingIntent(R.id.widget_layout, pendingIntent);
+ 			views.setOnClickPendingIntent(R.id.btn_new_transaction, pendingIntent);
+ 			appWidgetManager.updateAppWidget(appWidgetId, views);
+-			Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
++			Editor editor = PreferenceActivity.getActiveBookSharedPreferences().edit(); //PreferenceManager.getDefaultSharedPreferences(context).edit();
+ 			editor.remove(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId);
+-			editor.commit();
++			editor.apply();
+ 			return;
+ 		}
+ 		
+@@ -183,6 +241,7 @@ public static void updateWidget(final Context context, int appWidgetId, String a
+ 		accountViewIntent.setAction(Intent.ACTION_VIEW);
+ 		accountViewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+ 		accountViewIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
++		accountViewIntent.putExtra(UxArgument.BOOK_UID, bookUID);
+ 		PendingIntent accountPendingIntent = PendingIntent
+ 				.getActivity(context, appWidgetId, accountViewIntent, 0);
+ 		views.setOnClickPendingIntent(R.id.widget_layout, accountPendingIntent);
+@@ -191,6 +250,7 @@ public static void updateWidget(final Context context, int appWidgetId, String a
+ 		newTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+ 		newTransactionIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+ 		newTransactionIntent.putExtra(UxArgument.FORM_TYPE, FormActivity.FormType.TRANSACTION.name());
++		newTransactionIntent.putExtra(UxArgument.BOOK_UID, bookUID);
+ 		newTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+ 		PendingIntent pendingIntent = PendingIntent
+ 				.getActivity(context, appWidgetId, newTransactionIntent, 0);	            
+@@ -212,7 +272,8 @@ public static void updateAllWidgets(final Context context){
+ 		//update widgets asynchronously so as not to block method which called the update
+ 		//inside the computation of the account balance
+ 		new Thread(new Runnable() {
+-			SharedPreferences defaultSharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
++			SharedPreferences defaultSharedPrefs = PreferenceActivity.getActiveBookSharedPreferences();
++			//PreferenceManager.getDefaultSharedPreferences(context);
+ 
+ 			@Override
+ 			public void run() {
+@@ -223,7 +284,7 @@ public void run() {
+ 					if (accountUID == null)
+ 						continue;
+ 
+-					updateWidget(context, widgetId, accountUID);
++					updateWidget(context, widgetId, accountUID, BooksDbAdapter.getInstance().getActiveBookUID());
+ 				}
+ 			}
+ 		}).start();
+diff --git a/app/src/main/res/layout/widget_configuration.xml b/app/src/main/res/layout/widget_configuration.xml
+index 06339201..f9ef7c19 100644
+--- a/app/src/main/res/layout/widget_configuration.xml
++++ b/app/src/main/res/layout/widget_configuration.xml
+@@ -22,18 +22,33 @@
+     android:orientation="vertical" >
+     
+     <TextView
+-	    android:id="@+id/label_account"
+-	    android:text="@string/label_display_account"
++	    android:id="@+id/label_book"
++	    android:text="Book"
+ 	    android:layout_height="wrap_content"
+ 	    android:layout_width="wrap_content"
+ 	    android:layout_marginBottom="-8dp"
+ 	    android:layout_marginTop="8dp"
+ 	    style="@style/TextAppearance.EditTransaction_LabelSmall" />
+     <Spinner
+-        android:id="@+id/input_accounts_spinner"        
++        android:id="@+id/input_books_spinner"
+         android:layout_width="match_parent"
+-        android:layout_height="wrap_content" 
++        android:layout_height="wrap_content"
++		android:layout_marginBottom="@dimen/dialog_padding"
+         android:minHeight="?android:attr/listPreferredItemHeight" />
+ 
++	<TextView
++		android:id="@+id/label_account"
++		android:text="@string/label_display_account"
++		android:layout_height="wrap_content"
++		android:layout_width="wrap_content"
++		android:layout_marginBottom="-8dp"
++		android:layout_marginTop="8dp"
++		style="@style/TextAppearance.EditTransaction_LabelSmall" />
++	<Spinner
++		android:id="@+id/input_accounts_spinner"
++		android:layout_width="match_parent"
++		android:layout_height="wrap_content"
++		android:minHeight="?android:attr/listPreferredItemHeight" />
++
+     <include layout="@layout/default_buttons"/>
+ </LinearLayout>
+\ No newline at end of file

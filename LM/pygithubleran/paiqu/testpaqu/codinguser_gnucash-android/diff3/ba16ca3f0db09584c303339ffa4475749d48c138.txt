@@ -1,0 +1,386 @@
+From ba16ca3f0db09584c303339ffa4475749d48c138 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 4 May 2015 15:49:55 +0200
+Subject: [PATCH] Improved: If error occurs when parsing template transactions,
+ they will be ignored. (Scheduled transactions will also be ignored)
+
+Fixed: crash when restoring backups with no SD card present
+Fixed: deleted template transactions instead of non-template transactions after export
+Fixed: crash due to computation of imbalance with multi-currency transactions
+---
+ app/build.gradle                                   |  4 +--
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  2 +-
+ .../gnucash/android/importer/GncXmlHandler.java    | 36 ++++++++++++++++------
+ .../org/gnucash/android/model/Transaction.java     |  9 ++++--
+ ...> DeleteAllTransactionsConfirmationDialog.java} | 12 +++++---
+ .../android/ui/settings/SettingsActivity.java      |  6 ++++
+ .../settings/TransactionsPreferenceFragment.java   |  4 +--
+ app/src/main/res/values-de/strings.xml             |  1 +
+ app/src/main/res/values-el/strings.xml             |  1 +
+ app/src/main/res/values-es-rMX/strings.xml         |  1 +
+ app/src/main/res/values-es/strings.xml             |  1 +
+ app/src/main/res/values-fr/strings.xml             |  1 +
+ app/src/main/res/values-hu/strings.xml             |  1 +
+ app/src/main/res/values-it/strings.xml             |  1 +
+ app/src/main/res/values-nb/strings.xml             |  1 +
+ app/src/main/res/values-nl/strings.xml             |  1 +
+ app/src/main/res/values-pt-rBR/strings.xml         |  1 +
+ app/src/main/res/values-ru/strings.xml             |  1 +
+ app/src/main/res/values-zh/strings.xml             |  1 +
+ app/src/main/res/values/strings.xml                |  1 +
+ 20 files changed, 64 insertions(+), 22 deletions(-)
+ rename app/src/main/java/org/gnucash/android/ui/settings/{DeleteAllTransacationsConfirmationDialog.java => DeleteAllTransactionsConfirmationDialog.java} (87%)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index cfadb263..2e73ba66 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -6,7 +6,7 @@ apply plugin: 'crashlytics'
+ def versionMajor = 1
+ def versionMinor = 6
+ def versionPatch = 0
+-def versionBuild = 1
++def versionBuild = 2
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd_HHmm'UTC'")
+@@ -89,7 +89,7 @@ android {
+ 
+         beta {
+             resValue "string", "app_name", "GnuCash - beta"
+-            versionName "${versionMajor}.${versionMinor}.${versionPatch}-beta${versionBuild}}"
++            versionName "${versionMajor}.${versionMinor}.${versionPatch}-beta${versionBuild}"
+             resValue "string", "app_version_name", "${versionName}"
+         }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 55bb7bff..d517dcdf 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -590,7 +590,7 @@ public int getNumCurrencies(String transactionUID) {
+      * @return Number of records deleted
+      */
+     public int deleteAllNonTemplateTransactions(){
+-        String where = TransactionEntry.COLUMN_TEMPLATE + "!=0";
++        String where = TransactionEntry.COLUMN_TEMPLATE + "=0";
+         return mDb.delete(mTableName, where, null);
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 7f77eac8..03cfe708 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -181,6 +181,13 @@
+     boolean mIsRecurrenceStart  = false;
+ 
+     /**
++     * Flag to determine if to ignore template transactions.
++     * If this flag is set, both template transactions and scheduled actions will be ignored.
++     * This flag is mostly set when an error occurs in parsing the template transaction amount.
++     */
++    boolean mIgnoreTemplateTransactions = false;
++
++    /**
+      * Multiplier for the recurrence period type. e.g. period type of week and multiplier of 2 means bi-weekly
+      */
+     int mRecurrenceMultiplier   = 1;
+@@ -428,7 +435,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                         Log.e(LOG_TAG, msg + "\n" + e.getMessage());
+                         Crashlytics.log(msg);
+                         Crashlytics.logException(e);
+-                        throw new SAXException(msg, e); //if we fail to parse the split amount, terminate import - data integrity compromised
++                        mIgnoreTemplateTransactions = true;
++                        //throw new SAXException(msg, e); //if we fail to parse the split amount, terminate import - data integrity compromised
+                     } finally {
+                         mInCreditFormulaSlot = false;
+                     }
+@@ -443,7 +451,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                         Log.e(LOG_TAG, msg + "\n" + e.getMessage());
+                         Crashlytics.log(msg);
+                         Crashlytics.logException(e);
+-                        throw new SAXException(msg, e); //if we fail to parse the split amount, terminate import - data integrity compromised
++                        mIgnoreTemplateTransactions = true;
++                        //throw new SAXException(msg, e); //if we fail to parse the split amount, terminate import - data integrity compromised
+                     } finally {
+                         mInDebitFormulaSlot = false;
+                     }
+@@ -524,10 +533,12 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 if (imbSplit != null) {
+                     mAutoBalanceSplits.add(imbSplit);
+                 }
+-                mTransactionList.add(mTransaction);
+                 if (mInTemplates){
+                     mTemplateTransactions.add(mTransaction);
++                } else {
++                    mTransactionList.add(mTransaction);
+                 }
++
+                 if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
+                     mTransaction.setTemplate(true);
+                     ScheduledAction scheduledAction = ScheduledAction.parseScheduledAction(mTransaction, mRecurrencePeriod);
+@@ -606,8 +617,10 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_SCHEDULED_ACTION:
+                 mScheduledActionsList.add(mScheduledAction);
+-                int count = generateMissedScheduledTransactions(mScheduledAction);
+-                Log.i(LOG_TAG, String.format("Generated %d transactions from scheduled action", count));
++                if (!mIgnoreTemplateTransactions) {
++                    int count = generateMissedScheduledTransactions(mScheduledAction);
++                    Log.i(LOG_TAG, String.format("Generated %d transactions from scheduled action", count));
++                }
+                 mRecurrenceMultiplier = 1; //reset it, even though it will be parsed from XML each time
+                 break;
+         }
+@@ -711,10 +724,15 @@ public void endDocument() throws SAXException {
+             mAccountsDbAdapter.deleteAllRecords();
+             long nAccounts = mAccountsDbAdapter.bulkAddAccounts(mAccountList);
+             Log.d("Handler:", String.format("%d accounts inserted", nAccounts));
+-            //We need to add scheduled actions first because there is a foreign key constraint on transactions
+-            //which are generated from scheduled actions (we do auto-create some transactions during import)
+-            int nSchedActions = mScheduledActionsDbAdapter.bulkAddScheduledActions(mScheduledActionsList);
+-            Log.d("Handler:", String.format("%d scheduled actions inserted", nSchedActions));
++            //this flag is set when we have issues with parsing the template transaction amount
++            if (!mIgnoreTemplateTransactions) {
++                //We need to add scheduled actions first because there is a foreign key constraint on transactions
++                //which are generated from scheduled actions (we do auto-create some transactions during import)
++                int nSchedActions = mScheduledActionsDbAdapter.bulkAddScheduledActions(mScheduledActionsList);
++                Log.d("Handler:", String.format("%d scheduled actions inserted", nSchedActions));
++                long nTempTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTemplateTransactions);
++                Log.d("Handler:", String.format("%d template transactions inserted", nTempTransactions));
++            }
+             long nTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTransactionList);
+             Log.d("Handler:", String.format("%d transactions inserted", nTransactions));
+             long endTime = System.nanoTime();
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 09b507ec..00c9368b 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -259,13 +259,16 @@ public Money getBalance(String accountUID){
+ 
+     /**
+      * Computes the imbalance amount for the given transaction.
+-     * In double entry, all transactions should resolve to zero. However a user may not enter all such values which
+-     * means there is an extra amount which is unresolved.
+-     * @return Money imbalance of the transaction
++     * In double entry, all transactions should resolve to zero. But imbalance occurs when there are unresolved splits.
++     * <p>If it is a multi-currency transaction, an imbalance of zero will be returned</p>
++     * @return Money imbalance of the transaction or zero if it is a multi-currency transaction
+      */
+     public Money getImbalance(){
+         Money imbalance = Money.createZeroInstance(mCurrencyCode);
+         for (Split split : mSplitList) {
++            //TODO: Handle this better when multi-currency support is introduced
++            if (!split.getAmount().getCurrency().getCurrencyCode().equals(mCurrencyCode))
++                return Money.createZeroInstance(mCurrencyCode); //abort
+             Money amount = split.getAmount().absolute();
+             if (split.getType() == TransactionType.DEBIT)
+                 imbalance = imbalance.subtract(amount);
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransactionsConfirmationDialog.java
+similarity index 87%
+rename from app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+rename to app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransactionsConfirmationDialog.java
+index 1e62eeb2..3f37e2ee 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransactionsConfirmationDialog.java
+@@ -23,6 +23,7 @@
+ import android.content.Context;
+ import android.content.DialogInterface;
+ import android.os.Bundle;
++import android.util.Log;
+ import android.widget.Toast;
+ 
+ import org.gnucash.android.R;
+@@ -43,10 +44,10 @@
+  * @author Yongxin Wang <fefe.wyx@gmail.com>
+  */
+ @TargetApi(11)
+-public class DeleteAllTransacationsConfirmationDialog extends DialogFragment {
++public class DeleteAllTransactionsConfirmationDialog extends DialogFragment {
+ 
+-    public static DeleteAllTransacationsConfirmationDialog newInstance() {
+-        DeleteAllTransacationsConfirmationDialog frag = new DeleteAllTransacationsConfirmationDialog();
++    public static DeleteAllTransactionsConfirmationDialog newInstance() {
++        DeleteAllTransactionsConfirmationDialog frag = new DeleteAllTransactionsConfirmationDialog();
+         return frag;
+     }
+ 
+@@ -62,13 +63,14 @@ public void onClick(DialogInterface dialog, int whichButton) {
+ 
+                                 Context context = getActivity();
+                                 AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
+-                                List<Transaction> openingBalances = new ArrayList<Transaction>();
++                                List<Transaction> openingBalances = new ArrayList<>();
+                                 boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
+                                 if (preserveOpeningBalances) {
+                                     openingBalances = accountsDbAdapter.getAllOpeningBalanceTransactions();
+                                 }
+                                 TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+-                                transactionsDbAdapter.deleteAllNonTemplateTransactions();
++                                int count = transactionsDbAdapter.deleteAllNonTemplateTransactions();
++                                Log.i("DeleteDialog", String.format("Deleted %d transactions successfully", count));
+ 
+                                 if (preserveOpeningBalances) {
+                                     transactionsDbAdapter.bulkAddTransactions(openingBalances);
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 58d0f795..a1d6081b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -516,6 +516,12 @@ public void importAccounts() {
+     public void restoreBackup() {
+         Log.i("Settings", "Opening GnuCash XML backups for restore");
+         File[] backupFiles = new File(Exporter.BACKUP_FOLDER_PATH).listFiles();
++        if (backupFiles == null){
++            Toast.makeText(this, R.string.toast_backup_folder_not_found, Toast.LENGTH_LONG).show();
++            new File(Exporter.BACKUP_FOLDER_PATH).mkdirs();
++            return;
++        }
++
+         Arrays.sort(backupFiles);
+         List<File> backupFilesList = Arrays.asList(backupFiles);
+         Collections.reverse(backupFilesList);
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
+index 29e2cb36..8348d7d5 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
+@@ -87,8 +87,8 @@ public boolean onPreferenceChange(Preference preference, Object newValue) {
+      * Deletes all transactions in the system
+      */
+     public void deleteAllTransactions(){
+-        DeleteAllTransacationsConfirmationDialog deleteTransactionsConfirmationDialog =
+-                DeleteAllTransacationsConfirmationDialog.newInstance();
++        DeleteAllTransactionsConfirmationDialog deleteTransactionsConfirmationDialog =
++                DeleteAllTransactionsConfirmationDialog.newInstance();
+         deleteTransactionsConfirmationDialog.show(getFragmentManager(), "transaction_settings");
+     }
+ 
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index af4b8321..177d28fb 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -486,4 +486,5 @@
+     <string name="msg_enable_crashlytics">Enable to send information about malfunctions to the developers for improvement (recommended).
+ No user-identifiable information will be collected as part of this process!</string>
+     <string name="label_export_format">Export Format</string>
++	<string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index 5e31e61b..670c2736 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -505,4 +505,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++	<string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 208beb5a..43cf813d 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -490,4 +490,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++    <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 6fee7b67..564e4fa3 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -487,4 +487,5 @@
+     <string name="msg_enable_crashlytics">Activar para enviar informaci&#243;n de errores a los desarolladores (recomendado).
+ Este proceso solo recoge informaci&#243;n que no permite identificar al usuario</string>
+     <string name="label_export_format">Formato de exportaci&#243;n</string>
++	<string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index a8d359f6..ea9b3c48 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -487,4 +487,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++    <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 1709c29b..8be8eab7 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -491,4 +491,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++    <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index 9bb08d93..60a4b173 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -491,4 +491,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++    <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 11b76c06..614acf88 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -488,4 +488,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++	<string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 3e2ed52f..095fc3aa 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -492,4 +492,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++    <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 0c6602d4..36b27cd0 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -490,4 +490,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++	<string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 6702a2a4..0fcd2a93 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -496,4 +496,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++    <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index 35882200..babdeb32 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -488,4 +488,5 @@
+ No user-identifiable information will be collected as part of this process!
+     </string>
+     <string name="label_export_format">Export Format</string>
++    <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 1dc604b0..9738811b 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -495,4 +495,5 @@
+     <string name="msg_enable_crashlytics">Enable to send information about malfunctions to the developers for improvement (recommended).
+ No user-identifiable information will be collected as part of this process!</string>
+     <string name="label_export_format">Export Format</string>
++    <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+ </resources>

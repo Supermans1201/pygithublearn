@@ -1,0 +1,137 @@
+From c13a94c2b3c10893452200bbb630e15821281725 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Tue, 25 Oct 2016 18:24:39 +0200
+Subject: [PATCH] Don't set an scheduled action's last run unless it's been
+ executed.
+
+Every time the scheduled action service checked for scheduled actions to
+execute, it set the last run, even when the action hadn't been executed.
+As the service runs twice a day, the period would never pass.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/604
+---
+ .../android/service/ScheduledActionService.java    | 34 ++++++++++++----------
+ .../unit/service/ScheduledActionServiceTest.java   |  9 ++++--
+ 2 files changed, 25 insertions(+), 18 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index 58770873..9fa8f0de 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -127,7 +127,7 @@ public static void processScheduledActions(List<ScheduledAction> scheduledAction
+      */
+     private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDatabase db){
+         Log.i(LOG_TAG, "Executing scheduled action: " + scheduledAction.toString());
+-        int executionCount = scheduledAction.getExecutionCount();
++        int executionCount = 0;
+ 
+         switch (scheduledAction.getActionType()){
+             case TRANSACTION:
+@@ -139,20 +139,21 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+                 break;
+         }
+ 
+-        //the last run time is computed instead of just using "now" so that if the more than
+-        // one period has been skipped, all intermediate transactions can be created
+-
+-        scheduledAction.setLastRun(System.currentTimeMillis());
+-        //set the execution count in the object because it will be checked for the next iteration in the calling loop
+-        scheduledAction.setExecutionCount(executionCount); //this call is important, do not remove!!
+-        //update the last run time and execution count
+-        ContentValues contentValues = new ContentValues();
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN,
+-                          scheduledAction.getLastRunTime());
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT,
+-                          scheduledAction.getExecutionCount());
+-        db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
+-                DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
++        if (executionCount > 0) {
++            scheduledAction.setLastRun(System.currentTimeMillis());
++            // Set the execution count in the object because it will be checked
++            // for the next iteration in the calling loop.
++            // This call is important, do not remove!!
++            scheduledAction.setExecutionCount(scheduledAction.getExecutionCount() + executionCount);
++            // Update the last run time and execution count
++            ContentValues contentValues = new ContentValues();
++            contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN,
++                    scheduledAction.getLastRunTime());
++            contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT,
++                    scheduledAction.getExecutionCount());
++            db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
++                    DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
++        }
+     }
+ 
+     /**
+@@ -219,6 +220,7 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+         int totalPlannedExecutions = scheduledAction.getTotalPlannedExecutionCount();
+         List<Transaction> transactions = new ArrayList<>();
+ 
++        int previousExecutionCount = scheduledAction.getExecutionCount(); // We'll modify it
+         //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+         //so compute the actual transaction time from pre-known values
+         long transactionTime = scheduledAction.computeNextCountBasedScheduledExecutionTime();
+@@ -235,6 +237,8 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+         }
+ 
+         transactionsDbAdapter.bulkAddRecords(transactions, DatabaseAdapter.UpdateMethod.insert);
++        // Be nice and restore the parameter's original state to avoid confusing the callers
++        scheduledAction.setExecutionCount(previousExecutionCount);
+         return executionCount;
+     }
+ }
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 4b8dfda7..83f57c61 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -290,9 +290,6 @@ public void recurringTransactions_shouldHaveScheduledActionUID(){
+      * was done on Monday and it's Thursday, two backups have been
+      * missed. Doing the two missed backups plus today's wouldn't be
+      * useful, so just one should be done.</p>
+-     *
+-     * <p><i>Note</i>: the execution count will include the missed runs
+-     * as computeNextCountBasedScheduledExecutionTime depends on it.</p>
+      */
+     @Test
+     public void scheduledBackups_shouldRunOnlyOnce(){
+@@ -302,6 +299,7 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+         scheduledBackup.setRecurrence(PeriodType.MONTH, 1);
+         scheduledBackup.setExecutionCount(2);
+         scheduledBackup.setLastRun(LocalDateTime.now().minusMonths(2).toDate().getTime());
++        long previousLastRun = scheduledBackup.getLastRunTime();
+ 
+         ExportParams backupParams = new ExportParams(ExportFormat.XML);
+         backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
+@@ -317,13 +315,16 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+         // Check there's not a backup for each missed run
+         ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(scheduledBackup.getExecutionCount()).isEqualTo(3);
++        assertThat(scheduledBackup.getLastRunTime()).isGreaterThan(previousLastRun);
+         File[] backupFiles = backupFolder.listFiles();
+         assertThat(backupFiles).hasSize(1);
+         assertThat(backupFiles[0]).exists().hasExtension("gnca");
+ 
+         // Check also across service runs
++        previousLastRun = scheduledBackup.getLastRunTime();
+         ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(scheduledBackup.getExecutionCount()).isEqualTo(3);
++        assertThat(scheduledBackup.getLastRunTime()).isEqualTo(previousLastRun);
+         backupFiles = backupFolder.listFiles();
+         assertThat(backupFiles).hasSize(1);
+         assertThat(backupFiles[0]).exists().hasExtension("gnca");
+@@ -340,6 +341,7 @@ public void scheduledBackups_shouldNotRunBeforeNextScheduledExecution(){
+         ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
+         scheduledBackup.setStartTime(LocalDateTime.now().minusDays(2).toDate().getTime());
+         scheduledBackup.setLastRun(scheduledBackup.getStartTime());
++        long previousLastRun = scheduledBackup.getLastRunTime();
+         scheduledBackup.setExecutionCount(1);
+         scheduledBackup.setRecurrence(PeriodType.WEEK, 1);
+ 
+@@ -357,6 +359,7 @@ public void scheduledBackups_shouldNotRunBeforeNextScheduledExecution(){
+         ScheduledActionService.processScheduledActions(actions, mDb);
+ 
+         assertThat(scheduledBackup.getExecutionCount()).isEqualTo(1);
++        assertThat(scheduledBackup.getLastRunTime()).isEqualTo(previousLastRun);
+         assertThat(backupFolder.listFiles()).hasSize(0);
+     }
+ 

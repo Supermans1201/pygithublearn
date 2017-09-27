@@ -1,0 +1,428 @@
+From 1b224e59d213e0d2cd24f26102a3ac4c473be15a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 30 Aug 2013 16:28:41 +0200
+Subject: [PATCH] Added support for placeholder accounts (closes #113)
+ Placeholder accounts do not allow transactions to be added to them. They will
+ also properly be detected during import of the GnuCash account structure
+ Filter out placeholder accounts from double account spinner field
+
+---
+ app/src/org/gnucash/android/data/Account.java      | 23 ++++++++++
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 33 ++++++++++++++-
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  9 ++--
+ app/src/org/gnucash/android/db/DatabaseHelper.java | 16 +++++--
+ .../android/ui/accounts/AccountsListFragment.java  |  4 +-
+ .../ui/transactions/NewTransactionFragment.java    | 29 ++++++-------
+ .../ui/transactions/TransactionsActivity.java      | 29 ++++++++-----
+ .../android/util/GnucashAccountXmlHandler.java     | 49 +++++++++++++++++++---
+ 8 files changed, 151 insertions(+), 41 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/data/Account.java b/app/src/org/gnucash/android/data/Account.java
+index 7c325411..c1b4b4ee 100644
+--- a/app/src/org/gnucash/android/data/Account.java
++++ b/app/src/org/gnucash/android/data/Account.java
+@@ -91,6 +91,12 @@
+ 	 */
+ 	private String mParentAccountUID;
+ 
++    /**
++     * Flag for placeholder accounts.
++     * These accounts cannot have transactions
++     */
++    private boolean mPlaceholderAccount;
++
+ 	/**
+ 	 * An extra key for passing the currency code (according ISO 4217) in an intent
+ 	 */
+@@ -315,6 +321,23 @@ public String getParentUID() {
+ 		
+ 	}
+ 
++    /**
++     * Returns <code>true</code> if this account is a placeholder account, <code>false</code> otherwise.
++     * @return <code>true</code> if this account is a placeholder account, <code>false</code> otherwise
++     */
++    public boolean isPlaceholderAccount(){
++        return mPlaceholderAccount;
++    }
++
++    /**
++     * Sets the placeholder flag for this account.
++     * Placeholder accounts cannot have transactions
++     * @param isPlaceholder Boolean flag indicating if the account is a placeholder account or not
++     */
++    public void setPlaceHolderFlag(boolean isPlaceholder){
++        mPlaceholderAccount = isPlaceholder;
++    }
++
+ 	/**
+ 	 * Maps the <code>accountType</code> to the corresponding account type.
+ 	 * <code>accountType</code> have corresponding values to GnuCash desktop
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index f0e58e6b..fb742ebc 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -74,7 +74,8 @@ public long addAccount(Account account){
+ 		contentValues.put(DatabaseHelper.KEY_UID, account.getUID());
+ 		contentValues.put(DatabaseHelper.KEY_CURRENCY_CODE, account.getCurrency().getCurrencyCode());
+ 		contentValues.put(DatabaseHelper.KEY_PARENT_ACCOUNT_UID, account.getParentUID());
+-		
++		contentValues.put(DatabaseHelper.KEY_PLACEHOLDER, account.isPlaceholderAccount() ? 1 : 0);
++
+ 		long rowId = -1;
+ 		if ((rowId = getAccountID(account.getUID())) > 0){
+ 			//if account already exists, then just update
+@@ -178,6 +179,7 @@ public Account buildAccountInstance(Cursor c){
+ 		//else the transactions end up with a different currency from the account
+ 		account.setCurrency(Currency.getInstance(c.getString(DatabaseAdapter.COLUMN_CURRENCY_CODE)));
+ 		account.setTransactions(mTransactionsAdapter.getAllTransactionsForAccount(uid));
++        account.setPlaceHolderFlag(c.getInt(DatabaseAdapter.COLUMN_PLACEHOLDER) == 1);
+ 		return account;
+ 	}
+ 		
+@@ -596,6 +598,35 @@ public String getFullyQualifiedAccountName(long accountId){
+         return getFullyQualifiedAccountName(getAccountUID(accountId));
+     }
+ 
++    /**
++     * Returns <code>true</code> if the account with unique ID <code>accountUID</code> is a placeholder account.
++     * @param accountUID Unique identifier of the account
++     * @return <code>true</code> if the account is a placeholder account, <code>false</code> otherwise
++     */
++    public boolean isPlaceholderAccount(String accountUID){
++        Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                new String[]{DatabaseHelper.KEY_ROW_ID, DatabaseHelper.KEY_PLACEHOLDER},
++                DatabaseHelper.KEY_UID + " = ?",
++                new String[]{accountUID}, null, null, null);
++
++        if (cursor == null || !cursor.moveToFirst()){
++            return false;
++        }
++        boolean isPlaceholder = cursor.getInt(cursor.getColumnIndexOrThrow(DatabaseHelper.KEY_PLACEHOLDER)) == 1;
++        cursor.close();
++
++        return isPlaceholder;
++    }
++
++    /**
++     * Convenience method, resolves the account unique ID and calls {@link #isPlaceholderAccount(String)}
++     * @param accountId Database row ID of the account
++     * @return <code>true</code> if the account is a placeholder account, <code>false</code> otherwise
++     */
++    public boolean isPlaceholderAccount(long accountId){
++        return isPlaceholderAccount(getAccountUID(accountId));
++    }
++
+ 	/**
+ 	 * Deletes all accounts and their transactions from the database
+ 	 */
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index 7fa6b42f..88da4d42 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -42,7 +42,7 @@
+ 	public static final int COLUMN_NAME 	= 2;
+ 	public static final int COLUMN_TYPE 	= 3;
+ 	
+-	//columns specific to transactions
++	//columns indices specific to transactions
+ 	public static final int COLUMN_AMOUNT 		= 4;
+ 	public static final int COLUMN_DESCRIPTION 	= 5;
+ 	public static final int COLUMN_TIMESTAMP 	= 6;
+@@ -50,9 +50,10 @@
+ 	public static final int COLUMN_EXPORTED 	= 8;
+ 	public static final int COLUMN_DOUBLE_ENTRY_ACCOUNT_UID = 9;
+ 	
+-	//columns specific to accounts
+-	public static final int COLUMN_CURRENCY_CODE = 4;
+-	public static final int COLUMN_PARENT_ACCOUNT_UID = 5;
++	//columns indices specific to accounts
++	public static final int COLUMN_CURRENCY_CODE        = 4;
++	public static final int COLUMN_PARENT_ACCOUNT_UID   = 5;
++    public static final int COLUMN_PLACEHOLDER          = 6;
+ 	
+ 	/**
+ 	 * {@link DatabaseHelper} for creating and opening the database
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index 20ee6629..c1efe90a 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -46,7 +46,7 @@
+ 	 * Database version.
+ 	 * With any change to the database schema, this number must increase
+ 	 */
+-	private static final int DATABASE_VERSION = 2;
++	private static final int DATABASE_VERSION = 3;
+ 	
+ 	/**
+ 	 * Name of accounts table
+@@ -123,7 +123,9 @@
+ 	 * Flag for exported transactions in the database
+ 	 */
+ 	public static final String KEY_EXPORTED		= "is_exported";
+-	
++
++    public static final String KEY_PLACEHOLDER  = "is_placeholder";
++
+ 	/**********************************************************************************************************
+ 	//if you modify the order of the columns (i.e. the way they are created), 
+ 	//make sure to modify the indices in DatabaseAdapter
+@@ -139,6 +141,7 @@
+ 			+ KEY_TYPE 	+ " varchar(255) not null, "			
+ 			+ KEY_CURRENCY_CODE + " varchar(255) not null, "
+ 			+ KEY_PARENT_ACCOUNT_UID + " varchar(255), "
++            + KEY_PLACEHOLDER + " tinyint default 0, "
+ 			+ "UNIQUE (" + KEY_UID + ")"	
+ 			+ ");";
+ 	
+@@ -204,7 +207,14 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 			ContentValues cv = new ContentValues();
+ 			cv.put(KEY_TYPE, AccountType.CASH.toString());
+ 			db.update(ACCOUNTS_TABLE_NAME, cv, null, null);
+-				
++
++            if (oldVersion == 2 && newVersion == 3){
++                Log.i(TAG, "Adding flag for placeholder accounts");
++                String addPlaceHolderAccountFlagSql = "ALTER TABLE " + ACCOUNTS_TABLE_NAME +
++                        " ADD COLUMN " + KEY_PLACEHOLDER + " tinyint default 0";
++
++                db.execSQL(addPlaceHolderAccountFlagSql);
++            }
+ 		} else {
+ 			Log.i(TAG, "Cannot downgrade database.");
+ 		}
+diff --git a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 071272c5..e1c68de6 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -575,8 +575,10 @@ public void bindView(View v, Context context, Cursor cursor) {
+                     .findViewById(R.id.transactions_summary);
+             new AccountBalanceTask(summary, getActivity()).execute(accountId);
+ 
++            boolean isPlaceholderAccount = mAccountsDbAdapter.isPlaceholderAccount(accountId);
++
+             ImageButton newTransactionButton = (ImageButton) v.findViewById(R.id.btn_new_transaction);
+-            if (inSubAcccount()){
++            if (isPlaceholderAccount){
+                 newTransactionButton.setVisibility(View.GONE);
+                 v.findViewById(R.id.vertical_line).setVisibility(View.GONE);
+             } else {
+diff --git a/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index a066078f..dbd8b896 100644
+--- a/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -24,7 +24,6 @@
+ import java.text.ParseException;
+ import java.util.*;
+ 
+-import android.os.Handler;
+ import android.widget.*;
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Money;
+@@ -90,14 +89,9 @@
+ 	/**
+ 	 * Cursor for transfer account spinner
+ 	 */
+-	private Cursor mCursor;	
+-	
+-	/**
+-	 * Holds database ID of transaction to be edited (if in edit mode)
+-	 */
+-	private long mTransactionId = 0;
+-	
+-	/**
++	private Cursor mCursor;
++
++    /**
+ 	 * Transaction to be created/updated
+ 	 */
+ 	private Transaction mTransaction;
+@@ -202,7 +196,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 
+ 		SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+ 		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
+-		if (mUseDoubleEntry == false){
++		if (!mUseDoubleEntry){
+ 			getView().findViewById(R.id.layout_double_entry).setVisibility(View.GONE);
+ 		}
+ 		
+@@ -210,9 +204,9 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+ 		updateTransferAccountsList();
+ 		
+-		mTransactionId = getArguments().getLong(SELECTED_TRANSACTION_ID);
++        long transactionId = getArguments().getLong(SELECTED_TRANSACTION_ID);
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+-		mTransaction = mTransactionsDbAdapter.getTransaction(mTransactionId);
++		mTransaction = mTransactionsDbAdapter.getTransaction(transactionId);
+ 		
+ 		setListeners();
+ 		if (mTransaction == null)
+@@ -330,8 +324,11 @@ private void initalizeViews() {
+ 	private void updateTransferAccountsList(){
+ 		long accountId = ((TransactionsActivity)getActivity()).getCurrentAccountID();
+ 
+-		String conditions = "(" + DatabaseHelper.KEY_ROW_ID + " != " + accountId + ") AND " + "(" +
+-							DatabaseHelper.KEY_CURRENCY_CODE + " = '" + mAccountsDbAdapter.getCurrencyCode(accountId) + "')";
++		String conditions = "(" + DatabaseHelper.KEY_ROW_ID + " != " + accountId + " AND "
++							+ DatabaseHelper.KEY_CURRENCY_CODE + " = '" + mAccountsDbAdapter.getCurrencyCode(accountId)
++                            + "' AND " + DatabaseHelper.KEY_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
++                            + "' AND " + DatabaseHelper.KEY_PLACEHOLDER + " = 0"
++                            + ")";
+ 
+ 		mCursor = mAccountsDbAdapter.fetchAccounts(conditions);
+ 
+@@ -415,12 +412,12 @@ private void setSelectedTransferAccount(long accountId){
+ 		for (int pos = 0; pos < mCursorAdapter.getCount(); pos++) {
+ 			if (mCursorAdapter.getItemId(pos) == accountId){
+                 final int position = pos;
+-				new Handler().postDelayed(new Runnable() {
++                mDoubleAccountSpinner.postDelayed(new Runnable() {
+                     @Override
+                     public void run() {
+                         mDoubleAccountSpinner.setSelection(position);
+                     }
+-                }, 100);
++                }, 500);
+ 				break;
+ 			}
+ 		}
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+index 5fead01e..dd480fca 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+@@ -95,6 +95,7 @@
+     TextView mSectionHeaderSubAccounts;
+     TextView mSectionHeaderTransactions;
+     View mSubAccountsContainer;
++    View mTransactionsContainer;
+ 
+ 	private OnNavigationListener mTransactionListNavigationListener = new OnNavigationListener() {
+ 
+@@ -154,6 +155,7 @@ protected void onCreate(Bundle savedInstanceState) {
+         mSectionHeaderSubAccounts = (TextView) findViewById(R.id.section_header_sub_accounts);
+         mSectionHeaderTransactions = (TextView) findViewById(R.id.section_header_transactions);
+         mSubAccountsContainer = findViewById(R.id.sub_accounts_container);
++        mTransactionsContainer = findViewById(R.id.transactions_container);
+ 
+ 		final Intent intent = getIntent();
+ 		mAccountId = intent.getLongExtra(
+@@ -311,7 +313,9 @@ protected void showTransactionsList(){
+                 .beginTransaction();
+ 
+         int subAccountCount = mAccountsDbAdapter.getSubAccountCount(mAccountId);
+-        if (subAccountCount > 0){
++        boolean isPlaceholderAccount = mAccountsDbAdapter.isPlaceholderAccount(mAccountId);
++
++        if (subAccountCount > 0 || isPlaceholderAccount){
+             mSubAccountsContainer.setVisibility(View.VISIBLE);
+             mSectionHeaderSubAccounts.setVisibility(View.VISIBLE);
+             String subAccountSectionText = getResources().getQuantityString(R.plurals.label_sub_accounts, subAccountCount, subAccountCount);
+@@ -323,16 +327,21 @@ protected void showTransactionsList(){
+             fragmentTransaction.replace(R.id.sub_accounts_container, subAccountsListFragment, AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
+         }
+ 
+-        TransactionsListFragment transactionsListFragment = new TransactionsListFragment();
+-        Bundle args = new Bundle();
+-        args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID,
+-                mAccountId);
+-        transactionsListFragment.setArguments(args);
+-        Log.i(TAG, "Opening transactions for account id " +  mAccountId);
+-
+-        fragmentTransaction.replace(R.id.transactions_container,
+-                transactionsListFragment, FRAGMENT_TRANSACTIONS_LIST);
++        //only load transactions if it is not a placeholder account
++        if (!isPlaceholderAccount){
++            TransactionsListFragment transactionsListFragment = new TransactionsListFragment();
++            Bundle args = new Bundle();
++            args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID,
++                    mAccountId);
++            transactionsListFragment.setArguments(args);
++            Log.i(TAG, "Opening transactions for account id " +  mAccountId);
+ 
++            fragmentTransaction.replace(R.id.transactions_container,
++                    transactionsListFragment, FRAGMENT_TRANSACTIONS_LIST);
++        } else {
++            mSectionHeaderTransactions.setVisibility(View.GONE);
++            mTransactionsContainer.setVisibility(View.GONE);
++        }
+         fragmentTransaction.commit();
+ 	}
+ 	
+diff --git a/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java b/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
+index a9760b72..03c65ff9 100644
+--- a/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
++++ b/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
+@@ -44,22 +44,45 @@
+     /*
+      * GnuCash account XML file qualified tag names. Used for matching tags
+      */
+-    public static final String TAG_NAME         = "act:name";
+-    public static final String TAG_UID          = "act:id";
+-    public static final String TAG_TYPE         = "act:type";
+-    public static final String TAG_CURRENCY     = "cmdty:id";
+-    public static final String TAG_PARENT_UID   = "act:parent";
+-    public static final String TAG_ACCOUNT      = "gnc:account";
++    public static final String TAG_NAME             = "act:name";
++    public static final String TAG_UID              = "act:id";
++    public static final String TAG_TYPE             = "act:type";
++    public static final String TAG_CURRENCY         = "cmdty:id";
+     public static final String TAG_COMMODITY_SPACE  = "cmdty:space";
++    public static final String TAG_PARENT_UID       = "act:parent";
++    public static final String TAG_ACCOUNT          = "gnc:account";
++    public static final String TAG_SLOT_KEY         = "slot:key";
++    public static final String TAG_SLOT_VALUE       = "slot:value";
++
++    /**
++     * ISO 4217 currency code for "No Currency"
++     */
+     private static final String NO_CURRENCY_CODE    = "XXX";
+ 
++    /**
++     * Tag for logging
++     */
+     private static final String LOG_TAG = "GnuCashAccountImporter";
+ 
++    /**
++     * Value for placeholder slots in GnuCash account structure file
++     */
++    private static final String PLACEHOLDER_KEY = "placeholder";
++
+ 
+     AccountsDbAdapter mDatabaseAdapter;
++
++    /**
++     * StringBuilder for accumulating characters between XML tags
++     */
+     StringBuilder mContent;
++
++    /**
++     * Reference to account which is built when each account tag is parsed in the XML file
++     */
+     Account mAccount;
+ 
++    boolean mInPlaceHolderSlot = false;
+     boolean mISO4217Currency = false;
+ 
+     public GnucashAccountXmlHandler(Context context) {
+@@ -116,6 +139,20 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             mISO4217Currency = false;
+         }
+ 
++        if (qualifiedName.equalsIgnoreCase(TAG_SLOT_KEY)){
++            if (characterString.equals(PLACEHOLDER_KEY)){
++                mInPlaceHolderSlot = true;
++            }
++        }
++
++        if (qualifiedName.equalsIgnoreCase(TAG_SLOT_VALUE)){
++            if (mInPlaceHolderSlot){
++                if (characterString.equals("true")){
++                    mAccount.setPlaceHolderFlag(true);
++                };
++                mInPlaceHolderSlot = false;
++            }
++        }
+         //reset the accumulated characters
+         mContent.setLength(0);
+     }

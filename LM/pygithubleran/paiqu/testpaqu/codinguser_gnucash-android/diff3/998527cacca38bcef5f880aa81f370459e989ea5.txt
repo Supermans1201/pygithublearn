@@ -1,0 +1,512 @@
+From ad62cec2ac198bc2951e306ca05f754b51f9c357 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Mon, 22 Sep 2014 23:29:33 +0800
+Subject: [PATCH 1/9] Disable editing for multi-currency transactions
+
+---
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  3 ++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 18 +++++++++++++++++
+ .../ui/transaction/TransactionFormFragment.java    | 23 ++++++++++++++++++++++
+ 3 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index 24bf926d..f6d756fe 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -141,7 +141,8 @@ private void createTempView() {
+         //          ) ,
+         //          2
+         //      ) as trans_acct_a_uid ,
+-        //   TOTAL ( CASE WHEN splits_type = 'DEBIT' THEN splits_amount ELSE - splits_amount END ) AS trans_acct_balance
++        //   TOTAL ( CASE WHEN splits_type = 'DEBIT' THEN splits_amount ELSE - splits_amount END ) AS trans_acct_balance,
++        //   COUNT ( DISTINCT accounts_currency ) as trans_currency_count
+         //   FROM trans_split_acct GROUP BY transactions_uid
+         //
+         // This temporary view would pick one Account_UID for each
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index e27d7269..69675d11 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -597,4 +597,22 @@ public void scheduleTransaction(Transaction recurringTransaction) {
+     public Transaction getTransaction(String transactionUID) {
+         return getTransaction(getID(transactionUID));
+     }
++
++    public int getNumCurrencies(String transactionUID) {
++        Cursor cursor = mDb.query("trans_extra_info",
++                new String[]{"trans_currency_count"},
++                "trans_acct_t_uid=?",
++                new String[]{transactionUID},
++                null, null, null);
++        int numCurrencies = 0;
++        try {
++            if (cursor.moveToFirst()) {
++                numCurrencies = cursor.getInt(0);
++            }
++        }
++        finally {
++            cursor.close();
++        }
++        return numCurrencies;
++    }
+ }
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index e8b9b1b3..7240f414 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -160,6 +160,11 @@
+ 	private boolean mUseDoubleEntry;
+ 
+     /**
++     * Flag to not if the transaction involves multiple currency
++     */
++    private boolean mMultiCurrency;
++
++    /**
+      * The AccountType of the account to which this transaction belongs.
+      * Used for determining the accounting rules for credits and debits
+      */
+@@ -323,6 +328,7 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+ 	 * This method is called if the fragment is used for editing a transaction
+ 	 */
+ 	private void initializeViewsWithTransaction(){
++        mMultiCurrency = mTransactionsDbAdapter.getNumCurrencies(mTransaction.getUID()) > 1;
+ 		mDescriptionEditText.setText(mTransaction.getDescription());
+ 
+         mTransactionTypeButton.setAccountType(mAccountType);
+@@ -360,6 +366,23 @@ private void initializeViewsWithTransaction(){
+ 		mCurrencyTextView.setText(accountCurrency.getSymbol());
+ 
+         setSelectedRecurrenceOption();
++        if (mMultiCurrency) {
++            enableControls(false);
++        }
++    }
++
++    private void enableControls(boolean b) {
++        mDescriptionEditText.setEnabled(b);
++        mNotesEditText.setEnabled(b);
++        mDateTextView.setEnabled(b);
++        mTimeTextView.setEnabled(b);
++        mAmountEditText.setEnabled(b);
++        mCurrencyTextView.setEnabled(b);
++        mTransactionTypeButton.setEnabled(b);
++        mDoubleAccountSpinner.setEnabled(b);
++        // the next is always enabled, so the user can check the detailed info of splits
++        // mOpenSplitsButton;
++        mRecurringTransactionSpinner.setEnabled(b);
+     }
+ 
+     private void setAmountEditViewVisible(int visibility) {
+
+From 218de7536e12da81ab373055e5116f775a843c8e Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Mon, 22 Sep 2014 23:36:25 +0800
+Subject: [PATCH 2/9] refuse to modify when saving
+
+---
+ .../org/gnucash/android/ui/transaction/TransactionFormFragment.java | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 7240f414..5782c6ca 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -722,7 +722,11 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 			return true;
+ 
+ 		case R.id.menu_save:
+-            if (mAmountEditText.getText().length() == 0){
++            if (mMultiCurrency) {
++                Toast.makeText(getActivity(), "Multi-currency transactions cannot be modified", Toast.LENGTH_LONG).show();
++                finish();
++            }
++            else if (mAmountEditText.getText().length() == 0) {
+                 Toast.makeText(getActivity(), R.string.toast_transanction_amount_required, Toast.LENGTH_SHORT).show();
+             } else
+ 			    saveNewTransaction();
+
+From fcc72cd06fe1356c254c74e8b9db2c19a279d665 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 23 Sep 2014 21:48:53 +0800
+Subject: [PATCH 3/9] Put toast string to resource
+
+---
+ app/res/values/strings.xml                                              | 1 +
+ app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 2c5b8ed5..d6d0c394 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -325,6 +325,7 @@
+ 	</string>
+ 	<string name="label_dismiss">Dismiss</string>
+     <string name="toast_transanction_amount_required">Enter an amount to save the transaction</string>
++    <string name="toast_error_edit_multi_currency_transaction">Multi-currency transactions cannot be modified</string>
+     <string name="menu_import_accounts">Import GnuCash Accounts</string>
+     <string name="btn_import_accounts">Import Accounts</string>
+     <string name="toast_error_importing_accounts">An error occurred while importing the GnuCash accounts</string>
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 5782c6ca..533f705c 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -723,7 +723,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 
+ 		case R.id.menu_save:
+             if (mMultiCurrency) {
+-                Toast.makeText(getActivity(), "Multi-currency transactions cannot be modified", Toast.LENGTH_LONG).show();
++                Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
+                 finish();
+             }
+             else if (mAmountEditText.getText().length() == 0) {
+
+From 85976982dc2a21568e66704fef7f744eac6cdbb0 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 23 Sep 2014 21:51:53 +0800
+Subject: [PATCH 4/9] Refuse to change account multi-currency transaction
+
+---
+ .../ui/transaction/TransactionFormFragment.java        | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 533f705c..11a7bc7a 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -567,19 +567,23 @@ public void run() {
+      * Callback when the account in the navigation bar is changed by the user
+      * @param newAccountId Database record ID of the newly selected account
+      */
+-	public void onAccountChanged(long newAccountId){
+-		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		String currencyCode = accountsDbAdapter.getCurrencyCode(newAccountId);
+-		Currency currency = Currency.getInstance(currencyCode);
+-		mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
++    public void onAccountChanged(long newAccountId) {
++        if (mMultiCurrency) {
++            Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
++            return;
++        }
++        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
++        String currencyCode = accountsDbAdapter.getCurrencyCode(newAccountId);
++        Currency currency = Currency.getInstance(currencyCode);
++        mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
+ 
+         mAccountType = accountsDbAdapter.getAccountType(newAccountId);
+         mTransactionTypeButton.setAccountType(mAccountType);
+ 
+-		updateTransferAccountsList();
++        updateTransferAccountsList();
+ 
+         accountsDbAdapter.close();
+-	}
++    }
+ 
+ 	/**
+ 	 * Collects information from the fragment views and uses it to create
+
+From 53e3522a91ce5415bc9bf163b138d1ea0600db60 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 23 Sep 2014 23:31:19 +0800
+Subject: [PATCH 5/9] Try to disable split edition for multi-currency
+ transactions
+
+---
+ .../dialog/SplitEditorDialogFragment.java          | 57 +++++++++++++++++-----
+ 1 file changed, 46 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 02e1e780..36aba2db 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -69,6 +69,8 @@
+     private BigDecimal mBaseAmount = BigDecimal.ZERO;
+ 
+     private List<String> mRemovedSplitUIDs = new ArrayList<String>();
++
++    private boolean mMultiCurrency = false;
+     /**
+      * Create and return a new instance of the fragment with the appropriate paramenters
+      * @param baseAmountString String with base amount which is being split
+@@ -129,8 +131,37 @@ public void onActivityCreated(Bundle savedInstanceState) {
+     }
+ 
+     private void loadSplitViews(List<Split> splitList) {
++        Currency currency = null;
+         for (Split split : splitList) {
+             addSplitView(split);
++            if (currency == null) {
++                currency = split.getAmount().getCurrency();
++            }
++            else if (currency != split.getAmount().getCurrency()) {
++                mMultiCurrency = true;
++            }
++        }
++        if (mMultiCurrency) {
++            enableAllControls(false);
++        }
++    }
++
++    private void enableAllControls(boolean b) {
++        for (View splitView : mSplitItemViewList) {
++            EditText splitMemoEditText = (EditText) splitView.findViewById(R.id.input_split_memo);
++            final EditText splitAmountEditText = (EditText) splitView.findViewById(R.id.input_split_amount);
++            ImageButton removeSplitButton = (ImageButton) splitView.findViewById(R.id.btn_remove_split);
++            Spinner accountsSpinner = (Spinner) splitView.findViewById(R.id.input_accounts_spinner);
++            final TextView splitCurrencyTextView = (TextView) splitView.findViewById(R.id.split_currency_symbol);
++            final TextView splitUidTextView = (TextView) splitView.findViewById(R.id.split_uid);
++            final TransactionTypeToggleButton splitTypeButton = (TransactionTypeToggleButton) splitView.findViewById(R.id.btn_split_type);
++            splitMemoEditText.setEnabled(b);
++            splitAmountEditText.setEnabled(b);
++            removeSplitButton.setEnabled(b);
++            accountsSpinner.setEnabled(b);
++            splitCurrencyTextView.setEnabled(b);
++            splitUidTextView.setEnabled(b);
++            splitTypeButton.setEnabled(b);
+         }
+     }
+ 
+@@ -260,9 +291,13 @@ public void onClick(View view) {
+         mSaveButton.setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View view) {
+-                List<Split> splitList = extractSplitsFromView();
+-                ((TransactionFormFragment) getTargetFragment()).setSplitList(splitList, mRemovedSplitUIDs);
+-
++                if (mMultiCurrency) {
++                    Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
++                }
++                else {
++                    List<Split> splitList = extractSplitsFromView();
++                    ((TransactionFormFragment) getTargetFragment()).setSplitList(splitList, mRemovedSplitUIDs);
++                }
+                 dismiss();
+             }
+         });
+@@ -309,15 +344,15 @@ private void updateTotal(){
+         List<Split> splitList   = extractSplitsFromView();
+         String currencyCode     = mAccountsDbAdapter.getCurrencyCode(mAccountId);
+         Money splitSum          = Money.createZeroInstance(currencyCode);
+-
+-        for (Split split : splitList) {
+-            Money amount = split.getAmount().absolute();
+-            if (split.getType() == TransactionType.DEBIT)
+-                splitSum = splitSum.subtract(amount);
+-            else
+-                splitSum = splitSum.add(amount);
++        if (!mMultiCurrency) {
++            for (Split split : splitList) {
++                Money amount = split.getAmount().absolute();
++                if (split.getType() == TransactionType.DEBIT)
++                    splitSum = splitSum.subtract(amount);
++                else
++                    splitSum = splitSum.add(amount);
++            }
+         }
+-
+         TransactionsActivity.displayBalance(mImbalanceTextView, splitSum);
+     }
+ 
+
+From 0eee34e369600457b6a6bbddde7ee5162e74bf2e Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 20:44:37 +0800
+Subject: [PATCH 6/9] Show correct transfer account
+
+---
+ .../android/ui/transaction/TransactionFormFragment.java   | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 11a7bc7a..48f3f559 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -224,9 +224,6 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+         mAccountType = mAccountsDbAdapter.getAccountType(mAccountUID);
+ 
+-        //updateTransferAccountsList must only be called after initializing mAccountsDbAdapter
+-		updateTransferAccountsList();
+-
+         ArrayAdapter<CharSequence> recurrenceAdapter = ArrayAdapter.createFromResource(getActivity(),
+                 R.array.recurrence_period_strings, android.R.layout.simple_spinner_item);
+         recurrenceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+@@ -235,6 +232,13 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         String transactionUID = getArguments().getString(UxArgument.SELECTED_TRANSACTION_UID);
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+ 		mTransaction = mTransactionsDbAdapter.getTransaction(transactionUID);
++        if (mTransaction != null) {
++            mMultiCurrency = mTransactionsDbAdapter.getNumCurrencies(mTransaction.getUID()) > 1;
++        }
++
++        //updateTransferAccountsList must only be called after initializing mAccountsDbAdapter
++        // it needs mMultiCurrency to be properly initialized
++        updateTransferAccountsList();
+ 
+         mDoubleAccountSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+             @Override
+@@ -328,7 +332,6 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+ 	 * This method is called if the fragment is used for editing a transaction
+ 	 */
+ 	private void initializeViewsWithTransaction(){
+-        mMultiCurrency = mTransactionsDbAdapter.getNumCurrencies(mTransaction.getUID()) > 1;
+ 		mDescriptionEditText.setText(mTransaction.getDescription());
+ 
+         mTransactionTypeButton.setAccountType(mAccountType);
+@@ -448,8 +451,8 @@ private void updateTransferAccountsList(){
+ 		String accountUID = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
+ 
+ 		String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + accountUID
+-                            + "' AND " + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(accountUID)
+-                            + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
++                            + "' AND " + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(accountUID)
++                            + "' AND ")) + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                             + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                             + ")";
+ 
+
+From 9a68423b5c8b0a3242c5d6ea7bd45c655521d16b Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 21:40:28 +0800
+Subject: [PATCH 7/9] Keep currency for transaction splits
+
+---
+ app/src/org/gnucash/android/model/Transaction.java                   | 5 +----
+ .../org/gnucash/android/ui/transaction/TransactionFormFragment.java  | 2 +-
+ 2 files changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index ecdfe1ae..8e1cddc3 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -185,10 +185,7 @@ private void initDefaults(){
+      * @param splitList List of splits for this transaction
+      */
+     public void setSplits(List<Split> splitList){
+-        mSplitList.clear();
+-        for (Split split : splitList) {
+-            addSplit(split);
+-        }
++        mSplitList = splitList;
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 48f3f559..5eda9bac 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -484,7 +484,7 @@ private void openSplitEditor(){
+         } else {
+             Money biggestAmount = Money.createZeroInstance(mTransaction.getCurrencyCode());
+             for (Split split : mTransaction.getSplits()) {
+-                if (split.getAmount().compareTo(biggestAmount) > 0)
++                if (split.getAmount().asBigDecimal().compareTo(biggestAmount.asBigDecimal()) > 0)
+                     biggestAmount = split.getAmount();
+             }
+             baseAmountString = biggestAmount.toPlainString();
+
+From 4745dea1afd48f298f1aaaab7740d11cf468ce87 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 21:49:25 +0800
+Subject: [PATCH 8/9] reject add split; show splits own currency
+
+---
+ .../android/ui/transaction/dialog/SplitEditorDialogFragment.java | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 36aba2db..89e9f395 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -227,7 +227,7 @@ public void onClick(View view) {
+         updateTransferAccountsList(accountsSpinner);
+         accountsSpinner.setOnItemSelectedListener(new TypeButtonLabelUpdater(splitTypeButton));
+ 
+-        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountId));
++        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(split.getAccountUID()));
+         splitCurrencyTextView.setText(accountCurrency.getSymbol());
+         splitTypeButton.setAmountFormattingListener(splitAmountEditText, splitCurrencyTextView);
+         splitTypeButton.setChecked(mBaseAmount.signum() > 0);
+@@ -305,7 +305,12 @@ public void onClick(View view) {
+         mAddSplit.setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View view) {
+-                addSplitView(null);
++                if (mMultiCurrency) {
++                    Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
++                }
++                else {
++                    addSplitView(null);
++                }
+             }
+         });
+     }
+
+From a90349e356a79d5df64be56695e8a4f715e46798 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 22:20:59 +0800
+Subject: [PATCH 9/9] show correct split account
+
+---
+ .../dialog/SplitEditorDialogFragment.java          | 24 +++++++++++++---------
+ 1 file changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 89e9f395..75bde556 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -105,13 +105,24 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 
+         getDialog().setTitle("Transaction splits");
+ 
+-        initArgs();
+         mSplitItemViewList = new ArrayList<View>();
+         mSplitsDbAdapter = new SplitsDbAdapter(getActivity());
+ 
+         //we are editing splits for a new transaction.
+         // But the user may have already created some splits before. Let's check
+         List<Split> splitList = ((TransactionFormFragment) getTargetFragment()).getSplitList();
++        {
++            Currency currency = null;
++            for (Split split : splitList) {
++                if (currency == null) {
++                    currency = split.getAmount().getCurrency();
++                } else if (currency != split.getAmount().getCurrency()) {
++                    mMultiCurrency = true;
++                }
++            }
++        }
++
++        initArgs();
+         if (!splitList.isEmpty()) {
+             //aha! there are some splits. Let's load those instead
+             loadSplitViews(splitList);
+@@ -131,15 +142,8 @@ public void onActivityCreated(Bundle savedInstanceState) {
+     }
+ 
+     private void loadSplitViews(List<Split> splitList) {
+-        Currency currency = null;
+         for (Split split : splitList) {
+             addSplitView(split);
+-            if (currency == null) {
+-                currency = split.getAmount().getCurrency();
+-            }
+-            else if (currency != split.getAmount().getCurrency()) {
+-                mMultiCurrency = true;
+-            }
+         }
+         if (mMultiCurrency) {
+             enableAllControls(false);
+@@ -191,8 +195,8 @@ private void initArgs() {
+         mBaseAmount     = new BigDecimal(args.getString(UxArgument.AMOUNT_STRING));
+ 
+         String conditions = "(" //+ AccountEntry._ID + " != " + mAccountId + " AND "
+-                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountId)
+-                + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
++                + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountId)
++                + "' AND ")) + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                 + ")";
+         mCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions);

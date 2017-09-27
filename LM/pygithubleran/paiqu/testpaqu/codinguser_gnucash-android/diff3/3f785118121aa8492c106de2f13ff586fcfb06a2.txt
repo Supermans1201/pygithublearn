@@ -1,0 +1,1210 @@
+From ff894a5ce5901bafc8626279d09278efc229ef23 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 19 Sep 2016 17:48:51 +0200
+Subject: [PATCH 1/7] Adds multibook support for the homescreen widget
+
+When adding a widget, there is now an option for choosing the book in addition to the account.
+Updates to an account in the relevant book will be reflected in the widget.
+This change handles no migration from the old widget structure. (Users need to remove and re-add widgets)
+---
+ .../gnucash/android/app/GnuCashApplication.java    |  18 +++-
+ .../java/org/gnucash/android/db/BookDbHelper.java  |  10 ++
+ .../gnucash/android/db/adapter/BooksDbAdapter.java |   2 +
+ .../receivers/TransactionAppWidgetProvider.java    |  13 ++-
+ .../android/ui/common/BaseDrawerActivity.java      |   6 ++
+ .../gnucash/android/ui/common/FormActivity.java    |   7 ++
+ .../org/gnucash/android/ui/common/UxArgument.java  |   5 +
+ .../ui/homescreen/WidgetConfigurationActivity.java | 105 ++++++++++++++++-----
+ app/src/main/res/layout/widget_configuration.xml   |  23 ++++-
+ 9 files changed, 153 insertions(+), 36 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 859e87b0..b8327546 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -126,7 +126,7 @@ public void onCreate(){
+         BookDbHelper bookDbHelper = new BookDbHelper(getApplicationContext());
+         mBooksDbAdapter = new BooksDbAdapter(bookDbHelper.getWritableDatabase());
+ 
+-        initDatabaseAdapters();
++        initializeDatabaseAdapters();
+         setDefaultCurrencyCode(getDefaultCurrencyCode());
+ 
+         if (BuildConfig.DEBUG && !isRoboUnitTest())
+@@ -137,7 +137,7 @@ public void onCreate(){
+      * Initialize database adapter singletons for use in the application
+      * This method should be called every time a new book is opened
+      */
+-    private static void initDatabaseAdapters() {
++    private static void initializeDatabaseAdapters() {
+         if (mDbHelper != null){ //close if open
+             mDbHelper.getReadableDatabase().close();
+         }
+@@ -205,16 +205,24 @@ public static BooksDbAdapter getBooksDbAdapter(){
+     }
+ 
+     /**
+-     * Loads the book with GUID {@code bookUID}
++     * Loads the book with GUID {@code bookUID} and opens the AccountsActivity
+      * @param bookUID GUID of the book to be loaded
+      */
+     public static void loadBook(@NonNull String bookUID){
+-        mBooksDbAdapter.setActive(bookUID);
+-        initDatabaseAdapters();
++        activateBook(bookUID);
+         AccountsActivity.start(getAppContext());
+     }
+ 
+     /**
++     * Activates the book with unique identifer {@code bookUID}, and refreshes the database adapters
++     * @param bookUID GUID of the book to be activated
++     */
++    public static void activateBook(@NonNull String bookUID){
++        mBooksDbAdapter.setActive(bookUID);
++        initializeDatabaseAdapters();
++    }
++
++    /**
+      * Returns the currently active database in the application
+      * @return Currently active {@link SQLiteDatabase}
+      */
+diff --git a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+index 87adc17d..6fa1a6eb 100644
+--- a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+@@ -125,6 +125,16 @@ public void onCreate(SQLiteDatabase db) {
+     }
+ 
+     /**
++     * Returns the database for the book
++     * @param bookUID GUID of the book
++     * @return SQLiteDatabase of the book
++     */
++    public static SQLiteDatabase getDatabase(String bookUID){
++        DatabaseHelper dbHelper = new DatabaseHelper(GnuCashApplication.getAppContext(), bookUID);
++        return dbHelper.getWritableDatabase();
++    }
++
++    /**
+      * Inserts the book into the database
+      * @param db Book database
+      * @param book Book to insert
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index 65e06c95..abbce802 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -31,6 +31,8 @@
+ import org.gnucash.android.ui.settings.PreferenceActivity;
+ import org.gnucash.android.util.TimestampHelper;
+ 
++import java.util.List;
++
+ /**
+  * Database adapter for creating/modifying book entries
+  */
+diff --git a/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java b/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+index 053c2a0f..2f6e4d81 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
++++ b/app/src/main/java/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+@@ -21,8 +21,11 @@
+ import android.content.SharedPreferences.Editor;
+ import android.preference.PreferenceManager;
+ 
++import org.gnucash.android.db.adapter.BooksDbAdapter;
++import org.gnucash.android.model.Book;
+ import org.gnucash.android.ui.common.UxArgument;
+ import org.gnucash.android.ui.homescreen.WidgetConfigurationActivity;
++import org.gnucash.android.ui.settings.PreferenceActivity;
+ 
+ /**
+  * {@link AppWidgetProvider} which is responsible for managing widgets on the homescreen
+@@ -43,13 +46,13 @@ public void onUpdate(Context context, AppWidgetManager appWidgetManager,
+         for (int i=0; i<N; i++) {
+             int appWidgetId = appWidgetIds[i];
+ 
+-            String accountUID = PreferenceManager
+-                    .getDefaultSharedPreferences(context)
++            String accountUID = PreferenceActivity.getActiveBookSharedPreferences()
+                     .getString(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId, null);
+             if (accountUID == null)
+             	return;
+             
+-            WidgetConfigurationActivity.updateWidget(context, appWidgetId, accountUID);
++            WidgetConfigurationActivity.updateWidget(context, appWidgetId, accountUID,
++					BooksDbAdapter.getInstance().getActiveBookUID());
+         }
+ 	}
+ 
+@@ -62,11 +65,11 @@ public void onEnabled(Context context) {
+     @Override
+ 	public void onDeleted(Context context, int[] appWidgetIds) {
+ 		super.onDeleted(context, appWidgetIds);		
+-		Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
++		Editor editor = PreferenceActivity.getActiveBookSharedPreferences().edit();
+ 		
+ 		for (int appWidgetId : appWidgetIds) {
+ 			editor.remove(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId);
+ 		}
+-		editor.commit();		
++		editor.apply();
+ 	}
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index eee5966c..89fa315a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -102,6 +102,12 @@ protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         setContentView(getContentView());
+ 
++        //if a parameter was passed to open an account within a specific book, then switch
++        String bookUID = getIntent().getStringExtra(UxArgument.BOOK_UID);
++        if (bookUID != null && !bookUID.equals(BooksDbAdapter.getInstance().getActiveBookUID())){
++            GnuCashApplication.activateBook(bookUID);
++        }
++
+         ButterKnife.bind(this);
+         setSupportActionBar(mToolbar);
+         final ActionBar actionBar = getSupportActionBar();
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java b/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
+index e078ba18..6d777f5f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
+@@ -29,6 +29,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.ui.account.AccountFormFragment;
+ import org.gnucash.android.ui.budget.BudgetAmountEditorFragment;
+ import org.gnucash.android.ui.budget.BudgetFormFragment;
+@@ -57,6 +58,12 @@ protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         setContentView(R.layout.activity_form);
+ 
++        //if a parameter was passed to open an account within a specific book, then switch
++        String bookUID = getIntent().getStringExtra(UxArgument.BOOK_UID);
++        if (bookUID != null && !bookUID.equals(BooksDbAdapter.getInstance().getActiveBookUID())){
++            GnuCashApplication.activateBook(bookUID);
++        }
++
+         Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
+         setSupportActionBar(toolbar);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java b/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
+index b2077c62..9a4a0733 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
+@@ -102,6 +102,11 @@
+      */
+     public static final String BUDGET_AMOUNT_LIST = "budget_amount_list";
+ 
++    /**
++     * GUID of a book which is relevant for a specific action
++     */
++    public static final String BOOK_UID = "book_uid";
++
+     //prevent initialization of instances of this class
+     private UxArgument(){
+         //prevent even the native class from calling the ctor
+diff --git a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+index eb13294f..d02acbca 100644
+--- a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+@@ -25,29 +25,39 @@
+ import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
+ import android.database.Cursor;
++import android.database.sqlite.SQLiteDatabase;
+ import android.os.Bundle;
+-import android.preference.PreferenceManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.util.Log;
+ import android.view.View;
++import android.widget.AdapterView;
+ import android.widget.Button;
+ import android.widget.RemoteViews;
+ import android.widget.Spinner;
+ import android.widget.Toast;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.db.BookDbHelper;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Book;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.receivers.TransactionAppWidgetProvider;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.common.FormActivity;
+ import org.gnucash.android.ui.common.UxArgument;
++import org.gnucash.android.ui.settings.PreferenceActivity;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ import java.util.Locale;
+ 
++import butterknife.Bind;
++import butterknife.ButterKnife;
++
+ /**
+  * Activity for configuration which account to display on a widget.
+  * The activity is opened each time a widget is added to the homescreen
+@@ -57,19 +67,42 @@
+ 	private AccountsDbAdapter mAccountsDbAdapter;
+     private int mAppWidgetId;
+ 	
+-	private Spinner mAccountsSpinner;
+-	private Button mOkButton;
+-	private Button mCancelButton;
+-	
++	@Bind(R.id.input_accounts_spinner) Spinner mAccountsSpinner;
++	@Bind(R.id.input_books_spinner) Spinner mBooksSpinner;
++
++	@Bind(R.id.btn_save) Button mOkButton;
++	@Bind(R.id.btn_cancel) Button mCancelButton;
++	private SimpleCursorAdapter mAccountsCursorAdapter;
++
++
+ 	@Override
+ 	public void onCreate(Bundle savedInstanceState) {		
+ 		super.onCreate(savedInstanceState);
+ 		setContentView(R.layout.widget_configuration);
+ 		setResult(RESULT_CANCELED);
+-		
+-		mAccountsSpinner = (Spinner) findViewById(R.id.input_accounts_spinner);
+-		mOkButton 		= (Button) findViewById(R.id.btn_save);
+-		mCancelButton 	= (Button) findViewById(R.id.btn_cancel);
++
++		ButterKnife.bind(this);
++
++		BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
++		Cursor booksCursor = booksDbAdapter.fetchAllRecords();
++		String currentBookUID = booksDbAdapter.getActiveBookUID();
++
++		//determine the position of the currently active book in the cursor
++		int position = 0;
++		while (booksCursor.moveToNext()){
++			String bookUID = booksCursor.getString(booksCursor.getColumnIndexOrThrow(DatabaseSchema.BookEntry.COLUMN_UID));
++			if (bookUID.equals(currentBookUID))
++				break;
++			++position;
++		}
++
++		SimpleCursorAdapter booksCursorAdapter = new SimpleCursorAdapter(this,
++				android.R.layout.simple_spinner_item, booksCursor,
++				new String[]{DatabaseSchema.BookEntry.COLUMN_DISPLAY_NAME},
++				new int[]{android.R.id.text1}, 0);
++		booksCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++		mBooksSpinner.setAdapter(booksCursorAdapter);
++		mBooksSpinner.setSelection(position);
+ 
+ 		mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+ 		Cursor cursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+@@ -79,10 +112,10 @@ public void onCreate(Bundle savedInstanceState) {
+ 			finish();
+ 		}
+ 
+-        SimpleCursorAdapter cursorAdapter = new QualifiedAccountNameCursorAdapter(this, cursor);
++		mAccountsCursorAdapter = new QualifiedAccountNameCursorAdapter(this, cursor);
+ 		//without this line, the app crashes when a user tries to select an account
+-		cursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-		mAccountsSpinner.setAdapter(cursorAdapter);
++		mAccountsCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++		mAccountsSpinner.setAdapter(mAccountsCursorAdapter);
+ 		
+ 		bindListeners();
+ 	}
+@@ -91,6 +124,24 @@ public void onCreate(Bundle savedInstanceState) {
+ 	 * Sets click listeners for the buttons in the dialog
+ 	 */
+ 	private void bindListeners() {
++		mBooksSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
++			@Override
++			public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
++				Book book = BooksDbAdapter.getInstance().getRecord(id);
++				SQLiteDatabase db = new DatabaseHelper(WidgetConfigurationActivity.this, book.getUID()).getWritableDatabase();
++				mAccountsDbAdapter = new AccountsDbAdapter(db);
++
++				Cursor cursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
++				mAccountsCursorAdapter.swapCursor(cursor);
++				mAccountsCursorAdapter.notifyDataSetChanged();
++			}
++
++			@Override
++			public void onNothingSelected(AdapterView<?> parent) {
++				//nothing to see here, move along
++			}
++		});
++
+ 		mOkButton.setOnClickListener(new View.OnClickListener() {
+ 			
+ 			@Override
+@@ -110,12 +161,17 @@ public void onClick(View v) {
+ 				
+ 				long accountId = mAccountsSpinner.getSelectedItemId();
+                 String accountUID = mAccountsDbAdapter.getUID(accountId);
+-				SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(WidgetConfigurationActivity.this);
++
++				long bookId = mBooksSpinner.getSelectedItemId();
++				String bookUID = BooksDbAdapter.getInstance().getUID(bookId);
++
++				SharedPreferences prefs = PreferenceActivity.getBookSharedPreferences(bookUID);
++				//PreferenceManager.getDefaultSharedPreferences(WidgetConfigurationActivity.this);
+ 				Editor editor = prefs.edit();
+ 				editor.putString(UxArgument.SELECTED_ACCOUNT_UID + mAppWidgetId, accountUID);
+-				editor.commit();	
++				editor.apply();
+ 				
+-				updateWidget(WidgetConfigurationActivity.this, mAppWidgetId, accountUID);
++				updateWidget(WidgetConfigurationActivity.this, mAppWidgetId, accountUID, bookUID);
+ 						
+ 				Intent resultValue = new Intent();
+ 				resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, mAppWidgetId);
+@@ -137,14 +193,16 @@ public void onClick(View v) {
+ 	 * Updates the widget with id <code>appWidgetId</code> with information from the 
+ 	 * account with record ID <code>accountId</code>
+      * If the account has been deleted, then a notice is posted in the widget
+-     * @param appWidgetId ID of the widget to be updated
++	 * @param appWidgetId ID of the widget to be updated
+      * @param accountUID GUID of the account tied to the widget
++	 * @param bookUID GUID of the book with the relevant account
+ 	 */
+-	public static void updateWidget(final Context context, int appWidgetId, String accountUID) {
++	public static void updateWidget(final Context context, int appWidgetId, String accountUID, String bookUID) {
+ 		Log.i("WidgetConfiguration", "Updating widget: " + appWidgetId);
+ 		AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
+ 
+-		AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(BookDbHelper.getDatabase(bookUID));
++
+ 		final Account account;
+         try {
+             account = accountsDbAdapter.getRecord(accountUID);
+@@ -161,9 +219,9 @@ public static void updateWidget(final Context context, int appWidgetId, String a
+ 			views.setOnClickPendingIntent(R.id.widget_layout, pendingIntent);
+ 			views.setOnClickPendingIntent(R.id.btn_new_transaction, pendingIntent);
+ 			appWidgetManager.updateAppWidget(appWidgetId, views);
+-			Editor editor = PreferenceManager.getDefaultSharedPreferences(context).edit();
++			Editor editor = PreferenceActivity.getActiveBookSharedPreferences().edit(); //PreferenceManager.getDefaultSharedPreferences(context).edit();
+ 			editor.remove(UxArgument.SELECTED_ACCOUNT_UID + appWidgetId);
+-			editor.commit();
++			editor.apply();
+ 			return;
+ 		}
+ 		
+@@ -183,6 +241,7 @@ public static void updateWidget(final Context context, int appWidgetId, String a
+ 		accountViewIntent.setAction(Intent.ACTION_VIEW);
+ 		accountViewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+ 		accountViewIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
++		accountViewIntent.putExtra(UxArgument.BOOK_UID, bookUID);
+ 		PendingIntent accountPendingIntent = PendingIntent
+ 				.getActivity(context, appWidgetId, accountViewIntent, 0);
+ 		views.setOnClickPendingIntent(R.id.widget_layout, accountPendingIntent);
+@@ -191,6 +250,7 @@ public static void updateWidget(final Context context, int appWidgetId, String a
+ 		newTransactionIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+ 		newTransactionIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+ 		newTransactionIntent.putExtra(UxArgument.FORM_TYPE, FormActivity.FormType.TRANSACTION.name());
++		newTransactionIntent.putExtra(UxArgument.BOOK_UID, bookUID);
+ 		newTransactionIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, accountUID);
+ 		PendingIntent pendingIntent = PendingIntent
+ 				.getActivity(context, appWidgetId, newTransactionIntent, 0);	            
+@@ -212,7 +272,8 @@ public static void updateAllWidgets(final Context context){
+ 		//update widgets asynchronously so as not to block method which called the update
+ 		//inside the computation of the account balance
+ 		new Thread(new Runnable() {
+-			SharedPreferences defaultSharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
++			SharedPreferences defaultSharedPrefs = PreferenceActivity.getActiveBookSharedPreferences();
++			//PreferenceManager.getDefaultSharedPreferences(context);
+ 
+ 			@Override
+ 			public void run() {
+@@ -223,7 +284,7 @@ public void run() {
+ 					if (accountUID == null)
+ 						continue;
+ 
+-					updateWidget(context, widgetId, accountUID);
++					updateWidget(context, widgetId, accountUID, BooksDbAdapter.getInstance().getActiveBookUID());
+ 				}
+ 			}
+ 		}).start();
+diff --git a/app/src/main/res/layout/widget_configuration.xml b/app/src/main/res/layout/widget_configuration.xml
+index 06339201..f9ef7c19 100644
+--- a/app/src/main/res/layout/widget_configuration.xml
++++ b/app/src/main/res/layout/widget_configuration.xml
+@@ -22,18 +22,33 @@
+     android:orientation="vertical" >
+     
+     <TextView
+-	    android:id="@+id/label_account"
+-	    android:text="@string/label_display_account"
++	    android:id="@+id/label_book"
++	    android:text="Book"
+ 	    android:layout_height="wrap_content"
+ 	    android:layout_width="wrap_content"
+ 	    android:layout_marginBottom="-8dp"
+ 	    android:layout_marginTop="8dp"
+ 	    style="@style/TextAppearance.EditTransaction_LabelSmall" />
+     <Spinner
+-        android:id="@+id/input_accounts_spinner"        
++        android:id="@+id/input_books_spinner"
+         android:layout_width="match_parent"
+-        android:layout_height="wrap_content" 
++        android:layout_height="wrap_content"
++		android:layout_marginBottom="@dimen/dialog_padding"
+         android:minHeight="?android:attr/listPreferredItemHeight" />
+ 
++	<TextView
++		android:id="@+id/label_account"
++		android:text="@string/label_display_account"
++		android:layout_height="wrap_content"
++		android:layout_width="wrap_content"
++		android:layout_marginBottom="-8dp"
++		android:layout_marginTop="8dp"
++		style="@style/TextAppearance.EditTransaction_LabelSmall" />
++	<Spinner
++		android:id="@+id/input_accounts_spinner"
++		android:layout_width="match_parent"
++		android:layout_height="wrap_content"
++		android:minHeight="?android:attr/listPreferredItemHeight" />
++
+     <include layout="@layout/default_buttons"/>
+ </LinearLayout>
+\ No newline at end of file
+
+From 6048bd8d0604370a38189dad9ba451aa121fc7bb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Thu, 22 Sep 2016 20:33:21 +0200
+Subject: [PATCH 2/7] Show the correct last export date in the book manager.
+
+All books appeared with the date from the active book instead.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/580
+---
+ .../gnucash/android/ui/settings/BookManagerFragment.java |  2 +-
+ .../java/org/gnucash/android/util/PreferencesHelper.java | 16 ++++++++++++++++
+ 2 files changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+index 6d7e391a..ff7fa0e6 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+@@ -160,7 +160,7 @@ public void bindView(View view, final Context context, Cursor cursor) {
+             final String bookUID = cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_UID));
+ 
+             TextView lastSyncText = (TextView) view.findViewById(R.id.last_sync_time);
+-            lastSyncText.setText(PreferencesHelper.getLastExportTime().toString());
++            lastSyncText.setText(PreferencesHelper.getLastExportTime(bookUID).toString());
+ 
+             TextView labelLastSync = (TextView) view.findViewById(R.id.label_last_sync);
+             labelLastSync.setText(R.string.label_last_export_time);
+diff --git a/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java b/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+index d58f2e7d..27be8b7b 100644
+--- a/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
++++ b/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+@@ -84,4 +84,20 @@ public static Timestamp getLastExportTime() {
+         Log.d(LOG_TAG, "Retrieving '" + utcString + "' as lastExportTime from Android Preferences.");
+         return TimestampHelper.getTimestampFromUtcString(utcString);
+     }
++
++    /**
++     * Get the time for the last export operation of a specific book.
++     *
++     * @return A {@link Timestamp} with the time.
++     */
++    public static Timestamp getLastExportTime(String bookUID) {
++        final String utcString =
++                GnuCashApplication.getAppContext()
++                .getSharedPreferences(bookUID, Context.MODE_PRIVATE)
++                .getString(PREFERENCE_LAST_EXPORT_TIME_KEY,
++                           TimestampHelper.getUtcStringFromTimestamp(
++                                TimestampHelper.getTimestampFromEpochZero()));
++        Log.d(LOG_TAG, "Retrieving '" + utcString + "' as lastExportTime from Android Preferences.");
++        return TimestampHelper.getTimestampFromUtcString(utcString);
++    }
+ }
+\ No newline at end of file
+
+From a6aa211734accf94664da91316cf6e26bed0de92 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Sat, 1 Oct 2016 17:55:01 +0200
+Subject: [PATCH 3/7] Fix issues with scheduled exports running too much or not
+ at all.
+
+In one issue, the scheduled exports were being run with every service
+run, when executions had been missed.
+
+In the other, the scheduled exports wouldn't be run due to bug #583
+having incremented too much the execution count, yielding a next
+scheduled time too far in the future.
+
+Fixes:
+ https://github.com/codinguser/gnucash-android/issues/591
+ https://github.com/codinguser/gnucash-android/issues/594
+---
+ .../org/gnucash/android/model/ScheduledAction.java | 55 +++++++++++++++++-----
+ .../android/service/ScheduledActionService.java    | 28 +++++++----
+ .../test/unit/model/ScheduledActionTest.java       |  4 +-
+ .../unit/service/ScheduledActionServiceTest.java   | 29 +++++++++++-
+ 4 files changed, 89 insertions(+), 27 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index f7279af5..ff27fc76 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -173,35 +173,64 @@ public long getTimeOfLastSchedule(){
+     }
+ 
+     /**
+-     * Computes the next time that this scheduled action is supposed to be executed
++     * Computes the next time that this scheduled action is supposed to be
++     * executed based on the execution count.
++     *
+      * <p>This method does not consider the end time, or number of times it should be run.
+-     * It only considers when the next execution would theoretically be due</p>
++     * It only considers when the next execution would theoretically be due.</p>
++     *
+      * @return Next run time in milliseconds
+      */
+-    public long computeNextScheduledExecutionTime(){
+-        int multiplier = mRecurrence.getPeriodType().getMultiplier();
+-        //this is the last planned time for the action to occur, not the last run time
+-        long lastActionTime = getTimeOfLastSchedule(); //mStartDate + ((mExecutionCount-1)*getPeriod());
+-        if (lastActionTime < 0){
++    public long computeNextCountBasedScheduledExecutionTime(){
++        return computeNextScheduledExecutionTimeStartingAt(getTimeOfLastSchedule());
++    }
++
++    /**
++     * Computes the next time that this scheduled action is supposed to be
++     * executed based on the time of the last run.
++     *
++     * <p>This method does not consider the end time, or number of times it should be run.
++     * It only considers when the next execution would theoretically be due.</p>
++     *
++     * @return Next run time in milliseconds
++     */
++    public long computeNextTimeBasedScheduledExecutionTime() {
++        return computeNextScheduledExecutionTimeStartingAt(getLastRunTime());
++    }
++
++    /**
++     * Computes the next time that this scheduled action is supposed to be
++     * executed starting at startTime.
++     *
++     * <p>This method does not consider the end time, or number of times it should be run.
++     * It only considers when the next execution would theoretically be due.</p>
++     *
++     * @param startTime time in milliseconds to use as start to compute the next schedule.
++     *
++     * @return Next run time in milliseconds
++     */
++    private long computeNextScheduledExecutionTimeStartingAt(long startTime) {
++        if (startTime <= 0){ // has never been run
+             return mStartDate;
+         }
+ 
+-        LocalDateTime localDate = LocalDateTime.fromDateFields(new Date(lastActionTime));
++        int multiplier = mRecurrence.getPeriodType().getMultiplier();
++        LocalDateTime nextScheduledExecution = LocalDateTime.fromDateFields(new Date(startTime));
+         switch (mRecurrence.getPeriodType()) {
+             case DAY:
+-                localDate = localDate.plusDays(multiplier);
++                nextScheduledExecution = nextScheduledExecution.plusDays(multiplier);
+                 break;
+             case WEEK:
+-                localDate = localDate.plusWeeks(multiplier);
++                nextScheduledExecution = nextScheduledExecution.plusWeeks(multiplier);
+                 break;
+             case MONTH:
+-                localDate = localDate.plusMonths(multiplier);
++                nextScheduledExecution = nextScheduledExecution.plusMonths(multiplier);
+                 break;
+             case YEAR:
+-                localDate = localDate.plusYears(multiplier);
++                nextScheduledExecution = nextScheduledExecution.plusYears(multiplier);
+                 break;
+         }
+-        return localDate.toDate().getTime();
++        return nextScheduledExecution.toDate().getTime();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index fb70d62a..a8ee68b0 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -142,9 +142,10 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+         //the last run time is computed instead of just using "now" so that if the more than
+         // one period has been skipped, all intermediate transactions can be created
+ 
++        scheduledAction.setLastRun(System.currentTimeMillis());
+         //update the last run time and execution count
+         ContentValues contentValues = new ContentValues();
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, System.currentTimeMillis());
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, scheduledAction.getLastRunTime());
+         contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, executionCount);
+         db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
+                 DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
+@@ -162,13 +163,7 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+      */
+     private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase db) {
+         int executionCount = 0;
+-        long now = System.currentTimeMillis();
+-        long endTime = scheduledAction.getEndTime();
+-
+-        if (endTime > 0 && endTime < now)
+-            return executionCount;
+-
+-        if (scheduledAction.computeNextScheduledExecutionTime() > now)
++        if (!shouldExecuteScheduledBackup(scheduledAction))
+             return 0;
+ 
+         ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
+@@ -183,6 +178,19 @@ private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase
+         return executionCount;
+     }
+ 
++    private static boolean shouldExecuteScheduledBackup(ScheduledAction scheduledAction) {
++        long now = System.currentTimeMillis();
++        long endTime = scheduledAction.getEndTime();
++
++        if (endTime > 0 && endTime < now)
++            return false;
++
++        if (scheduledAction.computeNextTimeBasedScheduledExecutionTime() > now)
++            return false;
++
++        return true;
++    }
++
+     /**
+      * Executes scheduled transactions which are to be added to the database.
+      * <p>If a schedule was missed, all the intervening transactions will be generated, even if
+@@ -214,7 +222,7 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+ 
+         //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+         //so compute the actual transaction time from pre-known values
+-        long transactionTime = scheduledAction.computeNextScheduledExecutionTime();
++        long transactionTime = scheduledAction.computeNextCountBasedScheduledExecutionTime();
+         while (transactionTime <= endTime) {
+             Transaction recurringTrxn = new Transaction(trxnTemplate, true);
+             recurringTrxn.setTime(transactionTime);
+@@ -224,7 +232,7 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+ 
+             if (totalPlannedExecutions > 0 && executionCount >= totalPlannedExecutions)
+                 break; //if we hit the total planned executions set, then abort
+-            transactionTime = scheduledAction.computeNextScheduledExecutionTime();
++            transactionTime = scheduledAction.computeNextCountBasedScheduledExecutionTime();
+         }
+ 
+         transactionsDbAdapter.bulkAddRecords(transactions, DatabaseAdapter.UpdateMethod.insert);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+index c1a0b927..89b0fe43 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+@@ -105,11 +105,11 @@ public void testComputingNextScheduledExecution(){
+         recurrence.setPeriodStart(new Timestamp(startDate.getMillis()));
+         scheduledAction.setRecurrence(recurrence);
+ 
+-        assertThat(scheduledAction.computeNextScheduledExecutionTime()).isEqualTo(startDate.getMillis());
++        assertThat(scheduledAction.computeNextCountBasedScheduledExecutionTime()).isEqualTo(startDate.getMillis());
+ 
+         scheduledAction.setExecutionCount(3);
+         DateTime expectedTime = new DateTime(2016, 2, 15, 12, 0);
+-        assertThat(scheduledAction.computeNextScheduledExecutionTime()).isEqualTo(expectedTime.getMillis());
++        assertThat(scheduledAction.computeNextCountBasedScheduledExecutionTime()).isEqualTo(expectedTime.getMillis());
+     }
+ 
+     @Test
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 3827398d..4b8dfda7 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -280,12 +280,28 @@ public void recurringTransactions_shouldHaveScheduledActionUID(){
+         assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
+     }
+ 
++    /**
++     * Scheduled backups should run only once.
++     *
++     * <p>Backups may have been missed since the last run, but still only
++     * one should be done.</p>
++     *
++     * <p>For example, if we have set up a daily backup, the last one
++     * was done on Monday and it's Thursday, two backups have been
++     * missed. Doing the two missed backups plus today's wouldn't be
++     * useful, so just one should be done.</p>
++     *
++     * <p><i>Note</i>: the execution count will include the missed runs
++     * as computeNextCountBasedScheduledExecutionTime depends on it.</p>
++     */
+     @Test
+     public void scheduledBackups_shouldRunOnlyOnce(){
+         ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
+-        scheduledBackup.setStartTime(new DateTime(2016, 2, 17, 17, 0).getMillis());
++        scheduledBackup.setStartTime(LocalDateTime.now()
++                .minusMonths(4).minusDays(2).toDate().getTime());
+         scheduledBackup.setRecurrence(PeriodType.MONTH, 1);
+         scheduledBackup.setExecutionCount(2);
++        scheduledBackup.setLastRun(LocalDateTime.now().minusMonths(2).toDate().getTime());
+ 
+         ExportParams backupParams = new ExportParams(ExportFormat.XML);
+         backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
+@@ -297,12 +313,20 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+ 
+         List<ScheduledAction> actions = new ArrayList<>();
+         actions.add(scheduledBackup);
+-        ScheduledActionService.processScheduledActions(actions, mDb);
+ 
++        // Check there's not a backup for each missed run
++        ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(scheduledBackup.getExecutionCount()).isEqualTo(3);
+         File[] backupFiles = backupFolder.listFiles();
+         assertThat(backupFiles).hasSize(1);
+         assertThat(backupFiles[0]).exists().hasExtension("gnca");
++
++        // Check also across service runs
++        ScheduledActionService.processScheduledActions(actions, mDb);
++        assertThat(scheduledBackup.getExecutionCount()).isEqualTo(3);
++        backupFiles = backupFolder.listFiles();
++        assertThat(backupFiles).hasSize(1);
++        assertThat(backupFiles[0]).exists().hasExtension("gnca");
+     }
+ 
+     /**
+@@ -315,6 +339,7 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+     public void scheduledBackups_shouldNotRunBeforeNextScheduledExecution(){
+         ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
+         scheduledBackup.setStartTime(LocalDateTime.now().minusDays(2).toDate().getTime());
++        scheduledBackup.setLastRun(scheduledBackup.getStartTime());
+         scheduledBackup.setExecutionCount(1);
+         scheduledBackup.setRecurrence(PeriodType.WEEK, 1);
+ 
+
+From b2e9bf7f38a287985656e48ec6b13979a070dcd0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Fri, 7 Oct 2016 20:09:04 +0200
+Subject: [PATCH 4/7] Reorder and simplify statements to avoid confusion.
+
+---
+ .../gnucash/android/service/ScheduledActionService.java   | 15 +++++++--------
+ 1 file changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index a8ee68b0..58770873 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -143,15 +143,16 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+         // one period has been skipped, all intermediate transactions can be created
+ 
+         scheduledAction.setLastRun(System.currentTimeMillis());
++        //set the execution count in the object because it will be checked for the next iteration in the calling loop
++        scheduledAction.setExecutionCount(executionCount); //this call is important, do not remove!!
+         //update the last run time and execution count
+         ContentValues contentValues = new ContentValues();
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, scheduledAction.getLastRunTime());
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, executionCount);
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN,
++                          scheduledAction.getLastRunTime());
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT,
++                          scheduledAction.getExecutionCount());
+         db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
+                 DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
+-
+-        //set the execution count in the object because it will be checked for the next iteration in the calling loop
+-        scheduledAction.setExecutionCount(executionCount); //this call is important, do not remove!!
+     }
+ 
+     /**
+@@ -162,7 +163,6 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+      * @return Number of times backup is executed. This should either be 1 or 0
+      */
+     private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase db) {
+-        int executionCount = 0;
+         if (!shouldExecuteScheduledBackup(scheduledAction))
+             return 0;
+ 
+@@ -170,12 +170,11 @@ private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase
+         try {
+             //wait for async task to finish before we proceed (we are holding a wake lock)
+             new ExportAsyncTask(GnuCashApplication.getAppContext(), db).execute(params).get();
+-            scheduledAction.setExecutionCount(++executionCount);
+         } catch (InterruptedException | ExecutionException e) {
+             Crashlytics.logException(e);
+             Log.e(LOG_TAG, e.getMessage());
+         }
+-        return executionCount;
++        return 1;
+     }
+ 
+     private static boolean shouldExecuteScheduledBackup(ScheduledAction scheduledAction) {
+
+From 932c38034613f05a7e9dd42f8d58522a57de8d3c Mon Sep 17 00:00:00 2001
+From: Carlo Zancanaro <carlo@zancanaro.id.au>
+Date: Sat, 15 Oct 2016 11:37:52 +1100
+Subject: [PATCH 5/7] Fix first run wizard crashes on screen rotation
+
+If the screen rotates while the first-run wizard is open then GnuCash
+will crash with a NullPointerException. To avoid this we need to make
+sure we create our WizardModel before it is used to try to restore our
+page.
+---
+ .../android/ui/wizard/FirstRunWizardActivity.java  | 30 +++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java b/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
+index 7254ef5f..9284990e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
+@@ -83,19 +83,17 @@
+ 
+ 
+     public void onCreate(Bundle savedInstanceState) {
++        // we need to construct the wizard model before we call super.onCreate, because it's used in
++        // onGetPage (which is indirectly called through super.onCreate if savedInstanceState is not
++        // null)
++        mWizardModel = createWizardModel(savedInstanceState);
++
+         super.onCreate(savedInstanceState);
+         setContentView(R.layout.activity_first_run_wizard);
+         ButterKnife.bind(this);
+ 
+         setTitle(getString(R.string.title_setup_gnucash));
+ 
+-        mWizardModel = new FirstRunWizardModel(this);
+-        if (savedInstanceState != null) {
+-            mWizardModel.load(savedInstanceState.getBundle("model"));
+-        }
+-
+-        mWizardModel.registerListener(this);
+-
+         mPagerAdapter = new MyPagerAdapter(getSupportFragmentManager());
+         mPager.setAdapter(mPagerAdapter);
+         mStepPagerStrip
+@@ -198,6 +196,24 @@ public void onClick(View view) {
+     }
+ 
+     /**
++     * Create the wizard model for the activity, taking into accoun the savedInstanceState if it
++     * exists (and if it contains a "model" key that we can use).
++     * @param savedInstanceState    the instance state available in {{@link #onCreate(Bundle)}}
++     * @return  an appropriate wizard model for this activity
++     */
++    private AbstractWizardModel createWizardModel(Bundle savedInstanceState) {
++        AbstractWizardModel model = new FirstRunWizardModel(this);
++        if (savedInstanceState != null) {
++            Bundle wizardModel = savedInstanceState.getBundle("model");
++            if (wizardModel != null) {
++                model.load(wizardModel);
++            }
++        }
++        model.registerListener(this);
++        return model;
++    }
++
++    /**
+      * Create accounts depending on the user preference (import or default set) and finish this activity
+      * <p>This method also removes the first run flag from the application</p>
+      */
+
+From 952cb2b697b9bd946437e19db4597d23b3446f55 Mon Sep 17 00:00:00 2001
+From: Carlo Zancanaro <carlo@zancanaro.id.au>
+Date: Sun, 9 Oct 2016 23:04:31 +1100
+Subject: [PATCH 6/7] Fix widgets with negative values being green
+
+The number used to calculate whether a widget is red or green should be
+the same value as the one that is displayed. It was instead calling
+a (buggy) method which calculated a different balance to the one
+displayed. This patch fixes it to determine the colour using the same
+value as the one it is displaying.
+---
+ .../org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java  | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+index d02acbca..76e30158 100644
+--- a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+@@ -233,7 +233,7 @@ public static void updateWidget(final Context context, int appWidgetId, String a
+ 
+ 		views.setTextViewText(R.id.transactions_summary,
+ 				accountBalance.formattedString(Locale.getDefault()));
+-		int color = account.getBalance().isNegative() ? R.color.debit_red : R.color.credit_green;
++		int color = accountBalance.isNegative() ? R.color.debit_red : R.color.credit_green;
+ 		views.setTextColor(R.id.transactions_summary, context.getResources().getColor(color));
+ 
+ 
+
+From 5642de83c88e4c231438a029237f3eb8b7732824 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 18 Oct 2016 09:52:00 +0200
+Subject: [PATCH 7/7] Update version strings for v2.1.3 release
+
+Update CHANGELOG and CONTRIBUTORS
+Update Russian translation
+---
+ CHANGELOG.md                           |  8 ++++
+ CONTRIBUTORS.md                        |  6 +++
+ app/build.gradle                       |  4 +-
+ app/src/main/res/values-ru/strings.xml | 81 +++++++++++++++++-----------------
+ 4 files changed, 56 insertions(+), 43 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3cf2c62d..d2e9a7e8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,13 @@
+ Change Log
+ ===============================================================================
++Version 2.1.3 *(2016-10-20)*
++----------------------------
++* Fixed: Scheduled exports execute too often or not at all in some cases
++* Fixed: Crash if device is rotated during first-run wizard execution
++* Fixed: Negative values displayed as green on homescreen widget
++* Improved: Homescreen widget now allows to select the book to use
++* Improved: Update Russian translation
++
+ Version 2.1.2 *(2016-09-21)*
+ ----------------------------
+ * Fixed: Scheduled exports always run daily (no matter the actual schedule)
+diff --git a/CONTRIBUTORS.md b/CONTRIBUTORS.md
+index 0ce07a1d..48c117f6 100644
+--- a/CONTRIBUTORS.md
++++ b/CONTRIBUTORS.md
+@@ -30,5 +30,11 @@ The following (incomplete list of) people (in no particular order) contributed (
+ * Terry Chung <terrywmc@gmail.com>
+ * Caesar Wirth <cjwirth@gmail.com>
+ * Alceu Rodrigues Neto <alceurneto@gmail.com>
++* Carlo Zancanaro <carlo@zancanaro.id.au>
++* Eric Daly <edaly@hpsnet.com>
++* Weslly Oliveira <weslly99@hotmail.com>
++* Felipe Morato <me@fmorato.com>
++* Alceu Rodrigues Neto <alceurneto@gmail.com>
++* Salama AB <aksalj@aksalj.me>
+ 
+ Please visit https://crowdin.com/project/gnucash-android for a more complete list of translation contributions
+\ No newline at end of file
+diff --git a/app/build.gradle b/app/build.gradle
+index 1d5200fa..6b520971 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -7,8 +7,8 @@ apply plugin: 'io.fabric'
+ 
+ def versionMajor = 2
+ def versionMinor = 1
+-def versionPatch = 2
+-def versionBuild = 0
++def versionPatch = 3
++def versionBuild = 1
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd HH:mm 'UTC'")
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 75f12c45..057c4271 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -17,10 +17,10 @@
+ -->
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+   <string name="title_create_account"> </string>
+-  <string name="title_edit_account"> </string>
++  <string name="title_edit_account"> </string>
+   <string name="info_details"></string>
+-  <string name="menu_export"> OFX</string>
+-  <string name="description_add_transaction_icon">    </string>
++  <string name="menu_export">&#8230;</string>
++  <string name="description_add_transaction_icon"> </string>
+   <string name="label_no_accounts"> </string>
+   <string name="label_account_name"> </string>
+   <string name="btn_cancel"></string>
+@@ -41,24 +41,24 @@
+   <string name="label_credit"></string>
+   <string name="title_accounts"></string>
+   <string name="title_transactions"></string>
+-  <string name="menu_delete"></string>
++  <string name="menu_delete"></string>
+   <string name="alert_dialog_ok_delete"></string>
+   <string name="alert_dialog_cancel"></string>
+   <string name="toast_account_deleted"> </string>
+   <string name="title_confirm_delete"> </string>
+   <string name="delete_account_confirmation_message">     </string>
+   <string name="title_edit_transaction"> </string>
+-  <string name="label_transaction_description"></string>
++  <string name="label_transaction_description"></string>
+   <string name="menu_move"></string>
+   <string name="title_selected">%1$d </string>
+   <string name="label_account_balance">:</string>
+-  <string name="label_export_destination"> :</string>
++  <string name="label_export_destination"> :</string>
+   <string name="title_export_dialog"> </string>
+-  <string name="option_export_all_transactions"> </string>
+-  <string name="hint_export_choice">  ,    .</string>
+-  <string name="toast_export_error">   %1$s</string>
++  <string name="option_export_all_transactions">  </string>
++  <string name="hint_export_choice">      .     </string>
++  <string name="toast_export_error">  %1$s</string>
+   <string name="btn_export"></string>
+-  <string name="option_delete_after_export">   </string>
++  <string name="option_delete_after_export">   </string>
+   <string name="hint_delete_after_export">      .</string>
+   <string name="title_settings"></string>
+   <string-array name="export_destinations">
+@@ -69,20 +69,20 @@
+     <item>&#8230;</item>
+   </string-array>
+   <string name="btn_move"></string>
+-  <string name="title_move_transactions"> %1$d (,,)</string>
++  <string name="title_move_transactions"> %1$d  ()</string>
+   <string name="label_move_destination">-</string>
+   <string name="permission_access_sdcard">   </string>
+-  <string name="toast_incompatible_currency">  .\n-   .</string>
++  <string name="toast_incompatible_currency">  .\n-   </string>
+   <string name="header_general_settings"></string>
+   <string name="header_about_gnucash"> </string>
+   <string name="title_choose_currency">   </string>
+   <string name="title_default_currency">  </string>
+-  <string name="summary_default_currency">   </string>
++  <string name="summary_default_currency">  </string>
+   <string name="label_permission_record_transactions">   Gnucash  Android</string>
+   <string name="label_permission_create_accounts">   Gnucash  Android</string>
+   <string name="label_permission_group">  Gnucash</string>
+   <string name="description_permission_group">    Gnucash</string>
+-  <string name="label_permission_record_transaction">   GnuCash</string>
++  <string name="label_permission_record_transaction">   GnuCash</string>
+   <string name="label_permission_create_account">    GnuCash</string>
+   <string name="label_display_account"> </string>
+   <string name="btn_create_accounts"> </string>
+@@ -118,14 +118,14 @@
+   <string name="msg_delete_transaction_confirmation">     ?</string>
+   <string name="title_export_preference_category"></string>
+   <string name="title_export_all_transactions">  </string>
+-  <string name="title_always_delete_exported_transactions">  </string>
++  <string name="title_always_delete_exported_transactions">   </string>
+   <string name="title_default_export_email">E-mail  </string>
+   <string name="summary_default_export_email">     .     .</string>
+   <string name="label_double_entry_account"> </string>
+   <string name="summary_use_double_entry">        .</string>
+   <string name="title_use_double_entry">  </string>
+   <string name="account_balance"></string>
+-  <string name="toast_no_account_name_entered">   </string>
++  <string name="toast_no_account_name_entered">   </string>
+   <string name="label_account_currency"></string>
+   <string name="label_parent_account"> </string>
+   <string name="title_xml_ofx_header"> XML- OFX</string>
+@@ -139,15 +139,15 @@
+         -    \n
+         -      \n
+ 	</string>
+-  <string name="label_dismiss"></string>
++  <string name="label_dismiss"></string>
+   <string name="toast_transanction_amount_required"> ,   </string>
+-  <string name="toast_error_edit_multi_currency_transaction">    </string>
+-  <string name="menu_import_accounts">   GnuCash</string>
+-  <string name="btn_import_accounts"> </string>
+-  <string name="toast_error_importing_accounts">      GnuCash</string>
++  <string name="toast_error_edit_multi_currency_transaction">   </string>
++  <string name="menu_import_accounts">   GnuCash</string>
++  <string name="btn_import_accounts"> </string>
++  <string name="toast_error_importing_accounts">    GnuCash</string>
+   <string name="toast_success_importing_accounts">  GnuCash  </string>
+   <string name="summary_import_accounts">    GnuCash  </string>
+-  <string name="title_import_accounts">   GnuCash</string>
++  <string name="title_import_accounts">   GnuCash</string>
+   <string name="summary_delete_all_accounts">    .    .</string>
+   <string name="title_delete_all_accounts">  </string>
+   <string name="header_account_settings"></string>
+@@ -165,14 +165,14 @@
+   <string name="title_default_export_format">   </string>
+   <string name="summary_default_export_format"> ,     </string>
+   <string name="menu_export_transactions"> &#8230;</string>
+-  <string name="label_recurring_transaction"> </string>
++  <string name="label_recurring_transaction"> </string>
+   <!-- This should be the same name used by GnuCash desktop for imbalance accounts -->
+   <string name="imbalance_account_name"></string>
+   <string name="title_progress_exporting_transactions"> </string>
+-  <string name="label_no_recurring_transactions">  .</string>
+-  <string name="toast_recurring_transaction_deleted">   </string>
++  <string name="label_no_recurring_transactions">  .</string>
++  <string name="toast_recurring_transaction_deleted">  </string>
+   <string name="label_placeholder_account"> </string>
+-  <string name="label_default_transfer_account">   </string>
++  <string name="label_default_transfer_account">-  </string>
+   <plurals name="label_sub_accounts">
+     <item quantity="one">%d  </item>
+     <item quantity="few">%d .  </item>
+@@ -208,30 +208,29 @@
+   <string name="title_recent_accounts"></string>
+   <string name="title_favorite_accounts"></string>
+   <string name="title_all_accounts"></string>
+-  <string name="summary_create_default_accounts">   GnuCash  </string>
+-  <string name="title_create_default_accounts">   </string>
+-  <string name="msg_confirm_create_default_accounts_setting">         \n\n       !</string>
++  <string name="summary_create_default_accounts">   GnuCash  </string>
++  <string name="title_create_default_accounts">   </string>
++  <string name="msg_confirm_create_default_accounts_setting">         \n\n      !</string>
+   <string name="menu_scheduled_transactions"> </string>
+   <string name="msg_confirm_create_default_accounts_first_run">
+-          GnuCash  Android!\n    
+-          ,      GnuCash.\n\n
++          GnuCash  Android!\n         GnuCash.\n\n
+              ,   
+           .
+     </string>
+   <string name="title_scheduled_transactions"> </string>
+   <string name="title_select_export_destination">  </string>
+-  <string name="hint_split_memo"></string>
++  <string name="hint_split_memo"></string>
+   <string name="label_spend"></string>
+   <string name="label_receive"></string>
+   <string name="label_withdrawal"></string>
+   <string name="label_deposit"></string>
+   <string name="label_payment"></string>
+-  <string name="label_charge"></string>
++  <string name="label_charge"></string>
+   <string name="label_decrease"></string>
+   <string name="label_increase"></string>
+-  <string name="label_income"></string>
++  <string name="label_income"></string>
+   <string name="label_rebate"></string>
+-  <string name="label_expense"></string>
++  <string name="label_expense"></string>
+   <string name="label_bill"></string>
+   <string name="label_invoice"></string>
+   <string name="label_buy"></string>
+@@ -240,9 +239,9 @@
+   <string name="toast_no_recent_backup">  </string>
+   <string name="account_name_opening_balances"> </string>
+   <string name="account_name_equity"> </string>
+-  <string name="summary_save_opening_balances">     (  )       
++  <string name="summary_save_opening_balances">   (  )       
+     </string>
+-  <string name="title_save_opening_balances">   </string>
++  <string name="title_save_opening_balances">   </string>
+   <string name="export_warning_ofx">OFX    </string>
+   <string name="export_warning_qif">     QIF-</string>
+   <string name="title_transaction_splits"> </string>
+@@ -277,7 +276,7 @@
+   <string name="label_delete_account_subaccounts_description">  .\n   ?</string>
+   <string name="label_delete_transactions"> </string>
+   <string name="toast_disable_double_entry_to_save_transaction">          </string>
+-  <string name="label_tap_to_create_schedule">,   </string>
++  <string name="label_tap_to_create_schedule"> </string>
+   <string name="title_restore_backup">   &#8230;</string>
+   <string name="header_backup_and_export_settings">  &amp; </string>
+   <string name="title_dropbox_sync_preference"> DropBox</string>
+@@ -409,9 +408,9 @@
+   <string name="nav_menu_budgets"></string>
+   <string name="title_cash_flow_report"> </string>
+   <string name="title_budgets"></string>
+-  <string name="title_use_compact_list">  </string>
+-  <string name="summary_use_compact_list">       </string>
+-  <string name="error_invalid_exchange_rate">  </string>
++  <string name="title_use_compact_list"> </string>
++  <string name="summary_use_compact_list">     </string>
++  <string name="error_invalid_exchange_rate">  </string>
+   <string name="sample_exchange_rate">, 1 %1$s = x.xx %2$s</string>
+   <string name="error_invalid_amount"> </string>
+   <string-array name="report_time_range">

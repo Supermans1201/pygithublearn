@@ -1,0 +1,260 @@
+From 522375837ad441e4af42a0510b7159d350d67fa2 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 14 Apr 2015 23:18:45 +0200
+Subject: [PATCH] Fixed: editing a scheduled transaction deletes the scheduled
+ action
+
+Improved GnuCash XML export
+Fixed: typos in XML export
+Added missing namespaces for scheduled and recurrence actions
+---
+ .../android/db/ScheduledActionDbAdapter.java       | 14 ++++++++++-
+ .../gnucash/android/export/xml/GncXmlExporter.java | 29 ++++++++++++++--------
+ .../gnucash/android/export/xml/GncXmlHelper.java   |  4 +--
+ .../gnucash/android/importer/GncXmlHandler.java    |  1 +
+ .../org/gnucash/android/model/ScheduledAction.java |  2 +-
+ .../gnucash/android/service/SchedulerService.java  |  2 +-
+ .../ui/transaction/TransactionFormFragment.java    | 14 +++++------
+ 7 files changed, 43 insertions(+), 23 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index 7bb909be..7de737bd 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -236,7 +236,7 @@ public ScheduledAction getScheduledAction(String uid){
+      */
+     public List<ScheduledAction> getAllEnabledScheduledActions(){
+         Cursor cursor = mDb.query(mTableName,
+-                        null, ScheduledActionEntry.COLUMN_ENABLED + "=1", null, null, null, null);
++                null, ScheduledActionEntry.COLUMN_ENABLED + "=1", null, null, null, null);
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         while (cursor.moveToNext()){
+             scheduledActions.add(buildScheduledEventInstance(cursor));
+@@ -244,4 +244,16 @@ public ScheduledAction getScheduledAction(String uid){
+         return scheduledActions;
+     }
+ 
++    /**
++     * Returns the number of instances of the action which have been created from this scheduled action
++     * @param scheduledActionUID GUID of scheduled action
++     * @return Number of transactions created from scheduled action
++     */
++    public long getActionInstanceCount(String scheduledActionUID) {
++        String sql = "SELECT COUNT(*) FROM " + DatabaseSchema.TransactionEntry.TABLE_NAME
++                + " WHERE " + DatabaseSchema.TransactionEntry.COLUMN_SCHEDX_ACTION_UID + "=?";
++        SQLiteStatement statement = mDb.compileStatement(sql);
++        statement.bindString(1, scheduledActionUID);
++        return statement.simpleQueryForLong();
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index cebff9ab..7f479881 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -25,6 +25,7 @@
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
++import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.TransactionType;
+ import org.xmlpull.v1.XmlPullParserFactory;
+@@ -317,7 +318,9 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             String trxType = cursor.getString(cursor.getColumnIndexOrThrow("split_type"));
+             BigDecimal value = new BigDecimal(cursor.getString(cursor.getColumnIndexOrThrow("split_amount")));
+             value = value.multiply(denom);
+-            String strValue = (trxType.equals("CREDIT") ? "-" : "") + value.stripTrailingZeros().toPlainString() + "/" + denomString;
++            String strValue = "0";
++            if (!exportTemplates) //when doing normal transaction export
++                    strValue = (trxType.equals("CREDIT") ? "-" : "") + value.stripTrailingZeros().toPlainString() + "/" + denomString;
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_VALUE);
+             xmlSerializer.text(strValue);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_VALUE);
+@@ -352,7 +355,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 TransactionType type = TransactionType.valueOf(trxType);
+                 slotKeys.add(type == TransactionType.CREDIT ? GncXmlHelper.KEY_CREDIT_FORMULA : GncXmlHelper.KEY_DEBIT_FORMULA);
+                 slotTypes.add(GncXmlHelper.ATTR_VALUE_STRING);
+-                slotValues.add(GncXmlHelper.getNumberFormatForTemplateSplits().format(value.doubleValue()));
++                slotValues.add(GncXmlHelper.getNumberFormatForTemplateSplits().format(value.doubleValue())); //FIXME: Check the proper formatting of the amount string here
+ 
+                 exportSlots(xmlSerializer, slotKeys, slotTypes, slotValues);
+ 
+@@ -385,6 +388,7 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_VALUE_GUID, scheduledActionUID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_ID);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_NAME);
++            //FIXME: Export the actual name of the transaction (and make sure to fix the import too, it relies on this ACTION_TYPE)
+             xmlSerializer.text(cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TYPE)));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_NAME);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_ENABLED);
+@@ -404,7 +408,8 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.text("0");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_ADVANCE_REMIND_DAYS);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_INSTANCE_COUNT);
+-            xmlSerializer.text("1");
++            long instanceCount = mScheduledActionDbAdapter.getActionInstanceCount(scheduledActionUID);
++            xmlSerializer.text(Long.toString(instanceCount));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_INSTANCE_COUNT);
+ 
+             //start date
+@@ -421,15 +426,15 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+                 //end date
+                 serializeDate(xmlSerializer, GncXmlHelper.TAG_SX_END, endTime);
+             } else { //add number of occurrences
+-                int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY));
++                int totalFrequency = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY));
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_NUM_OCCUR);
+-                xmlSerializer.text(Integer.toString(numOccurrences));
++                xmlSerializer.text(Integer.toString(totalFrequency));
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_NUM_OCCUR);
+ 
+                 //remaining occurrences
+                 int executionCount = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_EXECUTION_COUNT));
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_REM_OCCUR);
+-                xmlSerializer.text(Integer.toString(numOccurrences - executionCount));
++                xmlSerializer.text(Integer.toString(totalFrequency - executionCount));
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_REM_OCCUR);
+             }
+ 
+@@ -440,7 +445,7 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_TAG);
+             }
+ 
+-            //TODO: possibly generate temporary template accounts to keep gnucash desktop happy
++            //FIXME: generate temporary template accounts to keep gnucash desktop happy
+             //Ignoring GnuCash XML template account: <sx:templ-acct type="guid">2da76df09056540bb3a37e4a04547d82</sx:templ-acct>
+ 
+             String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
+@@ -452,12 +457,13 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_SCHEDULE);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_RECURRENCE);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.RECURRENCE_VERSION);
++            long period = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
++            PeriodType periodType = ScheduledAction.getPeriodType(period);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_RX_MULT);
+-            xmlSerializer.text("1");
++            xmlSerializer.text(String.valueOf(periodType.getMultiplier()));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RX_MULT);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_RX_PERIOD_TYPE);
+-            long period = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
+-            xmlSerializer.text(ScheduledAction.getPeriodType(period).name());
++            xmlSerializer.text(periodType.name().toLowerCase());
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RX_PERIOD_TYPE);
+ 
+             serializeDate(xmlSerializer, GncXmlHelper.TAG_RX_START, startTime);
+@@ -502,7 +508,8 @@ private void exportCommodity(XmlSerializer xmlSerializer, List<Currency> currenc
+     @Override
+     public void generateExport(Writer writer) throws ExporterException{
+         try {
+-            String[] namespaces = new String[] {"gnc", "act", "book", "cd", "cmdty", "price", "slot", "split", "trn", "ts"};
++            String[] namespaces = new String[] {"gnc", "act", "book", "cd", "cmdty", "price", "slot",
++                    "split", "trn", "ts", "sx", "recurrence"};
+             XmlSerializer xmlSerializer = XmlPullParserFactory.newInstance().newSerializer();
+             xmlSerializer.setOutput(writer);
+             xmlSerializer.startDocument("utf-8", true);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 026a97ee..257a89df 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -110,7 +110,7 @@
+     public static final String TAG_SX_NUM_OCCUR             = "sx:num-occur";
+     public static final String TAG_SX_REM_OCCUR             = "sx:rem-occur";
+     public static final String TAG_SX_TAG                   = "sx:tag";
+-    public static final String TAG_SX_TEMPL_ACTION          = "sx:templ-action";
++    public static final String TAG_SX_TEMPL_ACTION          = "sx:templ-action"; //FIXME: This tag is unknown to GnuCash desktop. For full compat, we will need to fix it
+     public static final String TAG_SX_SCHEDULE              = "sx:schedule";
+     public static final String TAG_RECURRENCE               = "gnc:recurrence";
+     public static final String TAG_RX_MULT                  = "recurrence:mult";
+@@ -129,7 +129,7 @@
+     public static final String KEY_NOTES            = "notes";
+     public static final String KEY_EXPORTED         = "exported";
+     public static final String KEY_SCHEDX_ACTION    = "sched-xaction";
+-    public static final String KEY_SPLIT_ACCOUNT    = "key_account";
++    public static final String KEY_SPLIT_ACCOUNT    = "account";
+     public static final String KEY_DEBIT_FORMULA    = "debit-formula";
+     public static final String KEY_CREDIT_FORMULA   = "credit-formula";
+     public static final String KEY_FROM_SCHED_ACTION        = "from-sched-xaction";
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 44d8eea1..e51b49d4 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -471,6 +471,7 @@ else if (qualifiedName.equals(GncXmlHelper.TAG_SX_ID)){
+             mScheduledAction.setUID(characterString);
+         }
+         else if (qualifiedName.equals(GncXmlHelper.TAG_SX_NAME)){
++            //FIXME: Do not rely on the type, rather lookup the SX_ID from previous tag to find action type
+             ScheduledAction.ActionType type = ScheduledAction.ActionType.valueOf(characterString);
+             mScheduledAction.setActionType(type);
+         }
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index e0f5a02f..91e0cd65 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -46,7 +46,7 @@
+     /**
+      * Next scheduled run of Event
+      */
+-    private long mLastRun;
++    private long mLastRun = 0;
+ 
+     /**
+      * Unique ID of the template from which the recurring event will be executed.
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 02776cd8..bc0e3b94 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -71,7 +71,7 @@ protected void onHandleIntent(Intent intent) {
+             long now = System.currentTimeMillis();
+             //if we did not exceed the endtime (if there is one), and one execution period has passed since last run
+             if (((endTime > 0 && now < endTime) || (scheduledAction.getExecutionCount() < scheduledAction.getTotalFrequency()) || endTime == 0)
+-                    && (lastRun + period) < now ){
++                    && (lastRun + period) <= now ){
+                 executeScheduledEvent(scheduledAction);
+             }
+         }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 63eb0c3b..eee32486 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -441,6 +441,7 @@ private void initializeViewsWithTransaction(){
+         if (scheduledActionUID != null && !scheduledActionUID.isEmpty()) {
+             ScheduledAction scheduledAction = ScheduledActionDbAdapter.getInstance().getScheduledAction(scheduledActionUID);
+             mRecurrenceRule = scheduledAction.getRuleString();
++            mEventRecurrence.parse(mRecurrenceRule);
+             mRecurrenceTextView.setText(scheduledAction.getRepeatString());
+         }
+     }
+@@ -734,19 +735,19 @@ private void saveNewTransaction() {
+             mTransaction.setTime(cal.getTimeInMillis());
+             mTransaction.setNote(notes);
+ 
+-            // set as not exported.
++            // set as not exported because we have just edited it
+             mTransaction.setExported(false);
+             mTransaction.setTemplate(mSaveTemplateCheckbox.isChecked());
+             mTransactionsDbAdapter.addTransaction(mTransaction);
+ 
+-            if (mSaveTemplateCheckbox.isChecked()) {
+-                Transaction templateTransaction = mTransaction;
++            if (mSaveTemplateCheckbox.isChecked()) {//template is automatically checked when a transaction is scheduled
+                 if (!mEditMode) { //means it was new transaction, so a new template
+-                    templateTransaction = new Transaction(mTransaction, true);
++                    Transaction templateTransaction = new Transaction(mTransaction, true);
+                     templateTransaction.setTemplate(true);
+                     mTransactionsDbAdapter.addTransaction(templateTransaction);
+-                }
+-                scheduleRecurringTransaction(templateTransaction.getUID());
++                    scheduleRecurringTransaction(templateTransaction.getUID());
++                } else
++                    scheduleRecurringTransaction(mTransaction.getUID());
+             } else {
+                 String scheduledActionUID = getArguments().getString(UxArgument.SCHEDULED_ACTION_UID);
+                 if (scheduledActionUID != null){ //we were editing a schedule and it was turned off
+@@ -794,7 +795,6 @@ private void scheduleRecurringTransaction(String transactionUID) {
+ 
+         for (ScheduledAction event : events) {
+             event.setActionUID(transactionUID);
+-            event.setLastRun(System.currentTimeMillis());
+             scheduledActionDbAdapter.addScheduledAction(event);
+ 
+             Log.i("TransactionFormFragment", event.toString());

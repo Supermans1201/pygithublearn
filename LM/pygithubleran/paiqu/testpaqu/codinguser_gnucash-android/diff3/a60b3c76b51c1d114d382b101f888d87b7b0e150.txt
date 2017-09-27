@@ -1,0 +1,194 @@
+From a60b3c76b51c1d114d382b101f888d87b7b0e150 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 16 Oct 2015 00:25:14 +0200
+Subject: [PATCH] Fix: amount decimal separator is wrong for some locales when
+ using transaction templates
+
+---
+ .../ui/transaction/SplitEditorFragment.java        |  2 +-
+ .../ui/transaction/TransactionFormFragment.java    | 13 +++++-----
+ .../android/ui/util/widget/CalculatorEditText.java | 30 ++++++++++++++--------
+ .../ui/util/widget/TransactionTypeSwitch.java      | 24 ++++++++---------
+ 4 files changed, 38 insertions(+), 31 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+index ce07ed2b..695bf4a5 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+@@ -265,7 +265,7 @@ public void onClick(View view) {
+ 
+             if (split != null) {
+                 splitAmountEditText.setCurrency(split.getValue().getCurrency());
+-                splitAmountEditText.setText(split.getFormattedValue().formattedAmount());
++                splitAmountEditText.setValue(split.getFormattedValue().asBigDecimal());
+                 splitCurrencyTextView.setText(split.getValue().getCurrency().getSymbol());
+                 splitMemoEditText.setText(split.getMemo());
+                 splitUidTextView.setText(split.getUID());
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 57431316..025d305b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -292,8 +292,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+ 		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
+ 		if (!mUseDoubleEntry){
+-			getView().findViewById(R.id.layout_double_entry).setVisibility(View.GONE);
+-            mAmountEditText.setCompoundDrawablesWithIntrinsicBounds(0, 0, 0, 0);
++			mDoubleEntryLayout.setVisibility(View.GONE);
+ 		}
+ 
+         mAccountUID = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
+@@ -418,7 +417,7 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+                 if (isSplitPair){
+                     mSplitsList.clear();
+                     if (!amountEntered) //if user already entered an amount
+-                        mAmountEditText.setText(splitList.get(0).getValue().toPlainString());
++                        mAmountEditText.setValue(splitList.get(0).getValue().asBigDecimal());
+                 } else {
+                     if (amountEntered){ //if user entered own amount, clear loaded splits and use the user value
+                         mSplitsList.clear();
+@@ -449,7 +448,7 @@ private void initializeViewsWithTransaction(){
+ 
+ 		if (!mAmountEditText.isInputModified()){
+             //when autocompleting, only change the amount if the user has not manually changed it already
+-            mAmountEditText.setText(mTransaction.getBalance(mAccountUID).formattedAmount());
++            mAmountEditText.setValue(mTransaction.getBalance(mAccountUID).asBigDecimal());
+         }
+ 		mCurrencyTextView.setText(mTransaction.getCurrency().getSymbol(Locale.getDefault()));
+ 		mNotesEditText.setText(mTransaction.getNote());
+@@ -577,7 +576,7 @@ private void updateTransferAccountsList(){
+      * Opens the split editor dialog
+      */
+     private void openSplitEditor(){
+-        if (mAmountEditText.getText().toString().length() == 0){
++        if (mAmountEditText.getValue() == null){
+             Toast.makeText(getActivity(), "Please enter an amount to split", Toast.LENGTH_SHORT).show();
+             return;
+         }
+@@ -895,7 +894,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+             if (canSave()){
+                 saveNewTransaction();
+             } else {
+-                if (mAmountEditText.getText().length() == 0) {
++                if (mAmountEditText.getValue() == null) {
+                     Toast.makeText(getActivity(), R.string.toast_transanction_amount_required, Toast.LENGTH_SHORT).show();
+                 }
+                 if (mUseDoubleEntry && mTransferAccountSpinner.getCount() == 0){
+@@ -929,7 +928,7 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+         mSplitsList = splitList;
+         Money balance = Transaction.computeBalance(mAccountUID, mSplitsList);
+ 
+-        mAmountEditText.setText(balance.toPlainString());
++        mAmountEditText.setValue(balance.asBigDecimal());
+         mTransactionTypeSwitch.setChecked(balance.isNegative());
+         //once we set the split list, do not allow direct editing of the total
+         if (mSplitsList.size() > 1){
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+index 7020b007..9805df25 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+@@ -273,16 +273,7 @@ public String evaluate(){
+ 
+         if (expression != null && expression.validate().isValid()) {
+             BigDecimal result = new BigDecimal(expression.evaluate());
+-            result = result.setScale(mCurrency.getDefaultFractionDigits(), BigDecimal.ROUND_HALF_EVEN);
+-
+-            DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());
+-            formatter.setMinimumFractionDigits(0);
+-            formatter.setMaximumFractionDigits(mCurrency.getDefaultFractionDigits());
+-            formatter.setGroupingUsed(false);
+-            String resultString = formatter.format(result.doubleValue());
+-
+-            setText(resultString);
+-            setSelection(resultString.length());
++            setValue(result);
+         } else {
+             setError(getContext().getString(R.string.label_error_invalid_expression));
+             Log.w(VIEW_LOG_TAG, "Expression is null or invalid: " + expression);
+@@ -328,4 +319,23 @@ public BigDecimal getValue(){
+             return null;
+         return new BigDecimal(amountString);
+     }
++
++    /**
++     * Set the text to the value of {@code amount} formatted according to the locale
++     * <p>The number of decimal places are determined by the currency set to the view, and the
++     * decimal separator is determined by the device locale. There are no thousandths separators.</p>
++     * @param amount BigDecimal amount
++     */
++    public void setValue(BigDecimal amount){
++        BigDecimal newAmount = amount.setScale(mCurrency.getDefaultFractionDigits(), BigDecimal.ROUND_HALF_EVEN);
++
++        DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());
++        formatter.setMinimumFractionDigits(0);
++        formatter.setMaximumFractionDigits(mCurrency.getDefaultFractionDigits());
++        formatter.setGroupingUsed(false);
++        String resultString = formatter.format(newAmount.doubleValue());
++
++        setText(resultString);
++        setSelection(resultString.length());
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/TransactionTypeSwitch.java b/app/src/main/java/org/gnucash/android/ui/util/widget/TransactionTypeSwitch.java
+index ef00ddde..bb653709 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/TransactionTypeSwitch.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/TransactionTypeSwitch.java
+@@ -28,6 +28,8 @@
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+ 
++import java.math.BigDecimal;
++
+ /**
+  * A special type of {@link android.widget.ToggleButton} which displays the appropriate CREDIT/DEBIT labels for the
+  * different account types.
+@@ -107,7 +109,7 @@ public void setAccountType(AccountType accountType){
+      * @param amoutView Amount string {@link android.widget.EditText}
+      * @param currencyTextView Currency symbol text view
+      */
+-    public void setAmountFormattingListener(EditText amoutView, TextView currencyTextView){
++    public void setAmountFormattingListener(CalculatorEditText amoutView, TextView currencyTextView){
+         setOnCheckedChangeListener(new OnTypeChangedListener(amoutView, currencyTextView));
+     }
+ 
+@@ -136,14 +138,14 @@ public TransactionType getTransactionType(){
+     }
+ 
+     private class OnTypeChangedListener implements OnCheckedChangeListener{
+-        private EditText mAmountEditText;
++        private CalculatorEditText mAmountEditText;
+         private TextView mCurrencyTextView;
+         /**
+          * Constructor with the amount view
+          * @param amountEditText EditText displaying the amount value
+          * @param currencyTextView Currency symbol text view
+          */
+-        public OnTypeChangedListener(EditText amountEditText, TextView currencyTextView){
++        public OnTypeChangedListener(CalculatorEditText amountEditText, TextView currencyTextView){
+             this.mAmountEditText = amountEditText;
+             this.mCurrencyTextView = currencyTextView;
+         }
+@@ -163,17 +165,13 @@ public void onCheckedChanged(CompoundButton compoundButton, boolean isChecked) {
+                 mAmountEditText.setTextColor(green);
+                 mCurrencyTextView.setTextColor(green);
+             }
+-            String amountText = mAmountEditText.getText().toString();
+-            if (amountText.length() > 0){
+-                String newText = amountText;
+-                if (isChecked && !amountText.startsWith("-")){
+-                    newText = "-" + amountText;
+-                }
+-                if (!isChecked && amountText.startsWith("-")){
+-                    newText = amountText.substring(1);
++            BigDecimal amount = mAmountEditText.getValue();
++            if (amount != null){
++                if ((isChecked && amount.signum() > 0) //we switched to debit but the amount is +ve
++                        || (!isChecked && amount.signum() < 0)){ //credit but amount is -ve
++                    mAmountEditText.setValue(amount.negate());
+                 }
+-                mAmountEditText.setText(newText);
+-                mAmountEditText.setSelection(newText.length());
++
+             }
+         }
+     }

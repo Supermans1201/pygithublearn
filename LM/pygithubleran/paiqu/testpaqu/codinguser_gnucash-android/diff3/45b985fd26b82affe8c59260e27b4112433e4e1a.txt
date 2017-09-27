@@ -1,0 +1,118 @@
+From b6e59ce6e3bab1f0bba112a4844cb1ef19d0d8c8 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Thu, 11 Sep 2014 21:33:18 +0800
+Subject: [PATCH 1/2] QIF export refinement
+
+Try best effort to keep splits memo. The split whose account to chosen as group account will lose its split memo. Now we try to pick one without split memo as group account.
+
+Sort all transactions by time.
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 22 +++++++++++++++++++---
+ .../gnucash/android/export/qif/QifExporter.java    |  4 +++-
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 7d3402e3..5b697ecd 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -308,7 +308,13 @@ public Cursor fetchTransactionsWithSplits(String [] columns, String condition, S
+     public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] columns, String condition, String orderBy) {
+         // table is :
+         // transactions, splits ON transactions.uid = splits.transaction_uid ,
+-        // ( SELECT transactions.uid AS trans_acct_t_uid , MAX ( splits.account_uid ) as trans_acct_a_uid
++        // ( SELECT transactions.uid AS trans_acct_t_uid ,
++        //      SUBSTR (
++        //          MIN (
++        //              ( CASE WHEN IFNULL ( splits.memo , '' ) == '' THEN 'a' ELSE 'b' END ) || splits.account_uid
++        //          ) ,
++        //          2
++        //      ) as trans_acct_a_uid ,
+         //   TOTAL ( CASE WHEN splits.type = 'DEBIT' THEN splits.amount ELSE - splits.amount END ) AS trans_acct_balance
+         //   FROM transactions, splits ON transactions.uid = splits.transaction_uid GROUP BY transactions.uid ) AS trans_acct ON
+         // trans_acct.trans_acct_t_uid = transactions.uid , accounts AS account1 ON account1.uid = trans_acct.trans_acct_a_uid ,
+@@ -317,6 +323,14 @@ public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] column
+         // This is multi table/sub-query join. The third select would pick one Account_UID for each
+         // Transaction, which can be used to order all transactions.
+         // This is used in QIF export, when all transactions are grouped by accounts.
++        //
++        // As the split memo for the account used for grouping is lost, a split without a split memo
++        // is chosen if possible, in the following manner:
++        //   if the splits memo is null or empty string, attach an 'a' in front of the split account uid,
++        //   if not, attach a 'b' to the split account uid
++        //   pick the minimal value of the modified account uid (one of the ones begins with 'a', if exists)
++        //   use substr to get account uid
++        //
+         // account1 provides information for the grouped account. Splits from the grouped account
+         // can be eliminated with a WHERE clause. Transactions in QIF can be auto balanced.
+         // account2 provides information for the account associated with the split.
+@@ -331,8 +345,10 @@ public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] column
+                 " ON " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
+                 " = " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID +
+                 " , ( SELECT " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
+-                " AS trans_acct_t_uid , MAX ( " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID +
+-                " ) AS trans_acct_a_uid , TOTAL ( CASE WHEN " + SplitEntry.TABLE_NAME + "." +
++                " AS trans_acct_t_uid , SUBSTR ( MIN ( ( CASE WHEN IFNULL ( " + SplitEntry.TABLE_NAME + "." +
++                SplitEntry.COLUMN_MEMO + " , '' ) == '' THEN 'a' ELSE 'b' END ) || " +
++                SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID +
++                " ) , 2 ) AS trans_acct_a_uid , TOTAL ( CASE WHEN " + SplitEntry.TABLE_NAME + "." +
+                 SplitEntry.COLUMN_TYPE + " = 'DEBIT' THEN "+ SplitEntry.TABLE_NAME + "." +
+                 SplitEntry.COLUMN_AMOUNT + " ELSE - " + SplitEntry.TABLE_NAME + "." +
+                 SplitEntry.COLUMN_AMOUNT + " END ) AS trans_acct_balance FROM " +
+diff --git a/app/src/org/gnucash/android/export/qif/QifExporter.java b/app/src/org/gnucash/android/export/qif/QifExporter.java
+index 8d8494b0..835342bc 100644
+--- a/app/src/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/org/gnucash/android/export/qif/QifExporter.java
+@@ -70,7 +70,9 @@ public void generateExport(Writer writer) throws ExporterException {
+                             mParameters.shouldExportAllTransactions() ?
+                                     "" : " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_EXPORTED + "== 0"
+                             ),
+-                    "acct1_uid ASC, trans_uid ASC"
++                    // trans_time ASC : put transactions in time order
++                    // trans_uid ASC  : put splits from the same transaction together
++                   "trans_time ASC, trans_uid ASC"
+                     );
+             try {
+                 String currentAccountUID = "";
+
+From 43adc2784929ac222849b7dd9d9e6883b95e70f3 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 13 Sep 2014 22:27:44 +0800
+Subject: [PATCH 2/2] Replaced hard-coded account name
+
+---
+ app/src/org/gnucash/android/export/qif/QifExporter.java | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/export/qif/QifExporter.java b/app/src/org/gnucash/android/export/qif/QifExporter.java
+index 835342bc..a6049f3d 100644
+--- a/app/src/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/org/gnucash/android/export/qif/QifExporter.java
+@@ -22,6 +22,8 @@
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import static org.gnucash.android.db.DatabaseSchema.*;
++
++import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+@@ -29,6 +31,7 @@
+ import java.io.IOException;
+ import java.io.Writer;
+ import java.math.BigDecimal;
++import java.util.Currency;
+ 
+ /**
+  * @author Ngewi
+@@ -113,8 +116,9 @@ public void generateExport(Writer writer) throws ExporterException {
+                         BigDecimal decimalImbalance = BigDecimal.valueOf(imbalance).setScale(2, BigDecimal.ROUND_HALF_UP);
+                         if (decimalImbalance.compareTo(BigDecimal.ZERO) != 0) {
+                             writer.append(QifHelper.SPLIT_CATEGORY_PREFIX)
+-                                    .append("Imbalance-")
+-                                    .append(cursor.getString(cursor.getColumnIndexOrThrow("acct1_currency")))
++                                    .append(AccountsDbAdapter.getImbalanceAccountName(
++                                            Currency.getInstance(cursor.getString(cursor.getColumnIndexOrThrow("acct1_currency")))
++                                    ))
+                                     .append(newLine);
+                             writer.append(QifHelper.SPLIT_AMOUNT_PREFIX)
+                                     .append(decimalImbalance.toPlainString())
