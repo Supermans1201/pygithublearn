@@ -1,0 +1,1481 @@
+From 74d1277bd986708fc3617027d1229d405875741f Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 22 Apr 2015 16:08:30 +0200
+Subject: [PATCH] Removed setting for restoring last backup (there is a more
+ generic restore option)
+
+* Fixed: Top level accounts are now sorted
+* Fixed: Bug causing crash when autobalancing transactions during import (if transaction has different currency from splits)
+* Fixed: Bug in db migration code which prevents scheduled transactions from being run
+* Fixed: Scheduling exports does not work reliably when changing the export type
+* Fixed: Bug causing some scheduled actions to be run when they shouldn't
+* Fixed: Bug causing transactions not to be saved (GUID of models is now private to base class)
+* Improved: Start scheduled action service on each launch of application
+* Improved: Scheduled action service will now be called twice a day
+* Code refactoring - updated strings, updated README
+---
+ README.md                                          |  8 ++---
+ .../gnucash/android/app/GnuCashApplication.java    | 17 +++++++---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  7 ++--
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 12 ++++++-
+ .../org/gnucash/android/db/DatabaseHelper.java     | 11 ++++---
+ .../android/export/ExportDialogFragment.java       |  2 ++
+ .../org/gnucash/android/export/ExportParams.java   |  7 ----
+ .../java/org/gnucash/android/model/Account.java    |  6 ++--
+ .../java/org/gnucash/android/model/BaseModel.java  | 23 ++++++++++----
+ .../main/java/org/gnucash/android/model/Split.java |  9 +++---
+ .../org/gnucash/android/model/Transaction.java     | 11 +++++--
+ .../gnucash/android/receivers/BootReceiver.java    |  2 +-
+ .../gnucash/android/service/SchedulerService.java  | 27 ++++++++--------
+ .../android/ui/account/AccountsActivity.java       |  4 +--
+ .../ui/settings/BackupPreferenceFragment.java      |  3 --
+ .../android/ui/settings/SettingsActivity.java      | 11 +++----
+ .../ui/transaction/TransactionFormFragment.java    |  1 -
+ app/src/main/res/values-de/strings.xml             | 17 +++-------
+ app/src/main/res/values-el/strings.xml             | 24 +++-----------
+ app/src/main/res/values-es-rMX/strings.xml         | 24 +++-----------
+ app/src/main/res/values-es/strings.xml             | 23 +++-----------
+ app/src/main/res/values-fr/strings.xml             | 24 +++-----------
+ app/src/main/res/values-hu/strings.xml             | 24 +++-----------
+ app/src/main/res/values-it/strings.xml             | 24 +++-----------
+ app/src/main/res/values-nb/strings.xml             | 23 +++-----------
+ app/src/main/res/values-nl/strings.xml             | 18 +++--------
+ app/src/main/res/values-pt-rBR/strings.xml         | 24 +++-----------
+ app/src/main/res/values-ru/strings.xml             | 37 +++++++---------------
+ app/src/main/res/values-zh/strings.xml             | 23 +++-----------
+ app/src/main/res/values/donottranslate.xml         |  8 +----
+ app/src/main/res/values/strings.xml                | 18 +++--------
+ .../main/res/xml/fragment_backup_preferences.xml   |  3 --
+ 32 files changed, 150 insertions(+), 325 deletions(-)
+
+diff --git a/README.md b/README.md
+index be3f375c..cea5f273 100644
+--- a/README.md
++++ b/README.md
+@@ -30,14 +30,10 @@ the `ANDROID_HOME` environment variable to the location of your SDK. For example
+ 
+ After satisfying those requirements, the build is pretty simple:
+ 
+-* Run `gradlew build installDebug` from the within the project folder.
++* Run `gradlew build installDevelopmentDebug` from the within the project folder.
+ It will build the project for you and install it to the connected Android device or running emulator.
+ 
+-You might find that your device doesn't let you install your build if you
+-already have the version from the Android Market installed.  This is standard
+-Android security as it it won't let you directly replace an app that's been
+-signed with a different key.  Manually uninstall GnuCash from your device and
+-you will then be able to install your own built version.
++The app is configured to allow you to install a development and production version in parallel on your device.
+ 
+ ### With Android Studio
+ The easiest way to build is to install [Android Studio](https://developer.android.com/sdk/index.html) v1.+
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 5eb60ae8..a7015692 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -160,18 +160,25 @@ public static String getDefaultCurrency(){
+     }
+ 
+     /**
+-     * Starts the service for scheduled events and makes the service run daily.
++     * Starts the service for scheduled events and schedules an alarm to call the service twice daily.
++     * <p>If the alarm already exists, this method does nothing. If not, the alarm will be created
++     * Hence, there is no harm in calling the method repeatedly</p>
+      * @param context Application context
+      */
+-    public static void startScheduledEventExecutionService(Context context){
++    public static void startScheduledActionExecutionService(Context context){
+         Intent alarmIntent = new Intent(context, SchedulerService.class);
+-        PendingIntent pendingIntent = PendingIntent.getService(context, 0, alarmIntent, 0);
++        PendingIntent pendingIntent = PendingIntent.getService(context, 0, alarmIntent, PendingIntent.FLAG_NO_CREATE);
++        if (pendingIntent != null)
++            return;
++        else
++            pendingIntent = PendingIntent.getService(context, 0, alarmIntent, 0);
+ 
+         AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+-        alarmManager.cancel(pendingIntent); //if it already exists
+         alarmManager.setInexactRepeating(AlarmManager.RTC_WAKEUP,
+                 System.currentTimeMillis() + AlarmManager.INTERVAL_DAY,
+-                AlarmManager.INTERVAL_DAY, pendingIntent);
++                AlarmManager.INTERVAL_HALF_DAY,
++                pendingIntent);
+ 
++        context.startService(alarmIntent); //run the service the first time
+     }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 36585ccf..175df568 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -940,12 +940,13 @@ public Cursor fetchSubAccounts(String accountUID) {
+      * @return Cursor to the top level accounts
+      */
+     public Cursor fetchTopLevelAccounts() {
+-        //condition which selects accounts with no parent, whose UID is not ROOT and whose name is not ROOT
++        //condition which selects accounts with no parent, whose UID is not ROOT and whose type is not ROOT
+         return fetchAccounts("(" + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IS NULL OR "
+                         + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ?) AND "
+                         + AccountEntry.COLUMN_HIDDEN + " = 0 AND "
+                         + AccountEntry.COLUMN_TYPE + " != ?",
+-                new String[]{"" + getOrCreateGnuCashRootAccountUID(), AccountType.ROOT.name()}, null);
++                new String[]{getOrCreateGnuCashRootAccountUID(), AccountType.ROOT.name()},
++                AccountEntry.COLUMN_NAME + " ASC");
+     }
+ 
+     /**
+@@ -1000,7 +1001,7 @@ public String getOrCreateGnuCashRootAccountUID() {
+         // No ROOT exits, create a new one
+         Account rootAccount = new Account("ROOT Account");
+         rootAccount.setAccountType(AccountType.ROOT);
+-        rootAccount.setFullName(" ");
++        rootAccount.setFullName(ROOT_ACCOUNT_FULL_NAME);
+         addAccount(rootAccount);
+         return rootAccount.getUID();
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 0f976dda..0b0d34fb 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -371,6 +371,16 @@ public int updateRecord(@NonNull String uid, @NonNull String columnKey, String n
+     }
+ 
+     /**
++     * Overloaded method. Updates the record with GUID {@code uid} with the content values
++     * @param uid GUID of the record
++     * @param contentValues Content values to update
++     * @return Number of records updated
++     */
++    public int updateRecord(@NonNull String uid, @NonNull ContentValues contentValues){
++        return mDb.update(mTableName, contentValues, CommonColumns.COLUMN_UID + "=?", new String[]{uid});
++    }
++
++    /**
+      * Updates all records which match the {@code where} clause with the {@code newValue} for the column
+      * @param where SQL where clause
+      * @param whereArgs String arguments for where clause
+@@ -418,7 +428,7 @@ protected String getAttribute(@NonNull String recordUID, @NonNull String columnN
+             if (cursor.moveToFirst())
+                 return cursor.getString(cursor.getColumnIndexOrThrow(columnName));
+             else
+-                throw new IllegalArgumentException("Column or GUID does not exist in the db");
++                throw new IllegalArgumentException(String.format("Column (%s) or GUID (%s) does not exist in the db", columnName, recordUID));
+         } finally {
+             cursor.close();
+         }
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 3fff1575..329ea4f4 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -322,24 +322,25 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+             SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(db);
+             TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(db, splitsDbAdapter);
+             while (c.moveToNext()){
+-                long transactionId = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
+                 contentValues.clear();
+                 Timestamp timestamp = new Timestamp(c.getLong(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TIMESTAMP)));
+                 contentValues.put(TransactionEntry.COLUMN_CREATED_AT, timestamp.toString());
+-                db.update(TransactionEntry.TABLE_NAME, contentValues, TransactionEntry._ID+"="+transactionId, null);
++                long transactionId = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
++                db.update(TransactionEntry.TABLE_NAME, contentValues, TransactionEntry._ID + "=" + transactionId, null);
+ 
+                 ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
+                 scheduledAction.setActionUID(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_UID)));
++                long period = c.getLong(c.getColumnIndexOrThrow("recurrence_period"));
++                scheduledAction.setPeriod(period);
+                 scheduledActionDbAdapter.addScheduledAction(scheduledAction);
+ 
+                 //cancel existing pending intent
+                 Context context = GnuCashApplication.getAppContext();
+                 PendingIntent recurringPendingIntent = PendingIntent.getBroadcast(context,
+                         (int)transactionId, Transaction.createIntent(transactionsDbAdapter.buildTransactionInstance(c)),
+-                        PendingIntent.FLAG_UPDATE_CURRENT);
++                        PendingIntent.FLAG_CANCEL_CURRENT);
+                 AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                 alarmManager.cancel(recurringPendingIntent);
+-                recurringPendingIntent.cancel();
+             }
+             c.close();
+ 
+@@ -365,7 +366,7 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+             db.endTransaction();
+         }
+ 
+-        GnuCashApplication.startScheduledEventExecutionService(GnuCashApplication.getAppContext());
++        GnuCashApplication.startScheduledActionExecutionService(GnuCashApplication.getAppContext());
+ 
+         return oldVersion;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+index 390238f7..a2c87857 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+@@ -198,11 +198,13 @@ public void onRadioButtonClicked(View view){
+ 	 */
+ 	private void refreshRecurrenceTextView(ExportFormat exportFormat){
+ 		String repeatString	= getString(R.string.label_tap_to_create_schedule);
++		mEventRecurrence = new EventRecurrence();
+ 		ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+ 		ScheduledAction scheduledBackup = scheduledActionDbAdapter.getScheduledBackupAction(exportFormat);
+ 		if (scheduledBackup != null){
+ 			repeatString = scheduledBackup.getRepeatString();
+ 			mRecurrenceRule = scheduledBackup.getRuleString();
++			mEventRecurrence.parse(mRecurrenceRule);
+ 		}
+ 		mRecurrenceTextView.setText(repeatString);
+ 	}
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index 2645f829..b121c474 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -169,10 +169,6 @@ public String toCsv(){
+                 + Boolean.toString(mExportAllTransactions) + separator
+                 + Boolean.toString(mDeleteTransactionsAfterExport);
+ 
+-        if (mTargetFilepath != null && mTargetFilepath.length() > 0){
+-            csv +=  separator + mTargetFilepath;
+-        }
+-
+         return csv;
+     }
+ 
+@@ -188,9 +184,6 @@ public static ExportParams parseCsv(String csvParams){
+         params.setExportAllTransactions(Boolean.parseBoolean(tokens[2]));
+         params.setDeleteTransactionsAfterExport(Boolean.parseBoolean(tokens[3]));
+ 
+-        if (tokens.length == 5)
+-            params.setTargetFilepath(tokens[4]);
+-
+         return params;
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index d7ec854a..2af9acff 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -275,7 +275,7 @@ public boolean hasUnexportedTransactions(){
+ 	public Money getBalance(){
+ 		Money balance = Money.createZeroInstance(mCurrency.getCurrencyCode());
+         for (Transaction transaction : mTransactionsList) {
+-            balance.add(transaction.getBalance(mUID));
++            balance.add(transaction.getBalance(getUID()));
+ 		}
+ 		return balance;
+ 	}
+@@ -455,7 +455,7 @@ public void toOfx(Document doc, Element parent, boolean exportAllTransactions){
+ 		bankId.appendChild(doc.createTextNode(OfxHelper.APP_ID));
+ 		
+ 		Element acctId = doc.createElement(OfxHelper.TAG_ACCOUNT_ID);
+-		acctId.appendChild(doc.createTextNode(mUID));
++		acctId.appendChild(doc.createTextNode(getUID()));
+ 		
+ 		Element accttype = doc.createElement(OfxHelper.TAG_ACCOUNT_TYPE);
+ 		String ofxAccountType = convertToOfxAccountType(mAccountType).toString();
+@@ -504,7 +504,7 @@ public void toOfx(Document doc, Element parent, boolean exportAllTransactions){
+ 		for (Transaction transaction : mTransactionsList) {
+ 			if (!exportAllTransactions && transaction.isExported())
+ 				continue;
+-            bankTransactionsList.appendChild(transaction.toOFX(doc, mUID));
++            bankTransactionsList.appendChild(transaction.toOFX(doc, getUID()));
+ 		}		
+ 		//================= END TRANSACTIONS LIST =================================
+ 					
+diff --git a/app/src/main/java/org/gnucash/android/model/BaseModel.java b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+index 71815c00..4100153b 100644
+--- a/app/src/main/java/org/gnucash/android/model/BaseModel.java
++++ b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+@@ -24,12 +24,20 @@
+  * All other models should extend this base model.
+  */
+ public abstract class BaseModel {
+-    protected String mUID;
++    /**
++     * Unique identifier of this model instance.
++     * <p>It is declared private because it is generated only on-demand. Sub-classes should use the accessor methods to read and write this value</p>
++     * @see #getUID()
++     * @see #setUID(String)
++     */
++    private String mUID;
+     protected Timestamp mCreatedTimestamp;
+     protected Timestamp mModifiedTimestamp;
+ 
+     /**
+-     * Initializes the model attributes and generates a GUID
++     * Initializes the model attributes.
++     * <p>A GUID for this model is not generated in the constructor.
++     * A unique ID will be generated on demand with a call to {@link #getUID()}</p>
+      */
+     public BaseModel(){
+         mCreatedTimestamp = new Timestamp(System.currentTimeMillis());
+@@ -37,17 +45,17 @@ public BaseModel(){
+     }
+ 
+     /**
+-     * Method for generating the Global Unique ID for the object.
++     * Method for generating the Global Unique ID for the object and sets the internal variable which can be retrieved with {@link #getUID()}.
+      * Subclasses can override this method to provide a different implementation
+      * @return Random GUID for the model object
+      */
+     protected String generateUID(){
+-        return UUID.randomUUID().toString().replaceAll("-", "");
++        return mUID = UUID.randomUUID().toString().replaceAll("-", "");
+     }
+ 
+     /**
+-     * Returns the GUID of the model
+-     * @return String unique identifier for this model
++     * Returns a unique string identifier for this model instance
++     * @return GUID for this model
+      */
+     public String getUID() {
+         if (mUID == null)
+@@ -58,7 +66,8 @@ public String getUID() {
+     }
+ 
+     /**
+-     * Sets the GUID of the model
++     * Sets the GUID of the model.
++     * <p>A new GUID can be generated with a call to {@link #generateUID()}</p>
+      * @param uid String unique ID
+      */
+     public void setUID(String uid) {
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index c40e650f..6753cfef 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -64,9 +64,9 @@ public Split(Split sourceSplit, boolean generateUID){
+         this.mAmount        = sourceSplit.mAmount.absolute();
+ 
+         if (generateUID){
+-            mUID = generateUID();
++            generateUID();
+         } else {
+-            this.mUID           = sourceSplit.mUID;
++            setUID(sourceSplit.getUID());
+         }
+     }
+ 
+@@ -171,9 +171,10 @@ public Split createPair(String accountUID){
+      * Clones this split and returns an exact copy.
+      * @return New instance of a split which is a copy of the current one
+      */
+-    protected Split clone() {
++    protected Split clone() throws CloneNotSupportedException {
++        super.clone();
+         Split split = new Split(mAmount, mAccountUID);
+-        split.mUID = mUID;
++        split.setUID(getUID());
+         split.setType(mSplitType);
+         split.setMemo(mMemo);
+         split.setTransactionUID(mTransactionUID);
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 82e536ea..6a95cf28 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -180,8 +180,13 @@ public Split autoBalanceImportAccount(){
+             else if (lastCurrency != currentCurrency){
+                 return null; //for now we will not autobalance multi-currency transactions
+             }
++            lastCurrency = currentCurrency;
+         }
+ 
++        //if all the splits are the same currency but the transaction is another
++        if (!lastCurrency.getCurrencyCode().equals(mCurrencyCode))
++            return null;
++
+         Money imbalance = getImbalance();
+         if (!imbalance.isAmountZero()){
+             Currency currency = Currency.getInstance(mCurrencyCode);
+@@ -224,7 +229,7 @@ else if (lastCurrency != currentCurrency){
+     public void setSplits(List<Split> splitList){
+         mSplitList = splitList;
+         for (Split split : splitList) {
+-            split.setTransactionUID(mUID);
++            split.setTransactionUID(getUID());
+         }
+     }
+ 
+@@ -235,7 +240,7 @@ public void setSplits(List<Split> splitList){
+      */
+     public void addSplit(Split split){
+         //sets the currency of the split to the currency of the transaction
+-        split.setTransactionUID(mUID);
++        split.setTransactionUID(getUID());
+         mSplitList.add(split);
+     }
+ 
+@@ -480,7 +485,7 @@ public Element toOFX(Document doc, String accountUID){
+         transactionNode.appendChild(amount);
+ 
+         Element transID = doc.createElement(OfxHelper.TAG_TRANSACTION_FITID);
+-        transID.appendChild(doc.createTextNode(mUID));
++        transID.appendChild(doc.createTextNode(getUID()));
+         transactionNode.appendChild(transID);
+ 
+         Element name = doc.createElement(OfxHelper.TAG_NAME);
+diff --git a/app/src/main/java/org/gnucash/android/receivers/BootReceiver.java b/app/src/main/java/org/gnucash/android/receivers/BootReceiver.java
+index bcfd451f..3b324970 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/BootReceiver.java
++++ b/app/src/main/java/org/gnucash/android/receivers/BootReceiver.java
+@@ -31,6 +31,6 @@
+ 
+     @Override
+     public void onReceive(Context context, Intent intent) {
+-        GnuCashApplication.startScheduledEventExecutionService(context);
++        GnuCashApplication.startScheduledActionExecutionService(context);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 1e30993b..02b15d6b 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -17,6 +17,7 @@
+ package org.gnucash.android.service;
+ 
+ import android.app.IntentService;
++import android.content.ContentValues;
+ import android.content.Intent;
+ import android.os.PowerManager;
+ import android.os.SystemClock;
+@@ -55,6 +56,7 @@ public SchedulerService() {
+ 
+     @Override
+     protected void onHandleIntent(Intent intent) {
++        Log.i(LOG_TAG, "Starting scheduled action service");
+         PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+         PowerManager.WakeLock wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
+                 LOG_TAG);
+@@ -69,9 +71,12 @@ protected void onHandleIntent(Intent intent) {
+             long endTime    = scheduledAction.getEndTime();
+ 
+             long now = System.currentTimeMillis();
+-            //if we did not exceed the endtime (if there is one), and one execution period has passed since last run
+-            if (((endTime > 0 && now < endTime) || (scheduledAction.getExecutionCount() < scheduledAction.getTotalFrequency()) || endTime == 0)
+-                    && (lastRun + period) <= now ){
++
++            if (((endTime > 0 && now < endTime) //if and endTime is set and we did not reach it yet
++                    || (scheduledAction.getExecutionCount() < scheduledAction.getTotalFrequency()) //or the number of scheduled runs
++                    || (endTime == 0 && scheduledAction.getTotalFrequency() == 0)) //or the action is to run forever
++                    && ((lastRun + period) <= now)  //one period has passed since last execution
++                    && scheduledAction.getStartTime() <= now ){ //the start time has arrived
+                 executeScheduledEvent(scheduledAction);
+             }
+         }
+@@ -114,16 +119,10 @@ private void executeScheduledEvent(ScheduledAction scheduledAction){
+                 break;
+         }
+ 
+-        //update last run time
+-        ScheduledActionDbAdapter.getInstance().updateRecord(
+-                scheduledAction.getUID(),
+-                DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN,
+-                Long.toString(System.currentTimeMillis()));
+-
+-        //update the execution count
+-        ScheduledActionDbAdapter.getInstance().updateRecord(
+-                scheduledAction.getUID(),
+-                DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT,
+-                Integer.toString(scheduledAction.getExecutionCount()+1));
++        //update the last run time and execution count
++        ContentValues contentValues = new ContentValues();
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, System.currentTimeMillis());
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, scheduledAction.getExecutionCount()+1);
++        ScheduledActionDbAdapter.getInstance().updateRecord(scheduledAction.getUID(), contentValues);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index d7822210..8d4ce795 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -54,6 +54,7 @@
+ import org.gnucash.android.export.ExportDialogFragment;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.model.Money;
++import org.gnucash.android.service.SchedulerService;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.chart.ChartReportActivity;
+ import org.gnucash.android.ui.passcode.PassLockActivity;
+@@ -64,7 +65,6 @@
+ import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.util.TaskDelegate;
+ 
+-import java.io.FileNotFoundException;
+ import java.io.InputStream;
+ import java.util.Arrays;
+ import java.util.Currency;
+@@ -293,8 +293,8 @@ private void init() {
+ 
+         if (hasNewFeatures()){
+             showWhatsNewDialog(this);
+-            GnuCashApplication.startScheduledEventExecutionService(this);
+         }
++        GnuCashApplication.startScheduledActionExecutionService(this);
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index 18a89348..4c7dc24f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -72,9 +72,6 @@ public void onResume() {
+         }
+         pref.setOnPreferenceChangeListener(this);
+ 
+-        pref = findPreference(getString(R.string.key_restore_last_backup));
+-        pref.setOnPreferenceClickListener((SettingsActivity) getActivity());
+-
+ 		pref = findPreference(getString(R.string.key_restore_backup));
+ 		pref.setOnPreferenceClickListener((SettingsActivity)getActivity());
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index c97cdc4c..ea87edff 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -180,9 +180,6 @@ protected void onCreate(Bundle savedInstanceState) {
+             pref = findPreference(getString(R.string.key_build_version));
+             pref.setOnPreferenceClickListener(this);
+ 
+-            pref = findPreference(getString(R.string.key_restore_last_backup));
+-            pref.setOnPreferenceClickListener(this);
+-
+             pref = findPreference(getString(R.string.key_change_passcode));
+             pref.setOnPreferenceClickListener(this);
+ 
+@@ -306,10 +303,6 @@ public boolean onPreferenceClick(Preference preference) {
+             return true;
+         }
+ 
+-        if (key.equals(getString(R.string.key_restore_last_backup))){
+-            importMostRecentBackup();
+-        }
+-
+         if (key.equals(getString(R.string.key_dropbox_sync))){
+             toggleDropboxSync();
+             toggleDropboxPreference(preference);
+@@ -504,6 +497,10 @@ public void importAccounts() {
+ 
+     }
+ 
++    /**
++     * Imports the most recent backup file (by timestamp)
++     * TODO: Remove this method
++     */
+     public void importMostRecentBackup() {
+         Log.i("Settings", "Importing GnuCash XML");
+         File backupFile = Exporter.getMostRecentBackupFile();
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index eee32486..deb827e7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -737,7 +737,6 @@ private void saveNewTransaction() {
+ 
+             // set as not exported because we have just edited it
+             mTransaction.setExported(false);
+-            mTransaction.setTemplate(mSaveTemplateCheckbox.isChecked());
+             mTransactionsDbAdapter.addTransaction(mTransaction);
+ 
+             if (mSaveTemplateCheckbox.isChecked()) {//template is automatically checked when a transaction is scheduled
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index 394b1067..f7f89dc1 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -74,8 +74,8 @@
+     <string name="label_permission_create_accounts">Erm&#246;glicht das Erstellen von Konten in GnuCash</string>
+     <string name="label_permission_group">Ihre GnuCash-Daten</string>
+     <string name="description_permission_group">Lesen und Bearbeiten von GnuCash-Daten</string>
+-    <string name="label_permission_record_transaction">Buchungen speichern</string>
+-    <string name="label_permission_create_account">Konten erstellen</string>
++    <string name="label_permission_record_transaction">Buchungen speichern in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Konto anzeigen</string>
+     <string name="btn_create_accounts">Konten erstellen</string>
+     <string name="title_default_accounts">Zu erstellende Konten ausw&#228;hlen</string>
+@@ -256,13 +256,6 @@
+ 		<item>Zimbabwe Dollar</item>
+ 		<item>Zloty</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item>Ausgaben</item>
+-	    <item>Einkommen</item>
+-	    <item>Aktiva</item>	    
+-	    <item>KapitalKonto</item>
+-	    <item>Passiva</item>
+-	</string-array>
+ 	<string name="error_no_accounts">Keine Konten vorhanden.\nSie m&#252;ssen ein Konto erstellen um Widgets anf&#252;gen zu k&#246;nnen.</string>
+ 	<string name="title_build_version">Version</string>
+ 	<string name="title_license">Lizenz</string>
+@@ -369,6 +362,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++		<item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Farbe auswhlen</string>
+@@ -378,8 +372,7 @@
+     <string name="title_all_accounts">Alle</string>
+     <string name="summary_create_default_accounts">Erstellt die hufig verwendeten Standard-GnuCash-Konten</string>
+     <string name="title_create_default_accounts">Standard-Konten erstellen</string>
+-    <string name="msg_confirm_create_default_accounts_setting">Neue Konten werden zustzlich zur existierenden Kontenstruktur erstellt.\n\nWenn Sie die derzeitig existierenden Konten ersetzen wollen, lschen Sie diese bitte, bevor Sie fortfahren!
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="menu_scheduled_transactions">Eingeplante Buchungen</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Willkommen bei GnuCash Android!\nSie knnen entweder eine Hierarchie der fr gewhnlich verwendeten Konten erstellen oder Ihre eigene GnuCash-Kontenstruktur importieren.\n\nBeide Optionen sind auch in den Einstellungen verfgbar, sodass Sie dies spter entscheiden knnen.
+     </string>
+@@ -450,8 +443,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index b4239ca5..9da265ec 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -75,8 +75,8 @@
+     <string name="label_permission_create_accounts">    GnuCash  Android</string>
+     <string name="label_permission_group">    GnuCash</string>
+     <string name="description_permission_group">    GnuCash</string>
+-    <string name="label_permission_record_transaction"> </string>
+-    <string name="label_permission_create_account"> </string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account"> </string>
+     <string name="btn_create_accounts"> </string>
+     <string name="title_default_accounts">   </string>
+@@ -257,13 +257,6 @@
+ 		<item>Zimbabwe Dollar</item>
+ 		<item>Zloty</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item></item>
+-	    <item></item>
+-	    <item></item>	    
+-	    <item> </item>
+-	    <item></item>
+-	</string-array>
+ 	<string name="error_no_accounts">   
+ 	GnuCash.\n       </string>
+ 	<string name="title_build_version"></string>
+@@ -385,6 +378,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++		<item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title"> </string>
+@@ -394,20 +388,12 @@
+     <string name="title_all_accounts"></string>
+     <string name="summary_create_default_accounts">      GnuCash</string>
+     <string name="title_create_default_accounts">  </string>
+-    <string name="msg_confirm_create_default_accounts_setting">      
+-         .\n\n     ,    !
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="menu_scheduled_transactions"> </string>
+     <string name="msg_confirm_create_default_accounts_first_run">GnuCash Android.  ! \n   
+            ,         GnuCash. \n\n     
+              \'     .
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-    </string-array>
+     <string name="title_scheduled_transactions"> </string>
+     <string name="title_select_export_destination">Select destination for export</string>
+     <string name="hint_split_memo">Memo</string>
+@@ -475,8 +461,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index a1b7dc60..f5754eea 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -75,8 +75,8 @@
+     <string name="label_permission_create_accounts">Habilita la creaci&#243;n de cuentas en Gnucash para Android</string>
+     <string name="label_permission_group">Sus datos de GnuCash</string>
+     <string name="description_permission_group">Leer y modificar los datos de GnuCash</string>
+-    <string name="label_permission_record_transaction">Registrar transacciones</string>
+-    <string name="label_permission_create_account">Crear cuentas</string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Mostrar cuenta</string>
+     <string name="btn_create_accounts">Crear cuentas</string>
+     <string name="title_default_accounts">Seleccione la cuenta a crear</string>
+@@ -257,13 +257,6 @@
+ 		<item>D&#243;lar zimbabuense</item>
+ 		<item>Zloty polaco</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item>Gastos</item>
+-	    <item>Ingresos</item>
+-	    <item>Activos</item>
+-	    <item>Capital</item>
+-	    <item>Pasivos</item>
+-	</string-array>
+ 	<string name="error_no_accounts">No hay cuentas en Gnucash.\nCree una cuenta antes de agregar un widget</string>
+ 	<string name="title_build_version">Versi&#243;n de compilaci&#243;n</string>
+ 	<string name="title_license">Licencia</string>
+@@ -370,6 +363,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++        <item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Select a Color</string>
+@@ -379,19 +373,11 @@
+     <string name="title_all_accounts">All</string>
+     <string name="summary_create_default_accounts">Creates default GnuCash commonly-used account structure</string>
+     <string name="title_create_default_accounts">Create default accounts</string>
+-    <string name="msg_confirm_create_default_accounts_setting">New accounts will be created in addition to the existing
+-        account structure.\n\nIf you wish to replace currently existing accounts, delete them first before proceeding!
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Welcome to GnuCash Android! \nYou can either create
+         a hierarchy of commonly-used accounts, or import your own GnuCash account structure. \n\nBoth options are also
+         available in app Settings so you can decide later.
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item>NINGUNO</item>
+-        <item>DIARIO</item>
+-        <item>SEMANAL</item>
+-        <item>MENSUAL</item>
+-    </string-array>
+     <string name="menu_scheduled_transactions">Scheduled Transactions</string>
+     <string name="title_scheduled_transactions">Scheduled Transactions</string>
+     <string name="title_select_export_destination">Select destination for export</string>
+@@ -460,8 +446,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index b86f7e17..dfebf879 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -75,8 +75,8 @@
+     <string name="label_permission_create_accounts">Permite crear cuentas en Gnucash para Android</string>
+     <string name="label_permission_group">Sus datos GnuCash</string>
+     <string name="description_permission_group">Leer y modificar datos Gnucash</string>
+-    <string name="label_permission_record_transaction">almacenar transacciones</string>
+-    <string name="label_permission_create_account">crear cuentas</string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Mostrar cuentas</string>
+     <string name="btn_create_accounts">Crear Cuentas</string>
+     <string name="title_default_accounts">Seleccionar cuentas a crear</string>
+@@ -257,13 +257,6 @@
+ 		<item>D&#243;lar zimbabuense</item>
+ 		<item>Zloty polaco</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item>Gastos</item>
+-	    <item>Ingresos</item>
+-	    <item>Activos</item>	    
+-	    <item>Capital</item>
+-	    <item>Pasivo</item>
+-	</string-array>
+ 	<string name="error_no_accounts">No hay cuentas en Gnucash.\nCree una cuenta antes de a&#241;adir un widget</string>
+ 	<string name="title_build_version">Versi&#243;n de compilaci&#243;n</string>
+ 	<string name="title_license">Licencia</string>
+@@ -370,6 +363,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++		<item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Seleccionar un color</string>
+@@ -379,16 +373,9 @@
+     <string name="title_all_accounts">Todas</string>
+     <string name="summary_create_default_accounts">Crea una estructura por defecto de cuentas GnuCash com&#250;nmente usadas</string>
+     <string name="title_create_default_accounts">Crear cuentas por defecto</string>
+-    <string name="msg_confirm_create_default_accounts_setting">Se crear&#225;n nuevas cuentas por defecto adem&#225;s de la estructura ya existente.\n\nSi desea reemplazar las cuentas ya existentes b&#243;rrelas primero antes de seguir.
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="msg_confirm_create_default_accounts_first_run">&#161;Bienvenido a GnuCash Android! \nPuede crear una jerarqu&#237;a de cuentas com&#250;nmente usadas o importar su propia estructura de cuentas GnuCash. \n\nAmbas opciones est&#225;n disponibles en las opciones de la aplicaci&#243; por si quiere decidirlo m&#225;s tarde.
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item>NINGUNO</item>
+-        <item>DIARIO</item>
+-        <item>SEMANAL</item>
+-        <item>MENSUAL</item>
+-    </string-array>
+     <string name="menu_scheduled_transactions">Transacciones Programadas</string>
+     <string name="title_scheduled_transactions">Transacciones Programadas</string>
+     <string name="title_select_export_destination">Seleccionar destino para exportar</string>
+@@ -457,8 +444,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 832f6e60..f0f3da22 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -75,8 +75,8 @@
+     <string name="label_permission_create_accounts">Permettre la cr&#233;ation de comptes dans GnuCash pour Android</string>
+     <string name="label_permission_group">Vos donn&#233;es GnuCash</string>
+     <string name="description_permission_group">Lire et modifier les donn&#233;es GnuCash</string>
+-    <string name="label_permission_record_transaction">enregistrer les transactions</string>
+-    <string name="label_permission_create_account">cr&#233;er les comptes</string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Afficher le compte</string>
+     <string name="btn_create_accounts">Cr&#233;er les comptes</string>
+     <string name="title_default_accounts">Choisisez les comptes &#224; cr&#233;s</string>
+@@ -257,13 +257,6 @@
+         <item>Zimbabwe Dollar</item>
+         <item>Zloty</item>
+     </string-array>
+-    <string-array name="default_accounts">
+-        <item>D&#233;penses</item>
+-        <item>Revenus</item>
+-        <item>Actifs</item>
+-        <item>Capitaux propres</item>
+-        <item>Charges</item>
+-    </string-array>
+     <string name="error_no_accounts">Aucun compte &#233;xistant dans GnuCash.\nCr&#233;ez un compte avant d\'ajouter un widget</string>
+     <string name="title_build_version">Version logiciel</string>
+     <string name="title_license">Licence</string>
+@@ -368,6 +361,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++        <item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Slectionnez une couleur</string>
+@@ -377,18 +371,10 @@
+     <string name="title_all_accounts">Tous</string>
+     <string name="summary_create_default_accounts">Cre une structure de compte GnuCash par dfaut couramment utilis</string>
+     <string name="title_create_default_accounts">Cre comptes par dfaut</string>
+-    <string name="msg_confirm_create_default_accounts_setting">Les nouveaux comptes seront crs en plus de l\'existante
+-		structure de compte.\n\n Si vous souhaitez remplacer des comptes existants, supprimez-les d\'abord avant de commencer !
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Bienvenue sur GnuCash Android!\nVous pouvez soit crer
+ 		une hirarchie de comptes couramment utiliss, importer votre propre structure de compte GnuCash.\n\nLes deux options sont galement
+ 		disponibles dans les paramtres de l\'application de sorte que vous puissiez dcider plus tard.</string>
+-    <string-array name="recurrence_period_strings">
+-        <item>AUCUN</item>
+-        <item>QUOTIDIEN</item>
+-        <item>SEMAINE</item>
+-        <item>MENSUEL</item>
+-    </string-array>
+     <string name="menu_scheduled_transactions">Transactions planifies</string>
+     <string name="title_scheduled_transactions">Transactions planifies</string>
+     <string name="title_select_export_destination">Selectionnez une destination pour l\'export</string>
+@@ -457,8 +443,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 0b043541..4793eb68 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -75,8 +75,8 @@
+     <string name="label_permission_create_accounts">Enables creation of accounts in GnuCash for Android</string>
+     <string name="label_permission_group">Your GnuCash data</string>
+     <string name="description_permission_group">Read and modify GnuCash data</string>
+-    <string name="label_permission_record_transaction">record transactions</string>
+-    <string name="label_permission_create_account">create accounts</string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Display account</string>
+     <string name="btn_create_accounts">Create Accounts</string>
+     <string name="title_default_accounts">Select accounts to create</string>
+@@ -257,13 +257,6 @@
+ 		<item>Zimbabwe Dollar</item>
+ 		<item>Zloty</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item>Expenses</item>
+-	    <item>Income</item>
+-	    <item>Assets</item>	    
+-	    <item>Equity</item>
+-	    <item>Liabilities</item>
+-	</string-array>
+ 	<string name="error_no_accounts">No accounts exist in GnuCash.\nCreate an account before adding a widget</string>
+ 	<string name="title_build_version">Build version</string>
+ 	<string name="title_license">License</string>
+@@ -372,6 +365,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++        <item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Select a Color</string>
+@@ -381,20 +375,12 @@
+     <string name="title_all_accounts">All</string>
+     <string name="summary_create_default_accounts">Creates default GnuCash commonly-used account structure</string>
+     <string name="title_create_default_accounts">Create default accounts</string>
+-    <string name="msg_confirm_create_default_accounts_setting">New accounts will be created in addition to the existing
+-        account structure.\n\nIf you wish to replace currently existing accounts, delete them first before proceeding!
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="menu_scheduled_transactions">Scheduled Transactions</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Welcome to GnuCash Android! \nYou can either create
+         a hierarchy of commonly-used accounts, or import your own GnuCash account structure. \n\nBoth options are also
+         available in app Settings so you can decide later.
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item>NONE</item>
+-        <item>DAILY</item>
+-        <item>WEEKLY</item>
+-        <item>MONTHLY</item>
+-    </string-array>
+     <string name="title_scheduled_transactions">Scheduled Transactions</string>
+     <string name="title_select_export_destination">Select destination for export</string>
+     <string name="hint_split_memo">Memo</string>
+@@ -461,8 +447,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index 34042c26..041cb775 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -76,8 +76,8 @@
+     <string name="label_permission_create_accounts">Abilita la creazione dei conti in GnuCash per Android</string>
+     <string name="label_permission_group">I propri dati di GnuCash</string>
+     <string name="description_permission_group">Legge e modifica i dati di GnuCash</string>
+-    <string name="label_permission_record_transaction">registra transazione</string>
+-    <string name="label_permission_create_account">crea conti</string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Visualizza conto</string>
+     <string name="btn_create_accounts">Crea conti</string>
+     <string name="title_default_accounts">Selezione dei conti da creare</string>
+@@ -258,13 +258,6 @@
+ 		<item>Zimbabwe Dollar</item>
+ 		<item>Zloty</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item>Uscite</item>
+-	    <item>Entrate</item>
+-	    <item>Attivit</item>	    
+-	    <item>Capitali</item>
+-	    <item>Passivit</item>
+-	</string-array>
+ 	<string name="error_no_accounts">Non esiste alcun conto in GnuCash.\nCreare un conto prima di aggiungere il widget</string>
+ 	<string name="title_build_version">Versione build</string>
+ 	<string name="title_license">Licenza</string>
+@@ -372,6 +365,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++        <item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Selezione del colore</string>
+@@ -381,19 +375,11 @@
+     <string name="title_all_accounts">Tutti</string>
+     <string name="summary_create_default_accounts">Crea la struttura predefinita dei conti comuni di GnuCash</string>
+     <string name="title_create_default_accounts">Crea conti predefiniti</string>
+-    <string name="msg_confirm_create_default_accounts_setting">I nuovi conti saranno aggiunti alla struttura esistente.\n\n
+-        Per sostituire i conti esistenti, occorre eliminarli prima di proseguire!
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Benvenuti in GnuCash per Android! \n possibile
+         creare una struttura dei conti pi comunemente utilizzati o importare la propria struttura da GnuCash. \n\nEntrambe le
+         Opzioni sono disponibili nelle impostazioni dell\'applicazione ed  quindi possibile decidere in seguito.
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item>NESSUNA</item>
+-        <item>QUOTIDIANO</item>
+-        <item>SETTIMANALE</item>
+-        <item>MENSILE</item>
+-    </string-array>
+     <string name="menu_scheduled_transactions">Scheduled Transactions</string>
+     <string name="title_scheduled_transactions">Scheduled Transactions</string>
+     <string name="title_select_export_destination">Select destination for export</string>
+@@ -461,8 +447,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 7d11931a..64304c66 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -76,8 +76,8 @@
+     <string name="label_permission_create_accounts">Aktiverer oppretting av konti i Gnucash for Android</string>
+     <string name="label_permission_group">Dine GnuCash-data</string>
+     <string name="description_permission_group">Lese og endre Gnucash-data</string>
+-    <string name="label_permission_record_transaction">spill inn transaksjoner</string>
+-    <string name="label_permission_create_account">opprett konto</string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Vis konto</string>
+     <string name="btn_create_accounts">Opprette kontoer</string>
+     <string name="title_default_accounts">Velg kontoer som skal opprettes</string>
+@@ -258,13 +258,6 @@
+ 		<item>Zimbabwe Dollar</item>
+ 		<item>Zloty</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item>Utgifter</item>
+-	    <item>Inntekter</item>
+-	    <item>Eiendeler</item>	    
+-	    <item>Egenkapital</item>
+-	    <item>Gjeld</item>
+-	</string-array>
+ 	<string name="error_no_accounts">Ingen kontoer funnet.\nOpprett en konto fr du legger til en modul</string>
+ 	<string name="title_build_version">Byggversion</string>
+ 	<string name="title_license">Lisens</string>
+@@ -371,6 +364,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++		<item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Velg en farge</string>
+@@ -380,16 +374,9 @@
+     <string name="title_all_accounts">Alle</string>
+     <string name="summary_create_default_accounts">Oppretter standard GnuCash kontostruktur</string>
+     <string name="title_create_default_accounts">Opprette standard kontoer</string>
+-    <string name="msg_confirm_create_default_accounts_setting">Nye kontoer vil bli opprettet i tillegg til eksisterende kontostruktur.\n\nHvis du vil erstatte de, slett de fr du forsetter!
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Velkommen til GnuCash Android! \nDu kan enten opprette et hieraki av de mest brukte kontoene, eller importere din egen GnuCash kontostruktur. \n\nBegge valgene er ogs tilgjengelige under Instillinger, s du kan velge senere.
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item>INGEN</item>
+-        <item>DAGLIG</item>
+-        <item>UKENTLIG</item>
+-        <item>MNEDLIG</item>
+-    </string-array>
+     <string name="menu_scheduled_transactions">Planlagte Transaksjoner</string>
+     <string name="title_scheduled_transactions">Planlagte Transaksjoner</string>
+     <string name="title_select_export_destination">Select destination for export</string>
+@@ -457,8 +444,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 245d4e80..8d2a23d5 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -75,8 +75,8 @@
+     <string name="label_permission_create_accounts">Staat het aanmaken van rekeningen in GnuCash for Android toe</string>
+     <string name="label_permission_group">Uw GnuCash data</string>
+     <string name="description_permission_group">GnuCash data lezen en bewerken</string>
+-    <string name="label_permission_record_transaction">Transacties bewaren</string>
+-    <string name="label_permission_create_account">Rekeningen aanmaken</string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Rekening tonen</string>
+     <string name="btn_create_accounts">Rekeningen aanmaken</string>
+     <string name="title_default_accounts">Aan te maken rekeningen selecteren</string>
+@@ -257,13 +257,6 @@
+ 		<item>Zimbabwe Dollar</item>
+ 		<item>Zloty</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item>Uitgaven</item>
+-	    <item>Inkomsten</item>
+-	    <item>Activa</item>	    
+-	    <item>Eigen Vermogen</item>
+-	    <item>Passiva</item>
+-	</string-array>
+ 	<string name="error_no_accounts">Geen rekeningen beschikbaar.\nU moet een rekening aanmaken alvorens een widget toe te voegen</string>
+ 	<string name="title_build_version">Versie</string>
+ 	<string name="title_license">License</string>
+@@ -372,6 +365,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++        <item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Kies een kleur</string>
+@@ -381,9 +375,7 @@
+     <string name="title_all_accounts">Alle</string>
+     <string name="summary_create_default_accounts">Creert standaard GnuCash veelgebruikte rekeningstructuur</string>
+     <string name="title_create_default_accounts">Standaard rekeningen creren</string>
+-    <string name="msg_confirm_create_default_accounts_setting">Nieuwe rekeningen zullen toegevoegd worden aan de bestaande
+-        rekeningstructuur.\n\nAls je de bestaande rekeningen wil vervangen, verwijder ze dan eerst voor verder te gaan!
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Welkom in GnuCash Android! \nJe kan een nieuwe structuur van
+         veel gebruikte rekeningen creren, of je eigen GnuCash rekeningstructuur importeren. \n\nBeide opties zijn ook
+         beschikbaar in app Instellingen zodat je later kan beslissen.
+@@ -462,8 +454,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 50605829..d6301992 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -74,8 +74,8 @@
+ 	  <string name="label_permission_create_accounts">Habilitar a criao de contas no GnuCash para Android</string>
+ 	  <string name="label_permission_group">Seu arquivo GnuCash</string>
+ 	  <string name="description_permission_group">Ler e modificar o arquivo GnuCash</string>
+-	  <string name="label_permission_record_transaction">gravar transaes</string>
+-	  <string name="label_permission_create_account">criar contas</string>
++	  <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++	  <string name="label_permission_create_account">Create accounts in GnuCash</string>
+ 	  <string name="label_display_account">Mostrar conta</string>
+ 	  <string name="btn_create_accounts">Criar Contas</string>
+ 	  <string name="title_default_accounts">Selecionar contas para criar</string>
+@@ -256,13 +256,6 @@
+ 	    <item>Dlar do Zimbabue</item>
+ 	    <item>Zloty</item>
+ 	  </string-array>
+-	  <string-array name="default_accounts">
+-	    <item>Despesas</item>
+-	    <item>Receitas</item>
+-	    <item>Ativos</item>
+-	    <item>Patrimnio lquido</item>
+-		<item>Passivos</item>
+-	  </string-array>
+ 	  <string name="error_no_accounts">No existem contas no GnuCash.\nCriar uma conta antes de adicionar um widget</string>
+ 	  <string name="title_build_version">Verso de compilao</string>
+ 	  <string name="title_license">Licena</string>
+@@ -370,6 +363,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++		<item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Select a Color</string>
+@@ -379,19 +373,11 @@
+     <string name="title_all_accounts">All</string>
+     <string name="summary_create_default_accounts">Creates default GnuCash commonly-used account structure</string>
+     <string name="title_create_default_accounts">Create default accounts</string>
+-    <string name="msg_confirm_create_default_accounts_setting">New accounts will be created in addition to the existing
+-        account structure.\n\nIf you wish to replace currently existing accounts, delete them first before proceeding!
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Welcome to GnuCash Android! \nYou can either create
+         a hierarchy of commonly-used accounts, or import your own GnuCash account structure. \n\nBoth options are also
+         available in app Settings so you can decide later.
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item>NENHUM</item>
+-        <item>DIRIO</item>
+-        <item>SEMANAL</item>
+-        <item>MENSAL</item>
+-    </string-array>
+     <string name="menu_scheduled_transactions">Scheduled Transactions</string>
+     <string name="title_scheduled_transactions">Scheduled Transactions</string>
+     <string name="title_select_export_destination">Select destination for export</string>
+@@ -460,8 +446,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-	<string name="title_restore_last_backup">Restore last backup</string>
+-	<string name="summary_restore_last_backup">Restore the most recent backup</string>
+ 	<string name="title_restore_backup">Restore Backup</string>
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 216a141e..e00df711 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -75,8 +75,8 @@
+     <string name="label_permission_create_accounts">   Gnucash  Android</string>
+     <string name="label_permission_group">  Gnucash</string>
+     <string name="description_permission_group">    Gnucash</string>
+-    <string name="label_permission_record_transaction"> </string>
+-    <string name="label_permission_create_account"> </string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account"> </string>
+     <string name="btn_create_accounts"> </string>
+     <string name="title_default_accounts">   </string>
+@@ -257,13 +257,6 @@
+ 		<item>Zimbabwe Dollar</item>
+ 		<item>Zloty</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item></item>
+-	    <item></item>
+-	    <item></item>	    
+-	    <item></item>
+-	    <item></item>
+-	</string-array>
+ 	<string name="error_no_accounts">   Gnucash.\n  ,    .</string>
+ 	<string name="title_build_version"> </string>
+ 	<string name="title_license"></string>
+@@ -370,6 +363,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++        <item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title"> </string>
+@@ -379,22 +373,13 @@
+     <string name="title_all_accounts"></string>
+     <string name="summary_create_default_accounts">   GnuCash  </string>
+     <string name="title_create_default_accounts">   </string>
+-    <string name="msg_confirm_create_default_accounts_setting"> 
+-               .\n\n 
+-           ,   !
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="msg_confirm_create_default_accounts_first_run">
+           GnuCash  Android!\n    
+           ,      GnuCash.\n\n
+              ,   
+           .
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-    </string-array>
+     <string name="menu_scheduled_transactions"> </string>
+     <string name="title_scheduled_transactions"> </string>
+     <string name="title_select_export_destination">  </string>
+@@ -463,8 +448,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+@@ -482,18 +465,22 @@
+     <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+-        <item quantity="other">Every %d days</item>
++        <item quantity="few">Every %d days</item>
++        <item quantity="many">Every %d days</item>
+     </plurals>
+     <plurals name="label_every_x_weeks">
+         <item quantity="one">Weekly</item>
+-        <item quantity="other">Every %d weeks</item>
++        <item quantity="few">Every %d weeks</item>
++        <item quantity="many">Every %d weeks</item>
+     </plurals>
+     <plurals name="label_every_x_months">
+         <item quantity="one">Monthly</item>
+-        <item quantity="other">Every %d months</item>
++        <item quantity="few">Every %d months</item>
++        <item quantity="many">Every %d months</item>
+     </plurals>
+     <plurals name="label_every_x_years">
+         <item quantity="one">Yearly</item>
+-        <item quantity="other">Every %d years</item>
++        <item quantity="few">Every %d years</item>
++        <item quantity="many">Every %d years</item>
+     </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index ccbdda32..ba7e6874 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -80,8 +80,8 @@
+     <string name="label_permission_create_accounts"></string>
+     <string name="label_permission_group">GnuCash</string>
+     <string name="description_permission_group">GnuCash</string>
+-    <string name="label_permission_record_transaction"></string>
+-    <string name="label_permission_create_account"></string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account"></string>
+     <string name="btn_create_accounts"></string>
+     <string name="title_default_accounts"></string>
+@@ -262,13 +262,6 @@
+         <item></item>
+         <item>Zloty</item>
+     </string-array>
+-    <string-array name="default_accounts">
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-    </string-array>
+     <string name="error_no_accounts">GnuCash\n</string>
+     <string name="title_build_version"></string>
+     <string name="title_license"></string>
+@@ -379,6 +372,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++        <item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title"></string>
+@@ -391,17 +385,10 @@
+     <string name="title_all_accounts"></string>
+     <string name="summary_create_default_accounts"></string>
+     <string name="title_create_default_accounts"></string>
+-    <string name="msg_confirm_create_default_accounts_setting">
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="menu_scheduled_transactions"></string>
+     <string name="msg_confirm_create_default_accounts_first_run">GnuCash Android \n12\
+     </string>
+-    <string-array name="recurrence_period_strings">
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-        <item></item>
+-    </string-array>
+     <string name="title_scheduled_transactions"></string>
+     <string name="title_select_export_destination"></string>
+     <string name="hint_split_memo"></string>
+@@ -456,8 +443,6 @@
+     <string name="label_delete_transactions"></string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule"></string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/values/donottranslate.xml b/app/src/main/res/values/donottranslate.xml
+index ac67e9f2..7c33e378 100644
+--- a/app/src/main/res/values/donottranslate.xml
++++ b/app/src/main/res/values/donottranslate.xml
+@@ -21,7 +21,6 @@
+     <string name="key_default_export_format">default_export_format</string>
+     <string name="key_recurring_transaction_ids">recurring_transaction_ids</string>
+     <string name="key_create_default_accounts">create_default_accounts</string>
+-    <string name="key_restore_last_backup">restore_last_backup</string>
+     <string name="key_save_opening_balances">save_opening_balances</string>
+     <string name="key_restore_backup">restore_backup</string>
+     <string name="key_dropbox_sync">dropbox_sync</string>
+@@ -52,12 +51,7 @@
+     <string-array name="key_export_format_values">
+         <item>QIF</item>
+         <item>OFX</item>
+-    </string-array>
+-    <string-array name="key_recurrence_period_millis">
+-        <item>0</item>
+-        <item>86400000</item>
+-        <item>604800000</item>
+-        <item>2630000000</item>
++        <item>XML</item>
+     </string-array>
+     <string-array name="key_currency_codes">
+         <item>AFN</item>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 29185398..48ddbc07 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -80,8 +80,8 @@
+     <string name="label_permission_create_accounts">Enables creation of accounts in GnuCash for Android</string>
+     <string name="label_permission_group">Your GnuCash data</string>
+     <string name="description_permission_group">Read and modify GnuCash data</string>
+-    <string name="label_permission_record_transaction">record transactions</string>
+-    <string name="label_permission_create_account">create accounts</string>
++    <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++    <string name="label_permission_create_account">Create accounts in GnuCash</string>
+     <string name="label_display_account">Display account</string>
+     <string name="btn_create_accounts">Create Accounts</string>
+     <string name="title_default_accounts">Select accounts to create</string>
+@@ -262,13 +262,6 @@
+ 		<item>Zimbabwe Dollar</item>
+ 		<item>Zloty</item>
+     </string-array>
+-	<string-array name="default_accounts">
+-	    <item>Expenses</item>
+-	    <item>Income</item>
+-	    <item>Assets</item>
+-	    <item>Equity</item>
+-	    <item>Liabilities</item>
+-	</string-array>
+ 	<string name="error_no_accounts">No accounts exist in GnuCash.\nCreate an account before adding a widget</string>
+ 	<string name="title_build_version">Build version</string>
+ 	<string name="title_license">License</string>
+@@ -383,6 +376,7 @@
+     <string-array name="export_formats">
+         <item>QIF</item>
+         <item>OFX</item>
++        <item>XML</item>
+     </string-array>
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title">Select a Color</string>
+@@ -397,9 +391,7 @@
+     <string name="title_all_accounts">All</string>
+     <string name="summary_create_default_accounts">Creates default GnuCash commonly-used account structure</string>
+     <string name="title_create_default_accounts">Create default accounts</string>
+-    <string name="msg_confirm_create_default_accounts_setting">New accounts will be created in addition to the existing
+-        account structure.\n\nIf you wish to replace currently existing accounts, delete them first before proceeding!
+-    </string>
++    <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+     <string name="menu_scheduled_transactions">Scheduled Transactions</string>
+     <string name="msg_confirm_create_default_accounts_first_run">Welcome to GnuCash Android! \nYou can either create
+         a hierarchy of commonly-used accounts, or import your own GnuCash account structure. \n\nBoth options are also
+@@ -460,8 +452,6 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore the most recent backup</string>
+     <string name="title_restore_backup">Restore Backup</string>
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+diff --git a/app/src/main/res/xml/fragment_backup_preferences.xml b/app/src/main/res/xml/fragment_backup_preferences.xml
+index 309f1760..89464f08 100644
+--- a/app/src/main/res/xml/fragment_backup_preferences.xml
++++ b/app/src/main/res/xml/fragment_backup_preferences.xml
+@@ -20,9 +20,6 @@
+         <Preference android:title="@string/title_create_backup_pref"
+             android:key="@string/key_create_backup"
+             android:summary="@string/summary_create_backup_pref" />
+-        <Preference android:summary="@string/summary_restore_last_backup"
+-            android:key="@string/key_restore_last_backup"
+-            android:title="@string/title_restore_last_backup" />
+         <Preference android:title="@string/title_restore_backup"
+             android:key="@string/key_restore_backup"
+             android:summary="@string/summary_restore_backup_pref" />

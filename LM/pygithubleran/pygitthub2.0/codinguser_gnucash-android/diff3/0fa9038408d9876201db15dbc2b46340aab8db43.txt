@@ -1,0 +1,1081 @@
+From 0fa9038408d9876201db15dbc2b46340aab8db43 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 11 Apr 2015 03:12:57 +0200
+Subject: [PATCH] Improved the parsing and display of scheduled action
+ descriptions
+
+Added UID of origin scheduled action to transaction table
+Fixed: Scheduled actions not exported to XML
+Localized the scheduled action repeat string
+Refactored database schema (removed deprecated tables and code)
+---
+ .../org/gnucash/android/db/DatabaseHelper.java     |  13 +--
+ .../org/gnucash/android/db/DatabaseSchema.java     |   6 +-
+ .../android/db/ScheduledActionDbAdapter.java       |  12 +--
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  33 ++-----
+ .../gnucash/android/export/xml/GncXmlExporter.java |  12 ++-
+ .../gnucash/android/export/xml/GncXmlHelper.java   |   5 +-
+ .../gnucash/android/importer/GncXmlHandler.java    |   5 +-
+ .../java/org/gnucash/android/model/PeriodType.java | 108 +++++++++++++++++++++
+ .../org/gnucash/android/model/ScheduledAction.java |  89 ++++++++---------
+ .../org/gnucash/android/model/Transaction.java     |  21 ++++
+ .../gnucash/android/service/SchedulerService.java  |   2 +-
+ .../ScheduledTransactionsListFragment.java         |  10 +-
+ .../ui/transaction/TransactionFormFragment.java    |   4 +
+ .../gnucash/android/ui/util/RecurrenceParser.java  |   2 +-
+ app/src/main/res/values-de/strings.xml             |  16 +++
+ app/src/main/res/values-el/strings.xml             |  16 +++
+ app/src/main/res/values-es-rMX/strings.xml         |  16 +++
+ app/src/main/res/values-es/strings.xml             |  16 +++
+ app/src/main/res/values-fr/strings.xml             |  16 +++
+ app/src/main/res/values-hu/strings.xml             |  16 +++
+ app/src/main/res/values-it/strings.xml             |  16 +++
+ app/src/main/res/values-nb/strings.xml             |  16 +++
+ app/src/main/res/values-nl/strings.xml             |  16 +++
+ app/src/main/res/values-pt-rBR/strings.xml         |  16 +++
+ app/src/main/res/values-ru/strings.xml             |  16 +++
+ app/src/main/res/values-zh/strings.xml             |  16 +++
+ app/src/main/res/values/strings.xml                |  16 +++
+ 27 files changed, 434 insertions(+), 96 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/model/PeriodType.java
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 019bffb6..843d1e16 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -89,6 +89,7 @@
+ 			+ TransactionEntry.COLUMN_EXPORTED      + " tinyint default 0, "
+ 			+ TransactionEntry.COLUMN_TEMPLATE      + " tinyint default 0, "
+             + TransactionEntry.COLUMN_CURRENCY      + " varchar(255) not null, "
++            + TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " varchar(255), "
+             + TransactionEntry.COLUMN_CREATED_AT    + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + TransactionEntry.COLUMN_MODIFIED_AT   + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+ 			+ ");" + createUpdatedAtTrigger(TransactionEntry.TABLE_NAME);
+@@ -122,7 +123,7 @@
+             + ScheduledActionEntry.COLUMN_END_TIME       + " integer default 0, "
+             + ScheduledActionEntry.COLUMN_TAG            + " text, "
+             + ScheduledActionEntry.COLUMN_ENABLED        + " tinyint default 1, " //enabled by default
+-            + ScheduledActionEntry.COLUMN_NUM_OCCURRENCES+ " integer default 0, "
++            + ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY + " integer default 0, "
+             + ScheduledActionEntry.COLUMN_EXECUTION_COUNT+ " integer default 0, "
+             + ScheduledActionEntry.COLUMN_CREATED_AT     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + ScheduledActionEntry.COLUMN_MODIFIED_AT    + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+@@ -207,7 +208,7 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+             if (oldVersion == 3 && newVersion >= 4){
+                 Log.i(LOG_TAG, "Updating database to version 4");
+                 String addRecurrencePeriod = "ALTER TABLE " + TransactionEntry.TABLE_NAME +
+-                        " ADD COLUMN " + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " integer default 0";
++                        " ADD COLUMN recurrence_period integer default 0";
+ 
+                 String addDefaultTransferAccount = "ALTER TABLE " + AccountEntry.TABLE_NAME
+                         + " ADD COLUMN " + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " varchar(255)";
+@@ -297,7 +298,7 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+             //TODO: Migrate old scheduled events using only SQL, code had changed
+             //TODO: Take care to properly migrate the created_at dates for transactions (use the date already in the transaction)
+             //TODO: auto-balance existing splits during migration
+-
++            //TODO: add schedx_action_uid column to transactions table
+             db.setTransactionSuccessful();
+             oldVersion = 8;
+         } finally {
+@@ -334,7 +335,7 @@ private int upgradeDbToVersion7(SQLiteDatabase db) {
+                     + TransactionEntry.COLUMN_TIMESTAMP + " integer not null, "
+                     + TransactionEntry.COLUMN_EXPORTED + " tinyint default 0, "
+                     + TransactionEntry.COLUMN_CURRENCY + " varchar(255) not null, "
+-                    + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " integer default 0, "
++                    + "recurrence_period integer default 0, "
+                     + "UNIQUE (" + TransactionEntry.COLUMN_UID + ") "
+                     + ");");
+             // initialize new transaction table wiht data from old table
+@@ -346,7 +347,7 @@ private int upgradeDbToVersion7(SQLiteDatabase db) {
+                             + TransactionEntry.COLUMN_TIMESTAMP + " , "
+                             + TransactionEntry.COLUMN_EXPORTED + " , "
+                             + TransactionEntry.COLUMN_CURRENCY + " , "
+-                            + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " )  SELECT "
++                            + "recurrence_period )  SELECT "
+                             + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry._ID + " , "
+                             + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_UID + " , "
+                             + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_DESCRIPTION + " , "
+@@ -354,7 +355,7 @@ private int upgradeDbToVersion7(SQLiteDatabase db) {
+                             + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_TIMESTAMP + " , "
+                             + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_EXPORTED + " , "
+                             + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_CURRENCY + " , "
+-                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_RECURRENCE_PERIOD
++                            + TransactionEntry.TABLE_NAME + "_bak.recurrence_period"
+                             + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
+                             + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid == " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
+             );
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index d2d83111..f658ca6d 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -79,9 +79,7 @@ private DatabaseSchema(){}
+         public static final String COLUMN_TIMESTAMP             = "timestamp";
+         public static final String COLUMN_EXPORTED              = "is_exported";
+         public static final String COLUMN_TEMPLATE              = "is_template";
+-
+-        @Deprecated
+-        public static final String COLUMN_RECURRENCE_PERIOD     = "recurrence_period";
++        public static final String COLUMN_SCHEDX_ACTION_UID     = "schedx_action_uid";
+ 
+         public static final String INDEX_UID                    = "transaction_uid_index";
+     }
+@@ -113,7 +111,7 @@ private DatabaseSchema(){}
+         public static final String COLUMN_PERIOD            = "period";
+         public static final String COLUMN_TAG               = "tag"; //for any action-specific information
+         public static final String COLUMN_ENABLED           = "is_enabled";
+-        public static final String COLUMN_NUM_OCCURRENCES   = "num_occurrences"; //FIXME: This should not be here, rather transactions table should store UID of action which created it
++        public static final String COLUMN_TOTAL_FREQUENCY   = "total_frequency";
+         public static final String COLUMN_EXECUTION_COUNT   = "execution_count";
+ 
+         public static final String INDEX_UID            = "scheduled_action_uid_index";
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index edda39ee..876b6033 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -64,7 +64,7 @@ public long addScheduledAction(ScheduledAction scheduledAction){
+         contentValues.put(ScheduledActionEntry.COLUMN_TYPE,      scheduledAction.getActionType().name());
+         contentValues.put(ScheduledActionEntry.COLUMN_TAG,       scheduledAction.getTag());
+         contentValues.put(ScheduledActionEntry.COLUMN_ENABLED,   scheduledAction.isEnabled() ? "1":"0");
+-        contentValues.put(ScheduledActionEntry.COLUMN_NUM_OCCURRENCES, scheduledAction.getNumberOfOccurences());
++        contentValues.put(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY, scheduledAction.getTotalFrequency());
+         contentValues.put(ScheduledActionEntry.COLUMN_EXECUTION_COUNT, scheduledAction.getExecutionCount());
+ 
+         Log.d(TAG, "Replace scheduled event in the db");
+@@ -92,7 +92,7 @@ public int bulkAddScheduledActions(List<ScheduledAction> scheduledActionList){
+                     + ScheduledActionEntry.COLUMN_ENABLED           + " , "
+                     + ScheduledActionEntry.COLUMN_CREATED_AT        + " , "
+                     + ScheduledActionEntry.COLUMN_TAG               + " , "
+-                    + ScheduledActionEntry.COLUMN_NUM_OCCURRENCES   + " , "
++                    + ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY + " , "
+                     + ScheduledActionEntry.COLUMN_EXECUTION_COUNT   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
+             for (ScheduledAction schedxAction:scheduledActionList) {
+                 replaceStatement.clearBindings();
+@@ -106,7 +106,7 @@ public int bulkAddScheduledActions(List<ScheduledAction> scheduledActionList){
+                 replaceStatement.bindLong(8,    schedxAction.isEnabled() ? 1 : 0);
+                 replaceStatement.bindString(9,  schedxAction.getCreatedTimestamp().toString());
+                 replaceStatement.bindString(10, schedxAction.getTag());
+-                replaceStatement.bindString(11, Integer.toString(schedxAction.getNumberOfOccurences()));
++                replaceStatement.bindString(11, Integer.toString(schedxAction.getTotalFrequency()));
+                 replaceStatement.bindString(12, Integer.toString(schedxAction.getExecutionCount()));
+ 
+                 replaceStatement.execute();
+@@ -134,7 +134,7 @@ private ScheduledAction buildScheduledEventInstance(final Cursor cursor){
+         String typeString = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TYPE));
+         String tag      = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TAG));
+         boolean enabled = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ENABLED)) > 0;
+-        int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_NUM_OCCURRENCES));
++        int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY));
+         int execCount = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_EXECUTION_COUNT));
+ 
+         ScheduledAction event = new ScheduledAction(ScheduledAction.ActionType.valueOf(typeString));
+@@ -146,7 +146,7 @@ private ScheduledAction buildScheduledEventInstance(final Cursor cursor){
+         event.setLastRun(lastRun);
+         event.setTag(tag);
+         event.setEnabled(enabled);
+-        event.setNumberOfOccurences(numOccurrences);
++        event.setTotalFrequency(numOccurrences);
+         event.setExecutionCount(execCount);
+ 
+         return event;
+@@ -175,7 +175,7 @@ public ScheduledAction getScheduledEvent(String uid){
+      * @param eventUID GUID of the event itself
+      * @return List of ScheduledEvents
+      */
+-    public List<ScheduledAction> getScheduledEventsWithUID(@NonNull String eventUID){
++    public List<ScheduledAction> getScheduledActionsWithUID(@NonNull String eventUID){
+         Cursor cursor = mDb.query(ScheduledActionEntry.TABLE_NAME, null,
+                 ScheduledActionEntry.COLUMN_ACTION_UID + "= ?",
+                 new String[]{eventUID}, null, null, null);
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 292e105f..66bf8aef 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -90,6 +90,7 @@ public long addTransaction(Transaction transaction){
+ 		contentValues.put(TransactionEntry.COLUMN_EXPORTED,     transaction.isExported() ? 1 : 0);
+ 		contentValues.put(TransactionEntry.COLUMN_TEMPLATE,     transaction.isTemplate() ? 1 : 0);
+         contentValues.put(TransactionEntry.COLUMN_CURRENCY,     transaction.getCurrencyCode());
++        contentValues.put(TransactionEntry.COLUMN_SCHEDX_ACTION_UID, transaction.getScheduledActionUID());
+ 
+         Log.d(TAG, "Replacing transaction in db");
+         long rowId = -1;
+@@ -150,7 +151,8 @@ public long bulkAddTransactions(List<Transaction> transactionList){
+                 + TransactionEntry.COLUMN_EXPORTED      + " , "
+                 + TransactionEntry.COLUMN_CURRENCY      + " , "
+                 + TransactionEntry.COLUMN_CREATED_AT    + " , "
+-                + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ?)");
++                + TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " , "
++                + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ? , ?)");
+             for (Transaction transaction : transactionList) {
+                 //Log.d(TAG, "Replacing transaction in db");
+                 replaceStatement.clearBindings();
+@@ -161,7 +163,8 @@ public long bulkAddTransactions(List<Transaction> transactionList){
+                 replaceStatement.bindLong(5,    transaction.isExported() ? 1 : 0);
+                 replaceStatement.bindString(6,  transaction.getCurrencyCode());
+                 replaceStatement.bindString(7,  transaction.getCreatedTimestamp().toString());
+-                replaceStatement.bindLong(8,    transaction.isTemplate() ? 1 : 0);
++                replaceStatement.bindString(8,  transaction.getScheduledActionUID());
++                replaceStatement.bindLong(9,    transaction.isTemplate() ? 1 : 0);
+                 replaceStatement.execute();
+                 rowInserted ++;
+                 splitList.addAll(transaction.getSplits());
+@@ -379,29 +382,11 @@ public Transaction buildTransactionInstance(Cursor c){
+ 		transaction.setNote(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_NOTES)));
+ 		transaction.setExported(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_EXPORTED)) == 1);
+ 		transaction.setTemplate(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TEMPLATE)) == 1);
++        transaction.setCurrencyCode(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_CURRENCY)));
++        transaction.setScheduledActionUID(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_SCHEDX_ACTION_UID)));
++        long transactionID = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
++        transaction.setSplits(mSplitsDbAdapter.getSplitsForTransaction(transactionID));
+ 
+-        if (mDb.getVersion() < SPLITS_DB_VERSION){ //legacy, will be used once, when migrating the database
+-            String accountUID = c.getString(c.getColumnIndexOrThrow(SplitEntry.COLUMN_ACCOUNT_UID));
+-            String amountString = c.getString(c.getColumnIndexOrThrow(SplitEntry.COLUMN_AMOUNT));
+-            String currencyCode = getAccountCurrencyCode(accountUID);
+-            Money amount = new Money(amountString, currencyCode);
+-
+-            Split split = new Split(amount.absolute(), accountUID);
+-            TransactionType type = Transaction.getTypeForBalance(getAccountType(accountUID), amount.isNegative());
+-            split.setType(type);
+-            transaction.addSplit(split);
+-
+-            String transferAccountUID = c.getString(c.getColumnIndexOrThrow(DatabaseHelper.KEY_DOUBLE_ENTRY_ACCOUNT_UID));
+-            if (transferAccountUID == null) {
+-                AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
+-                transferAccountUID = accountsDbAdapter.getOrCreateImbalanceAccountUID(Currency.getInstance(currencyCode));
+-            }
+-            transaction.addSplit(split.createPair(transferAccountUID));
+-        } else {
+-            transaction.setCurrencyCode(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_CURRENCY)));
+-            long transactionID = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
+-            transaction.setSplits(mSplitsDbAdapter.getSplitsForTransaction(transactionID));
+-        }
+ 		return transaction;
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 6aaf0627..55a7dadf 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -182,6 +182,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                         TransactionEntry.TABLE_NAME+"."+ TransactionEntry.COLUMN_EXPORTED + " AS trans_exported",
+                         TransactionEntry.TABLE_NAME+"."+ TransactionEntry.COLUMN_CURRENCY + " AS trans_currency",
+                         TransactionEntry.TABLE_NAME+"."+ TransactionEntry.COLUMN_CREATED_AT + " AS trans_date_posted",
++                        TransactionEntry.TABLE_NAME+"."+ TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " AS trans_from_sched_action",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_UID + " AS split_uid",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_MEMO + " AS split_memo",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_TYPE + " AS split_type",
+@@ -267,6 +268,12 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                     slotValue.add("false");
+                 }
+ 
++                String scheduledActionUID = cursor.getString(cursor.getColumnIndexOrThrow("trans_from_sched_action"));
++                if (scheduledActionUID != null && !scheduledActionUID.isEmpty()){
++                    slotKey.add(GncXmlHelper.KEY_FROM_SCHED_ACTION);
++                    slotType.add(GncXmlHelper.ATTR_VALUE_GUID);
++                    slotValue.add(scheduledActionUID);
++                }
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_TRN_SLOTS);
+                 exportSlots(xmlSerializer, slotKey, slotType, slotValue);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_TRN_SLOTS);
+@@ -399,7 +406,7 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+                 //end date
+                 serializeDate(xmlSerializer, GncXmlHelper.TAG_SX_END, endTime);
+             } else { //add number of occurrences
+-                int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_NUM_OCCURRENCES));
++                int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY));
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_NUM_OCCUR);
+                 xmlSerializer.text(Integer.toString(numOccurrences));
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_NUM_OCCUR);
+@@ -515,6 +522,9 @@ public void generateExport(Writer writer) throws ExporterException{
+             exportTransactions(xmlSerializer, true);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+ 
++            //scheduled actions
++            exportScheduledActions(xmlSerializer);
++
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_BOOK);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_ROOT);
+             xmlSerializer.endDocument();
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 5e112c22..6bd2481e 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -126,12 +126,13 @@
+     public static final String KEY_COLOR            = "color";
+     public static final String KEY_FAVORITE         = "favorite";
+     public static final String KEY_NOTES            = "notes";
+-    public static final String KEY_DEFAULT_TRANSFER_ACCOUNT = "default_transfer_account";
+     public static final String KEY_EXPORTED         = "exported";
+-    public static final String KEY_SCHEDX_ACTION = "sched-xaction";
++    public static final String KEY_SCHEDX_ACTION    = "sched-xaction";
+     public static final String KEY_SPLIT_ACCOUNT    = "key_account";
+     public static final String KEY_DEBIT_FORMULA    = "debit-formula";
+     public static final String KEY_CREDIT_FORMULA   = "credit-formula";
++    public static final String KEY_FROM_SCHED_ACTION        = "from-sched-xaction";
++    public static final String KEY_DEFAULT_TRANSFER_ACCOUNT = "default_transfer_account";
+ 
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 1cc931cb..bf123f4b 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -29,6 +29,7 @@
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
++import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+@@ -475,13 +476,13 @@ else if (qualifiedName.equals(GncXmlHelper.TAG_SX_ENABLED)){
+             mScheduledAction.setEnabled(characterString.equalsIgnoreCase("y"));
+         }
+         else if (qualifiedName.equals(GncXmlHelper.TAG_SX_NUM_OCCUR)){
+-            mScheduledAction.setNumberOfOccurences(Integer.parseInt(characterString));
++            mScheduledAction.setTotalFrequency(Integer.parseInt(characterString));
+         }
+         else if (qualifiedName.equals(GncXmlHelper.TAG_RX_MULT)){
+             mRecurrenceMultiplier = Integer.parseInt(characterString);
+         }
+         else if (qualifiedName.equals(GncXmlHelper.TAG_RX_PERIOD_TYPE)){
+-            ScheduledAction.PeriodType periodType = ScheduledAction.PeriodType.valueOf(characterString.toUpperCase());
++            PeriodType periodType = PeriodType.valueOf(characterString.toUpperCase());
+             periodType.setMultiplier(mRecurrenceMultiplier);
+             mScheduledAction.setPeriod(periodType);
+         }
+diff --git a/app/src/main/java/org/gnucash/android/model/PeriodType.java b/app/src/main/java/org/gnucash/android/model/PeriodType.java
+new file mode 100644
+index 00000000..21435024
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/model/PeriodType.java
+@@ -0,0 +1,108 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.gnucash.android.model;
++
++import android.content.res.Resources;
++
++import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
++
++/**
++* Represents a type of period which can be associated with a recurring event
++ * @author Ngewi Fet <ngewif@gmail.com>
++ * @see org.gnucash.android.model.ScheduledAction
++*/
++public enum PeriodType {
++    DAY, WEEK, MONTH, YEAR;
++
++    int mMultiplier = 1; //multiplier for the period type
++
++    /**
++     * Sets the multiplier for this period type
++     * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
++     * @param multiplier Multiplier for this period type
++     */
++    public void setMultiplier(int multiplier){
++        mMultiplier = multiplier;
++    }
++
++    /**
++     * Returns the multiplier for this period type. The default multiplier is 1.
++     * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
++     * @return  Multiplier for this period type
++     */
++    public int getMultiplier(){
++        return mMultiplier;
++    }
++
++    /**
++     * Returns the frequency description of this period type.
++     * This is used mostly for generating the recurrence rule.
++     * @return Frequency description
++     */
++    public String getFrequencyDescription() {
++        if (mMultiplier > 1){
++            switch (this) {
++                case DAY:
++                    return "Every " + mMultiplier + " days";
++                case WEEK:
++                    return "Every " + mMultiplier + " weeks";
++                case MONTH:
++                    return "Every " + mMultiplier + " months";
++                case YEAR:
++                    return "Every " + mMultiplier + " years";
++                default:
++                    return "Every " + mMultiplier + " days";
++            }
++        } else {
++            switch (this) {
++                case DAY:
++                    return "Daily";
++                case WEEK:
++                    return "Weekly";
++                case MONTH:
++                    return "Monthly";
++                case YEAR:
++                    return "Yearly";
++                default:
++                    return "Daily";
++            }
++        }
++    }
++
++    /**
++     * Returns a localized string describing this period type's frequency.
++     * @return String describing period type
++     */
++    public String getLocalizedFrequencyDescription(){
++        Resources res = GnuCashApplication.getAppContext().getResources();
++
++        switch (this) {
++            case DAY:
++                return res.getQuantityString(R.plurals.label_every_x_days, mMultiplier);
++            case WEEK:
++                return res.getQuantityString(R.plurals.label_every_x_weeks, mMultiplier);
++            case MONTH:
++                return res.getQuantityString(R.plurals.label_every_x_months, mMultiplier);
++            case YEAR:
++                return res.getQuantityString(R.plurals.label_every_x_years, mMultiplier);
++            default:
++                return res.getQuantityString(R.plurals.label_every_x_days, mMultiplier);
++        }
++    }
++
++}
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index 32e5d289..f76674d2 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -38,30 +38,6 @@
+      */
+     public enum ActionType {TRANSACTION, EXPORT}
+ 
+-    public enum PeriodType {
+-        DAY, WEEK, MONTH, YEAR;
+-
+-        int mMultiplier = 1; //multiplier for the period type
+-
+-        /**
+-         * Sets the multiplier for this period type
+-         * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
+-         * @param multiplier Multiplier for this period type
+-         */
+-        public void setMultiplier(int multiplier){
+-            mMultiplier = multiplier;
+-        }
+-
+-        /**
+-         * Returns the multiplier for this period type. The default multiplier is 1.
+-         * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
+-         * @return  Multiplier for this period type
+-         */
+-        public int getMultiplier(){
+-            return mMultiplier;
+-        }
+-    }
+-
+     /**
+      * Next scheduled run of Event
+      */
+@@ -84,14 +60,14 @@ public int getMultiplier(){
+     private ActionType mActionType;
+ 
+     /**
+-     * Number of occurences of this event
++     * Number of times this event is to be executed
+      */
+-    private int mNumberOfOccurences = 0;
++    private int mTotalFrequency = 0;
+ 
+     /**
+      * How many times this action has already been executed
+      */
+-    private int mNumberOfExecutions = 0;
++    private int mExecutionCount = 0;
+ 
+     public ScheduledAction(ActionType actionType){
+         mActionType = actionType;
+@@ -134,7 +110,7 @@ public void setPeriod(long period) {
+ 
+     /**
+      * Sets the period given the period type.
+-     * The {@link org.gnucash.android.model.ScheduledAction.PeriodType} should have the multiplier set,
++     * The {@link PeriodType} should have the multiplier set,
+      * e.g. bi-weekly actions have period type {@link PeriodType#WEEK} and multiplier 2
+      * @param periodType Type of period
+      */
+@@ -165,7 +141,7 @@ public PeriodType getPeriodType(){
+     }
+ 
+     /**
+-     * Computes the {@link org.gnucash.android.model.ScheduledAction.PeriodType} for a given {@code period}
++     * Computes the {@link PeriodType} for a given {@code period}
+      * @param period Period in milliseconds since Epoch
+      * @return PeriodType corresponding to the period
+      */
+@@ -221,7 +197,7 @@ public long getEndTime() {
+      * @return End time in milliseconds for the scheduled action
+      */
+     public long getApproxEndTime(){
+-        return mStartDate + (mPeriod * mNumberOfOccurences);
++        return mStartDate + (mPeriod * mTotalFrequency);
+     }
+ 
+     public void setEndTime(long endDate) {
+@@ -246,20 +222,18 @@ public void setEnabled(boolean enabled){
+ 
+     /**
+      * Returns the total number of occurences of this scheduled action.
+-     * <p>Typically, this is set explicity, but if not, then it is computed from the values of
+-     * the start date, end date and period.</p>
+      * @return Total number of occurences of this action
+      */
+-    public int getNumberOfOccurences(){
+-        return mNumberOfOccurences;
++    public int getTotalFrequency(){
++        return mTotalFrequency;
+     }
+ 
+     /**
+      * Sets the number of occurences of this action
+      * @param occurencesCount Number of occurences
+      */
+-    public void setNumberOfOccurences(int occurencesCount){
+-        this.mNumberOfOccurences = occurencesCount;
++    public void setTotalFrequency(int occurencesCount){
++        this.mTotalFrequency = occurencesCount;
+     }
+ 
+     /**
+@@ -267,7 +241,7 @@ public void setNumberOfOccurences(int occurencesCount){
+      * @return Number of times this action has been executed
+      */
+     public int getExecutionCount(){
+-        return mNumberOfExecutions;
++        return mExecutionCount;
+     }
+ 
+     /**
+@@ -275,7 +249,7 @@ public int getExecutionCount(){
+      * @param executionCount Number of executions
+      */
+     public void setExecutionCount(int executionCount){
+-        mNumberOfExecutions = executionCount;
++        mExecutionCount = executionCount;
+     }
+ 
+     /**
+@@ -283,16 +257,43 @@ public void setExecutionCount(int executionCount){
+      * @return String description of repeat schedule
+      */
+     public String getRepeatString(){
+-        //TODO: localize the string
+-        SimpleDateFormat dateFormat = new SimpleDateFormat("dd.MM.yyyy", Locale.US);
+-        String repeatString = String.format("Repeats every %d %s starting on %s", getPeriodType().getMultiplier(), getPeriodType().name().toLowerCase(),
+-                dateFormat.format(new Date(mStartDate)));
++        String dayOfWeek = new SimpleDateFormat("E", Locale.US).format(new Date(mStartDate));
++        PeriodType periodType = getPeriodType();
++        StringBuilder ruleBuilder = new StringBuilder(periodType.getLocalizedFrequencyDescription());
++        ruleBuilder.append(" on " + dayOfWeek);
++        ruleBuilder.append(";");
+         if (mEndDate > 0){
+-            repeatString += " until " + dateFormat.format(mEndDate);
++            ruleBuilder.append(" until " + new SimpleDateFormat("M/d", Locale.US).format(new Date(mEndDate)) + ";");
++        } else if (mTotalFrequency > 0){
++            ruleBuilder.append(" for " + mTotalFrequency + " times;");
+         }
+-        return repeatString;
++        return ruleBuilder.toString();
+     }
+ 
++    /**
++     * Creates an RFC 2445 string which describes this recurring event
++     * @return String describing event
++     */
++    public String getRuleString(){
++        String dayOfWeek = new SimpleDateFormat("EE", Locale.US).format(new Date(mStartDate));
++        PeriodType periodType = getPeriodType();
++        StringBuilder ruleBuilder = new StringBuilder(periodType.getFrequencyDescription());
++        ruleBuilder.append(" on " + dayOfWeek);
++        ruleBuilder.append(";");
++        if (mEndDate > 0){
++            ruleBuilder.append(" until " + new SimpleDateFormat("M/d/yyyy", Locale.US).format(new Date(mEndDate)) + ";");
++        } else if (mTotalFrequency > 0){
++            ruleBuilder.append(" for " + mTotalFrequency + " times;");
++        }
++        return ruleBuilder.toString();
++    }
++
++    /**
++     * Creates a ScheduledAction from a Transaction and a period
++     * @param transaction
++     * @param period
++     * @return
++     */
+     public static ScheduledAction parseScheduledAction(Transaction transaction, long period){
+         ScheduledAction scheduledAction = new ScheduledAction(ActionType.TRANSACTION);
+         scheduledAction.mActionUID = transaction.getUID();
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 9520250c..eb1c8739 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -115,6 +115,11 @@
+      */
+     private boolean mIsTemplate = false;
+ 
++    /**
++     * GUID of ScheduledAction which created this transaction
++     */
++    private String mScheduledActionUID = null;
++
+ 	/**
+ 	 * Overloaded constructor. Creates a new transaction instance with the
+ 	 * provided data and initializes the rest to default values.
+@@ -515,6 +520,22 @@ public Element toOFX(Document doc, String accountUID){
+ 	}
+ 
+     /**
++     * Returns the GUID of the {@link org.gnucash.android.model.ScheduledAction} which created this transaction
++     * @return GUID of scheduled action
++     */
++    public String getScheduledActionUID() {
++        return mScheduledActionUID;
++    }
++
++    /**
++     * Sets the GUID of the {@link org.gnucash.android.model.ScheduledAction} which created this transaction
++     * @param scheduledActionUID GUID of the scheduled action
++     */
++    public void setScheduledActionUID(String scheduledActionUID) {
++        mScheduledActionUID = scheduledActionUID;
++    }
++
++    /**
+      * Creates an Intent with arguments from the <code>transaction</code>.
+      * This intent can be broadcast to create a new transaction
+      * @param transaction Transaction used to create intent
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index aa00989c..02776cd8 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -70,7 +70,7 @@ protected void onHandleIntent(Intent intent) {
+ 
+             long now = System.currentTimeMillis();
+             //if we did not exceed the endtime (if there is one), and one execution period has passed since last run
+-            if (((endTime > 0 && now < endTime) || (scheduledAction.getExecutionCount() < scheduledAction.getNumberOfOccurences()) || endTime == 0)
++            if (((endTime > 0 && now < endTime) || (scheduledAction.getExecutionCount() < scheduledAction.getTotalFrequency()) || endTime == 0)
+                     && (lastRun + period) < now ){
+                 executeScheduledEvent(scheduledAction);
+             }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index 3a0fb65e..fb33929d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2013 - 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2013 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -110,7 +110,7 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                         Log.i(TAG, "Cancelling scheduled transaction(s)");
+                         String trnUID = mTransactionsDbAdapter.getUID(id);
+                         ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+-                        List<ScheduledAction> events = scheduledActionDbAdapter.getScheduledEventsWithUID(trnUID);
++                        List<ScheduledAction> events = scheduledActionDbAdapter.getScheduledActionsWithUID(trnUID);
+ 
+                         if (mTransactionsDbAdapter.deleteRecord(id)){
+                             Toast.makeText(getActivity(), R.string.toast_recurring_transaction_deleted, Toast.LENGTH_SHORT).show();
+@@ -179,8 +179,8 @@ public void onResume() {
+     @Override
+     public void onListItemClick(ListView l, View v, int position, long id) {
+         super.onListItemClick(l, v, position, id);
+-        if (mInEditMode){
+-            CheckBox checkbox = (CheckBox) v.findViewById(R.id.checkbox_parent_account);
++        if (mActionMode != null){
++            CheckBox checkbox = (CheckBox) v.findViewById(R.id.checkbox);
+             checkbox.setChecked(!checkbox.isChecked());
+             return;
+         }
+@@ -400,7 +400,7 @@ public void bindView(View view, Context context, Cursor cursor) {
+             TextView descriptionTextView = (TextView) view.findViewById(R.id.secondary_text);
+ 
+             ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+-            List<ScheduledAction> events = scheduledActionDbAdapter.getScheduledEventsWithUID(transaction.getUID());
++            List<ScheduledAction> events = scheduledActionDbAdapter.getScheduledActionsWithUID(transaction.getUID());
+             StringBuilder repeatStringBuilder = new StringBuilder();
+             for (ScheduledAction event : events) {
+                 repeatStringBuilder.append(event.getRepeatString()).append("\n");
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index fa139cff..f15c9cb2 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -435,6 +435,10 @@ private void initializeViewsWithTransaction(){
+         }
+ 
+         mSaveTemplate.setChecked(mTransaction.isTemplate());
++        List<ScheduledAction> scheduledActions = ScheduledActionDbAdapter.getInstance().getScheduledActionsWithUID(mTransaction.getUID());
++        if (!scheduledActions.isEmpty()){
++            mRecurrenceTextView.setText(scheduledActions.get(0).getRuleString());
++        }
+     }
+ 
+     private void enableControls(boolean b) {
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index 70c8c16d..fe5b993d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -128,7 +128,7 @@ private static void parseEndTime(EventRecurrence eventRecurrence, ScheduledActio
+             endTime.parse(eventRecurrence.until);
+             scheduledAction.setEndTime(endTime.toMillis(false));
+         } else if (eventRecurrence.count > 0){
+-            scheduledAction.setNumberOfOccurences(eventRecurrence.count);
++            scheduledAction.setTotalFrequency(eventRecurrence.count);
+         }
+     }
+ 
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index 366352a9..11daac28 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -440,4 +440,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index 319639f5..ccd940da 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -465,4 +465,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 571a2e13..c5aa38e7 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -450,4 +450,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 6eb36f4b..f3d4ef35 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -447,4 +447,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index ae46c13d..4e0f037e 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -447,4 +447,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 064c0402..2b044f00 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -451,4 +451,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index 229dd7c0..962bb3e3 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -451,4 +451,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 3409c8ca..3fb7aab1 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -447,4 +447,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 192dc6f2..aa46a47f 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -452,4 +452,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index f66ccf17..b14635ff 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -450,4 +450,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 0424058b..70d00498 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -453,4 +453,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index 5c4251e1..84baea42 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -448,4 +448,20 @@
+     <string name="label_delete_transactions"></string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule"></string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 96b953b1..f48ccbd6 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -450,4 +450,20 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <plurals name="label_every_x_days">
++        <item quantity="one">Daily</item>
++        <item quantity="other">Every %d days</item>
++    </plurals>
++    <plurals name="label_every_x_weeks">
++        <item quantity="one">Weekly</item>
++        <item quantity="other">Every %d weeks</item>
++    </plurals>
++    <plurals name="label_every_x_months">
++        <item quantity="one">Monthly</item>
++        <item quantity="other">Every %d months</item>
++    </plurals>
++    <plurals name="label_every_x_years">
++        <item quantity="one">Yearly</item>
++        <item quantity="other">Every %d years</item>
++    </plurals>
+ </resources>

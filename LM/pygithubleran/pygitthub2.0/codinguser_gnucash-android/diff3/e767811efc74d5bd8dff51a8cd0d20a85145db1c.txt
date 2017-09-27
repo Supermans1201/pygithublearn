@@ -1,0 +1,244 @@
+From e767811efc74d5bd8dff51a8cd0d20a85145db1c Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 2 Sep 2015 17:27:16 +0200
+Subject: [PATCH] Fixed: nav menu "open" does not work when in scheduled
+ actions activity
+
+Fixed: display of amount sign in split editor
+Changed label in export dialog from "share file" to "send to"
+---
+ app/src/main/AndroidManifest.xml                   |  2 +-
+ .../main/java/org/gnucash/android/model/Split.java | 49 ++++++++++++++++++++++
+ .../android/ui/account/AccountFormFragment.java    |  1 +
+ .../transaction/ScheduledActionsListFragment.java  |  4 +-
+ .../ui/transaction/SplitEditorFragment.java        |  4 +-
+ ...ctivity.java => TransactionDetailActivity.java} |  4 +-
+ .../ui/transaction/TransactionsListFragment.java   |  4 +-
+ .../transaction/dialog/BulkMoveDialogFragment.java |  1 +
+ ...on_info.xml => activity_transaction_detail.xml} |  0
+ app/src/main/res/layout/dialog_transfer_funds.xml  |  1 +
+ app/src/main/res/values/strings.xml                |  2 +-
+ 11 files changed, 62 insertions(+), 10 deletions(-)
+ rename app/src/main/java/org/gnucash/android/ui/transaction/{TransactionInfoActivity.java => TransactionDetailActivity.java} (98%)
+ rename app/src/main/res/layout/{activity_transaction_info.xml => activity_transaction_detail.xml} (100%)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 0964b18d..109388e1 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -100,7 +100,7 @@
+ 		</activity>
+         <activity android:name=".ui.FormActivity"
+             android:configChanges="orientation|screenSize"/>
+-        <activity android:name=".ui.transaction.TransactionInfoActivity"
++        <activity android:name=".ui.transaction.TransactionDetailActivity"
+             android:configChanges="orientation|screenSize"/>
+         <activity android:name=".ui.report.ReportsActivity"
+             android:launchMode="singleTop"/>
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index ff9dfab4..3b14cdc3 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -4,6 +4,8 @@
+ import android.support.annotation.NonNull;
+ import android.util.Log;
+ 
++import org.gnucash.android.db.AccountsDbAdapter;
++
+ /**
+  * A split amount in a transaction.
+  * Every transaction is made up of at least two splits (representing a double entry transaction)
+@@ -241,6 +243,53 @@ public boolean isPairOf(Split other) {
+                 && mSplitType.invert().equals(other.mSplitType);
+     }
+ 
++    /**
++     * Returns the formatted amount (with or without negation sign) for the split value
++     * @return Money amount of value
++     * @see #getFormattedAmount(Money, String, TransactionType)
++     */
++    public Money getFormattedValue(){
++        return getFormattedAmount(mValue, mAccountUID, mSplitType);
++    }
++
++    /**
++     * Returns the formatted amount (with or without negation sign) for the quantity
++     * @return Money amount of quantity
++     * @see #getFormattedAmount(Money, String, TransactionType)
++     */
++    public Money getFormattedQuantity(){
++        return getFormattedAmount(mQuantity, mAccountUID, mSplitType);
++    }
++
++    /**
++     * Splits are saved as absolute values to the database, with no negative numbers.
++     * The type of movement the split causes to the balance of an account determines its sign, and
++     * that depends on the split type and the account type
++     * @param amount Money amount to format
++     * @param accountUID GUID of the account
++     * @param splitType Transaction type of the split
++     * @return -{@code amount} if the amount would reduce the balance of {@code account}, otherwise +{@code amount}
++     */
++    public static Money getFormattedAmount(Money amount, String accountUID, TransactionType splitType){
++        boolean isDebitAccount = AccountsDbAdapter.getInstance().getAccountType(accountUID).hasDebitNormalBalance();
++        Money absAmount = amount.absolute();
++
++        boolean isDebitSplit = splitType == TransactionType.DEBIT;
++        if (isDebitAccount) {
++            if (isDebitSplit) {
++                return absAmount;
++            } else {
++                return absAmount.negate();
++            }
++        } else {
++            if (isDebitSplit) {
++                return absAmount.negate();
++            } else {
++                return absAmount;
++            }
++        }
++    }
++
+     @Override
+     public String toString() {
+         return mSplitType.name() + " of " + mValue.toString() + " in account: " + mAccountUID;
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index c5e1b77e..437af5d4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -395,6 +395,7 @@ private void initializeViewsWithAccount(Account account){
+ 
+         if (mAccountsDbAdapter.getTransactionMaxSplitNum(mAccount.getUID()) > 1)
+         {
++            //TODO: Allow changing the currency and effecting the change for all transactions without any currency exchange (purely cosmetic change)
+             mCurrencySpinner.setEnabled(false);
+         }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
+index 3a57b285..a19e28ca 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
+@@ -366,8 +366,10 @@ private void stopActionMode(){
+ 
+     @Override
+     public void onActivityResult(int requestCode, int resultCode, Intent data) {
+-        if (resultCode == Activity.RESULT_OK)
++        if (resultCode == Activity.RESULT_OK) {
+             refreshList();
++            super.onActivityResult(requestCode, resultCode, data);
++        }
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+index 346ec2e3..2974153f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+@@ -139,7 +139,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             loadSplitViews(splitList);
+         } else {
+             final Currency currency = Currency.getInstance(mAccountsDbAdapter.getAccountCurrencyCode(mAccountUID));
+-            Split split = new Split(new Money(mBaseAmount, currency), mAccountUID);
++            Split split = new Split(new Money(mBaseAmount.abs(), currency), mAccountUID);
+             AccountType accountType = mAccountsDbAdapter.getAccountType(mAccountUID);
+             TransactionType transactionType = Transaction.getTypeForBalance(accountType, mBaseAmount.signum() < 0);
+             split.setType(transactionType);
+@@ -262,7 +262,7 @@ public void onClick(View view) {
+             splitUidTextView.setText(UUID.randomUUID().toString());
+ 
+             if (split != null) {
+-                splitAmountEditText.setText(split.getValue().toPlainString());
++                splitAmountEditText.setText(split.getFormattedValue().toPlainString());
+                 splitMemoEditText.setText(split.getMemo());
+                 splitUidTextView.setText(split.getUID());
+                 String splitAccountUID = split.getAccountUID();
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionDetailActivity.java
+similarity index 98%
+rename from app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java
+rename to app/src/main/java/org/gnucash/android/ui/transaction/TransactionDetailActivity.java
+index 3f864c71..ecac9e20 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionDetailActivity.java
+@@ -36,7 +36,7 @@
+  * Activity for displaying transaction information
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class TransactionInfoActivity extends AppCompatActivity{
++public class TransactionDetailActivity extends AppCompatActivity{
+ 
+     @Bind(R.id.trn_description) TextView mTransactionDescription;
+     @Bind(R.id.transaction_amount)TextView mTransactionAmount;
+@@ -54,7 +54,7 @@
+     protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+ 
+-        setContentView(R.layout.activity_transaction_info);
++        setContentView(R.layout.activity_transaction_detail);
+ 
+         mTransactionUID = getIntent().getStringExtra(UxArgument.SELECTED_TRANSACTION_UID);
+         mAccountUID     = getIntent().getStringExtra(UxArgument.SELECTED_ACCOUNT_UID);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 9c5e9dd7..ca464176 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -56,10 +56,8 @@
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ import org.ocpsoft.prettytime.PrettyTime;
+ 
+-import java.text.SimpleDateFormat;
+ import java.util.Date;
+ import java.util.List;
+-import java.util.Locale;
+ 
+ import butterknife.Bind;
+ import butterknife.ButterKnife;
+@@ -155,7 +153,7 @@ public void onResume() {
+ 	}
+ 
+ 	public void onListItemClick(long id) {
+-		Intent intent = new Intent(getActivity(), TransactionInfoActivity.class);
++		Intent intent = new Intent(getActivity(), TransactionDetailActivity.class);
+ 		intent.putExtra(UxArgument.SELECTED_TRANSACTION_UID, mTransactionsDbAdapter.getUID(id));
+ 		intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
+ 		startActivity(intent);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+index 33ba6bc7..c20352e7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+@@ -101,6 +101,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		/*
+ 	  Accounts database adapter
+ 	 */
++		//FIXME: move only to accounts which have the same currency as this one
+         AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
+         String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID    + " != ? AND "
+                 + DatabaseSchema.AccountEntry.COLUMN_CURRENCY               + " = ? AND "
+diff --git a/app/src/main/res/layout/activity_transaction_info.xml b/app/src/main/res/layout/activity_transaction_detail.xml
+similarity index 100%
+rename from app/src/main/res/layout/activity_transaction_info.xml
+rename to app/src/main/res/layout/activity_transaction_detail.xml
+diff --git a/app/src/main/res/layout/dialog_transfer_funds.xml b/app/src/main/res/layout/dialog_transfer_funds.xml
+index cce85afa..dd05f7e1 100644
+--- a/app/src/main/res/layout/dialog_transfer_funds.xml
++++ b/app/src/main/res/layout/dialog_transfer_funds.xml
+@@ -93,6 +93,7 @@
+             android:hint="Exchange rate"/>
+         </android.support.design.widget.TextInputLayout>
+ 
++        <!-- TODO: re-enable this button when fetching of price quotes is implemented -->
+         <Button android:id="@+id/btn_fetch_exchange_rate"
+             style="?attr/borderlessButtonStyle"
+             android:textColor="@color/theme_accent"
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 1e88f884..6fb1e711 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -64,7 +64,7 @@
+         <item>SD Card</item>
+         <item>DropBox</item>
+         <item>Google Drive</item>
+-        <item>Share file&#8230;</item>
++        <item>Send to&#8230;</item>
+     </string-array>
+     <string name="btn_move">Move</string>
+     <string name="title_move_transactions">Move %1$d transaction(s)</string>

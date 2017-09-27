@@ -1,0 +1,232 @@
+From 487bc1287144d5dbbc072a4f2aa29b2c2f1eee8a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 10 Apr 2015 12:16:14 +0200
+Subject: [PATCH] Improves the auto-complete suggestions when creating new
+ transactions
+
+Added more detail in the transaction suggestions dropdown  e.g. amount and date
+
+The suggestions are now generated according to the following guidelines:
+* Only include transactions from the same account as the current one,
+* Only one matching description is shown (eliminates duplicate names)
+* They are sorted by the most recent transaction entries
+Closes #309
+
+Updated CONTRIBUTORS and README files
+---
+ CONTRIBUTORS                                       |  2 +-
+ README.md                                          |  4 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 28 +++++++++----
+ .../ui/transaction/TransactionFormFragment.java    | 35 +++++++++++++---
+ app/src/main/res/layout/dropdown_item_2lines.xml   | 46 ++++++++++++++++++++++
+ .../main/res/layout/fragment_new_transaction.xml   |  3 ++
+ 6 files changed, 102 insertions(+), 16 deletions(-)
+ create mode 100644 app/src/main/res/layout/dropdown_item_2lines.xml
+
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+index d2b648f0..f5d925f9 100644
+--- a/CONTRIBUTORS
++++ b/CONTRIBUTORS
+@@ -17,7 +17,7 @@ Sigurd Gartmann <sigurdga-github@sigurdga.no>
+ Pedro Abel <pedroabel@gmail.com>
+ windwarrior <lennartbuit@gmail.com>
+ Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+-Lei Xiao Bao <lxbzmy@gmail.com>
++Alex Lei <lxbzmy@gmail.com>
+ Yongxin Wang <fefe.wyx@gmail.com>
+ Matthew Hague <matthewhague@zoho.com>
+ Spanti Nicola <rydroid_dev@yahoo.com>
+diff --git a/README.md b/README.md
+index fc3da1af..be3f375c 100644
+--- a/README.md
++++ b/README.md
+@@ -62,8 +62,8 @@ You could as well contribute code, fixing bugs, new features or automated tests.
+ Take a look at the [bug tracker](https://github.com/codinguser/gnucash-android/issues?state=open)
+ for ideas where to start.
+ 
+-For development, it is recommended to use the IntelliJ IDEA 14+ IDE for development which is available as free
+-community edition. Import the project into the IDE from an external (maven) model.The IDE will resolve dependencies automatically.
++For development, it is recommended to use the Android Studio for development which is available for free.
++Import the project into the IDE using the build.gradle file. The IDE will resolve dependencies automatically.
+ 
+ #Licence
+ Gnucash for Android is free software; you can redistribute it and/or 
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 0310698b..f4c639b1 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -494,17 +494,29 @@ public long getAllTransactionsCount() {
+ 
+     /**
+      * Returns a cursor to transactions whose name (UI: description) start with the <code>prefix</code>
+-     * <p>This method is used for autocomplete suggestions when creating new transactions</p>
++     * <p>This method is used for autocomplete suggestions when creating new transactions. <br/>
++     * The suggestions are either transactions which have at least one split with {@code accountUID} or templates.</p>
+      * @param prefix Starting characters of the transaction name
++     * @param accountUID GUID of account within which to search for transactions
+      * @return Cursor to the data set containing all matching transactions
+      */
+-    public Cursor fetchTemplatesStartingWith(String prefix){
+-        return mDb.query(TransactionEntry.TABLE_NAME,
+-                new String[]{TransactionEntry._ID, TransactionEntry.COLUMN_DESCRIPTION},
+-                TransactionEntry.COLUMN_TEMPLATE + "=1 AND "
+-                        + TransactionEntry.COLUMN_DESCRIPTION + " LIKE '" + prefix + "%'",
+-                null, null, null,
+-                TransactionEntry.COLUMN_DESCRIPTION + " ASC");
++    public Cursor fetchTransactionSuggestions(String prefix, String accountUID){
++        SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
++        queryBuilder.setTables(TransactionEntry.TABLE_NAME
++                + " INNER JOIN " + SplitEntry.TABLE_NAME + " ON "
++                + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
++                + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID);
++        queryBuilder.setDistinct(true);
++        String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
++        String selection = "(" + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID + " = ?"
++                + " OR " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TEMPLATE + "=1 )"
++                + " AND " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_DESCRIPTION + " LIKE '" + prefix + "%'";
++        String[] selectionArgs = new String[]{accountUID};
++        String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " DESC";
++        String groupBy = TransactionEntry.COLUMN_DESCRIPTION;
++        String limit = Integer.toString(5);
++
++        return queryBuilder.query(mDb, projectionIn, selection, selectionArgs, groupBy, null, sortOrder, limit);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index b089c24e..fa139cff 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -30,6 +30,7 @@
+ import android.support.v4.app.FragmentTransaction;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.text.Editable;
++import android.text.format.DateUtils;
+ import android.text.format.Time;
+ import android.util.Log;
+ import android.view.LayoutInflater;
+@@ -305,15 +306,39 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+ 	}
+ 
+     /**
++     * Extension of SimpleCursorAdapter which is used to populate the fields for the list items
++     * in the transactions suggestions (auto-complete transaction description).
++     */
++    private class DropDownCursorAdapter extends SimpleCursorAdapter{
++
++        public DropDownCursorAdapter(Context context, int layout, Cursor c, String[] from, int[] to) {
++            super(context, layout, c, from, to, 0);
++        }
++
++        @Override
++        public void bindView(View view, Context context, Cursor cursor) {
++            super.bindView(view, context, cursor);
++            String transactionUID = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_UID));
++            Money balance = TransactionsDbAdapter.getInstance().getBalance(transactionUID, mAccountUID);
++
++            long timestamp = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_TIMESTAMP));
++            String dateString = DateUtils.formatDateTime(getActivity(), timestamp,
++                    DateUtils.FORMAT_SHOW_WEEKDAY | DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_SHOW_YEAR);
++
++            TextView secondaryTextView = (TextView) view.findViewById(R.id.secondary_text);
++            secondaryTextView.setText(balance.formattedString() + " on " + dateString); //TODO: Extract string
++        }
++    }
++
++    /**
+      * Initializes the transaction name field for autocompletion with existing transaction names in the database
+      */
+     private void initTransactionNameAutocomplete() {
+-        final int[] to = new int[]{android.R.id.text1};
++        final int[] to = new int[]{R.id.primary_text};
+         final String[] from = new String[]{DatabaseSchema.TransactionEntry.COLUMN_DESCRIPTION};
+ 
+-        SimpleCursorAdapter adapter = new SimpleCursorAdapter(
+-                getActivity(), android.R.layout.simple_dropdown_item_1line,
+-                null, from, to, 0);
++        SimpleCursorAdapter adapter = new DropDownCursorAdapter(
++                getActivity(), R.layout.dropdown_item_2lines, null, from, to);
+ 
+         adapter.setCursorToStringConverter(new SimpleCursorAdapter.CursorToStringConverter() {
+             @Override
+@@ -326,7 +351,7 @@ public CharSequence convertToString(Cursor cursor) {
+         adapter.setFilterQueryProvider(new FilterQueryProvider() {
+             @Override
+             public Cursor runQuery(CharSequence name) {
+-                return mTransactionsDbAdapter.fetchTemplatesStartingWith(name == null ? "" : name.toString());
++                return mTransactionsDbAdapter.fetchTransactionSuggestions(name == null ? "" : name.toString(), mAccountUID);
+             }
+         });
+ 
+diff --git a/app/src/main/res/layout/dropdown_item_2lines.xml b/app/src/main/res/layout/dropdown_item_2lines.xml
+new file mode 100644
+index 00000000..044e61de
+--- /dev/null
++++ b/app/src/main/res/layout/dropdown_item_2lines.xml
+@@ -0,0 +1,46 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++Copyright (c) 2013 Ngewi Fet <ngewif@gmail.com>
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++-->
++
++<LinearLayout
++    xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:layout_height="?android:attr/listPreferredItemHeight"
++    android:layout_width="match_parent"
++    android:paddingLeft="10dp"
++    android:paddingTop="5dp"
++    android:paddingRight="10dp"
++    android:layout_weight="1"
++    android:orientation="vertical">
++
++    <TextView
++        android:id="@+id/primary_text"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:singleLine="true"
++        android:ellipsize="end"
++        tools:text="Transaction description"
++        style="@style/ListItemText"/>
++
++    <TextView
++        android:id="@+id/secondary_text"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:singleLine="true"
++        android:ellipsize="end"
++        android:textAppearance="?android:attr/textAppearanceSmall"
++        tools:text="Amount and date"/>
++</LinearLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/fragment_new_transaction.xml b/app/src/main/res/layout/fragment_new_transaction.xml
+index a148cc4b..07f1842b 100644
+--- a/app/src/main/res/layout/fragment_new_transaction.xml
++++ b/app/src/main/res/layout/fragment_new_transaction.xml
+@@ -175,10 +175,13 @@
+                       style="@style/Dropdown.TextView" />
+ 
+         </LinearLayout>
++
+         <CheckBox android:id="@+id/checkbox_save_template"
+             android:layout_width="match_parent"
+             android:layout_height="wrap_content"
+             android:layout_marginBottom="@dimen/form_row_bottom_margin"
++			android:visibility="gone"
+             android:text="@string/label_save_template" />
++		<!-- Not exposing the transaction template checkbox to the UI at this time -->
+ 	</LinearLayout>
+ </ScrollView>
+\ No newline at end of file

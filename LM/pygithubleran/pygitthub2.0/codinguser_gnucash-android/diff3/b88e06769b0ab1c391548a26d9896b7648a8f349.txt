@@ -1,0 +1,194 @@
+From b88e06769b0ab1c391548a26d9896b7648a8f349 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 22 Aug 2015 18:09:37 +0800
+Subject: [PATCH] import and export both value and quantity
+
+SetValue would not set quanity any more. Check the error message.
+stripCurrencyFormatting is removed from parseSplitAmount. The gnc doc in gnucash shows that amount is as follows:-?[0-9]+/-?[0-9]+
+---
+ .../gnucash/android/export/xml/GncXmlExporter.java |  9 ++++--
+ .../gnucash/android/export/xml/GncXmlHelper.java   |  5 ++--
+ .../gnucash/android/importer/GncXmlHandler.java    | 26 +++++++++++++----
+ .../main/java/org/gnucash/android/model/Split.java | 34 ++++++++++++++++++----
+ 4 files changed, 60 insertions(+), 14 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 0f7c4a27..f76288fc 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -271,7 +271,8 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_TYPE + " AS split_type",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_VALUE_NUM + " AS split_value_num",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_VALUE_DENOM + " AS split_value_denom",
+-                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_ACCOUNT_UID + " AS split_acct_uid"},
++                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_QUANTITY_NUM + " AS split_quantity_num",
++                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_QUANTITY_DENOM + " AS split_quantity_denom",                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_ACCOUNT_UID + " AS split_acct_uid"},
+                         where, null,
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " ASC , " +
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " ASC ");
+@@ -405,7 +406,11 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             xmlSerializer.text(strValue);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_VALUE);
+             // quantity, in the split account's currency
+-            // TODO: multi currency support.
++            String splitQuantityNum = cursor.getString(cursor.getColumnIndexOrThrow("split_quantity_num"));
++            String splitQuantityDenom = cursor.getString(cursor.getColumnIndexOrThrow("split_quantity_denom"));
++            if (!exportTemplates) {
++                strValue = (trxType.equals("CREDIT") ? "-" : "") + splitValueNum + "/" + splitQuantityDenom;
++            }
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_QUANTITY);
+             xmlSerializer.text(strValue);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_QUANTITY);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 53f479e3..3591d0c4 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -161,7 +161,7 @@ public static long parseDate(String dateString) throws ParseException {
+ 
+     /**
+      * Parses amount strings from GnuCash XML into {@link java.math.BigDecimal}s.
+-     * The amounts are formatted as 12345/4100
++     * The amounts are formatted as 12345/100
+      * @param amountString String containing the amount
+      * @return BigDecimal with numerical value
+      * @throws ParseException if the amount could not be parsed
+@@ -174,7 +174,8 @@ public static BigDecimal parseSplitAmount(String amountString) throws ParseExcep
+         }
+ 
+         int scale = amountString.length() - pos - 2; //do this before, because we could modify the string
+-        String numerator = TransactionFormFragment.stripCurrencyFormatting(amountString.substring(0, pos));
++        //String numerator = TransactionFormFragment.stripCurrencyFormatting(amountString.substring(0, pos));
++        String numerator = amountString.substring(0,pos);
+         BigInteger numeratorInt = new BigInteger(numerator);
+         return new BigDecimal(numeratorInt, scale);
+     }
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 602ebdca..453b9efb 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -132,11 +132,16 @@
+     Split mSplit;
+ 
+     /**
+-     * (Absolute) quantity of the split
++     * (Absolute) quantity of the split, which uses split account currency
+      */
+     BigDecimal mQuantity;
+ 
+     /**
++     * (Absolute) value of the split, which uses transaction currency
++     */
++    BigDecimal mValue;
++
++    /**
+      * Whether the quantity is negative
+      */
+     boolean mNegativeQuantity;
+@@ -263,7 +268,7 @@ public void startElement(String uri, String localName,
+                 mISO4217Currency = false;
+                 break;
+             case GncXmlHelper.TAG_TRN_SPLIT:
+-                mSplit = new Split(Money.getZeroInstance(),"");
++                mSplit = new Split(Money.getZeroInstance(), "");
+                 break;
+             case GncXmlHelper.TAG_DATE_POSTED:
+                 mIsDatePosted = true;
+@@ -470,6 +475,16 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SPLIT_MEMO:
+                 mSplit.setMemo(characterString);
+                 break;
++            case GncXmlHelper.TAG_SPLIT_VALUE:
++                try {
++                    mValue = GncXmlHelper.parseSplitAmount(characterString).abs(); // use sign from quantity
++                } catch (ParseException e) {
++                    String msg = "Error parsing split quantity - " + characterString;
++                    Crashlytics.log(msg);
++                    Crashlytics.logException(e);
++                    throw new SAXException(msg, e);
++                }
++                break;
+             case GncXmlHelper.TAG_SPLIT_QUANTITY:
+                 // delay the assignment of currency when the split account is seen
+                 try {
+@@ -490,11 +505,12 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_SPLIT_ACCOUNT:
+                 if (!mInTemplates) {
+-                    //the split amount uses the account currency
+-                    Money amount = new Money(mQuantity, getCurrencyForAccount(characterString));
+                     //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
+                     mSplit.setType(mNegativeQuantity ? TransactionType.CREDIT : TransactionType.DEBIT);
+-                    mSplit.setValue(amount);
++                    //the split amount uses the account currency
++                    mSplit.setQuantity(new Money(mQuantity, getCurrencyForAccount(characterString)));
++                    //the split value uses the transaction currency
++                    mSplit.setValue(new Money(mQuantity, mTransaction.getCurrency()));
+                     mSplit.setAccountUID(characterString);
+                 } else {
+                     if (!mIgnoreTemplateTransaction)
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 5ad38452..5bdce094 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -2,6 +2,7 @@
+ 
+ 
+ import android.support.annotation.NonNull;
++import android.util.Log;
+ 
+ /**
+  * A split amount in a transaction.
+@@ -49,7 +50,8 @@
+      * @param value Money value amount of this split
+      * @param accountUID String UID of transfer account
+      */
+-    public Split(@NonNull Money value, String accountUID){
++    public Split(@NonNull Money value, @NonNull Money quantity, String accountUID){
++        setQuantity(quantity);
+         setValue(value);
+         setAccountUID(accountUID);
+         //NOTE: This is a rather simplististic approach to the split type.
+@@ -59,6 +61,22 @@ public Split(@NonNull Money value, String accountUID){
+     }
+ 
+     /**
++     * Initialize split with a value amount and account
++     * @param value Money value amount of this split
++     * @param accountUID String UID of transfer account
++     */
++    public Split(@NonNull Money amount, String accountUID){
++        setQuantity(amount);
++        setValue(amount);
++        setAccountUID(accountUID);
++        //NOTE: This is a rather simplististic approach to the split type.
++        //It typically also depends on the account type of the account. But we do not want to access
++        //the database everytime a split is created. So we keep it simple here. Set the type you want explicity.
++        mSplitType = amount.isNegative() ? TransactionType.DEBIT : TransactionType.CREDIT;
++    }
++
++
++    /**
+      * Clones the <code>sourceSplit</code> to create a new instance with same fields
+      * @param sourceSplit Split to be cloned
+      * @param generateUID Determines if the clone should have a new UID or should maintain the one from source
+@@ -94,10 +112,16 @@ public Money getValue() {
+      * @param amount Money value of this split
+      * @see #setQuantity(Money)
+      */
+-    public void setValue(Money amount) {
+-        this.mValue = amount;
+-        if (mQuantity == null){
+-            mQuantity = amount;
++    public void setValue(Money value) {
++        mValue = value;
++        // remove the following when porting to value/quantity is done
++        if (mQuantity == null) {
++            Log.e(getClass().getSimpleName(), "Are you sure you want set the value instead of the quantity?");
++            try {
++                throw new Exception("");
++            } catch (Exception e) {
++                e.printStackTrace();
++            }
+         }
+     }
+ 

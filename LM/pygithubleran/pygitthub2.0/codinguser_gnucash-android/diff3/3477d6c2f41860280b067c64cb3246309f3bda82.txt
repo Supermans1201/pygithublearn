@@ -1,0 +1,384 @@
+From 49778772f64cc3b7cfdd801a562782d6564806ce Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 19 Aug 2015 15:48:14 +0200
+Subject: [PATCH] Fixed broken unit tests, added some new ones
+
+Fixed: crash when creating default accounts
+Fixed: adding account records not working
+Added SQL trigger for updated commodity guid in accounts and transactions tables after insert
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 15 ++++++++--
+ .../gnucash/android/db/CommoditiesDbAdapter.java   | 22 +++++++++++++++
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  9 ++++--
+ .../org/gnucash/android/db/DatabaseHelper.java     | 21 +++++++++++++-
+ .../org/gnucash/android/db/MigrationHelper.java    | 18 ++++++++++++
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  2 +-
+ .../java/org/gnucash/android/model/Account.java    |  2 +-
+ .../main/java/org/gnucash/android/model/Split.java | 15 ++++------
+ .../test/unit/db/AccountsDbAdapterTest.java        |  9 ++++++
+ .../android/test/unit/db/SplitsDbAdapterTest.java  | 32 ++++++++++++++++++++--
+ .../test/unit/db/TransactionsDbAdapterTest.java    |  3 +-
+ .../android/test/unit/model/AccountTest.java       | 17 ++++++++++++
+ .../gnucash/android/test/unit/model/SplitTest.java |  2 +-
+ 13 files changed, 145 insertions(+), 22 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index f5467b24..46970c78 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -153,6 +153,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Account account
+                     + AccountEntry.COLUMN_HIDDEN        + " , "
+                     + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " , "
+                     + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ?)");
++            //commodity_uid is not forgotten. It will be inserted by a database trigger
+         }
+ 
+         mReplaceStatement.clearBindings();
+@@ -893,7 +894,15 @@ public String getOrCreateGnuCashRootAccountUID() {
+         rootAccount.setAccountType(AccountType.ROOT);
+         rootAccount.setFullName(ROOT_ACCOUNT_FULL_NAME);
+         rootAccount.setHidden(true);
+-        addRecord(rootAccount);
++        ContentValues contentValues = new ContentValues();
++        contentValues.put(AccountEntry.COLUMN_UID, rootAccount.getUID());
++        contentValues.put(AccountEntry.COLUMN_NAME, rootAccount.getName());
++        contentValues.put(AccountEntry.COLUMN_FULL_NAME, rootAccount.getFullName());
++        contentValues.put(AccountEntry.COLUMN_TYPE, rootAccount.getAccountType().name());
++        contentValues.put(AccountEntry.COLUMN_HIDDEN, rootAccount.isHidden() ? 1 : 0);
++        contentValues.put(AccountEntry.COLUMN_CURRENCY, GnuCashApplication.getDefaultCurrencyCode());
++        Log.i(LOG_TAG, "Creating ROOT account");
++        mDb.insert(AccountEntry.TABLE_NAME, null, contentValues);
+         return rootAccount.getUID();
+     }
+ 
+@@ -932,14 +941,14 @@ public String getCurrencyCode(String uid){
+      */
+     public String getAccountName(String accountUID){
+         Cursor cursor = mDb.query(AccountEntry.TABLE_NAME,
+-                new String[]{AccountEntry._ID, AccountEntry.COLUMN_NAME},
++                new String[]{AccountEntry.COLUMN_NAME},
+                 AccountEntry.COLUMN_UID + " = ?",
+                 new String[]{accountUID}, null, null, null);
+         try {
+             if (cursor.moveToNext()) {
+                 return cursor.getString(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_NAME));
+             } else {
+-                throw new IllegalArgumentException("account " + accountUID + " does not exist");
++                throw new IllegalArgumentException("Failed to retrieve account name for account: " + accountUID);
+             }
+         } finally {
+             cursor.close();
+diff --git a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+index 291d8410..af20a75d 100644
+--- a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+@@ -89,4 +89,26 @@ public Commodity getCommodity(String currencyCode){
+         cursor.close();
+         return commodity;
+     }
++
++    /**
++     * Returns the commodity GUID for the given ISO 4217 currency code
++     * @param currencyCode ISO 4217 currency code
++     * @return GUID of commodity
++     */
++    public String getCommodityUID(String currencyCode){
++        String where = CommodityEntry.COLUMN_MNEMONIC + "= ?";
++        String[] whereArgs = new String[]{currencyCode};
++
++        Cursor cursor = mDb.query(mTableName, new String[]{CommodityEntry.COLUMN_UID},
++                where, whereArgs, null, null, null);
++        try {
++            if (cursor.moveToNext()) {
++                return cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_UID));
++            } else {
++                throw new IllegalArgumentException("Currency code not found in commodities");
++            }
++        } finally {
++            cursor.close();
++        }
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index f3612fb8..b5bebe3b 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -197,13 +197,18 @@ public void addRecord(@NonNull final Model model){
+      * @return Number of rows inserted
+      */
+     public long bulkAddRecords(@NonNull List<Model> modelList) {
++        if (modelList.isEmpty()) {
++            Log.d(LOG_TAG, "Empty model list. Cannot bulk add records, returning 0");
++            return 0;
++        }
++
+         Log.i(LOG_TAG, String.format("Bulk adding %d %s records to the database", modelList.size(),
+                 modelList.get(0).getClass().getName()));
+         long nRow = 0;
+         try {
+             mDb.beginTransaction();
+-            for (Model split : modelList) {
+-                compileReplaceStatement(split).execute();
++            for (Model model : modelList) {
++                compileReplaceStatement(model).execute();
+                 nRow++;
+             }
+             mDb.setTransactionSuccessful();
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 255f9a36..64ce4baa 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -186,7 +186,8 @@ static String createUpdatedAtTrigger(String tableName){
+         return "CREATE TRIGGER update_time_trigger "
+                 + "  AFTER UPDATE ON " + tableName + " FOR EACH ROW"
+                 + "  BEGIN " + "UPDATE " + tableName
+-                + "  SET " + DatabaseSchema.CommonColumns.COLUMN_MODIFIED_AT + " = CURRENT_TIMESTAMP;"
++                + "  SET " + CommonColumns.COLUMN_MODIFIED_AT + " = CURRENT_TIMESTAMP"
++                + "  WHERE OLD." + CommonColumns.COLUMN_UID + " = NEW." + CommonColumns.COLUMN_UID + ";"
+                 + "  END;";
+     }
+ 
+@@ -288,6 +289,24 @@ private void createDatabaseTables(SQLiteDatabase db) {
+             e.printStackTrace();
+             throw new RuntimeException(e);
+         }
++
++        db.execSQL("CREATE TRIGGER insert_account_commodity "
++                + " AFTER INSERT ON " + AccountEntry.TABLE_NAME
++                + " BEGIN " + "UPDATE " + AccountEntry.TABLE_NAME
++                        + " SET " + AccountEntry.COLUMN_COMMODITY_UID + " = "
++                            + " (SELECT " + CommodityEntry.COLUMN_UID + " FROM " + CommodityEntry.TABLE_NAME
++                            + " WHERE " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_CURRENCY + " = " + CommodityEntry.TABLE_NAME + "." + CommodityEntry.COLUMN_MNEMONIC + ")"
++                        + " WHERE " + AccountEntry.COLUMN_UID + " = NEW." + AccountEntry.COLUMN_UID + ";"
++                + "  END;");
++
++        db.execSQL("CREATE TRIGGER insert_transaction_commodity "
++                + " AFTER INSERT ON " + TransactionEntry.TABLE_NAME
++                + " BEGIN " + "UPDATE " + TransactionEntry.TABLE_NAME
++                    + " SET " + TransactionEntry.COLUMN_COMMODITY_UID + " = "
++                        + " (SELECT " + CommodityEntry.COLUMN_UID + " FROM " + CommodityEntry.TABLE_NAME
++                        + " WHERE " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_CURRENCY + " = " + CommodityEntry.TABLE_NAME + "." + CommodityEntry.COLUMN_MNEMONIC + ") "
++                    + " WHERE " + TransactionEntry.COLUMN_UID + " = NEW." + TransactionEntry.COLUMN_UID + ";"
++                + "  END;");
+     }
+ 
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index b8a09dcb..6f109304 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -872,6 +872,24 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+                 throw new RuntimeException(e);
+             }
+ 
++            db.execSQL("CREATE TRIGGER insert_account_commodity "
++                    + " AFTER INSERT ON " + AccountEntry.TABLE_NAME
++                    + " BEGIN " + "UPDATE " + AccountEntry.TABLE_NAME
++                    + " SET " + AccountEntry.COLUMN_COMMODITY_UID + " = "
++                    + " (SELECT " + CommodityEntry.COLUMN_UID + " FROM " + CommodityEntry.TABLE_NAME
++                    + " WHERE " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_CURRENCY + " = " + CommodityEntry.TABLE_NAME + "." + CommodityEntry.COLUMN_MNEMONIC + ")"
++                    + " WHERE " + AccountEntry.COLUMN_UID + " = NEW." + AccountEntry.COLUMN_UID + ";"
++                    + "  END;");
++
++            db.execSQL("CREATE TRIGGER insert_transaction_commodity "
++                    + " AFTER INSERT ON " + TransactionEntry.TABLE_NAME
++                    + " BEGIN " + "UPDATE " + TransactionEntry.TABLE_NAME
++                    + " SET " + TransactionEntry.COLUMN_COMMODITY_UID + " = "
++                    + " (SELECT " + CommodityEntry.COLUMN_UID + " FROM " + CommodityEntry.TABLE_NAME
++                    + " WHERE " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_CURRENCY + " = " + CommodityEntry.TABLE_NAME + "." + CommodityEntry.COLUMN_MNEMONIC + ") "
++                    + " WHERE " + TransactionEntry.COLUMN_UID + " = NEW." + TransactionEntry.COLUMN_UID + ";"
++                    + "  END;");
++
+             db.execSQL(" ALTER TABLE " + AccountEntry.TABLE_NAME
+                     + " ADD COLUMN " + AccountEntry.COLUMN_COMMODITY_UID + " varchar(255) "
+                     + " REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") ");
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 579fb030..0b78fd96 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -86,7 +86,7 @@ public SplitsDbAdapter getSplitDbAdapter() {
+ 	 */
+     @Override
+ 	public void addRecord(@NonNull Transaction transaction){
+-
++        //TODO: Override this method to balance transaction splits before saving to database
+         Log.d(LOG_TAG, "Replacing transaction in db");
+         mDb.beginTransaction();
+         try {
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index d3a7083b..465855dd 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -102,7 +102,7 @@
+ 	/**
+ 	 * List of transactions in this account
+ 	 */
+-	private List<Transaction> mTransactionsList = new ArrayList<Transaction>();
++	private List<Transaction> mTransactionsList = new ArrayList<>();
+ 
+ 	/**
+ 	 * Account UID of the parent account. Can be null
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index f90d0fb7..5ad38452 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -68,7 +68,8 @@ public Split(Split sourceSplit, boolean generateUID){
+         this.mAccountUID    = sourceSplit.mAccountUID;
+         this.mSplitType     = sourceSplit.mSplitType;
+         this.mTransactionUID = sourceSplit.mTransactionUID;
+-        this.mValue = sourceSplit.mValue.absolute();
++        this.mValue         = new Money(sourceSplit.mValue);
++        this.mQuantity      = new Money(sourceSplit.mQuantity);
+ 
+         if (generateUID){
+             generateUID();
+@@ -238,15 +239,9 @@ public String toString() {
+      */
+     public String toCsv(){
+         String sep = ";";
+-        int valueFractionDigits = mValue.getCurrency().getDefaultFractionDigits();
+-        int qtyFractionDigits = mQuantity.getCurrency().getDefaultFractionDigits();
+-        String valueDenom = String.valueOf((int) Math.pow(10, valueFractionDigits));
+-        String valueNum = String.valueOf(mValue.multiply(Integer.parseInt(valueDenom)).intValue());
+-        String qtyDenom = String.valueOf((int)Math.pow(10, qtyFractionDigits));
+-        String qtyNum   = String.valueOf(mQuantity.multiply(Integer.parseInt(qtyDenom)).intValue());
+-
+-        String splitString = valueNum + sep + valueDenom + sep + mValue.getCurrency().getCurrencyCode()
+-                + qtyNum + sep + qtyDenom + sep + mQuantity.getCurrency().getCurrencyCode()
++
++        String splitString = mValue.getNumerator() + sep + mValue.getDenominator() + sep + mValue.getCurrency().getCurrencyCode() + sep
++                + mQuantity.getNumerator() + sep + mQuantity.getDenominator() + sep + mQuantity.getCurrency().getCurrencyCode()
+                 + sep + mTransactionUID + sep + mAccountUID + sep + mSplitType.name();
+         if (mMemo != null){
+             splitString = splitString + sep + mMemo;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index edeabe78..72530a1b 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -103,6 +103,15 @@ public void shouldAddAccountsToDatabase(){
+         mAccountsDbAdapter.addRecord(account1);
+         mAccountsDbAdapter.addRecord(account2);
+ 
++        Account firstAccount = mAccountsDbAdapter.getRecord(account1.getUID());
++        assertThat(firstAccount).isNotNull();
++        assertThat(firstAccount.getUID()).isEqualTo(account1.getUID());
++        assertThat(firstAccount.getFullName()).isEqualTo(account1.getFullName());
++
++        Account secondAccount = mAccountsDbAdapter.getRecord(account2.getUID());
++        assertThat(secondAccount).isNotNull();
++        assertThat(secondAccount.getUID()).isEqualTo(account2.getUID());
++
+         assertThat(mTransactionsDbAdapter.getRecordsCount()).isEqualTo(1);
+     }
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
+index cba5cb54..5b233933 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
+@@ -1,5 +1,7 @@
+ package org.gnucash.android.test.unit.db;
+ 
++import android.database.sqlite.SQLiteException;
++
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+@@ -43,7 +45,10 @@ public void setUp() throws Exception {
+         mAccountsDbAdapter.addRecord(mAccount);
+     }
+ 
+-    @Test
++    /**
++     * Adding a split where the account does not exist in the database should generate an exception
++     */
++    @Test(expected = SQLiteException.class)
+     public void shouldHaveAccountInDatabase(){
+         Transaction transaction = new Transaction("");
+         mTransactionsDbAdapter.addRecord(transaction);
+@@ -51,9 +56,32 @@ public void shouldHaveAccountInDatabase(){
+         Split split = new Split(Money.getZeroInstance(), "non-existent");
+         split.setTransactionUID(transaction.getUID());
+         mSplitsDbAdapter.addRecord(split);
++    }
++
++    /**
++     * Adding a split where the account does not exist in the database should generate an exception
++     */
++    @Test(expected = SQLiteException.class)
++    public void shouldHaveTransactionInDatabase(){
++        Transaction transaction = new Transaction(""); //not added to the db
++
++        Split split = new Split(Money.getZeroInstance(), mAccount.getUID());
++        split.setTransactionUID(transaction.getUID());
++        mSplitsDbAdapter.addRecord(split);
++    }
++
++    @Test
++    public void testAddSplit(){
++        Transaction transaction = new Transaction("");
++        mTransactionsDbAdapter.addRecord(transaction);
++
++        Split split = new Split(Money.getZeroInstance(), mAccount.getUID());
++        split.setTransactionUID(transaction.getUID());
++        mSplitsDbAdapter.addRecord(split);
+ 
+         List<Split> splits = mSplitsDbAdapter.getSplitsForTransaction(transaction.getUID());
+-        assertThat(splits).isEmpty();
++        assertThat(splits).isNotEmpty();
++        assertThat(splits.get(0).getUID()).isEqualTo(split.getUID());
+     }
+ 
+     /**
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+index 6de30fc0..70f4ee10 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+@@ -122,7 +122,8 @@ public void testComputeBalance(){
+ 		assertThat(savedBalance).isEqualTo(firstSplitAmount.negate());
+ 
+ 		savedBalance = transaction.getBalance(bravoAccount.getUID());
+-		assertThat(savedBalance).isEqualTo(secondSplitAmount.negate());
++		assertThat(savedBalance.getNumerator()).isEqualTo(secondSplitAmount.negate().getNumerator());
++		assertThat(savedBalance.getCurrency()).isEqualTo(secondSplitAmount.getCurrency());
+ 	}
+ 
+ 	@After
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+index b9c13174..e3b9193a 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+@@ -45,4 +45,21 @@ public void testSetInvalidColorCode(){
+ 		account.setColorCode("443859");
+ 	}
+ 
++	@Test
++	public void shouldSetFullNameWhenCreated(){
++		String fullName = "Full name ";
++		Account account = new Account(fullName);
++		assertThat(account.getName()).isEqualTo(fullName.trim()); //names are trimmed
++		assertThat(account.getFullName()).isEqualTo(fullName.trim()); //names are trimmed
++	}
++
++	@Test
++	public void settingNameShouldNotChangeFullName(){
++		String fullName = "Full name";
++		Account account = new Account(fullName);
++
++		account.setName("Name");
++		assertThat(account.getName()).isEqualTo("Name");
++		assertThat(account.getFullName()).isEqualTo(fullName);
++	}
+ }
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+index ff388f07..92974455 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+@@ -66,7 +66,7 @@ public void shouldGenerateValidCsv(){
+         split.setTransactionUID("terminator-trx");
+         split.setType(TransactionType.CREDIT);
+ 
+-        assertThat(split.toCsv()).isEqualTo("10.00;EUR;random-account;terminator-trx;CREDIT");
++        assertThat(split.toCsv()).isEqualTo("1000;100;EUR;1000;100;EUR;terminator-trx;random-account;CREDIT");
+     }
+ 
+     @Test

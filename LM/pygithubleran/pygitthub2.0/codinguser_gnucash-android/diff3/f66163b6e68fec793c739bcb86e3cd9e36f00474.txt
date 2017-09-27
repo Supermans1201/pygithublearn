@@ -1,0 +1,572 @@
+From f66163b6e68fec793c739bcb86e3cd9e36f00474 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 11 Dec 2015 14:30:36 +0100
+Subject: [PATCH] Fix crash when switching books
+
+Compact transaction view enabled by default when in single-entry mode
+Use smaller font size for transaction description text
+Reduce number of days after install until rating requested to 14
+Fix several failing instrumentation tests (due to multi-book support)
+---
+ app/build.gradle                                   |  4 ++--
+ .../android/test/ui/AccountsActivityTest.java      | 21 +++++++++------------
+ .../android/test/ui/ExportTransactionsTest.java    |  8 +++++++-
+ .../android/test/ui/PieChartReportTest.java        | 22 +++++++++++++---------
+ .../android/test/ui/TransactionsActivityTest.java  | 20 ++++++++++++--------
+ .../gnucash/android/app/GnuCashApplication.java    |  7 ++++++-
+ .../gnucash/android/importer/ImportAsyncTask.java  |  7 ++++++-
+ .../android/ui/account/AccountsActivity.java       | 13 ++++++-------
+ .../android/ui/account/AccountsListFragment.java   | 12 +++++++-----
+ .../android/ui/common/BaseDrawerActivity.java      | 17 +++++++++++++----
+ .../ui/transaction/TransactionsListFragment.java   |  7 +++++--
+ .../android/ui/util/widget/CalculatorEditText.java |  1 +
+ .../android/ui/wizard/FirstRunWizardActivity.java  |  3 +++
+ 13 files changed, 90 insertions(+), 52 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index bcd3fe0b..1def8805 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -82,8 +82,8 @@ android {
+         //todo re-enable proguard and test coverage
+         release {
+             minifyEnabled true
+-//            shrinkResources true
+-//            proguardFiles getDefaultProguardFile('proguard-android.txt'), proguard-rules.pro
++            shrinkResources true
++            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+             if (project.hasProperty("RELEASE_STORE_FILE")){
+                 signingConfig signingConfigs.release
+             } else {
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 3fff61e7..b087fe24 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -34,6 +34,7 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.BookDbHelper;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+@@ -87,6 +88,8 @@
+     private static final Commodity DUMMY_ACCOUNT_CURRENCY = Commodity.getInstance(DUMMY_ACCOUNT_CURRENCY_CODE);
+ 	private static final String DUMMY_ACCOUNT_NAME = "Dummy account";
+     public static final String  DUMMY_ACCOUNT_UID   = "dummy-account";
++    public static final String TEST_DB_NAME = "test_gnucash_db.sqlite";
++
+     private DatabaseHelper mDbHelper;
+     private SQLiteDatabase mDb;
+     private AccountsDbAdapter mAccountsDbAdapter;
+@@ -105,30 +108,23 @@ public void setUp() throws Exception {
+         preventFirstRunDialogs(getInstrumentation().getTargetContext());
+         mAcccountsActivity = getActivity();
+ 
+-        Book book1 = new Book();
+-        mDbHelper = new DatabaseHelper(mAcccountsActivity, book1.getUID());
++        String activeBookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++        mDbHelper = new DatabaseHelper(mAcccountsActivity, activeBookUID);
+         try {
+             mDb = mDbHelper.getWritableDatabase();
+         } catch (SQLException e) {
+             Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
+             mDb = mDbHelper.getReadableDatabase();
+         }
+-        mSplitsDbAdapter = new SplitsDbAdapter(mDb);
+-        mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
+-        mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
++        mSplitsDbAdapter        = new SplitsDbAdapter(mDb);
++        mTransactionsDbAdapter  = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
++        mAccountsDbAdapter      = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+         mAccountsDbAdapter.deleteAllRecords(); //clear the data
+ 
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME, new CommoditiesDbAdapter(mDb).getCommodity(DUMMY_ACCOUNT_CURRENCY_CODE));
+         account.setUID(DUMMY_ACCOUNT_UID);
+ 		mAccountsDbAdapter.addRecord(account);
+ 
+-        String rootUID = mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID();
+-        book1.setRootAccountUID(rootUID);
+-        book1.setActive(true);
+-        book1.setDisplayName("Book 1");
+-        BooksDbAdapter booksDbAdapter = new BooksDbAdapter(new BookDbHelper(mAcccountsActivity).getWritableDatabase());
+-        booksDbAdapter.addRecord(book1);
+-
+         refreshAccountsList();
+ 	}
+ 
+@@ -157,6 +153,7 @@ public void testDisplayAccountsList(){
+         mAcccountsActivity.recreate();
+ 
+         refreshAccountsList();
++        sleep(1000);
+         onView(withText("Assets")).perform(scrollTo());
+         onView(withText("Expenses")).perform(click());
+         onView(withText("Books")).perform(scrollTo());
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 9c776049..d5fbe27c 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -36,6 +36,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.db.adapter.RecurrenceDbAdapter;
+ import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
+@@ -62,8 +63,11 @@
+ import java.util.Currency;
+ import java.util.List;
+ 
++import static android.support.test.espresso.Espresso.onData;
+ import static android.support.test.espresso.Espresso.onView;
+ import static android.support.test.espresso.action.ViewActions.click;
++import static android.support.test.espresso.action.ViewActions.scrollTo;
++import static android.support.test.espresso.action.ViewActions.swipeUp;
+ import static android.support.test.espresso.assertion.ViewAssertions.matches;
+ import static android.support.test.espresso.matcher.RootMatchers.withDecorView;
+ import static android.support.test.espresso.matcher.ViewMatchers.isAssignableFrom;
+@@ -102,7 +106,8 @@ public void setUp() throws Exception {
+ 		AccountsActivityTest.preventFirstRunDialogs(getInstrumentation().getTargetContext());
+ 		mAcccountsActivity = getActivity();
+ 
+-        mDbHelper = new DatabaseHelper(getActivity(), BaseModel.generateUID());
++		String activeBookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++        mDbHelper = new DatabaseHelper(getActivity(), activeBookUID);
+         try {
+             mDb = mDbHelper.getWritableDatabase();
+         } catch (SQLException e) {
+@@ -258,6 +263,7 @@ public void testShouldCreateExportSchedule(){
+ 	@Test
+ 	public void testCreateBackup(){
+ 		onView(withId(R.id.drawer_layout)).perform(DrawerActions.open());
++		onView(withId(R.id.nav_view)).perform(swipeUp());
+ 		onView(withText(R.string.title_settings)).perform(click());
+ 		onView(withText(R.string.header_backup_and_export_settings)).perform(click());
+ 
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartReportTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartReportTest.java
+index ab3b94d0..00ef29f6 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartReportTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartReportTest.java
+@@ -35,6 +35,8 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
++import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.db.adapter.SplitsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.importer.GncXmlImporter;
+@@ -88,7 +90,7 @@
+     private static final String GIFTS_RECEIVED_INCOME_ACCOUNT_UID = "b01950c0df0890b6543209d51c8e0b0f";
+     private static final String GIFTS_RECEIVED_INCOME_ACCOUNT_NAME = "Gifts Received";
+ 
+-    public static final Commodity CURRENCY = Commodity.getInstance("USD");
++    public static Commodity CURRENCY;
+ 
+     private AccountsDbAdapter mAccountsDbAdapter;
+     private TransactionsDbAdapter mTransactionsDbAdapter;
+@@ -97,6 +99,7 @@
+ 
+ 	public PieChartReportTest() {
+ 		super(ReportsActivity.class);
++        CURRENCY = new Commodity("US Dollars", "USD", 100);
+ 	}
+ 	
+ 	@Override
+@@ -105,10 +108,14 @@ public void setUp() throws Exception {
+ 		super.setUp();
+ 		injectInstrumentation(InstrumentationRegistry.getInstrumentation());
+ 
++        // creates default accounts
++        String bookUID = GncXmlImporter.parse(GnuCashApplication.getAppContext().getResources().openRawResource(R.raw.default_accounts));
++        BooksDbAdapter.getInstance().setActive(bookUID);
++
+         mReportsActivity = getActivity();
+ 
+         SQLiteDatabase db;
+-        DatabaseHelper dbHelper = new DatabaseHelper(mReportsActivity, BaseModel.generateUID());
++        DatabaseHelper dbHelper = new DatabaseHelper(mReportsActivity, bookUID);
+         try {
+             db = dbHelper.getWritableDatabase();
+         } catch (SQLException e) {
+@@ -119,11 +126,12 @@ public void setUp() throws Exception {
+         mAccountsDbAdapter = new AccountsDbAdapter(db, mTransactionsDbAdapter);
+         mAccountsDbAdapter.deleteAllRecords();
+ 
++        CURRENCY = new CommoditiesDbAdapter(db).getCommodity("USD");
++
+         PreferenceManager.getDefaultSharedPreferences(mReportsActivity).edit()
+                 .putString(mReportsActivity.getString(R.string.key_default_currency), CURRENCY.getCurrencyCode())
+                 .commit();
+-        // creates default accounts
+-        GncXmlImporter.parse(GnuCashApplication.getAppContext().getResources().openRawResource(R.raw.default_accounts));
++
+ 	}
+ 
+     /**
+@@ -145,8 +153,6 @@ private void addTransactionForCurrentMonth() throws Exception {
+         transaction.addSplit(split);
+         transaction.addSplit(split.createPair(CASH_IN_WALLET_ASSET_ACCOUNT_UID));
+ 
+-        Account account = mAccountsDbAdapter.getRecord(DINING_EXPENSE_ACCOUNT_UID);
+-        account.addTransaction(transaction);
+         mTransactionsDbAdapter.addRecord(transaction);
+     }
+ 
+@@ -160,8 +166,6 @@ private void addTransactionForPreviousMonth(int minusMonths) {
+         transaction.addSplit(split);
+         transaction.addSplit(split.createPair(CASH_IN_WALLET_ASSET_ACCOUNT_UID));
+ 
+-        Account account = mAccountsDbAdapter.getRecord(BOOKS_EXPENSE_ACCOUNT_UID);
+-        account.addTransaction(transaction);
+         mTransactionsDbAdapter.addRecord(transaction);
+     }
+ 
+@@ -192,7 +196,6 @@ public void testSpinner() throws Exception {
+         transaction.addSplit(split);
+         transaction.addSplit(split.createPair(CASH_IN_WALLET_ASSET_ACCOUNT_UID));
+ 
+-        mAccountsDbAdapter.getRecord(GIFTS_RECEIVED_INCOME_ACCOUNT_UID).addTransaction(transaction);
+         mTransactionsDbAdapter.addRecord(transaction);
+ 
+         getTestActivity();
+@@ -205,6 +208,7 @@ public void testSpinner() throws Exception {
+         Thread.sleep(1000);
+ 
+         onView(withId(R.id.pie_chart)).perform(click());
++
+         String selectedText = String.format(PieChartFragment.SELECTED_VALUE_PATTERN, GIFTS_RECEIVED_INCOME_ACCOUNT_NAME, TRANSACTION3_AMOUNT, 100f);
+         onView(withId(R.id.selected_chart_slice)).check(matches(withText(selectedText)));
+ 
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index ce4b9196..ce7afd3d 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -33,6 +33,8 @@
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
++import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.db.adapter.SplitsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
+@@ -87,6 +89,7 @@
+     private static final String TRANSFER_ACCOUNT_NAME   = "Transfer account";
+     private static final String TRANSFER_ACCOUNT_UID    = "transfer_account";
+     public static final String CURRENCY_CODE = "USD";
++	public static Commodity COMMODITY = Commodity.DEFAULT_COMMODITY;
+ 
+ 	private Transaction mTransaction;
+ 	private long mTransactionTimeMillis;
+@@ -109,8 +112,8 @@ public void setUp() throws Exception {
+ 		injectInstrumentation(InstrumentationRegistry.getInstrumentation());
+ 		AccountsActivityTest.preventFirstRunDialogs(getInstrumentation().getTargetContext());
+ 
+-
+-        mDbHelper = new DatabaseHelper(getInstrumentation().getTargetContext(), BaseModel.generateUID());
++		String activeBookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++        mDbHelper = new DatabaseHelper(getInstrumentation().getTargetContext(), activeBookUID);
+         try {
+             mDb = mDbHelper.getWritableDatabase();
+         } catch (SQLException e) {
+@@ -122,20 +125,20 @@ public void setUp() throws Exception {
+         mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+ 		mAccountsDbAdapter.deleteAllRecords();
+ 
++		COMMODITY = new CommoditiesDbAdapter(mDb).getCommodity(CURRENCY_CODE);
++
+ 		mTransactionTimeMillis = System.currentTimeMillis();
+-        Account account = new Account(DUMMY_ACCOUNT_NAME);
++        Account account = new Account(DUMMY_ACCOUNT_NAME, COMMODITY);
+         account.setUID(DUMMY_ACCOUNT_UID);
+-        account.setCommodity(Commodity.getInstance(CURRENCY_CODE));
+ 
+-        Account account2 = new Account(TRANSFER_ACCOUNT_NAME);
++        Account account2 = new Account(TRANSFER_ACCOUNT_NAME, COMMODITY);
+         account2.setUID(TRANSFER_ACCOUNT_UID);
+-        account2.setCommodity(Commodity.getInstance(CURRENCY_CODE));
+ 
+         mAccountsDbAdapter.addRecord(account);
+         mAccountsDbAdapter.addRecord(account2);
+ 
+         mTransaction = new Transaction(TRANSACTION_NAME);
+-		mTransaction.setCurrencyCode(CURRENCY_CODE);
++		mTransaction.setCommodity(COMMODITY);
+         mTransaction.setNote("What up?");
+         mTransaction.setTime(mTransactionTimeMillis);
+         Split split = new Split(new Money(TRANSACTION_AMOUNT, CURRENCY_CODE), DUMMY_ACCOUNT_UID);
+@@ -584,7 +587,8 @@ private void clickOnView(int viewId){
+ 	@Override
+ 	@After
+ 	public void tearDown() throws Exception {
+-		mTransactionsActivity.finish();
++		if (mTransactionsActivity != null)
++			mTransactionsActivity.finish();
+ 		super.tearDown();
+ 	}
+ }
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 76172912..2f0c9bc9 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -96,6 +96,7 @@
+     private static RecurrenceDbAdapter mRecurrenceDbAdapter;
+ 
+     private static BooksDbAdapter mBooksDbAdapter;
++    private DatabaseHelper mDbHelper;
+ 
+     /**
+      * Returns darker version of specified <code>color</code>.
+@@ -141,7 +142,11 @@ public void onCreate(){
+      * This method should be called every time a new book is opened
+      */
+     private void initDatabaseAdapters() {
+-        DatabaseHelper mDbHelper = new DatabaseHelper(getApplicationContext(),
++        if (mDbHelper != null){ //close if open
++            mDbHelper.getReadableDatabase().close();
++        }
++
++        mDbHelper = new DatabaseHelper(getApplicationContext(),
+                 mBooksDbAdapter.getActiveBookUID());
+         SQLiteDatabase mainDb;
+         try {
+diff --git a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+index cee1e2a0..ca698ded 100644
+--- a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -18,6 +18,7 @@
+ import android.annotation.TargetApi;
+ import android.app.Activity;
+ import android.app.ProgressDialog;
++import android.content.ContentValues;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.net.Uri;
+@@ -114,7 +115,11 @@ public void run() {
+         if (cursor != null && cursor.moveToFirst()) {
+             int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+             String displayName = cursor.getString(nameIndex);
+-            BooksDbAdapter.getInstance().updateRecord(bookUID, DatabaseSchema.BookEntry.COLUMN_DISPLAY_NAME, displayName);
++            ContentValues contentValues = new ContentValues();
++            contentValues.put(DatabaseSchema.BookEntry.COLUMN_DISPLAY_NAME, displayName);
++            contentValues.put(DatabaseSchema.BookEntry.COLUMN_SOURCE_URI, uris[0].toString());
++            BooksDbAdapter.getInstance().updateRecord(bookUID, contentValues);
++
+             cursor.close();
+         }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index cfdc26ad..047af6ab 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -147,7 +147,7 @@
+     /**
+      * Configuration for rating the app
+      */
+-    public static RateThisApp.Config rateAppConfig = new RateThisApp.Config(30, 100);
++    public static RateThisApp.Config rateAppConfig = new RateThisApp.Config(14, 100);
+ 
+     /**
+      * Adapter for managing the sub-account and transaction fragment pages in the accounts view
+@@ -178,7 +178,6 @@ public Fragment getItem(int i) {
+                 }
+                 mFragmentPageReferenceMap.put(i, currentFragment);
+             }
+-
+             return currentFragment;
+         }
+ 
+@@ -252,12 +251,12 @@ public void onTabSelected(TabLayout.Tab tab) {
+ 
+             @Override
+             public void onTabUnselected(TabLayout.Tab tab) {
+-
++                //nothing to see here, move along
+             }
+ 
+             @Override
+             public void onTabReselected(TabLayout.Tab tab) {
+-
++                //nothing to see here, move along
+             }
+         });
+ 
+@@ -503,9 +502,9 @@ public void onTaskComplete() {
+      */
+     public static void startXmlFileChooser(Activity activity) {
+         Intent pickIntent;
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT){
+-            pickIntent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+-        } else
++//        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT){
++//            pickIntent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++//        } else
+             pickIntent = new Intent(Intent.ACTION_GET_CONTENT);
+ 
+ //        ArrayList<String> mimeTypes = new ArrayList<>();
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 5c8dcd4d..913714c7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -176,8 +176,6 @@ public void onCreate(Bundle savedInstanceState) {
+         Bundle args = getArguments();
+         if (args != null)
+             mParentAccountUID = args.getString(UxArgument.PARENT_ACCOUNT_UID);
+-
+-        mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+     }
+ 
+     @Override
+@@ -194,14 +192,17 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         mAccountRecyclerAdapter = new AccountRecyclerAdapter(null);
+         mRecyclerView.setAdapter(mAccountRecyclerAdapter);
+ 
+-        getLoaderManager().initLoader(0, null, this);
++    }
++
++    @Override
++    public void onStart() {
++        super.onStart();
++        mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+     }
+ 
+     @Override
+     public void onResume() {
+         super.onResume();
+-        ActionBar actionbar = ((AppCompatActivity) getActivity()).getSupportActionBar();
+-        actionbar.setTitle(R.string.title_accounts);
+         refresh();
+     }
+ 
+@@ -462,6 +463,7 @@ public AccountViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
+         @Override
+         public void onBindViewHolderCursor(final AccountViewHolder holder, final Cursor cursor) {
+             final String accountUID = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_UID));
++            mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+             holder.accoundId = mAccountsDbAdapter.getID(accountUID);
+ 
+             holder.accountName.setText(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_NAME)));
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index 10ff217d..9c79a913 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -74,6 +74,7 @@
+ public abstract class BaseDrawerActivity extends PasscodeLockActivity implements
+     PopupMenu.OnMenuItemClickListener {
+ 
++    public static final int ID_MANAGE_BOOKS = 0xB00C;
+     @Bind(R.id.drawer_layout) DrawerLayout mDrawerLayout;
+     @Bind(R.id.nav_view) NavigationView mNavigationView;
+     @Bind(R.id.toolbar) Toolbar mToolbar;
+@@ -290,9 +291,16 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+     @Override
+     public boolean onMenuItemClick(MenuItem item) {
+         long id = item.getItemId();
+-        String bookUID = BooksDbAdapter.getInstance().getUID(id);
+-        ((GnuCashApplication)getApplication()).loadBook(bookUID);
+-        finish();
++        if (id == ID_MANAGE_BOOKS){
++            //// TODO: 11.12.2015 launch activity to manage books
++            return true;
++        }
++        BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
++        String bookUID = booksDbAdapter.getUID(id);
++        if (!bookUID.equals(booksDbAdapter.getActiveBookUID())){
++            ((GnuCashApplication) getApplication()).loadBook(bookUID);
++            finish();
++        }
+         AccountsActivity.start(GnuCashApplication.getAppContext());
+         return true;
+     }
+@@ -309,11 +317,12 @@ public void onClickBook(View view){
+         int maxRecent = 0;
+         Cursor cursor = BooksDbAdapter.getInstance().fetchAllRecords(null, null,
+                 DatabaseSchema.BookEntry.COLUMN_MODIFIED_AT + " DESC");
+-        while (cursor.moveToNext() && maxRecent++ < 10) {
++        while (cursor.moveToNext() && maxRecent++ < 5) {
+             long id = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.BookEntry._ID));
+             String name = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.BookEntry.COLUMN_DISPLAY_NAME));
+             menu.add(0, (int)id, maxRecent, name);
+         }
++        menu.add(0, ID_MANAGE_BOOKS, maxRecent, "Manage Books...");
+ 
+         popup.show();
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 9d781e19..fe3b1882 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -43,6 +43,7 @@
+ import android.widget.TextView;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseSchema;
+@@ -94,10 +95,11 @@ public void onCreate(Bundle savedInstanceState) {
+ 		mAccountUID = args.getString(UxArgument.SELECTED_ACCOUNT_UID);
+ 
+ 		mUseCompactView = PreferenceManager.getDefaultSharedPreferences(getActivity())
+-				.getBoolean(getActivity().getString(R.string.key_use_compact_list), false);
++				.getBoolean(getActivity().getString(R.string.key_use_compact_list), !GnuCashApplication.isDoubleEntryEnabled());
+ 		//if there was a local override of the global setting, respect it
+ 		if (savedInstanceState != null)
+ 			mUseCompactView = savedInstanceState.getBoolean(getString(R.string.key_use_compact_list), mUseCompactView);
++
+ 		mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
+ 	}
+ 
+@@ -183,6 +185,7 @@ public void onPrepareOptionsMenu(Menu menu) {
+ 		super.onPrepareOptionsMenu(menu);
+ 		MenuItem item = menu.findItem(R.id.menu_compact_trn_view);
+ 		item.setChecked(mUseCompactView);
++		item.setEnabled(GnuCashApplication.isDoubleEntryEnabled()); //always compact for single-entry
+ 	}
+ 
+ 	@Override
+@@ -326,7 +329,7 @@ public void onClick(View v) {
+ 			public ViewHolder(View itemView) {
+ 				super(itemView);
+ 				ButterKnife.bind(this, itemView);
+-
++				primaryText.setTextSize(18);
+ 				optionsMenu.setOnClickListener(new View.OnClickListener() {
+ 					@Override
+ 					public void onClick(View v) {
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+index f12caba5..835e35c0 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+@@ -30,6 +30,7 @@
+ import android.view.View;
+ import android.view.inputmethod.InputMethodManager;
+ import android.widget.EditText;
++import android.widget.TextView;
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java b/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
+index 71732849..00a8b0c0 100644
+--- a/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
+@@ -50,6 +50,7 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.util.TaskDelegate;
+@@ -209,6 +210,8 @@ private void createAccountsAndFinish() {
+         AccountsActivity.removeFirstRunFlag();
+ 
+         if (mAccountOptions.equals(getString(R.string.wizard_option_create_default_accounts))){
++            String bookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++            BooksDbAdapter.getInstance().deleteRecord(bookUID); //a default book is usually created
+             AccountsActivity.createDefaultAccounts(mCurrencyCode, FirstRunWizardActivity.this);
+             finish();
+         } else if (mAccountOptions.equals(getString(R.string.wizard_option_import_my_accounts))){

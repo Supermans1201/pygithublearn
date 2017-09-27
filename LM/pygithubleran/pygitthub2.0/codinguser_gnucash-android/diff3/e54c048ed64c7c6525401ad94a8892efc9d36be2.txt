@@ -1,0 +1,820 @@
+From e54c048ed64c7c6525401ad94a8892efc9d36be2 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 3 Nov 2015 17:33:21 +0100
+Subject: [PATCH] Use Commodity instead of Currency in Accounts and
+ Transactions
+
+---
+ .../android/test/ui/AccountsActivityTest.java      |  6 +--
+ .../android/test/ui/TransactionsActivityTest.java  |  7 +--
+ .../gnucash/android/app/GnuCashApplication.java    | 12 +++++
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 17 +++---
+ .../gnucash/android/db/CommoditiesDbAdapter.java   | 12 ++++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 13 +++--
+ .../gnucash/android/importer/GncXmlHandler.java    |  5 +-
+ .../java/org/gnucash/android/model/Account.java    | 60 ++++++++++------------
+ .../java/org/gnucash/android/model/Commodity.java  | 31 +++++------
+ .../main/java/org/gnucash/android/model/Money.java | 13 +++--
+ .../org/gnucash/android/model/Transaction.java     | 21 ++++----
+ .../gnucash/android/receivers/AccountCreator.java  |  6 +--
+ .../android/ui/account/AccountFormFragment.java    |  6 +--
+ .../ui/transaction/TransactionFormFragment.java    |  4 +-
+ .../test/unit/db/AccountsDbAdapterTest.java        |  4 +-
+ .../android/test/unit/model/AccountTest.java       | 28 +++++++++-
+ .../gnucash/android/test/unit/model/MoneyTest.java | 28 +++++-----
+ .../android/test/unit/model/TransactionTest.java   | 13 ++++-
+ 18 files changed, 173 insertions(+), 113 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index ecae2fa0..3d2d8f97 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -116,7 +116,7 @@ public void setUp() throws Exception {
+ 
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+         account.setUID(DUMMY_ACCOUNT_UID);
+-		account.setCurrency(Currency.getInstance(DUMMY_ACCOUNT_CURRENCY_CODE));
++		account.setCommodity(Commodity.getInstance(DUMMY_ACCOUNT_CURRENCY_CODE));
+ 		mAccountsDbAdapter.addRecord(account);
+         refreshAccountsList();
+ 	}
+@@ -202,7 +202,7 @@ public void testCreateAccount(){
+     @Test
+     public void testChangeParentAccount() {
+         final String accountName = "Euro Account";
+-        Account account = new Account(accountName, Currency.getInstance("EUR"));
++        Account account = new Account(accountName, Commodity.EUR);
+         mAccountsDbAdapter.addRecord(account);
+ 
+         refreshAccountsList();
+@@ -283,7 +283,7 @@ public void editingAccountShouldNotDeleteTransactions(){
+                 .perform(click());
+ 
+         Account account = new Account("Transfer Account");
+-        account.setCurrency(Currency.getInstance(DUMMY_ACCOUNT_CURRENCY.getCurrencyCode()));
++        account.setCommodity(Commodity.getInstance(DUMMY_ACCOUNT_CURRENCY.getCurrencyCode()));
+         Transaction transaction = new Transaction("Simple trxn");
+         transaction.setCurrencyCode(DUMMY_ACCOUNT_CURRENCY.getCurrencyCode());
+         Split split = new Split(new Money(BigDecimal.TEN, DUMMY_ACCOUNT_CURRENCY), account.getUID());
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 669660cc..7b0ef4bf 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -36,6 +36,7 @@
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+@@ -121,11 +122,11 @@ public void setUp() throws Exception {
+ 		mTransactionTimeMillis = System.currentTimeMillis();
+         Account account = new Account(DUMMY_ACCOUNT_NAME);
+         account.setUID(DUMMY_ACCOUNT_UID);
+-        account.setCurrency(Currency.getInstance(CURRENCY_CODE));
++        account.setCommodity(Commodity.getInstance(CURRENCY_CODE));
+ 
+         Account account2 = new Account(TRANSFER_ACCOUNT_NAME);
+         account2.setUID(TRANSFER_ACCOUNT_UID);
+-        account2.setCurrency(Currency.getInstance(CURRENCY_CODE));
++        account2.setCommodity(Commodity.getInstance(CURRENCY_CODE));
+ 
+         mAccountsDbAdapter.addRecord(account);
+         mAccountsDbAdapter.addRecord(account2);
+@@ -478,7 +479,7 @@ public void testDeleteTransaction(){
+ 	@Test
+ 	public void testMoveTransaction(){
+ 		Account account = new Account("Move account");
+-		account.setCurrency(Currency.getInstance(CURRENCY_CODE));
++		account.setCommodity(Commodity.getInstance(CURRENCY_CODE));
+ 		mAccountsDbAdapter.addRecord(account);
+ 
+ 		assertThat(mTransactionsDbAdapter.getAllTransactionsForAccount(account.getUID())).hasSize(0);
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index cadc03f7..bc0ae201 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -40,6 +40,7 @@
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.service.SchedulerService;
+ 
+ import java.util.Currency;
+@@ -122,6 +123,8 @@ public void onCreate(){
+         mScheduledActionDbAdapter   = new ScheduledActionDbAdapter(mDb);
+         mCommoditiesDbAdapter       = new CommoditiesDbAdapter(mDb);
+         mPricesDbAdapter            = new PricesDbAdapter(mDb);
++
++        Commodity.DEFAULT_COMMODITY = mCommoditiesDbAdapter.getCommodity(getDefaultCurrencyCode());
+     }
+ 
+     public static AccountsDbAdapter getAccountsDbAdapter() {
+@@ -213,6 +216,15 @@ public static String getDefaultCurrencyCode(){
+     }
+ 
+     /**
++     * Returns the default commodity
++     * @return Default commodity of application
++     * @see #getDefaultCurrencyCode()
++     */
++    public static Commodity getDefaultCommodity(){
++        return Commodity.DEFAULT_COMMODITY;
++    }
++
++    /**
+      * Returns the default locale which is used for currencies, while handling special cases for
+      * locales which are not supported for currency such as en_GB
+      * @return The default locale for this device
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 30fc1093..7d1acfbb 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -32,6 +32,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+@@ -108,9 +109,8 @@ public void addRecord(@NonNull Account account){
+ 		if (account.getAccountType() != AccountType.ROOT){
+             //update the fully qualified account name
+             updateRecord(accountUID, AccountEntry.COLUMN_FULL_NAME, getFullyQualifiedAccountName(accountUID));
+-            String commodityUID = getCommodityUID(account.getCurrency().getCurrencyCode());
+             for (Transaction t : account.getTransactions()) {
+-                t.setCommodityUID(commodityUID);
++                t.setCommodity(account.getCommodity());
+ 		        mTransactionsAdapter.addRecord(t);
+ 			}
+             for (Transaction transaction : templateTransactions) {
+@@ -184,11 +184,11 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Account account
+         mReplaceStatement.bindLong(9, account.isPlaceholderAccount() ? 1 : 0);
+         mReplaceStatement.bindString(10, account.getCreatedTimestamp().toString());
+         mReplaceStatement.bindLong(11, account.isHidden() ? 1 : 0);
+-        String commodityUID = account.getCommodityUID();
+-        if (commodityUID == null)
+-            commodityUID = CommoditiesDbAdapter.getInstance().getCommodityUID(account.getCurrency().getCurrencyCode());
++        Commodity commodity = account.getCommodity();
++        if (commodity == null)
++            commodity = CommoditiesDbAdapter.getInstance().getCommodity(account.getCurrency().getCurrencyCode());
+ 
+-        mReplaceStatement.bindString(12, commodityUID);
++        mReplaceStatement.bindString(12, commodity.getUID());
+ 
+         String parentAccountUID = account.getParentUID();
+         if (parentAccountUID == null && account.getAccountType() != AccountType.ROOT) {
+@@ -398,7 +398,7 @@ private Account buildSimpleAccountInstance(Cursor c) {
+         account.setParentUID(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_PARENT_ACCOUNT_UID)));
+         account.setAccountType(AccountType.valueOf(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_TYPE))));
+         Currency currency = Currency.getInstance(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_CURRENCY)));
+-        account.setCurrency(currency);
++        account.setCommodity(CommoditiesDbAdapter.getInstance().getCommodity(currency.getCurrencyCode()));
+         account.setPlaceHolderFlag(c.getInt(c.getColumnIndexOrThrow(AccountEntry.COLUMN_PLACEHOLDER)) == 1);
+         account.setDefaultTransferAccountUID(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID)));
+         account.setColorCode(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_COLOR_CODE)));
+@@ -542,9 +542,10 @@ public AccountType getAccountType(long accountId){
+      */
+     public String getOrCreateImbalanceAccountUID(Currency currency){
+         String imbalanceAccountName = getImbalanceAccountName(currency);
++        Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(currency.getCurrencyCode());
+         String uid = findAccountUidByFullName(imbalanceAccountName);
+         if (uid == null){
+-            Account account = new Account(imbalanceAccountName, currency);
++            Account account = new Account(imbalanceAccountName, commodity);
+             account.setAccountType(AccountType.BANK);
+             account.setParentUID(getOrCreateGnuCashRootAccountUID());
+             account.setHidden(!GnuCashApplication.isDoubleEntryEnabled());
+diff --git a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+index 043a8291..b4e6d758 100644
+--- a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+@@ -21,6 +21,16 @@
+      */
+     public CommoditiesDbAdapter(SQLiteDatabase db) {
+         super(db, CommodityEntry.TABLE_NAME);
++        /**
++         * initialize commonly used commodities
++         */
++        Commodity.USD = getCommodity("USD");
++        Commodity.EUR = getCommodity("EUR");
++        Commodity.GBP = getCommodity("GBP");
++        Commodity.CHF = getCommodity("CHF");
++        Commodity.CAD = getCommodity("CAD");
++        Commodity.JPY = getCommodity("JPY");
++        Commodity.AUD = getCommodity("AUD");
+     }
+ 
+     public static CommoditiesDbAdapter getInstance(){
+@@ -49,7 +59,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Commodity commo
+         mReplaceStatement.bindString(5, commodity.getLocalSymbol());
+         mReplaceStatement.bindString(6, commodity.getCusip());
+         mReplaceStatement.bindLong(7, commodity.getSmallestFraction());
+-        mReplaceStatement.bindLong(8,   commodity.getQuoteFlag());
++        mReplaceStatement.bindLong(8, commodity.getQuoteFlag());
+ 
+         return mReplaceStatement;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index c235b75b..b522ea7f 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -32,6 +32,7 @@
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+@@ -180,11 +181,11 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Transaction tra
+         mReplaceStatement.bindLong(5, transaction.isExported() ? 1 : 0);
+         mReplaceStatement.bindString(6, transaction.getCurrencyCode());
+ 
+-        String commodityUID = transaction.getCommodityUID();
+-        if (commodityUID == null)
+-            commodityUID = getCommodityUID(transaction.getCurrency().getCurrencyCode());
++        Commodity commodity = transaction.getCommodity();
++        if (commodity == null)
++            commodity = CommoditiesDbAdapter.getInstance().getCommodity(transaction.getCurrencyCode());
+ 
+-        mReplaceStatement.bindString(7, commodityUID);
++        mReplaceStatement.bindString(7, commodity.getUID());
+         mReplaceStatement.bindString(8, transaction.getCreatedTimestamp().toString());
+ 
+         if (transaction.getScheduledActionUID() == null)
+@@ -412,7 +413,9 @@ public Transaction buildModelInstance(@NonNull final Cursor c){
+ 		transaction.setNote(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_NOTES)));
+ 		transaction.setExported(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_EXPORTED)) == 1);
+ 		transaction.setTemplate(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TEMPLATE)) == 1);
+-        transaction.setCurrencyCode(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_CURRENCY)));
++        String currencyCode = c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_CURRENCY));
++        transaction.setCurrencyCode(currencyCode);
++        transaction.setCommodity(CommoditiesDbAdapter.getInstance().getCommodity(currencyCode));
+         transaction.setScheduledActionUID(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_SCHEDX_ACTION_UID)));
+         long transactionID = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
+         transaction.setSplits(mSplitsDbAdapter.getSplitsForTransaction(transactionID));
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 9e12030d..40be52aa 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -49,7 +49,6 @@
+ import java.sql.Timestamp;
+ import java.text.ParseException;
+ import java.util.ArrayList;
+-import java.util.Currency;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+@@ -372,7 +371,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_COMMODITY_ID:
+                 String currencyCode = mISO4217Currency ? characterString : NO_CURRENCY_CODE;
+                 if (mAccount != null) {
+-                    mAccount.setCurrency(Currency.getInstance(currencyCode));
++                    mAccount.setCurrencyCode(currencyCode);
+                 }
+                 if (mTransaction != null) {
+                     mTransaction.setCurrencyCode(currencyCode);
+@@ -767,7 +766,7 @@ public void endDocument() throws SAXException {
+             String currencyCode = split.getAccountUID();
+             Account imbAccount = mapImbalanceAccount.get(currencyCode);
+             if (imbAccount == null) {
+-                imbAccount = new Account(imbalancePrefix + currencyCode, Currency.getInstance(currencyCode));
++                imbAccount = new Account(imbalancePrefix + currencyCode, Commodity.getInstance(currencyCode));
+                 imbAccount.setParentUID(mRootAccount.getUID());
+                 imbAccount.setAccountType(AccountType.BANK);
+                 mapImbalanceAccount.put(currencyCode, imbAccount);
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index 2b1025b4..84dc317e 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -93,9 +93,13 @@
+ 	/**
+ 	 * Currency used by transactions in this account
+ 	 */
+-	private Currency mCurrency; 
++	private String mCurrencyCode;
++
++	/**
++	 * Commodity used by this account
++	 */
++	private Commodity mCommodity;
+ 
+-	private String mCommodityUID;
+ 
+ 	/**
+ 	 * Type of account
+@@ -159,18 +163,18 @@
+ 	public Account(String name) {
+ 		setName(name);
+         this.mFullName  = mName;
+-		this.mCurrency  = Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
++		setCommodity(Commodity.DEFAULT_COMMODITY);
+ 	}
+ 	
+ 	/**
+ 	 * Overloaded constructor
+ 	 * @param name Name of the account
+-	 * @param currency {@link Currency} to be used by transactions in this account
++	 * @param commodity {@link Commodity} to be used by transactions in this account
+ 	 */
+-	public Account(String name, Currency currency){
++	public Account(String name, Commodity commodity){
+ 		setName(name);
+         this.mFullName  = mName;
+-		this.mCurrency  = currency;
++		setCommodity(commodity);
+ 	}
+ 
+ 	/**
+@@ -244,7 +248,7 @@ public void setAccountType(AccountType mAccountType) {
+ 	 * @param transaction {@link Transaction} to be added to the account
+ 	 */
+ 	public void addTransaction(Transaction transaction){
+-		transaction.setCurrencyCode(mCurrency.getCurrencyCode());
++		transaction.setCommodity(mCommodity);
+ 		mTransactionsList.add(transaction);
+ 	}
+ 	
+@@ -281,7 +285,7 @@ public int getTransactionCount(){
+ 	 * @return {@link Money} aggregate amount of all transactions in account.
+ 	 */
+ 	public Money getBalance(){
+-		Money balance = Money.createZeroInstance(mCurrency.getCurrencyCode());
++		Money balance = Money.createZeroInstance(mCurrencyCode);
+         for (Transaction transaction : mTransactionsList) {
+             balance.add(transaction.getBalance(getUID()));
+ 		}
+@@ -331,41 +335,33 @@ public void setFavorite(boolean isFavorite) {
+ 	 * @return the mCurrency
+ 	 */
+ 	public Currency getCurrency() {
+-		return mCurrency;
++		return Currency.getInstance(mCurrencyCode);
+ 	}
+ 
+ 	/**
+-	 * Return the commodity for this account
+-	 * @return
++	 * Sets the currency code of this account
++	 * @param currencyCode ISO 4217 3-letter currency code
+ 	 */
+-	public Commodity getCommodity(){
+-		return Commodity.getInstance(mCurrency.getCurrencyCode());
++	public void setCurrencyCode(String currencyCode){
++		this.mCurrencyCode = currencyCode;
+ 	}
+ 
+ 	/**
+-	 * Sets the currency to be used by this account
+-	 * @param currency the mCurrency to set
+-	 */
+-	public void setCurrency(Currency currency) {
+-		this.mCurrency = currency;
+-		//TODO: Maybe at some time t, this method should convert all 
+-		//transaction values to the corresponding value in the new currency
+-	}
+-
+-	/**
+-	 * Returns the commodity GUID for this account
+-	 * @return String GUID of commodity
++	 * Return the commodity for this account
++	 * @return
+ 	 */
+-	public String getCommodityUID() {
+-		return mCommodityUID;
++	public Commodity getCommodity(){
++		return mCommodity;
+ 	}
+ 
+ 	/**
+-	 * Sets the commodity GUID for this account
+-	 * @param commodityUID String commodity GUID
++	 * Sets the commodity of this account
++	 * @param commodity Commodity of the account
+ 	 */
+-	public void setCommodityUID(String commodityUID) {
+-		this.mCommodityUID = commodityUID;
++	public void setCommodity(Commodity commodity){
++		this.mCommodity = commodity;
++		this.mCurrencyCode = commodity.getCurrencyCode();
++		//todo: should we also change commodity of transactions? Transactions can have splits from different accounts
+ 	}
+ 
+ 	/**
+@@ -479,7 +475,7 @@ public static OfxAccountType convertToOfxAccountType(AccountType accountType){
+ 	 */
+ 	public void toOfx(Document doc, Element parent, boolean exportAllTransactions){
+ 		Element currency = doc.createElement(OfxHelper.TAG_CURRENCY_DEF);
+-		currency.appendChild(doc.createTextNode(mCurrency.getCurrencyCode()));						
++		currency.appendChild(doc.createTextNode(mCommodity.getCurrencyCode()));
+ 		
+ 		//================= BEGIN BANK ACCOUNT INFO (BANKACCTFROM) =================================
+ 		
+diff --git a/app/src/main/java/org/gnucash/android/model/Commodity.java b/app/src/main/java/org/gnucash/android/model/Commodity.java
+index 89232512..8169f417 100644
+--- a/app/src/main/java/org/gnucash/android/model/Commodity.java
++++ b/app/src/main/java/org/gnucash/android/model/Commodity.java
+@@ -22,26 +22,23 @@
+  * At the moment only ISO4217 currencies are supported
+  */
+ public class Commodity extends BaseModel {
++
+     public enum Namespace { ISO4217 } //Namespace for commodities
+ 
+     private Namespace mNamespace = Namespace.ISO4217;
+-/*
+-    public static final Commodity USD = CommoditiesDbAdapter.getInstance().getCommodity("USD");
+-    public static final Commodity EUR = CommoditiesDbAdapter.getInstance().getCommodity("EUR");
+-    public static final Commodity GBP = CommoditiesDbAdapter.getInstance().getCommodity("GBP");
+-    public static final Commodity CHF = CommoditiesDbAdapter.getInstance().getCommodity("CHF");
+-    public static final Commodity CAD = CommoditiesDbAdapter.getInstance().getCommodity("CAD");
+-    public static final Commodity JPY = CommoditiesDbAdapter.getInstance().getCommodity("JPY");
+-    public static final Commodity AUD = CommoditiesDbAdapter.getInstance().getCommodity("AUD");
+-*/
+-
+-    public static final Commodity USD = new Commodity("", "USD", 100);
+-    public static final Commodity EUR = new Commodity("", "EUR", 100);
+-    public static final Commodity GBP = new Commodity("", "GBP", 100);
+-    public static final Commodity CHF = new Commodity("", "CHF", 100);
+-    public static final Commodity CAD = new Commodity("", "CAD", 100);
+-    public static final Commodity JPY = new Commodity("", "JPY", 1);
+-    public static final Commodity AUD = new Commodity("", "AUD", 100);
++
++    /**
++     * Default commodity for device locale
++     */
++    public static Commodity DEFAULT_COMMODITY = new Commodity("US Dollars", "USD", 100); //this value is a stub. Will be overwritten when the app is launched
++
++    public static Commodity USD = new Commodity("", "USD", 100);
++    public static Commodity EUR = new Commodity("", "EUR", 100);
++    public static Commodity GBP = new Commodity("", "GBP", 100);
++    public static Commodity CHF = new Commodity("", "CHF", 100);
++    public static Commodity CAD = new Commodity("", "CAD", 100);
++    public static Commodity JPY = new Commodity("", "JPY", 1);
++    public static Commodity AUD = new Commodity("", "AUD", 100);
+ 
+     /**
+      * This is the currency code for ISO4217 currencies
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 6e101b84..312a171b 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -287,28 +287,33 @@ public String asString(){
+ 	 * @return String containing formatted Money representation
+ 	 */
+     public String formattedString(Locale locale){
++/*
++//todo: enable this code for 2.1 release. Test better too
+ 		NumberFormat currencyFormat = NumberFormat.getCurrencyInstance(locale);
+ 		Currency currency = Currency.getInstance(mCommodity.getCurrencyCode());
+-		currencyFormat.setCurrency(currency);
+ 
+ 		String symbol;
+-		if (mCommodity.getCurrencyCode().equalsIgnoreCase("USD") && !locale.equals(Locale.US)) {
++		if (mCommodity.equals(Commodity.USD) && !locale.equals(Locale.US)) {
+ 			symbol = "US$";
++		} else if (mCommodity.equals(Commodity.EUR) {
++			symbol = currency.getSymbol(Locale.GERMANY); //euro currency is pretty unique around the world
+ 		} else {
+ 			symbol = currency.getSymbol(Locale.US); // US locale has the best symbol formatting table.
+ 		}
+ 		DecimalFormatSymbols decimalFormatSymbols = ((DecimalFormat)currencyFormat).getDecimalFormatSymbols();
+ 		decimalFormatSymbols.setCurrencySymbol(symbol);
+ 		((DecimalFormat)currencyFormat).setDecimalFormatSymbols(decimalFormatSymbols);
++		currencyFormat.setMinimumFractionDigits(mCommodity.getSmallestFractionDigits());
++		currencyFormat.setMaximumFractionDigits(mCommodity.getSmallestFractionDigits());
+ 
+ 		return currencyFormat.format(asDouble());
+-/*
++*/
++
+ 		NumberFormat formatter = NumberFormat.getInstance(locale);
+ 		formatter.setMinimumFractionDigits(mCommodity.getSmallestFractionDigits());
+ 		formatter.setMaximumFractionDigits(mCommodity.getSmallestFractionDigits());
+ 		Currency currency = Currency.getInstance(mCommodity.getCurrencyCode());
+ 		return formatter.format(asDouble()) + " " + currency.getSymbol(locale);
+-*/
+ 	}
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index f0e2586a..fd7528e4 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -19,9 +19,7 @@
+ import android.content.Intent;
+ 
+ import org.gnucash.android.BuildConfig;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.export.ofx.OfxHelper;
+ import org.gnucash.android.model.Account.OfxAccountType;
+ import org.w3c.dom.Document;
+@@ -90,7 +88,7 @@
+     /**
+      * GUID of commodity associated with this transaction
+      */
+-    private String mCommodityUID;
++    private Commodity mCommodity;
+ 
+     /**
+      * The splits making up this transaction
+@@ -168,7 +166,7 @@ public Transaction(Transaction transaction, boolean generateNewUID){
+ 	 * Initializes the different fields to their default values.
+ 	 */
+ 	private void initDefaults(){
+-        mCurrencyCode = Money.DEFAULT_CURRENCY_CODE;
++        setCommodity(Commodity.DEFAULT_COMMODITY);
+ 		this.mTimestamp = System.currentTimeMillis();
+ 	}
+ 
+@@ -345,19 +343,20 @@ public Currency getCurrency(){
+     }
+ 
+     /**
+-     * Returns the GUID of the commodity for this transaction
+-     * @return GUID of commodity
++     * Returns the  commodity for this transaction
++     * @return Commodity of the transaction
+      */
+-    public String getCommodityUID() {
+-        return mCommodityUID;
++    public Commodity getCommodity() {
++        return mCommodity;
+     }
+ 
+     /**
+      * Sets the commodity for this transaction
+-     * @param commodityUID GUID of commodity
++     * @param commodity Commodity instance
+      */
+-    public void setCommodityUID(String commodityUID) {
+-        this.mCommodityUID = commodityUID;
++    public void setCommodity(Commodity commodity) {
++        this.mCommodity = commodity;
++        this.mCurrencyCode = commodity.getCurrencyCode();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java b/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
+index 3985e850..100ae589 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
++++ b/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
+@@ -24,8 +24,7 @@
+ 
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.model.Account;
+-
+-import java.util.Currency;
++import org.gnucash.android.model.Commodity;
+ 
+ /**
+  * Broadcast receiver responsible for creating {@link Account}s received through intents.
+@@ -49,8 +48,7 @@ public void onReceive(Context context, Intent intent) {
+ 		
+ 		String currencyCode = args.getString(Account.EXTRA_CURRENCY_CODE);				
+ 		if (currencyCode != null){
+-			Currency currency = Currency.getInstance(currencyCode);
+-			account.setCurrency(currency);
++			account.setCommodity(Commodity.getInstance(currencyCode));
+ 		}
+ 		
+ 		String uid = args.getString(Intent.EXTRA_UID);
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index c5cca688..0108312f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -61,16 +61,15 @@
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.ui.common.UxArgument;
+ import org.gnucash.android.ui.colorpicker.ColorPickerDialog;
+ import org.gnucash.android.ui.colorpicker.ColorPickerSwatch;
+ import org.gnucash.android.ui.colorpicker.ColorSquare;
++import org.gnucash.android.ui.common.UxArgument;
+ import org.gnucash.android.util.CommoditiesCursorAdapter;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ import java.util.ArrayList;
+ import java.util.Arrays;
+-import java.util.Currency;
+ import java.util.HashMap;
+ import java.util.List;
+ 
+@@ -771,8 +770,7 @@ private void saveAccount() {
+ 
+         long commodityId = mCurrencySpinner.getSelectedItemId();
+         Commodity commodity = CommoditiesDbAdapter.getInstance().getRecord(commodityId);
+-        mAccount.setCommodityUID(commodity.getUID());
+-        mAccount.setCurrency(Currency.getInstance(commodity.getMnemonic()));
++        mAccount.setCommodity(commodity);
+ 
+         AccountType selectedAccountType = getSelectedAccountType();
+         mAccount.setAccountType(selectedAccountType);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 77d5222b..500ed18e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -58,6 +58,7 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -796,7 +797,8 @@ private void saveNewTransaction() {
+ 
+             String currencyCode = mAccountsDbAdapter.getAccountCurrencyCode(mAccountUID);
+             mTransaction.setCurrencyCode(currencyCode);
+-            mTransaction.setCommodityUID(mAccountsDbAdapter.getCommodityUID(currencyCode));
++            Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(currencyCode);
++            mTransaction.setCommodity(commodity);
+             mTransaction.setTime(cal.getTimeInMillis());
+             mTransaction.setNote(notes);
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index ba5bb710..6ea614e3 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -253,7 +253,7 @@ public void simpleAccountListShouldNotContainTransactions(){
+ 
+     @Test
+     public void shouldComputeAccountBalanceCorrectly(){
+-        Account account = new Account("Test", Currency.getInstance("USD"));
++        Account account = new Account("Test", Commodity.USD);
+         account.setAccountType(AccountType.ASSET); //debit normal account balance
+         Account transferAcct = new Account("Transfer");
+ 
+@@ -262,7 +262,7 @@ public void shouldComputeAccountBalanceCorrectly(){
+ 
+         Transaction transaction = new Transaction("Test description");
+         mTransactionsDbAdapter.addRecord(transaction);
+-        Split split = new Split(new Money(BigDecimal.TEN, Commodity.getInstance("USD")), account.getUID());
++        Split split = new Split(new Money(BigDecimal.TEN, Commodity.USD), account.getUID());
+         split.setTransactionUID(transaction.getUID());
+         split.setType(TransactionType.DEBIT);
+         mSplitsDbAdapter.addRecord(split);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+index ff14d175..adbbbb11 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+@@ -15,15 +15,24 @@
+  */
+ package org.gnucash.android.test.unit.model;
+ 
++import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.test.unit.util.GnucashTestRunner;
++import org.gnucash.android.test.unit.util.ShadowCrashlytics;
++import org.gnucash.android.test.unit.util.ShadowUserVoice;
+ import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
+ 
+ import java.util.Currency;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
++@RunWith(GnucashTestRunner.class)
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
+ public class AccountTest{
+ 
+ 	@Test
+@@ -40,7 +49,7 @@ public void testAccountAlwaysHasUID(){
+ 
+ 	@Test
+ 	public void testTransactionsHaveSameCurrencyAsAccount(){
+-		Account acc1 = new Account("Japanese", Currency.getInstance("JPY"));
++		Account acc1 = new Account("Japanese", Commodity.JPY);
+ 		acc1.setUID("simile");
+ 		Transaction trx = new Transaction("Underground");
+ 		Transaction term = new Transaction( "Tube");
+@@ -77,4 +86,21 @@ public void settingNameShouldNotChangeFullName(){
+ 		assertThat(account.getName()).isEqualTo("Name");
+ 		assertThat(account.getFullName()).isEqualTo(fullName);
+ 	}
++
++	@Test
++	public void settingCommodity_shouldSetCurrencyCode(){
++		Account account = new Account("Test", Commodity.USD);
++		account.setCommodity(Commodity.JPY);
++
++		assertThat(account.getCurrency()).isEqualTo(Currency.getInstance("JPY"));
++	}
++
++	@Test
++	public void settingCurrencyCode_shouldNotSetCommodity(){
++		Account account = new Account("Test EUR account", Commodity.EUR);
++		account.setCurrencyCode("USD");
++
++		assertThat(account.getCommodity()).isEqualTo(Commodity.EUR);
++		assertThat(account.getCurrency()).isEqualTo(Currency.getInstance("USD"));
++	}
+ }
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
+index 6fca5b03..1340dc20 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
+@@ -16,12 +16,6 @@
+ 
+ package org.gnucash.android.test.unit.model;
+ 
+-import java.math.BigDecimal;
+-import java.util.Currency;
+-import java.util.Locale;
+-
+-import static org.assertj.core.api.Assertions.assertThat;
+-
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+@@ -33,7 +27,13 @@
+ import org.junit.runner.RunWith;
+ import org.robolectric.annotation.Config;
+ 
+-import static org.junit.Assert.*;
++import java.math.BigDecimal;
++import java.util.Currency;
++import java.util.Locale;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotSame;
+ 
+ @RunWith(GnucashTestRunner.class)
+ @Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
+@@ -138,12 +138,16 @@ public void testNegation(){
+ 	public void testPrinting(){
+ 		assertEquals(mMoneyInEur.asString(), mMoneyInEur.toPlainString());
+ 		assertEquals(amountString, mMoneyInEur.asString());
+-		
++
+ 		// the unicode for Euro symbol is \u20AC
+-		String symbol = Currency.getInstance("EUR").getSymbol(Locale.GERMAN);
+-		String symbolUS = Currency.getInstance("EUR").getSymbol(Locale.US);
+-		assertEquals("15,75 " + symbol, mMoneyInEur.formattedString(Locale.GERMAN));
+-		assertEquals("15.75 " + symbolUS, mMoneyInEur.formattedString(Locale.US));
++
++		String symbol = Currency.getInstance("EUR").getSymbol(Locale.GERMANY);
++		String actualOuputDE = mMoneyInEur.formattedString(Locale.GERMANY);
++		assertThat(actualOuputDE).isEqualTo("15,75 " + symbol);
++
++		symbol = Currency.getInstance("EUR").getSymbol(Locale.US);
++		String actualOuputUS = mMoneyInEur.formattedString(Locale.US);
++		assertThat(actualOuputUS).isEqualTo("15.75 " + symbol);
+ 		
+ 		//always prints with 2 decimal places only
+ 		Money some = new Money("9.7469", CURRENCY_CODE);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+index b781c7bd..486f1793 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+@@ -1,19 +1,28 @@
+ package org.gnucash.android.test.unit.model;
+ 
++import org.gnucash.android.BuildConfig;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.test.unit.util.GnucashTestRunner;
++import org.gnucash.android.test.unit.util.ShadowCrashlytics;
++import org.gnucash.android.test.unit.util.ShadowUserVoice;
+ import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
++@RunWith(GnucashTestRunner.class)
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
+ public class TransactionTest {
+ 
+ 	@Test
+ 	public void testCloningTransaction(){
+ 		Transaction transaction = new Transaction("Bobba Fett");
+ 		assertThat(transaction.getUID()).isNotNull();
+-		assertThat(transaction.getCurrencyCode()).isEqualTo(Money.DEFAULT_CURRENCY_CODE);
++		assertThat(transaction.getCurrencyCode()).isEqualTo(Commodity.DEFAULT_COMMODITY.getCurrencyCode());
+ 
+ 		Transaction clone1 = new Transaction(transaction, false);
+ 		assertThat(transaction.getUID()).isEqualTo(clone1.getUID());
+@@ -34,7 +43,7 @@ public void testCloningTransaction(){
+ 	@Test
+ 	public void addingSplitsShouldSetTransactionUID(){
+ 		Transaction transaction = new Transaction("");
+-		assertThat(transaction.getCurrencyCode()).isEqualTo(Money.DEFAULT_CURRENCY_CODE);
++		assertThat(transaction.getCurrencyCode()).isEqualTo(Commodity.DEFAULT_COMMODITY.getCurrencyCode());
+ 
+ 		Split split = new Split(Money.getZeroInstance(), "test-account");
+ 		assertThat(split.getTransactionUID()).isEmpty();

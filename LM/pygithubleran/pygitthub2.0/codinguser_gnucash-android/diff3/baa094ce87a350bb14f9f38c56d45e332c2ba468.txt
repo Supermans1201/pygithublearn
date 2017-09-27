@@ -1,0 +1,489 @@
+From baa094ce87a350bb14f9f38c56d45e332c2ba468 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewi.fet@uni-due.de>
+Date: Wed, 8 Jul 2015 13:22:34 +0200
+Subject: [PATCH] Fixed: crash when creating a sub-account and changing the
+ type to another different from the parent Also added test case
+
+Fixed: crash when dismissing error dialog after export
+Fixed: crash when resuming app with passcode set and app killed
+---
+ .../android/test/ui/AccountsActivityTest.java      | 31 ++++++++++++++++++++++
+ .../android/test/ui/TransactionsActivityTest.java  |  9 -------
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  1 +
+ .../gnucash/android/importer/ImportAsyncTask.java  | 11 ++++++--
+ .../android/ui/account/AccountFormFragment.java    | 20 ++++++++------
+ .../ui/settings/PasscodePreferenceFragment.java    |  5 ++++
+ .../main/res/layout/fragment_account_detail.xml    |  2 +-
+ app/src/main/res/layout/fragment_accounts_list.xml |  2 +-
+ app/src/main/res/menu/account_actions.xml          |  2 +-
+ app/src/main/res/menu/sub_account_actions.xml      |  2 +-
+ app/src/main/res/values-de/strings.xml             |  2 +-
+ app/src/main/res/values-el/strings.xml             |  2 +-
+ app/src/main/res/values-es-rMX/strings.xml         |  2 +-
+ app/src/main/res/values-es/strings.xml             |  2 +-
+ app/src/main/res/values-fr/strings.xml             |  2 +-
+ app/src/main/res/values-hu/strings.xml             |  2 +-
+ app/src/main/res/values-it/strings.xml             |  2 +-
+ app/src/main/res/values-nb/strings.xml             |  2 +-
+ app/src/main/res/values-nl/strings.xml             |  2 +-
+ app/src/main/res/values-pt-rBR/strings.xml         |  2 +-
+ app/src/main/res/values-ru/strings.xml             |  2 +-
+ app/src/main/res/values-uk/strings.xml             |  2 +-
+ app/src/main/res/values-zh/strings.xml             |  2 +-
+ app/src/main/res/values/strings.xml                |  2 +-
+ 24 files changed, 76 insertions(+), 37 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 03fa31c8..618310d4 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -35,6 +35,7 @@
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
++import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.receivers.AccountCreator;
+ import org.gnucash.android.ui.account.AccountsActivity;
+@@ -47,19 +48,24 @@
+ import java.util.Currency;
+ import java.util.List;
+ 
++import static android.support.test.espresso.Espresso.onData;
+ import static android.support.test.espresso.Espresso.onView;
+ import static android.support.test.espresso.action.ViewActions.clearText;
+ import static android.support.test.espresso.action.ViewActions.click;
+ import static android.support.test.espresso.action.ViewActions.longClick;
+ import static android.support.test.espresso.action.ViewActions.scrollTo;
++import static android.support.test.espresso.action.ViewActions.swipeRight;
+ import static android.support.test.espresso.action.ViewActions.typeText;
+ import static android.support.test.espresso.assertion.ViewAssertions.matches;
++import static android.support.test.espresso.matcher.ViewMatchers.isChecked;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
+ import static android.support.test.espresso.matcher.ViewMatchers.isNotChecked;
+ import static android.support.test.espresso.matcher.ViewMatchers.withId;
+ import static android.support.test.espresso.matcher.ViewMatchers.withText;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.hamcrest.Matchers.allOf;
++import static org.hamcrest.Matchers.instanceOf;
++import static org.hamcrest.Matchers.is;
+ import static org.hamcrest.Matchers.not;
+ 
+ @RunWith(AndroidJUnit4.class)
+@@ -213,6 +219,31 @@ public void testChangeParentAccount() {
+         assertThat(DUMMY_ACCOUNT_UID).isEqualTo(parentUID);
+     }
+ 
++    /**
++     * When creating a sub-account (starting from within another account), if we change the account
++     * type to another type with no accounts of that type, then the parent account list should be hidden.
++     * The account which is then created is not a sub-account, but rather a top-level account
++     */
++    @Test
++    public void shouldHideParentAccountViewWhenNoParentsExist(){
++        onView(withText(DUMMY_ACCOUNT_NAME)).perform(click());
++        onView(withId(R.id.fragment_transaction_list)).perform(swipeRight());
++        onView(withText(R.string.label_create_account)).check(matches(isDisplayed())).perform(click());
++        sleep(1000);
++        onView(withId(R.id.checkbox_parent_account)).check(matches(allOf(isChecked())));
++        onView(withId(R.id.input_account_name)).perform(typeText("Trading account"));
++        onView(withId(R.id.input_account_type_spinner)).perform(click());
++        onData(allOf(is(instanceOf(String.class)), is(AccountType.TRADING.name()))).perform(click());
++
++        onView(withId(R.id.layout_parent_account)).check(matches(not(isDisplayed())));
++        onView(withId(R.id.menu_save)).perform(click());
++
++        //no sub-accounts
++        assertThat(mAccountsDbAdapter.getSubAccountCount(DUMMY_ACCOUNT_UID)).isEqualTo(0);
++        assertThat(mAccountsDbAdapter.getSubAccountCount(mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID())).isEqualTo(2);
++        assertThat(mAccountsDbAdapter.getSimpleAccountList()).extracting("mAccountType").contains(AccountType.TRADING);
++    }
++
+     @Test
+ 	public void testEditAccount(){
+ 		String editedAccountName = "Edited Account";
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 12971ed2..f13a95fc 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -16,7 +16,6 @@
+ 
+ package org.gnucash.android.test.ui;
+ 
+-import android.app.Fragment;
+ import android.content.ContentValues;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+@@ -28,8 +27,6 @@
+ import android.support.test.runner.AndroidJUnit4;
+ import android.test.ActivityInstrumentationTestCase2;
+ import android.util.Log;
+-import android.widget.LinearLayout;
+-import android.widget.Spinner;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
+@@ -58,7 +55,6 @@
+ import java.util.List;
+ import java.util.Locale;
+ 
+-import static android.support.test.espresso.Espresso.onData;
+ import static android.support.test.espresso.Espresso.onView;
+ import static android.support.test.espresso.action.ViewActions.clearText;
+ import static android.support.test.espresso.action.ViewActions.click;
+@@ -69,15 +65,10 @@
+ import static android.support.test.espresso.matcher.ViewMatchers.hasDescendant;
+ import static android.support.test.espresso.matcher.ViewMatchers.isChecked;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
+-import static android.support.test.espresso.matcher.ViewMatchers.isNotChecked;
+-import static android.support.test.espresso.matcher.ViewMatchers.withChild;
+ import static android.support.test.espresso.matcher.ViewMatchers.withId;
+-import static android.support.test.espresso.matcher.ViewMatchers.withSpinnerText;
+ import static android.support.test.espresso.matcher.ViewMatchers.withText;
+-import static org.assertj.android.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.hamcrest.Matchers.allOf;
+-import static org.hamcrest.Matchers.instanceOf;
+ import static org.hamcrest.Matchers.is;
+ import static org.hamcrest.Matchers.not;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 13b3b08b..5fdd2558 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -286,6 +286,7 @@ public long getID(@NonNull String uid){
+      * Returns the string unique ID (GUID) of a record in the database
+      * @param id long database record ID
+      * @return GUID of the record
++     * @throws IllegalArgumentException if the record ID does not exist in the database
+      */
+     public String getUID(long id){
+         Cursor cursor = mDb.query(mTableName,
+diff --git a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+index 0546a82c..55c6f138 100644
+--- a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -94,8 +94,15 @@ protected void onPostExecute(Boolean importSuccess) {
+         if (mDelegate != null)
+             mDelegate.onTaskComplete();
+ 
+-        if (progressDialog != null && progressDialog.isShowing())
+-            progressDialog.dismiss();
++        try {
++            if (progressDialog != null && progressDialog.isShowing())
++                progressDialog.dismiss();
++        } catch (IllegalArgumentException ex){
++            //TODO: This is a hack to catch "View not attached to window" exceptions
++            //FIXME by moving the creation and display of the progress dialog to the Fragment
++        } finally {
++            progressDialog = null;
++        }
+ 
+         int message = importSuccess ? R.string.toast_success_importing_accounts : R.string.toast_error_importing_accounts;
+         Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 31494c5f..257cec3b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -239,7 +239,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 	@Override	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+ 		View view = inflater.inflate(R.layout.fragment_new_account, container, false);
+-		getSherlockActivity().getSupportActionBar().setTitle(R.string.title_add_account);
++		getSherlockActivity().getSupportActionBar().setTitle(R.string.label_create_account);
+ 		mCurrencySpinner = (Spinner) view.findViewById(R.id.input_currency_spinner);
+ 		mNameEditText = (EditText) view.findViewById(R.id.input_account_name);
+ 		//mNameEditText.requestFocus();
+@@ -443,14 +443,14 @@ private void setSelectedCurrency(String currencyCode){
+      * @param parentAccountId Record ID of parent account to be selected
+      */
+     private void setParentAccountSelection(long parentAccountId){
+-        if (parentAccountId > 0 && parentAccountId != mRootAccountId){
+-            mParentCheckBox.setChecked(true);
+-            mParentAccountSpinner.setEnabled(true);
+-        } else
++        if (parentAccountId <= 0 || parentAccountId == mRootAccountId) {
+             return;
++        }
+ 
+         for (int pos = 0; pos < mParentAccountCursorAdapter.getCount(); pos++) {
+             if (mParentAccountCursorAdapter.getItemId(pos) == parentAccountId){
++                mParentCheckBox.setChecked(true);
++                mParentAccountSpinner.setEnabled(true);
+                 mParentAccountSpinner.setSelection(pos, true);
+                 break;
+             }
+@@ -581,11 +581,15 @@ private void loadParentAccountList(AccountType accountType){
+             mParentAccountCursor.close();
+ 
+ 		mParentAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(condition, null);
+-		if (mParentAccountCursor.getCount() <= 0){
+-            final View view = getView();
+-            assert view != null;
++        final View view = getView();
++        assert view != null;
++        if (mParentAccountCursor.getCount() <= 0){
++            mParentCheckBox.setChecked(false); //disable before hiding, else we can still read it when saving
+             view.findViewById(R.id.layout_parent_account).setVisibility(View.GONE);
+             view.findViewById(R.id.label_parent_account).setVisibility(View.GONE);
++        } else {
++            view.findViewById(R.id.layout_parent_account).setVisibility(View.VISIBLE);
++            view.findViewById(R.id.label_parent_account).setVisibility(View.VISIBLE);
+         }
+ 
+ 		mParentAccountCursorAdapter = new QualifiedAccountNameCursorAdapter(
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+index 84a4ff77..d1662d99 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+@@ -32,6 +32,7 @@
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.passcode.PasscodeLockScreenActivity;
+ import org.gnucash.android.ui.passcode.PasscodePreferenceActivity;
+@@ -108,6 +109,10 @@ public boolean onPreferenceClick(Preference preference) {
+     public void onActivityResult(int requestCode, int resultCode, Intent data) {
+         super.onActivityResult(requestCode, resultCode, data);
+ 
++        if (mEditor == null){
++            mEditor = PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext()).edit();
++        }
++
+         switch (requestCode) {
+             case PASSCODE_REQUEST_CODE:
+                 if (resultCode == Activity.RESULT_OK && data != null) {
+diff --git a/app/src/main/res/layout/fragment_account_detail.xml b/app/src/main/res/layout/fragment_account_detail.xml
+index d0879569..5a4be69e 100644
+--- a/app/src/main/res/layout/fragment_account_detail.xml
++++ b/app/src/main/res/layout/fragment_account_detail.xml
+@@ -40,6 +40,6 @@
+             android:id="@+id/add_preference_button"
+             android:layout_width="match_parent"
+             android:layout_height="wrap_content"
+-            android:text="@string/title_add_account" />
++            android:text="@string/label_create_account" />
+     </LinearLayout>
+ </LinearLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/fragment_accounts_list.xml b/app/src/main/res/layout/fragment_accounts_list.xml
+index 05c73ab9..07c6e8cf 100644
+--- a/app/src/main/res/layout/fragment_accounts_list.xml
++++ b/app/src/main/res/layout/fragment_accounts_list.xml
+@@ -50,6 +50,6 @@
+             android:id="@+id/add_account_button"
+             style="@style/ButtonStyle"
+             android:onClick="onNewAccountClick"
+-            android:text="@string/title_add_account" />
++            android:text="@string/label_create_account" />
+     </LinearLayout>
+ </RelativeLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/menu/account_actions.xml b/app/src/main/res/menu/account_actions.xml
+index e43e9b1c..17f230d2 100644
+--- a/app/src/main/res/menu/account_actions.xml
++++ b/app/src/main/res/menu/account_actions.xml
+@@ -18,7 +18,7 @@
+ <menu xmlns:android="http://schemas.android.com/apk/res/android" >
+     <item android:id="@+id/menu_add_account"
+           android:icon="@drawable/content_new_holo_dark"
+-          android:title="@string/title_add_account"
++          android:title="@string/label_create_account"
+           android:showAsAction="always"/>
+ 
+     <item android:id="@+id/menu_recurring_transactions"
+diff --git a/app/src/main/res/menu/sub_account_actions.xml b/app/src/main/res/menu/sub_account_actions.xml
+index b82c4f3f..9a62dfe3 100644
+--- a/app/src/main/res/menu/sub_account_actions.xml
++++ b/app/src/main/res/menu/sub_account_actions.xml
+@@ -22,7 +22,7 @@
+ 
+     <item android:id="@+id/menu_add_account"
+           android:icon="@drawable/content_new_holo_dark"
+-          android:title="@string/title_add_account"
++          android:title="@string/label_create_account"
+           android:showAsAction="always"/>
+ 
+     <item android:id="@+id/menu_edit_account"
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index c9a6b399..57ce6967 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -16,7 +16,7 @@
+  limitations under the License.
+ -->
+ <resources>
+-    <string name="title_add_account">Neues Konto</string>
++    <string name="label_create_account">Neues Konto</string>
+     <string name="title_edit_account">Konto bearbeiten</string>
+     <string name="info_details">Info</string>
+     <string name="menu_export">OFX-Datei exportieren</string>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index e503637a..699b4bef 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -17,7 +17,7 @@
+ -->
+ 
+ <resources>
+-    <string name="title_add_account"> </string>
++    <string name="label_create_account"> </string>
+     <string name="title_edit_account"> </string>
+     <string name="info_details"></string>
+     <string name="menu_export"> OFX</string>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 67aa4efa..ecea7b87 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -17,7 +17,7 @@
+ -->
+ 
+ <resources>
+-    <string name="title_add_account">Crear cuenta</string>
++    <string name="label_create_account">Crear cuenta</string>
+     <string name="title_edit_account">Editar cuenta</string>
+     <string name="info_details">Detalles</string>
+     <string name="menu_export">Exportar a OFX</string>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 2ff2c2a0..6d670d7e 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -17,7 +17,7 @@
+ -->
+ 
+ <resources>
+-    <string name="title_add_account">Crear Cuenta</string>
++    <string name="label_create_account">Crear Cuenta</string>
+     <string name="title_edit_account">Editar Cuenta</string>
+     <string name="info_details">Info</string>
+     <string name="menu_export">Exportar OFX</string>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 1eed10dc..5d85003b 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -17,7 +17,7 @@
+ -->
+ 
+ <resources xmlns:tools="http://schemas.android.com/tools" tools:locale="fr">
+-    <string name="title_add_account">Cr&#233;er un compte</string>
++    <string name="label_create_account">Cr&#233;er un compte</string>
+     <string name="title_edit_account">diter le compte</string>
+     <string name="info_details">Informations</string>
+     <string name="menu_export">Exporter en OFX</string>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index eba5056a..213d870b 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -16,7 +16,7 @@
+ -->
+ 
+ <resources>
+-    <string name="title_add_account">Create Account</string>
++    <string name="label_create_account">Create Account</string>
+     <string name="title_edit_account">Edit Account</string>
+     <string name="info_details">Info</string>
+     <string name="menu_export">Export OFX</string>
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index 7cb3f3aa..17546090 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -17,7 +17,7 @@
+ -->
+ 
+ <resources>
+-    <string name="title_add_account">Crea conto</string>
++    <string name="label_create_account">Crea conto</string>
+     <string name="title_edit_account">Modifica conto</string>
+     <string name="info_details">Informazioni</string>
+     <string name="menu_export">Esporta OFX</string>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index d59e5f5e..bd6d49d5 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -18,7 +18,7 @@
+ -->
+ 
+ <resources>
+-    <string name="title_add_account">Opprett konto</string>
++    <string name="label_create_account">Opprett konto</string>
+     <string name="title_edit_account">Rediger konto</string>
+     <string name="info_details">Informasjon</string>
+     <string name="menu_export">Eksport OFX</string>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index ac4f421a..d0f7f089 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -17,7 +17,7 @@
+ -->
+ 
+ <resources>
+-    <string name="title_add_account">Nieuw rekening</string>
++    <string name="label_create_account">Nieuw rekening</string>
+     <string name="title_edit_account">Rekening bewerken</string>
+     <string name="info_details">Info</string>
+     <string name="menu_export">OFX exporteren</string>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 8714b7c2..503cbdb2 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -16,7 +16,7 @@
+  limitations under the License.
+ -->
+ <resources>
+-	  <string name="title_add_account">Criar Conta</string>
++	  <string name="label_create_account">Criar Conta</string>
+ 	  <string name="title_edit_account">Editar Conta</string>
+ 	  <string name="info_details">Info</string>
+ 	  <string name="menu_export">Exportar OFX</string>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 4ef43f7f..2d2bec44 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -17,7 +17,7 @@
+ -->
+ 
+ <resources>
+-    <string name="title_add_account"> </string>
++    <string name="label_create_account"> </string>
+     <string name="title_edit_account"> </string>
+     <string name="info_details"></string>
+     <string name="menu_export"> OFX</string>
+diff --git a/app/src/main/res/values-uk/strings.xml b/app/src/main/res/values-uk/strings.xml
+index 6edd8226..3c6704e8 100644
+--- a/app/src/main/res/values-uk/strings.xml
++++ b/app/src/main/res/values-uk/strings.xml
+@@ -1,5 +1,5 @@
+ <resources>
+-    <string name="title_add_account"> </string>
++    <string name="label_create_account"> </string>
+     <string name="title_edit_account"> </string>
+     <string name="info_details"></string>
+     <string name="menu_export"> OFX</string>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index 5aac50b6..94a123c5 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -17,7 +17,7 @@
+ -->
+ 
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+-    <string name="title_add_account"></string>
++    <string name="label_create_account"></string>
+     <string name="title_edit_account"></string>
+     <string name="info_details"></string>
+     <string name="menu_export">OFX</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index a6391dc3..adba1a29 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -16,7 +16,7 @@
+ -->
+ 
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+-    <string name="title_add_account">Create Account</string>
++    <string name="label_create_account">Create Account</string>
+     <string name="title_edit_account">Edit Account</string>
+     <string name="info_details">Info</string>
+     <string name="menu_export">Export</string>

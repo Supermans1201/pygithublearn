@@ -1,0 +1,255 @@
+From 5783b87a54d9c73e65bcc07664c57421d215a95a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 11 Aug 2015 11:12:46 +0200
+Subject: [PATCH 1/3] Fixed: crash when importing from GnuCash file with
+ budgets
+
+---
+ app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index ba0d11dd..75b5dd9a 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -555,7 +555,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 try {
+                     PeriodType periodType = PeriodType.valueOf(characterString.toUpperCase());
+                     periodType.setMultiplier(mRecurrenceMultiplier);
+-                    mScheduledAction.setPeriod(periodType);
++                    if (mScheduledAction != null) //there might be recurrence tags for bugdets and other stuff
++                        mScheduledAction.setPeriod(periodType);
+                 } catch (IllegalArgumentException ex){ //the period type constant is not supported
+                     String msg = "Unsupported period constant: " + characterString;
+                     Log.e(LOG_TAG, msg);
+
+From 9559db7b06b856fcbee467d36aab49db12e3b7b3 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 12 Aug 2015 17:07:54 +0200
+Subject: [PATCH 2/3] Fixed: crash when restoring certain backups with poorly
+ formatted amount strings
+
+Added some GncXmlHelper tests
+---
+ CHANGELOG.md                                       |  4 ++
+ app/build.gradle                                   |  2 +-
+ .../gnucash/android/export/xml/GncXmlHelper.java   | 52 +++++-----------------
+ .../android/test/unit/export/GncXmlHelperTest.java | 46 +++++++++++++++++++
+ 4 files changed, 61 insertions(+), 43 deletions(-)
+ create mode 100644 app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1c261383..ba507cd1 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,9 @@
+ Change Log
+ ===============================================================================
++Version 1.6.4 *(2015-08-xx)*
++----------------------------
++* Fixed: Isolated crash during backup restoration
++
+ Version 1.6.3 *(2015-08-09)*
+ ----------------------------
+ * Fixed: Transfer account ignored when saving transaction with one split (after opening split editor)
+diff --git a/app/build.gradle b/app/build.gradle
+index a7e4c6bd..6e7ba074 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -5,7 +5,7 @@ apply plugin: 'crashlytics'
+ 
+ def versionMajor = 1
+ def versionMinor = 6
+-def versionPatch = 3
++def versionPatch = 4
+ def versionBuild = 0
+ 
+ def buildTime() {
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 9c4bad32..53f479e3 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -19,9 +19,7 @@
+ 
+ import android.support.annotation.NonNull;
+ 
+-import org.gnucash.android.model.Money;
+-import org.gnucash.android.model.Split;
+-import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ 
+ import java.math.BigDecimal;
+ import java.math.BigInteger;
+@@ -162,41 +160,8 @@ public static long parseDate(String dateString) throws ParseException {
+     }
+ 
+     /**
+-     * Parses the amounts in template transaction splits.
+-     * <p>GnuCash desktop formats the amounts based on the locale of the computer. That poses a problem here as the input can vary per user.<br/>
+-     *     The solution is to parse the string irrespective of comma or thousands separators as follows:
+-     *     <ol>
+-     *         <li>Find the last non-numeric character and split the string at that point</li>
+-     *         <li>If the length of the 2nd part is &gt;= 2, then it is a thousands separator, else it is decimal</li>
+-     *         <li>Append the two parts again together accordingly</li>
+-     *         <li>If no non-numeric character was found, then just return a new {@link BigDecimal}</li>
+-     *     </ol>
+-     * </p>
+-     * @param amountString String value of the amount.
+-     * @return BigDecimal representation of the amount
+-     * @see #formatTemplateSplitAmount(BigDecimal)
+-     */
+-    public static BigDecimal parseTemplateSplitAmount(@NonNull String amountString){
+-        Pattern pattern = Pattern.compile(".*\\D");
+-        Matcher matcher = pattern.matcher(amountString);
+-        if (matcher.find()){
+-            int index = matcher.end();
+-            String wholeNum = amountString.substring(0, index).replaceAll("\\D", "");
+-            String decimal = amountString.substring(index);
+-            String parsedAmountString;
+-            if (decimal.length() > 2){ //then it is just another thousands separator, just add it back
+-                parsedAmountString = wholeNum + decimal;
+-            } else { //add it as a decimal
+-                parsedAmountString = wholeNum + "." + decimal;
+-            }
+-            return new BigDecimal(parsedAmountString);
+-        } else {//an amount string with no commas or periods
+-            return new BigDecimal(amountString);
+-        }
+-    }
+-
+-    /**
+-     * Parses amount strings from GnuCash XML into {@link java.math.BigDecimal}s
++     * Parses amount strings from GnuCash XML into {@link java.math.BigDecimal}s.
++     * The amounts are formatted as 12345/4100
+      * @param amountString String containing the amount
+      * @return BigDecimal with numerical value
+      * @throws ParseException if the amount could not be parsed
+@@ -207,9 +172,11 @@ public static BigDecimal parseSplitAmount(String amountString) throws ParseExcep
+         {
+             throw new ParseException("Cannot parse money string : " + amountString, 0);
+         }
+-        BigInteger numerator = new BigInteger(amountString.substring(0, pos));
+-        int scale = amountString.length() - pos - 2;
+-        return new BigDecimal(numerator, scale);
++
++        int scale = amountString.length() - pos - 2; //do this before, because we could modify the string
++        String numerator = TransactionFormFragment.stripCurrencyFormatting(amountString.substring(0, pos));
++        BigInteger numeratorInt = new BigInteger(numerator);
++        return new BigDecimal(numeratorInt, scale);
+     }
+ 
+     /**
+@@ -224,7 +191,8 @@ public static String formatSplitAmount(BigDecimal amount, Currency trxCurrency){
+         BigDecimal denom = new BigDecimal(denomInt);
+         String denomString = Integer.toString(denomInt);
+ 
+-        return amount.multiply(denom).stripTrailingZeros().toPlainString() + "/" + denomString;
++        String numerator = TransactionFormFragment.stripCurrencyFormatting(amount.multiply(denom).stripTrailingZeros().toPlainString());
++        return numerator + "/" + denomString;
+     }
+ 
+     /**
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java b/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
+new file mode 100644
+index 00000000..20bc2e09
+--- /dev/null
++++ b/app/src/test/java/org/gnucash/android/test/unit/export/GncXmlHelperTest.java
+@@ -0,0 +1,46 @@
++package org.gnucash.android.test.unit.export;
++
++import org.gnucash.android.export.xml.GncXmlHelper;
++import org.junit.Test;
++
++import java.math.BigDecimal;
++import java.text.ParseException;
++import java.util.Currency;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/**
++ * Test the helper methods used for generating GnuCash XML
++ */
++public class GncXmlHelperTest {
++
++    /**
++     * Tests the parsing of split amounts
++     */
++    @Test
++    public void testParseSplitAmount() throws ParseException {
++        String splitAmount = "12345/100";
++        BigDecimal amount = GncXmlHelper.parseSplitAmount(splitAmount);
++        assertThat(amount.toPlainString()).isEqualTo("123.45");
++
++        amount = GncXmlHelper.parseSplitAmount("1.234,50/100");
++        assertThat(amount.toPlainString()).isEqualTo("1234.50");
++    }
++
++    @Test(expected = ParseException.class)
++    public void shouldFailToParseWronglyFormattedInput() throws ParseException {
++        GncXmlHelper.parseSplitAmount("123.45");
++    }
++
++    @Test
++    public void testFormatSplitAmount(){
++        BigDecimal bigDecimal = new BigDecimal("45.90");
++        String amount = GncXmlHelper.formatSplitAmount(bigDecimal, Currency.getInstance("USD"));
++        assertThat(amount).isEqualTo("4590/100");
++
++
++        bigDecimal = new BigDecimal("350");
++        amount = GncXmlHelper.formatSplitAmount(bigDecimal, Currency.getInstance("EUR"));
++        assertThat(amount).isEqualTo("35000/100");
++    }
++}
+
+From 9dfc9cf18d311b5e1f894d908a89f38f820cf9f4 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 12 Aug 2015 23:53:53 +0200
+Subject: [PATCH 3/3] Updated changeling for v1.6.4 release
+
+---
+ CHANGELOG.md | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ba507cd1..55b0dd6a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,8 +1,8 @@
+ Change Log
+ ===============================================================================
+-Version 1.6.4 *(2015-08-xx)*
++Version 1.6.4 *(2015-08-12)*
+ ----------------------------
+-* Fixed: Isolated crash during backup restoration
++* Fixed: Crashes during backup restoration
+ 
+ Version 1.6.3 *(2015-08-09)*
+ ----------------------------
+@@ -18,7 +18,7 @@ Version 1.6.1 *(2015-07-08)*
+ ----------------------------
+ * Fixed: Crash when importing some scheduled transations with custom period strings
+ * Fixed: Crash when closing export progress dialog if an export error occurred
+-* Fixed: Crash when creating a sub-account and changing the account type 
++* Fixed: Crash when creating a sub-account and changing the account type
+ * Fixed: Crash when loading backup files with no timestamp in their name
+ * Fixed: Crash when app is run on devices with locale es_LG
+ * Improved: Updated betterpickers library
+@@ -277,7 +277,7 @@ Version 1.1.0 *(2013-01-31)*
+ 
+ * Feature: Double entry accounting - every transaction is a transfer
+ * Feature: Nested accounts
+-* Feature: SGML support for OFX exports. Exports are now SGML by default 
++* Feature: SGML support for OFX exports. Exports are now SGML by default
+ * Feature: Display what's new to user after minor/major updates
+ * Improved: Reworked UX for creating accounts
+ * Improved: Default accounts now match GnuCash desktop accounts
+@@ -307,7 +307,7 @@ Version 1.0.1 *(2012-11-05)*
+ * Feature: Select default transaction type from settings
+ * Feature: Navigate account transactions using action bar navigation lists
+ * Feature: Brazilian Portuguese translation now available
+-* Fixed:   Inconsistencies in some translation strings 
++* Fixed:   Inconsistencies in some translation strings
+ 
+ 
+ Version 1.0.0 *(2012-11-01)*

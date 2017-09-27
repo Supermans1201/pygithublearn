@@ -1,0 +1,169 @@
+From 98f4d603556300e98801d2970dcd91d91608e4e1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 4 Jan 2013 15:24:15 +0100
+Subject: [PATCH] Convert database account type to GnuCash-compatible account
+ types Introduce mapping to fox Account types when exporting OFX data Update
+ beta version code in manifest
+
+---
+ GnucashMobile/AndroidManifest.xml                    |  2 +-
+ .../src/org/gnucash/android/data/Account.java        | 13 ++++++++-----
+ .../src/org/gnucash/android/data/Transaction.java    |  4 +++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java    |  3 ++-
+ .../src/org/gnucash/android/db/DatabaseHelper.java   | 20 +++++++++++++-------
+ 5 files changed, 27 insertions(+), 15 deletions(-)
+
+diff --git a/GnucashMobile/AndroidManifest.xml b/GnucashMobile/AndroidManifest.xml
+index 5386d5f6..1be8c073 100644
+--- a/GnucashMobile/AndroidManifest.xml
++++ b/GnucashMobile/AndroidManifest.xml
+@@ -18,7 +18,7 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+     android:versionCode="5"
+-    android:versionName="1.0.4.beta1" >
++    android:versionName="1.1.0.beta1" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="15"/>
+     
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index 56325058..f70b379e 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -52,7 +52,7 @@
+ 	 * they are currently not used except for exporting
+ 	 */
+ 	public enum AccountType {CASH, BANK, CREDIT_CARD, ASSET, LIABILITY, INCOME, EXPENSE, 
+-		EQUITY, CURRENCY, STOCK, MUTUAL_FUND, CHECKING, SAVINGS, MONEYMRKT, CREDITLINE};
++							PAYABLE, RECEIVABLE, EQUITY, CURRENCY, STOCK, MUTUAL_FUND};
+ 	
+ 	public enum OfxAccountType {CHECKING, SAVINGS, MONEYMRKT, CREDITLINE };
+ 		
+@@ -314,15 +314,16 @@ public String getParentUID() {
+ 	 * @see AccountType
+ 	 * @see OfxAccountType
+ 	 */
+-	public OfxAccountType ofxAccountTypeMapping(AccountType accountType){
++	public static OfxAccountType convertToOfxAccountType(AccountType accountType){
+ 		switch (accountType) {
+-		case CREDITLINE:
++		case CREDIT_CARD:
+ 			return OfxAccountType.CREDITLINE;
+ 			
+ 		case CASH:
+ 		case INCOME:
+ 		case EXPENSE:
+-		case CURRENCY:
++		case PAYABLE:
++		case RECEIVABLE:
+ 			return OfxAccountType.CHECKING;
+ 			
+ 		case BANK:
+@@ -332,6 +333,7 @@ public OfxAccountType ofxAccountTypeMapping(AccountType accountType){
+ 		case MUTUAL_FUND:
+ 		case STOCK:
+ 		case EQUITY:
++		case CURRENCY:
+ 			return OfxAccountType.MONEYMRKT;
+ 
+ 		default:
+@@ -357,7 +359,8 @@ public void toOfx(Document doc, Element parent, boolean allTransactions){
+ 		acctId.appendChild(doc.createTextNode(mUID));
+ 		
+ 		Element accttype = doc.createElement("ACCTTYPE");
+-		accttype.appendChild(doc.createTextNode(mAccountType.toString()));
++		String ofxAccountType = convertToOfxAccountType(mAccountType).toString();
++		accttype.appendChild(doc.createTextNode(ofxAccountType));
+ 		
+ 		Element bankFrom = doc.createElement("BANKACCTFROM");
+ 		bankFrom.appendChild(bankId);
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index 3ae7b31c..be2968c5 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -23,6 +23,7 @@
+ import java.util.UUID;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.data.Account.OfxAccountType;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.util.OfxFormatter;
+ import org.w3c.dom.Document;
+@@ -409,7 +410,8 @@ public Element toOfx(Document doc, String accountUID){
+ 			
+ 			Element accttype = doc.createElement("ACCTTYPE");			
+ 			AccountsDbAdapter acctDbAdapter = new AccountsDbAdapter(GnuCashApplication.getAppContext());
+-			accttype.appendChild(doc.createTextNode(acctDbAdapter.getAccountType(doubleAccountUID).toString()));
++			OfxAccountType ofxAccountType = Account.convertToOfxAccountType(acctDbAdapter.getAccountType(doubleAccountUID));
++			accttype.appendChild(doc.createTextNode(ofxAccountType.toString()));
+ 			acctDbAdapter.close();
+ 			
+ 			Element bankAccountTo = doc.createElement("BANKACCTTO");
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index dc1f4db3..ea4ac62d 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -78,7 +78,8 @@ public long addAccount(Account account){
+ 		if ((rowId = getAccountID(account.getUID())) > 0){
+ 			//if account already exists, then just update
+ 			Log.d(TAG, "Updating existing account");
+-			mDb.update(DatabaseHelper.ACCOUNTS_TABLE_NAME, contentValues, DatabaseHelper.KEY_ROW_ID + " = " + rowId, null);
++			mDb.update(DatabaseHelper.ACCOUNTS_TABLE_NAME, contentValues, 
++					DatabaseHelper.KEY_ROW_ID + " = " + rowId, null);
+ 		} else {
+ 			Log.d(TAG, "Adding new account to db");
+ 			rowId = mDb.insert(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, contentValues);
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+index 2eb49d39..20ee6629 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -16,6 +16,9 @@
+ 
+ package org.gnucash.android.db;
+ 
++import org.gnucash.android.data.Account.AccountType;
++
++import android.content.ContentValues;
+ import android.content.Context;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteOpenHelper;
+@@ -176,8 +179,7 @@ public void onCreate(SQLiteDatabase db) {
+ 	@Override
+ 	public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 		Log.i(TAG, "Upgrading database from version " 
+-				+ oldVersion + " to " + newVersion
+-				+ " which will destroy all old data");
++				+ oldVersion + " to " + newVersion);
+ 		
+ 		if (oldVersion < newVersion){
+ 			//introducing double entry accounting
+@@ -187,6 +189,8 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 				String addColumnSql = "ALTER TABLE " + TRANSACTIONS_TABLE_NAME + 
+ 									" ADD COLUMN " + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " varchar(255)";
+ 				
++				//introducing sub accounts
++				Log.i(TAG, "Adding column for parent accounts");
+ 				String addParentAccountSql = "ALTER TABLE " + ACCOUNTS_TABLE_NAME + 
+ 						" ADD COLUMN " + KEY_PARENT_ACCOUNT_UID + " varchar(255)";
+ 	
+@@ -194,13 +198,15 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 				db.execSQL(addParentAccountSql);
+ 			}
+ 			
++			//update account types to GnuCash account types
++			//since all were previously CHECKING, now all will be CASH
++			Log.i(TAG, "Converting account types to GnuCash compatible types");
++			ContentValues cv = new ContentValues();
++			cv.put(KEY_TYPE, AccountType.CASH.toString());
++			db.update(ACCOUNTS_TABLE_NAME, cv, null, null);
++				
+ 		} else {
+ 			Log.i(TAG, "Cannot downgrade database.");
+-			/*
+-			db.execSQL("DROP TABLE IF EXISTS " + TRANSACTIONS_TABLE_NAME);
+-			db.execSQL("DROP TABLE IF EXISTS " + ACCOUNTS_TABLE_NAME);
+-			onCreate(db);
+-			*/
+ 		}
+ 	}
+ 

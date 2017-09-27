@@ -1,0 +1,2688 @@
+From eaaae2baf2f1cc98bf46849ef234603c474c723c Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 14 Aug 2015 15:51:42 +0200
+Subject: [PATCH] Database module restructuring
+
+      DatabaseAdapter is now a template class for BaseModel
+      Moved common methods to the DatabaseAdapter. Subclasses only need provide minimal implementation
+
+Added local symbol to commodities table (parsed from XML)
+Fixed: broken tests
+---
+ .gitignore                                         |   1 +
+ .../android/test/ui/AccountsActivityTest.java      |  22 +-
+ .../android/test/ui/ExportTransactionsTest.java    |   2 +-
+ .../android/test/ui/TransactionsActivityTest.java  |  24 +--
+ .../gnucash/android/app/GnuCashApplication.java    |  24 ++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 230 +++++++++------------
+ .../gnucash/android/db/CommoditiesDbAdapter.java   |  73 ++++++-
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 133 +++++++++++-
+ .../org/gnucash/android/db/DatabaseHelper.java     |  14 +-
+ .../org/gnucash/android/db/DatabaseSchema.java     |   1 +
+ .../org/gnucash/android/db/PricesDbAdapter.java    |  90 +++++++-
+ .../android/db/ScheduledActionDbAdapter.java       | 124 ++++-------
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 124 ++++-------
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 173 +++++++---------
+ .../gnucash/android/export/ExportAsyncTask.java    |   2 +-
+ .../gnucash/android/export/ofx/OfxExporter.java    |   3 +-
+ .../gnucash/android/export/xml/GncXmlExporter.java |   2 +-
+ .../android/importer/CommoditiesXmlHandler.java    |  45 ++--
+ .../gnucash/android/importer/GncXmlHandler.java    |   8 +-
+ .../java/org/gnucash/android/model/Account.java    |  21 ++
+ .../java/org/gnucash/android/model/Commodity.java  |  30 +++
+ .../main/java/org/gnucash/android/model/Price.java |   9 +
+ .../gnucash/android/receivers/AccountCreator.java  |   2 +-
+ .../android/receivers/TransactionRecorder.java     |   2 +-
+ .../gnucash/android/service/SchedulerService.java  |   4 +-
+ .../android/ui/account/AccountFormFragment.java    |   4 +-
+ .../android/ui/account/AccountsListFragment.java   |   3 +-
+ .../android/ui/export/ExportFormFragment.java      |   2 +-
+ .../ui/export/ScheduledExportListFragment.java     |   2 +-
+ .../DeleteAllTransactionsConfirmationDialog.java   |   2 +-
+ .../android/ui/settings/SettingsActivity.java      |   2 +-
+ .../ScheduledTransactionsListFragment.java         |   6 +-
+ .../ui/transaction/TransactionFormFragment.java    |  12 +-
+ .../ui/transaction/TransactionInfoActivity.java    |   4 +-
+ ...ansactionsDeleteConfirmationDialogFragment.java |   2 +-
+ .../ui/widget/WidgetConfigurationActivity.java     |   2 +-
+ .../test/unit/db/AccountsDbAdapterTest.java        |  64 +++---
+ .../android/test/unit/db/SplitsDbAdapterTest.java  |  10 +-
+ .../test/unit/db/TransactionsDbAdapterTest.java    |  18 +-
+ 39 files changed, 762 insertions(+), 534 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index 996ac112..75c60988 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -23,3 +23,4 @@ out/
+ /captures
+ gradle.properties
+ crashlytics.properties
++app/*.tap
+\ No newline at end of file
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 7657adfc..5fefcc1a 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -113,7 +113,7 @@ public void setUp() throws Exception {
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+         account.setUID(DUMMY_ACCOUNT_UID);
+ 		account.setCurrency(Currency.getInstance(DUMMY_ACCOUNT_CURRENCY_CODE));
+-		mAccountsDbAdapter.addAccount(account);
++		mAccountsDbAdapter.addRecord(account);
+         refreshAccountsList();
+ 	}
+ 
+@@ -140,7 +140,7 @@ public void testDisplayAccountsList(){
+             final int NUMBER_OF_ACCOUNTS = 15;
+             for (int i = 0; i < NUMBER_OF_ACCOUNTS; i++) {
+                 Account account = new Account("Acct " + i);
+-                mAccountsDbAdapter.addAccount(account);
++                mAccountsDbAdapter.addRecord(account);
+             }
+ 
+             //there should exist a listview of accounts
+@@ -159,7 +159,7 @@ public void testSearchAccounts(){
+ 
+         Account account = new Account(SEARCH_ACCOUNT_NAME);
+         account.setParentUID(DUMMY_ACCOUNT_UID);
+-        mAccountsDbAdapter.addAccount(account);
++        mAccountsDbAdapter.addRecord(account);
+ 
+         //enter search query
+ //        ActionBarUtils.clickSherlockActionBarItem(mSolo, R.id.menu_search);
+@@ -191,7 +191,7 @@ public void testCreateAccount(){
+ 
+         onView(withId(R.id.menu_save)).perform(click());
+ 
+-		List<Account> accounts = mAccountsDbAdapter.getAllAccounts();
++		List<Account> accounts = mAccountsDbAdapter.getAllRecords();
+         assertThat(accounts).isNotNull();
+         assertThat(accounts).hasSize(2);
+ 		Account newestAccount = accounts.get(0); //because of alphabetical sorting
+@@ -205,7 +205,7 @@ public void testCreateAccount(){
+     public void testChangeParentAccount() {
+         final String accountName = "Euro Account";
+         Account account = new Account(accountName, Currency.getInstance("EUR"));
+-        mAccountsDbAdapter.addAccount(account);
++        mAccountsDbAdapter.addRecord(account);
+ 
+         refreshAccountsList();
+ 
+@@ -220,7 +220,7 @@ public void testChangeParentAccount() {
+ 
+         onView(withId(R.id.menu_save)).perform(click());
+ 
+-        Account editedAccount = mAccountsDbAdapter.getAccount(account.getUID());
++        Account editedAccount = mAccountsDbAdapter.getRecord(account.getUID());
+         String parentUID = editedAccount.getParentUID();
+ 
+         assertThat(parentUID).isNotNull();
+@@ -265,7 +265,7 @@ public void testEditAccount(){
+ 
+         onView(withId(R.id.menu_save)).perform(click());
+ 
+-		List<Account> accounts = mAccountsDbAdapter.getAllAccounts();
++		List<Account> accounts = mAccountsDbAdapter.getAllRecords();
+ 		Account latest = accounts.get(0);  //will be the first due to alphabetical sorting
+ 
+         assertThat(latest.getName()).isEqualTo(editedAccountName);
+@@ -284,15 +284,15 @@ public void editingAccountShouldNotDeleteTransactions(){
+         transaction.addSplit(split);
+         transaction.addSplit(split.createPair(DUMMY_ACCOUNT_UID));
+         account.addTransaction(transaction);
+-        mAccountsDbAdapter.addAccount(account);
++        mAccountsDbAdapter.addRecord(account);
+ 
+-        assertThat(mAccountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount()).isEqualTo(1);
++        assertThat(mAccountsDbAdapter.getRecord(DUMMY_ACCOUNT_UID).getTransactionCount()).isEqualTo(1);
+         assertThat(mSplitsDbAdapter.getSplitsForTransaction(transaction.getUID())).hasSize(2);
+ 
+         onView(withText(R.string.title_edit_account)).perform(click());
+ 
+         onView(withId(R.id.menu_save)).perform(click());
+-        assertThat(mAccountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount()).isEqualTo(1);
++        assertThat(mAccountsDbAdapter.getRecord(DUMMY_ACCOUNT_UID).getTransactionCount()).isEqualTo(1);
+         assertThat(mSplitsDbAdapter.fetchSplitsForAccount(DUMMY_ACCOUNT_UID).getCount()).isEqualTo(1);
+         assertThat(mSplitsDbAdapter.getSplitsForTransaction(transaction.getUID())).hasSize(2);
+ 
+@@ -340,7 +340,7 @@ public void testIntentAccountCreation(){
+ 
+         new AccountCreator().onReceive(mAcccountsActivity, intent);
+ 
+-		Account account = mAccountsDbAdapter.getAccount("intent-account");
++		Account account = mAccountsDbAdapter.getRecord("intent-account");
+ 		assertThat(account).isNotNull();
+         assertThat(account.getName()).isEqualTo("Intent Account");
+         assertThat(account.getUID()).isEqualTo("intent-account");
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 6ec5f7cc..e0464254 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -106,7 +106,7 @@ public void setUp() throws Exception {
+ 		transaction.addSplit(split.createPair(mAccountsDbAdapter.getOrCreateImbalanceAccountUID(Currency.getInstance("USD"))));
+ 		account.addTransaction(transaction);
+ 
+-		mAccountsDbAdapter.addAccount(account);
++		mAccountsDbAdapter.addRecord(account);
+ 
+ 	}
+ 	
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index aca89f17..82e281a5 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -135,8 +135,8 @@ public void setUp() throws Exception {
+         account2.setUID(TRANSFER_ACCOUNT_UID);
+         account2.setCurrency(Currency.getInstance(CURRENCY_CODE));
+ 
+-        long id1 = mAccountsDbAdapter.addAccount(account);
+-        long id2 = mAccountsDbAdapter.addAccount(account2);
++        long id1 = mAccountsDbAdapter.addRecord(account);
++        long id2 = mAccountsDbAdapter.addRecord(account2);
+         assertThat(id1).isGreaterThan(0);
+         assertThat(id2).isGreaterThan(0);
+ 
+@@ -150,7 +150,7 @@ public void setUp() throws Exception {
+         mTransaction.addSplit(split.createPair(TRANSFER_ACCOUNT_UID));
+         account.addTransaction(mTransaction);
+ 
+-        mTransactionsDbAdapter.addTransaction(mTransaction);
++        mTransactionsDbAdapter.addRecord(mTransaction);
+ 
+         Intent intent = new Intent(Intent.ACTION_VIEW);
+         intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, DUMMY_ACCOUNT_UID);
+@@ -292,7 +292,7 @@ public void testAutoBalanceTransactions(){
+ 		setDoubleEntryEnabled(false);
+ 		mTransactionsDbAdapter.deleteAllRecords();
+ 
+-		assertThat(mTransactionsDbAdapter.getTotalTransactionsCount()).isEqualTo(0);
++		assertThat(mTransactionsDbAdapter.getRecordsCount()).isEqualTo(0);
+ 		String imbalanceAcctUID = mAccountsDbAdapter.getImbalanceAccountUID(Currency.getInstance(CURRENCY_CODE));
+ 		assertThat(imbalanceAcctUID).isNull();
+ 
+@@ -307,7 +307,7 @@ public void testAutoBalanceTransactions(){
+ 		//TODO: check that the split drawable is not displayed
+ 		onView(withId(R.id.menu_save)).perform(click());
+ 
+-		assertThat(mTransactionsDbAdapter.getTotalTransactionsCount()).isEqualTo(1);
++		assertThat(mTransactionsDbAdapter.getRecordsCount()).isEqualTo(1);
+ 		Transaction transaction = mTransactionsDbAdapter.getAllTransactions().get(0);
+ 		assertThat(transaction.getSplits()).hasSize(2);
+ 		imbalanceAcctUID = mAccountsDbAdapter.getImbalanceAccountUID(Currency.getInstance(CURRENCY_CODE));
+@@ -412,12 +412,12 @@ private void setDefaultTransactionType(TransactionType type) {
+ 	//FIXME: Improve on this test
+ 	public void childAccountsShouldUseParentTransferAccountSetting(){
+ 		Account transferAccount = new Account("New Transfer Acct");
+-		mAccountsDbAdapter.addAccount(transferAccount);
+-		mAccountsDbAdapter.addAccount(new Account("Higher account"));
++		mAccountsDbAdapter.addRecord(transferAccount);
++		mAccountsDbAdapter.addRecord(new Account("Higher account"));
+ 
+ 		Account childAccount = new Account("Child Account");
+ 		childAccount.setParentUID(DUMMY_ACCOUNT_UID);
+-		mAccountsDbAdapter.addAccount(childAccount);
++		mAccountsDbAdapter.addRecord(childAccount);
+ 		ContentValues contentValues = new ContentValues();
+ 		contentValues.put(DatabaseSchema.AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID, transferAccount.getUID());
+ 		mAccountsDbAdapter.updateRecord(DUMMY_ACCOUNT_UID, contentValues);
+@@ -496,9 +496,9 @@ public void testBulkMoveTransactions(){
+         String targetAccountName = "Target";
+         Account account = new Account(targetAccountName);
+ 		account.setCurrency(Currency.getInstance(Locale.getDefault()));
+-		mAccountsDbAdapter.addAccount(account);
++		mAccountsDbAdapter.addRecord(account);
+ 		
+-		int beforeOriginCount = mAccountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
++		int beforeOriginCount = mAccountsDbAdapter.getRecord(DUMMY_ACCOUNT_UID).getTransactionCount();
+ 		
+ 		validateTransactionListDisplayed();
+ 
+@@ -507,10 +507,10 @@ public void testBulkMoveTransactions(){
+ 
+ 		clickOnView(R.id.btn_save);
+ 
+-		int targetCount = mAccountsDbAdapter.getAccount(account.getUID()).getTransactionCount();
++		int targetCount = mAccountsDbAdapter.getRecord(account.getUID()).getTransactionCount();
+ 		assertThat(targetCount).isEqualTo(1);
+ 		
+-		int afterOriginCount = mAccountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
++		int afterOriginCount = mAccountsDbAdapter.getRecord(DUMMY_ACCOUNT_UID).getTransactionCount();
+ 		assertThat(afterOriginCount).isEqualTo(beforeOriginCount - 1);
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 612efa66..8687727f 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -33,7 +33,9 @@
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.PricesDbAdapter;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -75,6 +77,10 @@
+ 
+     private static ScheduledActionDbAdapter mScheduledActionDbAdapter;
+ 
++    private static CommoditiesDbAdapter mCommoditiesDbAdapter;
++
++    private static PricesDbAdapter mPricesDbAdapter;
++
+     /**
+      * Returns darker version of specified <code>color</code>.
+      * Use for theming the status bar color when setting the color of the actionBar
+@@ -103,10 +109,12 @@ public void onCreate(){
+             Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
+             mDb = mDbHelper.getReadableDatabase();
+         }
+-        mSplitsDbAdapter = new SplitsDbAdapter(mDb);
+-        mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
+-        mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+-        mScheduledActionDbAdapter = new ScheduledActionDbAdapter(mDb);
++        mSplitsDbAdapter            = new SplitsDbAdapter(mDb);
++        mTransactionsDbAdapter      = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
++        mAccountsDbAdapter          = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
++        mScheduledActionDbAdapter   = new ScheduledActionDbAdapter(mDb);
++        mCommoditiesDbAdapter       = new CommoditiesDbAdapter(mDb);
++        mPricesDbAdapter            = new PricesDbAdapter(mDb);
+     }
+ 
+     public static AccountsDbAdapter getAccountsDbAdapter() {
+@@ -125,6 +133,14 @@ public static ScheduledActionDbAdapter getScheduledEventDbAdapter(){
+         return mScheduledActionDbAdapter;
+     }
+ 
++    public static CommoditiesDbAdapter getCommoditiesDbAdapter(){
++        return mCommoditiesDbAdapter;
++    }
++
++    public static PricesDbAdapter getPricesDbAdapter(){
++        return mPricesDbAdapter;
++    }
++
+     /**
+      * Returns the application context
+      * @return Application {@link Context} object
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 5e0a27e8..6e87d7cc 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -54,7 +54,7 @@
+  * @author Yongxin Wang <fefe.wyx@gmail.com>
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  */
+-public class AccountsDbAdapter extends DatabaseAdapter {
++public class AccountsDbAdapter extends DatabaseAdapter<Account> {
+     /**
+      * Separator used for account name hierarchies between parent and child accounts
+      */
+@@ -72,8 +72,6 @@
+ 	 */
+     private final TransactionsDbAdapter mTransactionsAdapter;
+ 
+-//    private static String mImbalanceAccountPrefix = GnuCashApplication.getAppContext().getString(R.string.imbalance_account_name) + "-";
+-
+     /**
+      * Overloaded constructor. Creates an adapter for an already open database
+      * @param db SQliteDatabase instance
+@@ -99,48 +97,24 @@ public static AccountsDbAdapter getInstance(){
+ 	 * @param account {@link Account} to be inserted to database
+ 	 * @return Database row ID of the inserted account
+ 	 */
+-	public long addAccount(Account account){
+-		ContentValues contentValues = getContentValues(account);
+-		contentValues.put(AccountEntry.COLUMN_NAME,         account.getName());
+-		contentValues.put(AccountEntry.COLUMN_TYPE,         account.getAccountType().name());
+-		contentValues.put(AccountEntry.COLUMN_CURRENCY,     account.getCurrency().getCurrencyCode());
+-        contentValues.put(AccountEntry.COLUMN_PLACEHOLDER,  account.isPlaceholderAccount() ? 1 : 0);
+-        contentValues.put(AccountEntry.COLUMN_HIDDEN,       account.isHidden() ? 1 : 0);
+-        if (account.getColorHexCode() != null) {
+-            contentValues.put(AccountEntry.COLUMN_COLOR_CODE, account.getColorHexCode());
+-        } else {
+-            contentValues.putNull(AccountEntry.COLUMN_COLOR_CODE);
+-        }
+-        contentValues.put(AccountEntry.COLUMN_FAVORITE,     account.isFavorite() ? 1 : 0);
+-        contentValues.put(AccountEntry.COLUMN_FULL_NAME,    account.getFullName());
+-        String parentAccountUID = account.getParentUID();
+-        if (parentAccountUID == null && account.getAccountType() != AccountType.ROOT) {
+-            parentAccountUID = getOrCreateGnuCashRootAccountUID();
+-        }
+-        contentValues.put(AccountEntry.COLUMN_PARENT_ACCOUNT_UID, parentAccountUID);
+-
+-        if (account.getDefaultTransferAccountUID() != null) {
+-            contentValues.put(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID, account.getDefaultTransferAccountUID());
+-        } else {
+-            contentValues.putNull(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID);
+-        }
+-
++    @Override
++	public long addRecord(@NonNull Account account){
+         Log.d(LOG_TAG, "Replace account to db");
+-        long rowId =  mDb.replace(AccountEntry.TABLE_NAME, null, contentValues);
++        long rowId =  super.addRecord(account);
+ 
+ 		//now add transactions if there are any
+ 		if (rowId > 0 && account.getAccountType() != AccountType.ROOT){
+             //update the fully qualified account name
+             updateAccount(rowId, AccountEntry.COLUMN_FULL_NAME, getFullyQualifiedAccountName(rowId));
+ 			for (Transaction t : account.getTransactions()) {
+-		        mTransactionsAdapter.addTransaction(t);
++		        mTransactionsAdapter.addRecord(t);
+ 			}
+ 		}
+ 		return rowId;
+ 	}
+ 
+     /**
+-     * Adds some accounts to the database.
++     * Adds some accounts and their transactions to the database in bulk.
+      * If an account already exists in the database with the same unique ID,
+      * then just update that account. This function will NOT try to determine the full name
+      * of the accounts inserted, full names should be generated prior to the insert.
+@@ -148,60 +122,93 @@ public long addAccount(Account account){
+      * @param accountList {@link Account} to be inserted to database
+      * @return number of rows inserted
+      */
+-    public long bulkAddAccounts(List<Account> accountList){
++    @Override
++    public long bulkAddRecords(@NonNull List<Account> accountList){
++        long nRow = super.bulkAddRecords(accountList);
++
+         List<Transaction> transactionList = new ArrayList<>(accountList.size()*2);
+-        long nRow = 0;
+-        try {
+-            mDb.beginTransaction();
+-            SQLiteStatement replaceStatement = mDb.compileStatement("REPLACE INTO " + AccountEntry.TABLE_NAME + " ( "
+-                    + AccountEntry.COLUMN_UID 	            + " , "
+-                    + AccountEntry.COLUMN_NAME 	            + " , "
+-                    + AccountEntry.COLUMN_TYPE              + " , "
+-                    + AccountEntry.COLUMN_CURRENCY          + " , "
+-                    + AccountEntry.COLUMN_COLOR_CODE        + " , "
+-                    + AccountEntry.COLUMN_FAVORITE 		    + " , "
+-                    + AccountEntry.COLUMN_FULL_NAME 	    + " , "
+-                    + AccountEntry.COLUMN_PLACEHOLDER       + " , "
+-                    + AccountEntry.COLUMN_CREATED_AT        + " , "
+-                    + AccountEntry.COLUMN_HIDDEN            + " , "
+-                    + AccountEntry.COLUMN_PARENT_ACCOUNT_UID    + " , "
+-                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
+-            for (Account account:accountList) {
+-                replaceStatement.clearBindings();
+-                replaceStatement.bindString(1, account.getUID());
+-                replaceStatement.bindString(2, account.getName());
+-                replaceStatement.bindString(3, account.getAccountType().name());
+-                replaceStatement.bindString(4, account.getCurrency().getCurrencyCode());
+-                if (account.getColorHexCode() != null) {
+-                    replaceStatement.bindString(5, account.getColorHexCode());
+-                }
+-                replaceStatement.bindLong(6,    account.isFavorite() ? 1 : 0);
+-                replaceStatement.bindString(7,  account.getFullName());
+-                replaceStatement.bindLong(8,    account.isPlaceholderAccount() ? 1 : 0);
+-                replaceStatement.bindString(9,  account.getCreatedTimestamp().toString());
+-                replaceStatement.bindLong(10, account.isHidden() ? 1 : 0);
+-                if (account.getParentUID() != null) {
+-                    replaceStatement.bindString(11, account.getParentUID());
+-                }
+-                if (account.getDefaultTransferAccountUID() != null) {
+-                    replaceStatement.bindString(12, account.getDefaultTransferAccountUID());
+-                }
+-                //Log.d(LOG_TAG, "Replacing account in db");
+-                replaceStatement.execute();
+-                nRow ++;
+-                transactionList.addAll(account.getTransactions());
+-            }
+-            mDb.setTransactionSuccessful();
+-        }
+-        finally {
+-            mDb.endTransaction();
++        for (Account account : accountList) {
++            transactionList.addAll(account.getTransactions());
+         }
+ 
+         if (nRow > 0 && !transactionList.isEmpty()){
+-            mTransactionsAdapter.bulkAddTransactions(transactionList);
++            mTransactionsAdapter.bulkAddRecords(transactionList);
+         }
+         return nRow;
+     }
++
++    @Override
++    protected SQLiteStatement compileReplaceStatement(Account account) {
++        if (mReplaceStatement == null){
++            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + AccountEntry.TABLE_NAME + " ( "
++                    + AccountEntry.COLUMN_UID + " , "
++                    + AccountEntry.COLUMN_NAME + " , "
++                    + AccountEntry.COLUMN_TYPE + " , "
++                    + AccountEntry.COLUMN_CURRENCY + " , "
++                    + AccountEntry.COLUMN_COLOR_CODE + " , "
++                    + AccountEntry.COLUMN_FAVORITE + " , "
++                    + AccountEntry.COLUMN_FULL_NAME + " , "
++                    + AccountEntry.COLUMN_PLACEHOLDER + " , "
++                    + AccountEntry.COLUMN_CREATED_AT + " , "
++                    + AccountEntry.COLUMN_HIDDEN + " , "
++                    + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " , "
++                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
++        }
++
++        mReplaceStatement.clearBindings();
++        mReplaceStatement.bindString(1, account.getUID());
++        mReplaceStatement.bindString(2, account.getName());
++        mReplaceStatement.bindString(3, account.getAccountType().name());
++        mReplaceStatement.bindString(4, account.getCurrency().getCurrencyCode());
++        if (account.getColorHexCode() != null) {
++            mReplaceStatement.bindString(5, account.getColorHexCode());
++        }
++        mReplaceStatement.bindLong(6, account.isFavorite() ? 1 : 0);
++        mReplaceStatement.bindString(7, account.getFullName());
++        mReplaceStatement.bindLong(8, account.isPlaceholderAccount() ? 1 : 0);
++        mReplaceStatement.bindString(9, account.getCreatedTimestamp().toString());
++        mReplaceStatement.bindLong(10, account.isHidden() ? 1 : 0);
++        if (account.getParentUID() != null) {
++            mReplaceStatement.bindString(11, account.getParentUID());
++        }
++        if (account.getDefaultTransferAccountUID() != null) {
++            mReplaceStatement.bindString(12, account.getDefaultTransferAccountUID());
++        }
++
++        return mReplaceStatement;
++    }
++
++    @Override
++    protected ContentValues buildContentValues(@NonNull Account account) {
++        ContentValues contentValues = new ContentValues();
++        populateBaseModelAttributes(contentValues, account);
++        contentValues.put(AccountEntry.COLUMN_NAME,         account.getName());
++        contentValues.put(AccountEntry.COLUMN_TYPE,         account.getAccountType().name());
++        contentValues.put(AccountEntry.COLUMN_CURRENCY,     account.getCurrency().getCurrencyCode());
++        contentValues.put(AccountEntry.COLUMN_PLACEHOLDER,  account.isPlaceholderAccount() ? 1 : 0);
++        contentValues.put(AccountEntry.COLUMN_HIDDEN,       account.isHidden() ? 1 : 0);
++        if (account.getColorHexCode() != null) {
++            contentValues.put(AccountEntry.COLUMN_COLOR_CODE, account.getColorHexCode());
++        } else {
++            contentValues.putNull(AccountEntry.COLUMN_COLOR_CODE);
++        }
++        contentValues.put(AccountEntry.COLUMN_FAVORITE,     account.isFavorite() ? 1 : 0);
++        contentValues.put(AccountEntry.COLUMN_FULL_NAME,    account.getFullName());
++        String parentAccountUID = account.getParentUID();
++        if (parentAccountUID == null && account.getAccountType() != AccountType.ROOT) {
++            parentAccountUID = getOrCreateGnuCashRootAccountUID();
++        }
++        contentValues.put(AccountEntry.COLUMN_PARENT_ACCOUNT_UID, parentAccountUID);
++
++        if (account.getDefaultTransferAccountUID() != null) {
++            contentValues.put(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID, account.getDefaultTransferAccountUID());
++        } else {
++            contentValues.putNull(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID);
++        }
++
++        return contentValues;
++    }
++
+     /**
+      * Marks all transactions for a given account as exported
+      * @param accountUID Unique ID of the record to be marked as exported
+@@ -223,7 +230,7 @@ public int markAsExported(String accountUID){
+                         AccountEntry.COLUMN_UID + " WHERE " + AccountEntry.TABLE_NAME + "." +
+                         AccountEntry.COLUMN_UID + " = ? "
+                         + " ) ",
+-                new String[] {accountUID}
++                new String[]{accountUID}
+         );
+     }
+ 
+@@ -371,7 +378,8 @@ public boolean recursiveDeleteAccount(long accountId){
+ 	 * @param c Cursor pointing to account record in database
+ 	 * @return {@link Account} object constructed from database record
+ 	 */
+-    public Account buildAccountInstance(Cursor c){
++    @Override
++    public Account buildModelInstance(@NonNull final Cursor c){
+         Account account = buildSimpleAccountInstance(c);
+         account.setTransactions(mTransactionsAdapter.getAllTransactionsForAccount(account.getUID()));
+ 
+@@ -382,14 +390,14 @@ public Account buildAccountInstance(Cursor c){
+      * Builds an account instance with the provided cursor and loads its corresponding transactions.
+      * <p>The method will not move the cursor position, so the cursor should already be pointing
+      * to the account record in the database<br/>
+-     * <b>Note</b> Unlike {@link  #buildAccountInstance(android.database.Cursor)} this method will not load transactions</p>
++     * <b>Note</b> Unlike {@link  #buildModelInstance(android.database.Cursor)} this method will not load transactions</p>
+      *
+      * @param c Cursor pointing to account record in database
+      * @return {@link Account} object constructed from database record
+      */
+     private Account buildSimpleAccountInstance(Cursor c) {
+         Account account = new Account(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_NAME)));
+-        populateModel(c, account);
++        populateBaseModelAttributes(c, account);
+ 
+         account.setParentUID(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_PARENT_ACCOUNT_UID)));
+         account.setAccountType(AccountType.valueOf(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_TYPE))));
+@@ -412,7 +420,7 @@ private Account buildSimpleAccountInstance(Cursor c) {
+ 	 */
+     public String getParentAccountUID(@NonNull String uid){
+ 		Cursor cursor = mDb.query(AccountEntry.TABLE_NAME,
+-				new String[] {AccountEntry.COLUMN_PARENT_ACCOUNT_UID},
++                new String[]{AccountEntry.COLUMN_PARENT_ACCOUNT_UID},
+                 AccountEntry.COLUMN_UID + " = ?",
+                 new String[]{uid},
+                 null, null, null, null);
+@@ -438,35 +446,6 @@ public String getParentAccountUID(@NonNull String uid){
+     public String getParentAccountUID(long id){
+         return getParentAccountUID(getUID(id));
+     }
+-
+-	/**
+-	 * Retrieves an account object from a database with database ID <code>rowId</code>
+-	 * @param rowId Identifier of the account record to be retrieved
+-	 * @return {@link Account} object corresponding to database record
+-	 */
+-    public Account getAccount(long rowId){
+-		Log.v(LOG_TAG, "Fetching account with id " + rowId);
+-		Cursor c =	fetchRecord(rowId);
+-		try {
+-            if (c.moveToFirst()) {
+-                return buildAccountInstance(c);
+-            } else {
+-                throw new IllegalArgumentException(String.format("rowId %d does not exist", rowId));
+-            }
+-        } finally {
+-            c.close();
+-        }
+-	}
+-		
+-	/**
+-	 * Returns the {@link Account} object populated with data from the database
+-	 * for the record with UID <code>uid</code>
+-	 * @param uid Unique ID of the account to be retrieved
+-	 * @return {@link Account} object for unique ID <code>uid</code>
+-	 */
+-    public Account getAccount(String uid){
+-		return getAccount(getID(uid));
+-	}	
+ 	
+     /**
+      * Returns the color code for the account in format #rrggbb
+@@ -516,23 +495,6 @@ public String getName(long accountID) {
+             c.close();
+         }
+ 	}
+-	
+-	/**
+-	 * Returns a list of all account objects in the system
+-	 * @return List of {@link Account}s in the database
+-	 */
+-    public List<Account> getAllAccounts(){
+-		LinkedList<Account> accounts = new LinkedList<>();
+-		Cursor c = fetchAllRecords();
+-        try {
+-            while (c.moveToNext()) {
+-                accounts.add(buildAccountInstance(c));
+-            }
+-        } finally {
+-            c.close();
+-        }
+-		return accounts;
+-	}
+ 
+     /**
+      * Returns a list of all account entries in the system (includes root account)
+@@ -594,7 +556,7 @@ public String getName(long accountID) {
+         );
+         try {
+             while (cursor.moveToNext()) {
+-                accountsList.add(buildAccountInstance(cursor));
++                accountsList.add(buildModelInstance(cursor));
+             }
+         }
+         finally {
+@@ -617,7 +579,7 @@ public String getOrCreateImbalanceAccountUID(Currency currency){
+             account.setAccountType(AccountType.BANK);
+             account.setParentUID(getOrCreateGnuCashRootAccountUID());
+             account.setHidden(!GnuCashApplication.isDoubleEntryEnabled());
+-            addAccount(account);
++            addRecord(account);
+             uid = account.getUID();
+         }
+         return uid;
+@@ -666,7 +628,7 @@ public String createAccountHierarchy(String fullName, AccountType accountType) {
+             parentName += ACCOUNT_NAME_SEPARATOR;
+         }
+         if (accountsList.size() > 0) {
+-            bulkAddAccounts(accountsList);
++            bulkAddRecords(accountsList);
+         }
+         // if fullName is not empty, loop will be entered and then uid will never be null
+         //noinspection ConstantConditions
+@@ -956,7 +918,7 @@ public String getOrCreateGnuCashRootAccountUID() {
+         rootAccount.setAccountType(AccountType.ROOT);
+         rootAccount.setFullName(ROOT_ACCOUNT_FULL_NAME);
+         rootAccount.setHidden(true);
+-        addAccount(rootAccount);
++        addRecord(rootAccount);
+         return rootAccount.getUID();
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+index 06dca519..9d1fbec9 100644
+--- a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+@@ -1,12 +1,20 @@
+ package org.gnucash.android.db;
+ 
++import android.content.ContentValues;
++import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
++import android.database.sqlite.SQLiteStatement;
++import android.support.annotation.NonNull;
++
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.model.Commodity;
++
+ import static org.gnucash.android.db.DatabaseSchema.CommodityEntry;
+ 
+ /**
+  * Database adapter for {@link org.gnucash.android.model.Commodity}
+  */
+-public class CommoditiesDbAdapter extends DatabaseAdapter {
++public class CommoditiesDbAdapter extends DatabaseAdapter<Commodity> {
+     /**
+      * Opens the database adapter with an existing database
+      *
+@@ -16,7 +24,70 @@ public CommoditiesDbAdapter(SQLiteDatabase db) {
+         super(db, CommodityEntry.TABLE_NAME);
+     }
+ 
++    public static CommoditiesDbAdapter getInstance(){
++        return GnuCashApplication.getCommoditiesDbAdapter();
++    }
++
++    @Override
++    protected ContentValues buildContentValues(@NonNull Commodity commodity) {
++        ContentValues contentValues = new ContentValues();
++        populateBaseModelAttributes(contentValues, commodity);
++        contentValues.put(CommodityEntry.COLUMN_NAMESPACE, commodity.getNamespace().name());
++        contentValues.put(CommodityEntry.COLUMN_MNEMONIC,   commodity.getMnemonic());
++        contentValues.put(CommodityEntry.COLUMN_FULLNAME,   commodity.getFullname());
++        contentValues.put(CommodityEntry.COLUMN_LOCAL_SYMBOL, commodity.getLocalSymbol());
++        contentValues.put(CommodityEntry.COLUMN_CUSIP,      commodity.getCusip());
++        contentValues.put(CommodityEntry.COLUMN_FRACTION,   commodity.getFraction());
++        contentValues.put(CommodityEntry.COLUMN_QUOTE_FLAG, commodity.getQuoteFlag());
++
++        return contentValues;
++    }
++
++    @Override
++    protected SQLiteStatement compileReplaceStatement(Commodity commodity) {
++        if (mReplaceStatement == null) {
++            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + CommodityEntry.TABLE_NAME + " ( "
++                    + CommodityEntry.COLUMN_UID + " , "
++                    + CommodityEntry.COLUMN_FULLNAME + " , "
++                    + CommodityEntry.COLUMN_NAMESPACE + " , "
++                    + CommodityEntry.COLUMN_MNEMONIC + " , "
++                    + CommodityEntry.COLUMN_LOCAL_SYMBOL + " , "
++                    + CommodityEntry.COLUMN_CUSIP + " , "
++                    + CommodityEntry.COLUMN_FRACTION + " , "
++                    + CommodityEntry.COLUMN_QUOTE_FLAG + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? ) ");
++        }
++
++        mReplaceStatement.clearBindings();
++        mReplaceStatement.bindString(1, commodity.getUID());
++        mReplaceStatement.bindString(2, commodity.getFullname());
++        mReplaceStatement.bindString(3, commodity.getNamespace().name());
++        mReplaceStatement.bindString(4, commodity.getMnemonic());
++        mReplaceStatement.bindString(5, commodity.getLocalSymbol());
++        mReplaceStatement.bindString(6, commodity.getCusip());
++        mReplaceStatement.bindLong(7, commodity.getFraction());
++        mReplaceStatement.bindLong(8,   commodity.getQuoteFlag());
++
++        return mReplaceStatement;
++    }
++
++    @Override
++    public Commodity buildModelInstance(@NonNull final Cursor cursor) {
++        String fullname = cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_FULLNAME));
++        String mnemonic = cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_MNEMONIC));
++        String namespace = cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_NAMESPACE));
++        String cusip = cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_CUSIP));
++        String localSymbol = cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_LOCAL_SYMBOL));
+ 
++        int fraction = cursor.getInt(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_FRACTION));
++        int quoteFlag = cursor.getInt(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_QUOTE_FLAG));
+ 
++        Commodity commodity = new Commodity(fullname, mnemonic, fraction);
++        commodity.setNamespace(Commodity.Namespace.valueOf(namespace));
++        commodity.setCusip(cusip);
++        commodity.setQuoteFlag(quoteFlag);
++        commodity.setLocalSymbol(localSymbol);
++        populateBaseModelAttributes(cursor, commodity);
+ 
++        return commodity;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 5fdd2558..16cb7a70 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -31,6 +31,8 @@
+ import org.gnucash.android.model.BaseModel;
+ 
+ import java.sql.Timestamp;
++import java.util.ArrayList;
++import java.util.List;
+ 
+ /**
+  * Adapter to be used for creating and opening the database for read/write operations.
+@@ -39,7 +41,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  *
+  */
+-public abstract class DatabaseAdapter {
++public abstract class DatabaseAdapter<Model extends BaseModel> {
+ 	/**
+ 	 * Tag for logging
+ 	 */
+@@ -52,6 +54,8 @@
+ 
+     protected final String mTableName;
+ 
++    protected SQLiteStatement mReplaceStatement;
++
+     /**
+      * Opens the database adapter with an existing database
+      * @param db SQLiteDatabase object
+@@ -169,12 +173,128 @@ public boolean isOpen(){
+     }
+ 
+     /**
+-     * Returns a ContentValues object which has the data of the base model
++     * Adds a record to the database with the data contained in the model.
++     * <p>This method uses the SQL REPLACE instructions to replace any record with a matching GUID.
++     * So beware of any foreign keys with cascade dependencies which might need to be re-added</p>
++     * @param model
++     * @return
++     */
++    public long addRecord(@NonNull final Model model){
++        Log.d(LOG_TAG, String.format("Adding %s record to database: ", model.getClass().getName()));
++        return mDb.replace(mTableName, null, buildContentValues(model));
++    }
++
++    /**
++     * Add multiple records to the database at once
++     * <p>Either all or none of the records will be inserted/updated into the database.</p>
++     * @param modelList List of model records
++     * @return Number of rows inserted
++     */
++    public long bulkAddRecords(@NonNull List<Model> modelList) {
++        Log.i(LOG_TAG, String.format("Bulk adding %d %s records to the database", modelList.size(),
++                modelList.get(0).getClass().getName()));
++        long nRow = 0;
++        try {
++            mDb.beginTransaction();
++
++            for (Model split : modelList) {
++                compileReplaceStatement(split).execute();
++                nRow++;
++            }
++
++            mDb.setTransactionSuccessful();
++        }
++        finally {
++            mDb.endTransaction();
++        }
++
++        return nRow;
++    }
++
++    /**
++     * Builds the ContentValues object used for modifying the records in the database.
++     * <p>Classes implementing this method should call {@link #populateBaseModelAttributes(ContentValues, BaseModel)} (BaseModel)} in
++     * order to populate the base model fields</p>
++     * @return {@link ContentValues} filled with the model values
++     * @see #populateBaseModelAttributes(ContentValues, BaseModel)
++     */
++    protected abstract ContentValues buildContentValues(@NonNull final Model model);
++
++    /**
++     * Builds an instance of the model from the database record entry
++     * <p>This method should not modify the cursor in any way</p>
++     * @param cursor Cursor pointing to the record
++     * @return
++     */
++    protected abstract Model buildModelInstance(@NonNull final Cursor cursor);
++
++    /**
++     * Generates an {@link SQLiteStatement} with values from the {@code model}.
++     * This statement can be executed to replace a record in the database.
++     * <p>If the {@link #mReplaceStatement} is null, subclasses should create a new statement and return.<br/>
++     * If it is not null, the previous bindings will be cleared and replaced with those from the model</p>
++     * @param model Model whose attributes will be used as bindings
++     * @return SQLiteStatement for replacing a record in the database
++     */
++    protected abstract SQLiteStatement compileReplaceStatement(Model model);
++
++    /**
++     * Returns a model instance populated with data from the record with GUID {@code uid}
++     * <p>Sub-classes which require special handling should override this method</p>
++     * @param uid GUID of the record
++     * @return BaseModel instance of the record
++     * @throws IllegalArgumentException if the record UID does not exist in thd database
++     */
++    public Model getRecord(@NonNull String uid){
++        Log.v(LOG_TAG, "Fetching record with GUID " + uid);
++
++        Cursor cursor = fetchRecord(uid);
++        try {
++            if (cursor.moveToFirst()) {
++                return buildModelInstance(cursor);
++            }
++            else {
++                throw new IllegalArgumentException("split " + uid + " does not exist");
++            }
++        } finally {
++            cursor.close();
++        }
++    }
++
++    /**
++     * Overload of {@link #getRecord(String)}
++     * Simply converts the record ID to a GUID and calls {@link #getRecord(String)}
++     * @param id Database record ID
++     * @return Subclass of {@link BaseModel} containing record info
++     */
++    public Model getRecord(long id){
++        return getRecord(getUID(id));
++    }
++
++    /**
++     * Returns all the records in the database
++     * @return List of records in the database
++     */
++    public List<Model> getAllRecords(){
++        List<Model> modelRecords = new ArrayList<>();
++        Cursor c = fetchAllRecords();
++        try {
++            while (c.moveToNext()) {
++                modelRecords.add(buildModelInstance(c));
++            }
++        } finally {
++            c.close();
++        }
++        return modelRecords;
++    }
++
++    /**
++     * Adds the attributes of the base model to the ContentValues object provided
++     * @param contentValues Content values to which to add attributes
+      * @param model {@link org.gnucash.android.model.BaseModel} from which to extract values
+      * @return {@link android.content.ContentValues} with the data to be inserted into the db
+      */
+-    protected ContentValues getContentValues(BaseModel model){
+-        ContentValues contentValues = new ContentValues();
++    protected ContentValues populateBaseModelAttributes(@NonNull ContentValues contentValues, @NonNull Model model){
+         contentValues.put(CommonColumns.COLUMN_UID, model.getUID());
+         contentValues.put(CommonColumns.COLUMN_CREATED_AT, model.getCreatedTimestamp().toString());
+         //there is a trigger in the database for updated the modified_at column
+@@ -190,7 +310,7 @@ protected ContentValues getContentValues(BaseModel model){
+      * @param cursor Cursor pointing to database record
+      * @param model Model instance to be initialized
+      */
+-    protected static void populateModel(Cursor cursor, BaseModel model){
++    protected void populateBaseModelAttributes(Cursor cursor, BaseModel model){ //// FIXME: use template type
+         String uid = cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_UID));
+         String created = cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_CREATED_AT));
+         String modified= cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_MODIFIED_AT));
+@@ -271,10 +391,9 @@ public long getID(@NonNull String uid){
+         long result = -1;
+         try{
+             if (cursor.moveToFirst()) {
+-                Log.d(LOG_TAG, "Transaction already exists. Returning existing id");
+                 result = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.CommonColumns._ID));
+             } else {
+-                throw new IllegalArgumentException("Account UID " + uid + " does not exist in the db");
++                throw new IllegalArgumentException("GUID " + uid + " does not exist in the db");
+             }
+         } finally {
+             cursor.close();
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index c0a0d90d..4d53de67 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -150,6 +150,7 @@
+             + CommodityEntry.COLUMN_NAMESPACE   + " varchar(255) not null default " + Commodity.Namespace.ISO4217.name() + ", "
+             + CommodityEntry.COLUMN_FULLNAME    + " varchar(255) not null, "
+             + CommodityEntry.COLUMN_MNEMONIC    + " varchar(255) not null, "
++            + CommodityEntry.COLUMN_LOCAL_SYMBOL+ " varchar(255) not null default '', "
+             + CommodityEntry.COLUMN_CUSIP       + " varchar(255), "
+             + CommodityEntry.COLUMN_FRACTION    + " integer not null, "
+             + CommodityEntry.COLUMN_QUOTE_FLAG  + " integer not null, "
+@@ -172,8 +173,8 @@
+             + PriceEntry.COLUMN_VALUE_DENOM     + " integer not null, "
+             + PriceEntry.COLUMN_CREATED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + PriceEntry.COLUMN_MODIFIED_AT     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+-            + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_COMMODITY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + "), "
+-            + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_CURRENCY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") "
++            + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_COMMODITY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") ON DELETE CASCADE, "
++            + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_CURRENCY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") ON DELETE CASCADE "
+             + ");" + createUpdatedAtTrigger(PriceEntry.TABLE_NAME);
+ 
+     /**
+@@ -322,6 +323,7 @@ private int upgradeDbToVersion9(SQLiteDatabase db){
+                     + CommodityEntry.COLUMN_NAMESPACE   + " varchar(255) not null default " + Commodity.Namespace.ISO4217.name() + ", "
+                     + CommodityEntry.COLUMN_FULLNAME    + " varchar(255) not null, "
+                     + CommodityEntry.COLUMN_MNEMONIC    + " varchar(255) not null, "
++                    + CommodityEntry.COLUMN_LOCAL_SYMBOL+ " varchar(255) not null default '', "
+                     + CommodityEntry.COLUMN_CUSIP       + " varchar(255), "
+                     + CommodityEntry.COLUMN_FRACTION    + " integer not null, "
+                     + CommodityEntry.COLUMN_QUOTE_FLAG  + " integer not null, "
+@@ -349,8 +351,8 @@ private int upgradeDbToVersion9(SQLiteDatabase db){
+                     + PriceEntry.COLUMN_VALUE_DENOM     + " integer not null, "
+                     + PriceEntry.COLUMN_CREATED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                     + PriceEntry.COLUMN_MODIFIED_AT     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+-                    + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_COMMODITY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + "), "
+-                    + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_CURRENCY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") "
++                    + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_COMMODITY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") ON DELETE CASCADE, "
++                    + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_CURRENCY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") ON DELETE CASCADE "
+                     + ");" + createUpdatedAtTrigger(PriceEntry.TABLE_NAME);
+             db.execSQL(createPricesSql);
+             //TODO: add migrations here
+@@ -621,7 +623,7 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+                 contentValues.put(ScheduledActionEntry.COLUMN_ENABLED, 1);
+                 contentValues.put(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY, 0);
+                 contentValues.put(ScheduledActionEntry.COLUMN_EXECUTION_COUNT, 0);
+-                //scheduledActionDbAdapter.addScheduledAction(scheduledAction);
++                //scheduledActionDbAdapter.addRecord(scheduledAction);
+                 db.insert(ScheduledActionEntry.TABLE_NAME, null, contentValues);
+ 
+                 //build intent for recurring transactions in the database
+@@ -641,7 +643,7 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+             Log.i(LOG_TAG, "Auto-balancing existing transaction splits");
+ //            cursor = transactionsDbAdapter.fetchAllRecords();
+ //            while (cursor.moveToNext()){
+-//                Transaction transaction = transactionsDbAdapter.buildTransactionInstance(cursor);
++//                Transaction transaction = transactionsDbAdapter.buildModelInstance(cursor);
+ //                if (transaction.isTemplate())
+ //                    continue;
+ //                Money imbalance = transaction.getImbalance();
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 12848b2d..535a7c62 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -137,6 +137,7 @@ private DatabaseSchema(){}
+          */
+         public static final String COLUMN_MNEMONIC      = "mnemonic";
+ 
++        public static final String COLUMN_LOCAL_SYMBOL  = "local_symbol";
+ 
+         /**
+          * The fraction is the number of sub-units that the basic commodity can be divided into
+diff --git a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+index f7105ff7..3b6526cd 100644
+--- a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+@@ -1,18 +1,102 @@
+ package org.gnucash.android.db;
+ 
++import android.content.ContentValues;
++import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
++import android.database.sqlite.SQLiteStatement;
++import android.support.annotation.NonNull;
++
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.model.Price;
++
++import java.sql.Timestamp;
++
+ import static org.gnucash.android.db.DatabaseSchema.PriceEntry;
+ 
+ /**
+  * Database adapter for prices
+  */
+-public class PricesDbAdapter extends DatabaseAdapter {
++public class PricesDbAdapter extends DatabaseAdapter<Price> {
+     /**
+      * Opens the database adapter with an existing database
+-     *
+-     * @param db        SQLiteDatabase object
++     * @param db SQLiteDatabase object
+      */
+     public PricesDbAdapter(SQLiteDatabase db) {
+         super(db, PriceEntry.TABLE_NAME);
+     }
++
++    public static PricesDbAdapter getInstance(){
++        return GnuCashApplication.getPricesDbAdapter();
++    }
++
++    @Override
++    protected ContentValues buildContentValues(@NonNull Price price) {
++        ContentValues contentValues = new ContentValues();
++        populateBaseModelAttributes(contentValues, price);
++
++        contentValues.put(PriceEntry.COLUMN_COMMODITY_UID,  price.getCommodityUID());
++        contentValues.put(PriceEntry.COLUMN_CURRENCY_UID,   price.getCurrencyUID());
++        contentValues.put(PriceEntry.COLUMN_DATE,           price.getDate().toString());
++        contentValues.put(PriceEntry.COLUMN_SOURCE,         price.getSource());
++        contentValues.put(PriceEntry.COLUMN_TYPE,           price.getType());
++        contentValues.put(PriceEntry.COLUMN_VALUE_NUM,      price.getValueNum());
++        contentValues.put(PriceEntry.COLUMN_VALUE_DENOM,    price.getValueDenom());
++
++        return contentValues;
++    }
++
++    @Override
++    protected SQLiteStatement compileReplaceStatement(Price price) {
++        if (mReplaceStatement == null) {
++            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + PriceEntry.TABLE_NAME + " ( "
++                    + PriceEntry.COLUMN_UID + " , "
++                    + PriceEntry.COLUMN_COMMODITY_UID + " , "
++                    + PriceEntry.COLUMN_CURRENCY_UID + " , "
++                    + PriceEntry.COLUMN_DATE + " , "
++                    + PriceEntry.COLUMN_SOURCE + " , "
++                    + PriceEntry.COLUMN_TYPE + " , "
++                    + PriceEntry.COLUMN_VALUE_NUM + " , "
++                    + PriceEntry.COLUMN_VALUE_DENOM + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? ) ");
++        }
++
++        mReplaceStatement.clearBindings();
++        mReplaceStatement.bindString(1, price.getUID());
++        mReplaceStatement.bindString(2, price.getCommodityUID());
++        mReplaceStatement.bindString(3, price.getCurrencyUID());
++        mReplaceStatement.bindString(4, price.getDate().toString());
++        if (price.getSource() == null)
++            mReplaceStatement.bindNull(5);
++        else
++            mReplaceStatement.bindString(5, price.getSource());
++
++        if (price.getType() == null)
++            mReplaceStatement.bindNull(6);
++        else
++            mReplaceStatement.bindString(6, price.getType());
++        mReplaceStatement.bindLong(7,   price.getValueNum());
++        mReplaceStatement.bindLong(8,   price.getValueDenom());
++
++        return mReplaceStatement;
++    }
++
++    @Override
++    public Price buildModelInstance(@NonNull final Cursor cursor) {
++        String commodityUID = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_COMMODITY_UID));
++        String currencyUID  = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_CURRENCY_UID));
++        String dateString   = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_DATE));
++        String source       = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_SOURCE));
++        String type         = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_TYPE));
++        String valueNum     = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_NUM));
++        String valueDenom   = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_DENOM));
++
++        Price price = new Price(commodityUID, currencyUID);
++        price.setDate(Timestamp.valueOf(dateString));
++        price.setSource(source);
++        price.setType(type);
++        price.setValueNum(Integer.parseInt(valueNum));
++        price.setValueDenom(Integer.parseInt(valueDenom));
++
++        populateBaseModelAttributes(cursor, price);
++        return price;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index 3cb26df0..2d4333f8 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -35,7 +35,7 @@
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class ScheduledActionDbAdapter extends DatabaseAdapter {
++public class ScheduledActionDbAdapter extends DatabaseAdapter<ScheduledAction> {
+ 
+     public ScheduledActionDbAdapter(SQLiteDatabase db){
+         super(db, ScheduledActionEntry.TABLE_NAME);
+@@ -50,26 +50,23 @@ public static ScheduledActionDbAdapter getInstance(){
+         return GnuCashApplication.getScheduledEventDbAdapter();
+     }
+ 
+-    /**
+-     * Adds a scheduled event to the database or replaces the existing entry if one with the same GUID exists
+-     * @param scheduledAction {@link ScheduledAction} to be added
+-     * @return Database row ID of the newly created/replaced instance
+-     */
+-    public long addScheduledAction(ScheduledAction scheduledAction){
+-        ContentValues contentValues = getContentValues(scheduledAction);
++
++    @Override
++    protected ContentValues buildContentValues(@NonNull ScheduledAction scheduledAction) {
++        ContentValues contentValues = new ContentValues();
++        populateBaseModelAttributes(contentValues, scheduledAction);
+         contentValues.put(ScheduledActionEntry.COLUMN_ACTION_UID, scheduledAction.getActionUID());
+         contentValues.put(ScheduledActionEntry.COLUMN_PERIOD,    scheduledAction.getPeriod());
+         contentValues.put(ScheduledActionEntry.COLUMN_START_TIME, scheduledAction.getStartTime());
+         contentValues.put(ScheduledActionEntry.COLUMN_END_TIME,  scheduledAction.getEndTime());
+         contentValues.put(ScheduledActionEntry.COLUMN_LAST_RUN,  scheduledAction.getLastRun());
+-        contentValues.put(ScheduledActionEntry.COLUMN_TYPE,      scheduledAction.getActionType().name());
++        contentValues.put(ScheduledActionEntry.COLUMN_TYPE, scheduledAction.getActionType().name());
+         contentValues.put(ScheduledActionEntry.COLUMN_TAG,       scheduledAction.getTag());
+         contentValues.put(ScheduledActionEntry.COLUMN_ENABLED,   scheduledAction.isEnabled() ? "1":"0");
+         contentValues.put(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY, scheduledAction.getTotalFrequency());
+         contentValues.put(ScheduledActionEntry.COLUMN_EXECUTION_COUNT, scheduledAction.getExecutionCount());
+ 
+-        Log.d(LOG_TAG, "Replace scheduled event in the db");
+-        return mDb.replace(ScheduledActionEntry.TABLE_NAME, null, contentValues);
++        return contentValues;
+     }
+ 
+     /**
+@@ -82,7 +79,8 @@ public long addScheduledAction(ScheduledAction scheduledAction){
+      * @return Database record ID of the edited scheduled action
+      */
+     public long updateRecurrenceAttributes(ScheduledAction scheduledAction){
+-        ContentValues contentValues = getContentValues(scheduledAction);
++        ContentValues contentValues = new ContentValues();
++        populateBaseModelAttributes(contentValues, scheduledAction);
+         contentValues.put(ScheduledActionEntry.COLUMN_PERIOD,    scheduledAction.getPeriod());
+         contentValues.put(ScheduledActionEntry.COLUMN_START_TIME, scheduledAction.getStartTime());
+         contentValues.put(ScheduledActionEntry.COLUMN_END_TIME,  scheduledAction.getEndTime());
+@@ -95,17 +93,11 @@ public long updateRecurrenceAttributes(ScheduledAction scheduledAction){
+         return mDb.update(ScheduledActionEntry.TABLE_NAME, contentValues, where, whereArgs);
+     }
+ 
+-    /**
+-     * Adds a multiple scheduled actions to the database in one transaction.
+-     * @param scheduledActionList List of ScheduledActions
+-     * @return Returns the number of rows inserted
+-     */
+-    public int bulkAddScheduledActions(List<ScheduledAction> scheduledActionList){
+-        Log.d(LOG_TAG, "Bulk adding scheduled actions to the database");
+-        int nRow = 0;
+-        try {
+-            mDb.beginTransaction();
+-            SQLiteStatement replaceStatement = mDb.compileStatement("REPLACE INTO " + ScheduledActionEntry.TABLE_NAME + " ( "
++
++    @Override
++    protected SQLiteStatement compileReplaceStatement(ScheduledAction schedxAction) {
++        if (mReplaceStatement == null) {
++            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + ScheduledActionEntry.TABLE_NAME + " ( "
+                     + ScheduledActionEntry.COLUMN_UID 	            + " , "
+                     + ScheduledActionEntry.COLUMN_ACTION_UID        + " , "
+                     + ScheduledActionEntry.COLUMN_TYPE              + " , "
+@@ -118,41 +110,36 @@ public int bulkAddScheduledActions(List<ScheduledAction> scheduledActionList){
+                     + ScheduledActionEntry.COLUMN_TAG               + " , "
+                     + ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY + " , "
+                     + ScheduledActionEntry.COLUMN_EXECUTION_COUNT   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
+-            for (ScheduledAction schedxAction:scheduledActionList) {
+-                replaceStatement.clearBindings();
+-                replaceStatement.bindString(1, schedxAction.getUID());
+-                replaceStatement.bindString(2, schedxAction.getActionUID());
+-                replaceStatement.bindString(3, schedxAction.getActionType().name());
+-                replaceStatement.bindLong(4, schedxAction.getStartTime());
+-                replaceStatement.bindLong(5, schedxAction.getEndTime());
+-                replaceStatement.bindLong(6, schedxAction.getLastRun());
+-                replaceStatement.bindLong(7, schedxAction.getPeriod());
+-                replaceStatement.bindLong(8,    schedxAction.isEnabled() ? 1 : 0);
+-                replaceStatement.bindString(9,  schedxAction.getCreatedTimestamp().toString());
+-                if (schedxAction.getTag() == null)
+-                    replaceStatement.bindNull(10);
+-                else
+-                    replaceStatement.bindString(10, schedxAction.getTag());
+-                replaceStatement.bindString(11, Integer.toString(schedxAction.getTotalFrequency()));
+-                replaceStatement.bindString(12, Integer.toString(schedxAction.getExecutionCount()));
+-
+-                replaceStatement.execute();
+-                nRow ++;
+-            }
+-            mDb.setTransactionSuccessful();
+-        }
+-        finally {
+-            mDb.endTransaction();
+         }
+-        return nRow;
++
++        mReplaceStatement.clearBindings();
++        mReplaceStatement.bindString(1, schedxAction.getUID());
++        mReplaceStatement.bindString(2, schedxAction.getActionUID());
++        mReplaceStatement.bindString(3, schedxAction.getActionType().name());
++        mReplaceStatement.bindLong(4,   schedxAction.getStartTime());
++        mReplaceStatement.bindLong(5,   schedxAction.getEndTime());
++        mReplaceStatement.bindLong(6,   schedxAction.getLastRun());
++        mReplaceStatement.bindLong(7,   schedxAction.getPeriod());
++        mReplaceStatement.bindLong(8,   schedxAction.isEnabled() ? 1 : 0);
++        mReplaceStatement.bindString(9, schedxAction.getCreatedTimestamp().toString());
++        if (schedxAction.getTag() == null)
++            mReplaceStatement.bindNull(10);
++        else
++            mReplaceStatement.bindString(10, schedxAction.getTag());
++        mReplaceStatement.bindString(11, Integer.toString(schedxAction.getTotalFrequency()));
++        mReplaceStatement.bindString(12, Integer.toString(schedxAction.getExecutionCount()));
++
++        return mReplaceStatement;
+     }
++
+     /**
+      * Builds a {@link org.gnucash.android.model.ScheduledAction} instance from a row to cursor in the database.
+      * The cursor should be already pointing to the right entry in the data set. It will not be modified in any way
+      * @param cursor Cursor pointing to data set
+      * @return ScheduledEvent object instance
+      */
+-    public ScheduledAction buildScheduledActionInstance(final Cursor cursor){
++    @Override
++    public ScheduledAction buildModelInstance(@NonNull final Cursor cursor){
+         String actionUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
+         long period     = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
+         long startTime  = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
+@@ -165,7 +152,7 @@ public ScheduledAction buildScheduledActionInstance(final Cursor cursor){
+         int execCount = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_EXECUTION_COUNT));
+ 
+         ScheduledAction event = new ScheduledAction(ScheduledAction.ActionType.valueOf(typeString));
+-        populateModel(cursor, event);
++        populateBaseModelAttributes(cursor, event);
+         event.setPeriod(period);
+         event.setStartTime(startTime);
+         event.setEndTime(endTime);
+@@ -180,24 +167,6 @@ public ScheduledAction buildScheduledActionInstance(final Cursor cursor){
+     }
+ 
+     /**
+-     * Returns an instance of {@link org.gnucash.android.model.ScheduledAction} from the database record
+-     * @param uid GUID of event
+-     * @return ScheduledEvent object instance
+-     */
+-    public ScheduledAction getScheduledAction(String uid){
+-        Cursor cursor = fetchRecord(getID(uid));
+-
+-        ScheduledAction scheduledAction = null;
+-        if (cursor != null) {
+-            if (cursor.moveToFirst()) {
+-                scheduledAction = buildScheduledActionInstance(cursor);
+-            }
+-            cursor.close();
+-        }
+-        return scheduledAction;
+-    }
+-
+-    /**
+      * Returns all {@link org.gnucash.android.model.ScheduledAction}s from the database with the specified action UID.
+      * Note that the parameter is not of the the scheduled action record, but from the action table
+      * @param actionUID GUID of the event itself
+@@ -211,7 +180,7 @@ public ScheduledAction getScheduledAction(String uid){
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         try {
+             while (cursor.moveToNext()) {
+-                scheduledActions.add(buildScheduledActionInstance(cursor));
++                scheduledActions.add(buildModelInstance(cursor));
+             }
+         } finally {
+             cursor.close();
+@@ -220,19 +189,6 @@ public ScheduledAction getScheduledAction(String uid){
+     }
+ 
+     /**
+-     * Returns all scheduled events in the database
+-     * @return List with all scheduled events
+-     */
+-    public List<ScheduledAction> getAllScheduledActions(){
+-        Cursor cursor = fetchAllRecords();
+-        List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+-        while (cursor.moveToNext()){
+-            scheduledActions.add(buildScheduledActionInstance(cursor));
+-        }
+-        return scheduledActions;
+-    }
+-
+-    /**
+      * Returns all enabled scheduled actions in the database
+      * @return List of enalbed scheduled actions
+      */
+@@ -241,7 +197,7 @@ public ScheduledAction getScheduledAction(String uid){
+                 null, ScheduledActionEntry.COLUMN_ENABLED + "=1", null, null, null, null);
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         while (cursor.moveToNext()){
+-            scheduledActions.add(buildScheduledActionInstance(cursor));
++            scheduledActions.add(buildModelInstance(cursor));
+         }
+         return scheduledActions;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index 5ce9eab7..c09a471c 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -22,6 +22,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
++import android.support.annotation.NonNull;
+ import android.text.TextUtils;
+ import android.util.Log;
+ 
+@@ -46,7 +47,7 @@
+  * @author Yongxin Wang <fefe.wyx@gmail.com>
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  */
+-public class SplitsDbAdapter extends DatabaseAdapter {
++public class SplitsDbAdapter extends DatabaseAdapter<Split> {
+ 
+     public SplitsDbAdapter(SQLiteDatabase db) {
+         super(db, SplitEntry.TABLE_NAME);
+@@ -68,15 +69,9 @@ public static SplitsDbAdapter getInstance(){
+      * @return Record ID of the newly saved split
+      */
+     public long addSplit(Split split){
+-        ContentValues contentValues = getContentValues(split);
+-        contentValues.put(SplitEntry.COLUMN_AMOUNT,     split.getAmount().absolute().toPlainString());
+-        contentValues.put(SplitEntry.COLUMN_TYPE,       split.getType().name());
+-        contentValues.put(SplitEntry.COLUMN_MEMO,       split.getMemo());
+-        contentValues.put(SplitEntry.COLUMN_ACCOUNT_UID, split.getAccountUID());
+-        contentValues.put(SplitEntry.COLUMN_TRANSACTION_UID, split.getTransactionUID());
+ 
+         Log.d(LOG_TAG, "Replace transaction split in db");
+-        long rowId = mDb.replace(SplitEntry.TABLE_NAME, null, contentValues);
++        long rowId = super.addRecord(split);
+ 
+         long transactionId = getTransactionID(split.getTransactionUID());
+         //when a split is updated, we want mark the transaction as not exported
+@@ -89,50 +84,44 @@ public long addSplit(Split split){
+         return rowId;
+     }
+ 
+-    /**
+-     * Adds some splits to the database.
+-     * If the split already exists, then it is simply updated.
+-     * This function will NOT update the exported status of corresponding transactions.
+-     * All or none of the splits will be inserted/updated into the database.
+-     * @param splitList {@link org.gnucash.android.model.Split} to be recorded in DB. The amount
+-     *                                                         of all splits should be non-negative
+-     * @return Number of records of the newly saved split
+-     */
+-    public long bulkAddSplits(List<Split> splitList) {
+-        long nRow = 0;
+-        try {
+-            mDb.beginTransaction();
+-            SQLiteStatement replaceStatement = mDb.compileStatement("REPLACE INTO " + SplitEntry.TABLE_NAME + " ( "
+-                    + SplitEntry.COLUMN_UID             + " , "
+-                    + SplitEntry.COLUMN_MEMO 	        + " , "
+-                    + SplitEntry.COLUMN_TYPE            + " , "
+-                    + SplitEntry.COLUMN_AMOUNT          + " , "
+-                    + SplitEntry.COLUMN_CREATED_AT      + " , "
+-                    + SplitEntry.COLUMN_ACCOUNT_UID 	+ " , "
++    @Override
++    protected ContentValues buildContentValues(@NonNull Split split) {
++        ContentValues contentValues = new ContentValues();
++        populateBaseModelAttributes(contentValues, split);
++        contentValues.put(SplitEntry.COLUMN_AMOUNT,     split.getAmount().absolute().toPlainString());
++        contentValues.put(SplitEntry.COLUMN_TYPE,       split.getType().name());
++        contentValues.put(SplitEntry.COLUMN_MEMO,       split.getMemo());
++        contentValues.put(SplitEntry.COLUMN_ACCOUNT_UID, split.getAccountUID());
++        contentValues.put(SplitEntry.COLUMN_TRANSACTION_UID, split.getTransactionUID());
++
++        return contentValues;
++    }
++
++    @Override
++    protected SQLiteStatement compileReplaceStatement(Split split) {
++        if (mReplaceStatement == null) {
++            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + SplitEntry.TABLE_NAME + " ( "
++                    + SplitEntry.COLUMN_UID + " , "
++                    + SplitEntry.COLUMN_MEMO + " , "
++                    + SplitEntry.COLUMN_TYPE + " , "
++                    + SplitEntry.COLUMN_AMOUNT + " , "
++                    + SplitEntry.COLUMN_CREATED_AT + " , "
++                    + SplitEntry.COLUMN_ACCOUNT_UID + " , "
+                     + SplitEntry.COLUMN_TRANSACTION_UID + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? ) ");
+-            for (Split split : splitList) {
+-                replaceStatement.clearBindings();
+-                replaceStatement.bindString(1, split.getUID());
+-                if (split.getMemo() != null) {
+-                    replaceStatement.bindString(2, split.getMemo());
+-                }
+-                replaceStatement.bindString(3, split.getType().name());
+-                replaceStatement.bindString(4, split.getAmount().toPlainString());
+-                replaceStatement.bindString(5, split.getCreatedTimestamp().toString());
+-                replaceStatement.bindString(6, split.getAccountUID());
+-                replaceStatement.bindString(7, split.getTransactionUID());
+-
+-                //Log.d(TAG, "Replacing transaction split in db");
+-                replaceStatement.execute();
+-                nRow++;
+-            }
+-            mDb.setTransactionSuccessful();
+         }
+-        finally {
+-            mDb.endTransaction();
++
++        mReplaceStatement.clearBindings();
++        mReplaceStatement.bindString(1, split.getUID());
++        if (split.getMemo() != null) {
++            mReplaceStatement.bindString(2, split.getMemo());
+         }
++        mReplaceStatement.bindString(3, split.getType().name());
++        mReplaceStatement.bindString(4, split.getAmount().toPlainString());
++        mReplaceStatement.bindString(5, split.getCreatedTimestamp().toString());
++        mReplaceStatement.bindString(6, split.getAccountUID());
++        mReplaceStatement.bindString(7, split.getTransactionUID());
+ 
+-        return nRow;
++        return mReplaceStatement;
+     }
+ 
+     /**
+@@ -141,7 +130,7 @@ public long bulkAddSplits(List<Split> splitList) {
+      * @param cursor Cursor pointing to transaction record in database
+      * @return {@link org.gnucash.android.model.Split} instance
+      */
+-    public Split buildSplitInstance(Cursor cursor){
++    public Split buildModelInstance(@NonNull final Cursor cursor){
+         String amountString = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_AMOUNT));
+         String typeName     = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_TYPE));
+         String accountUID   = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_ACCOUNT_UID));
+@@ -152,7 +141,7 @@ public Split buildSplitInstance(Cursor cursor){
+         Money amount = new Money(amountString, currencyCode);
+ 
+         Split split = new Split(amount, accountUID);
+-        populateModel(cursor, split);
++        populateBaseModelAttributes(cursor, split);
+         split.setTransactionUID(transxUID);
+         split.setType(TransactionType.valueOf(typeName));
+         split.setMemo(memo);
+@@ -160,35 +149,6 @@ public Split buildSplitInstance(Cursor cursor){
+         return split;
+     }
+ 
+-
+-    /**
+-     * Retrieves a split from the database
+-     * @param uid Unique Identifier String of the split transaction
+-     * @return {@link org.gnucash.android.model.Split} instance
+-     */
+-    public Split getSplit(String uid){
+-        return getSplit(getID(uid));
+-    }
+-
+-    /**
+-     * Returns the Split instance given the database id
+-     * @param id Database record ID of the split
+-     * @return {@link org.gnucash.android.model.Split} instance
+-     */
+-    public Split getSplit(long id){
+-        Cursor cursor = fetchRecord(id);
+-        try {
+-            if (cursor.moveToFirst()) {
+-                return buildSplitInstance(cursor);
+-            }
+-            else {
+-                throw new IllegalArgumentException("split " + id + " does not exist");
+-            }
+-        } finally {
+-            cursor.close();
+-        }
+-    }
+-
+     /**
+      * Returns the sum of the splits for a given account.
+      * This takes into account the kind of movement caused by the split in the account (which also depends on account type)
+@@ -318,7 +278,7 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+         List<Split> splitList = new ArrayList<Split>();
+         try {
+             while (cursor.moveToNext()) {
+-                splitList.add(buildSplitInstance(cursor));
++                splitList.add(buildModelInstance(cursor));
+             }
+         } finally {
+             cursor.close();
+@@ -348,7 +308,7 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+         List<Split> splitList = new ArrayList<Split>();
+         if (cursor != null){
+             while (cursor.moveToNext()){
+-                splitList.add(buildSplitInstance(cursor));
++                splitList.add(buildModelInstance(cursor));
+             }
+             cursor.close();
+         }
+@@ -449,7 +409,7 @@ public String getTransactionUID(long transactionId){
+ 
+     @Override
+     public boolean deleteRecord(long rowId) {
+-        Split split = getSplit(rowId);
++        Split split = getRecord(rowId);
+         String transactionUID = split.getTransactionUID();
+         boolean result = mDb.delete(SplitEntry.TABLE_NAME, SplitEntry._ID + "=" + rowId, null) > 0;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 5fa0b2a9..777e6e6b 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -23,6 +23,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
++import android.support.annotation.NonNull;
+ import android.support.annotation.Nullable;
+ import android.text.TextUtils;
+ import android.util.Log;
+@@ -50,7 +51,7 @@
+  * @author Yongxin Wang <fefe.wyx@gmail.com>
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  */
+-public class TransactionsDbAdapter extends DatabaseAdapter {
++public class TransactionsDbAdapter extends DatabaseAdapter<Transaction> {
+ 
+     private final SplitsDbAdapter mSplitsDbAdapter;
+ 
+@@ -83,35 +84,22 @@ public SplitsDbAdapter getSplitDbAdapter() {
+ 	 * @param transaction {@link Transaction} to be inserted to database
+ 	 * @return Database row ID of the inserted transaction
+ 	 */
+-	public long addTransaction(Transaction transaction){
+-		ContentValues contentValues = getContentValues(transaction);
+-		contentValues.put(TransactionEntry.COLUMN_DESCRIPTION, transaction.getDescription());
+-		contentValues.put(TransactionEntry.COLUMN_TIMESTAMP,    transaction.getTimeMillis());
+-		contentValues.put(TransactionEntry.COLUMN_NOTES,        transaction.getNote());
+-		contentValues.put(TransactionEntry.COLUMN_EXPORTED,     transaction.isExported() ? 1 : 0);
+-		contentValues.put(TransactionEntry.COLUMN_TEMPLATE,     transaction.isTemplate() ? 1 : 0);
+-        contentValues.put(TransactionEntry.COLUMN_CURRENCY,     transaction.getCurrencyCode());
+-        contentValues.put(TransactionEntry.COLUMN_SCHEDX_ACTION_UID, transaction.getScheduledActionUID());
++    @Override
++	public long addRecord(@NonNull Transaction transaction){
+ 
+         Log.d(LOG_TAG, "Replacing transaction in db");
+         long rowId = -1;
+         mDb.beginTransaction();
+         try {
+-            rowId = mDb.replaceOrThrow(TransactionEntry.TABLE_NAME, null, contentValues);
++            rowId = super.addRecord(transaction);
+ 
+             Log.d(LOG_TAG, "Adding splits for transaction");
+-            ArrayList<String> splitUIDs = new ArrayList<String>(transaction.getSplits().size());
++            SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
++            ArrayList<String> splitUIDs = new ArrayList<>(transaction.getSplits().size());
+             for (Split split : transaction.getSplits()) {
+-                contentValues = getContentValues(split);
+-                contentValues.put(SplitEntry.COLUMN_AMOUNT,     split.getAmount().absolute().toPlainString());
+-                contentValues.put(SplitEntry.COLUMN_TYPE,       split.getType().name());
+-                contentValues.put(SplitEntry.COLUMN_MEMO,       split.getMemo());
+-                contentValues.put(SplitEntry.COLUMN_ACCOUNT_UID, split.getAccountUID());
+-                contentValues.put(SplitEntry.COLUMN_TRANSACTION_UID, split.getTransactionUID());
+-                splitUIDs.add(split.getUID());
+-
+                 Log.d(LOG_TAG, "Replace transaction split in db");
+-                mDb.replaceOrThrow(SplitEntry.TABLE_NAME, null, contentValues);
++                splitsDbAdapter.addRecord(split);
++                splitUIDs.add(split.getUID());
+             }
+             Log.d(LOG_TAG, transaction.getSplits().size() + " splits added");
+ 
+@@ -121,9 +109,9 @@ public long addTransaction(Transaction transaction){
+                     new String[]{transaction.getUID()});
+             Log.d(LOG_TAG, deleted + " splits deleted");
+             mDb.setTransactionSuccessful();
+-        } catch (SQLException sqle) {
+-            Log.e(LOG_TAG, sqle.getMessage());
+-            Crashlytics.logException(sqle);
++        } catch (SQLException sqlEx) {
++            Log.e(LOG_TAG, sqlEx.getMessage());
++            Crashlytics.logException(sqlEx);
+         } finally {
+             mDb.endTransaction();
+         }
+@@ -139,48 +127,17 @@ public long addTransaction(Transaction transaction){
+      * @param transactionList {@link Transaction} transactions to be inserted to database
+      * @return Number of transactions inserted
+      */
+-    public long bulkAddTransactions(List<Transaction> transactionList){
++    @Override
++    public long bulkAddRecords(@NonNull List<Transaction> transactionList){
++        long rowInserted = super.bulkAddRecords(transactionList);
++
+         List<Split> splitList = new ArrayList<>(transactionList.size()*3);
+-        long rowInserted = 0;
+-        try {
+-            mDb.beginTransaction();
+-            SQLiteStatement replaceStatement = mDb.compileStatement("REPLACE INTO " + TransactionEntry.TABLE_NAME + " ( "
+-                    + TransactionEntry.COLUMN_UID + " , "
+-                    + TransactionEntry.COLUMN_DESCRIPTION + " , "
+-                    + TransactionEntry.COLUMN_NOTES + " , "
+-                    + TransactionEntry.COLUMN_TIMESTAMP + " , "
+-                    + TransactionEntry.COLUMN_EXPORTED + " , "
+-                    + TransactionEntry.COLUMN_CURRENCY + " , "
+-                    + TransactionEntry.COLUMN_CREATED_AT + " , "
+-                    + TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " , "
+-                    + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ? , ?)");
+-            for (Transaction transaction : transactionList) {
+-                //Log.d(TAG, "Replacing transaction in db");
+-                replaceStatement.clearBindings();
+-                replaceStatement.bindString(1, transaction.getUID());
+-                replaceStatement.bindString(2, transaction.getDescription());
+-                replaceStatement.bindString(3, transaction.getNote());
+-                replaceStatement.bindLong(4, transaction.getTimeMillis());
+-                replaceStatement.bindLong(5, transaction.isExported() ? 1 : 0);
+-                replaceStatement.bindString(6,  transaction.getCurrencyCode());
+-                replaceStatement.bindString(7,  transaction.getCreatedTimestamp().toString());
+-                if (transaction.getScheduledActionUID() == null)
+-                    replaceStatement.bindNull(8);
+-                else
+-                    replaceStatement.bindString(8,  transaction.getScheduledActionUID());
+-                replaceStatement.bindLong(9,    transaction.isTemplate() ? 1 : 0);
+-                replaceStatement.execute();
+-                rowInserted ++;
+-                splitList.addAll(transaction.getSplits());
+-            }
+-            mDb.setTransactionSuccessful();
+-        }
+-        finally {
+-            mDb.endTransaction();
++        for (Transaction transaction : transactionList) {
++            splitList.addAll(transaction.getSplits());
+         }
+         if (rowInserted != 0 && !splitList.isEmpty()) {
+             try {
+-                long nSplits = mSplitsDbAdapter.bulkAddSplits(splitList);
++                long nSplits = mSplitsDbAdapter.bulkAddRecords(splitList);
+                 Log.d(LOG_TAG, String.format("%d splits inserted", nSplits));
+             }
+             finally {
+@@ -195,26 +152,54 @@ public long bulkAddTransactions(List<Transaction> transactionList){
+         return rowInserted;
+     }
+ 
+-	/**
+-	 * Retrieves a transaction object from a database with database ID <code>rowId</code>
+-	 * @param rowId Identifier of the transaction record to be retrieved
+-	 * @return {@link Transaction} object corresponding to database record
+-	 */
+-    public Transaction getTransaction(long rowId) {
+-        Log.v(LOG_TAG, "Fetching transaction with id " + rowId);
+-        Cursor c = fetchRecord(rowId);
+-        try {
+-            if (c.moveToFirst()) {
+-                return buildTransactionInstance(c);
+-            } else {
+-                throw new IllegalArgumentException("row " + rowId + " does not exist");
+-            }
+-        } finally {
+-            c.close();
++    @Override
++    protected SQLiteStatement compileReplaceStatement(Transaction transaction) {
++        if (mReplaceStatement == null) {
++            mReplaceStatement = mDb.compileStatement("REPLACE INTO " + TransactionEntry.TABLE_NAME + " ( "
++                    + TransactionEntry.COLUMN_UID + " , "
++                    + TransactionEntry.COLUMN_DESCRIPTION + " , "
++                    + TransactionEntry.COLUMN_NOTES + " , "
++                    + TransactionEntry.COLUMN_TIMESTAMP + " , "
++                    + TransactionEntry.COLUMN_EXPORTED + " , "
++                    + TransactionEntry.COLUMN_CURRENCY + " , "
++                    + TransactionEntry.COLUMN_CREATED_AT + " , "
++                    + TransactionEntry.COLUMN_SCHEDX_ACTION_UID + " , "
++                    + TransactionEntry.COLUMN_TEMPLATE + " ) VALUES ( ? , ? , ? , ?, ? , ? , ? , ? , ?)");
+         }
++
++        mReplaceStatement.clearBindings();
++        mReplaceStatement.bindString(1, transaction.getUID());
++        mReplaceStatement.bindString(2, transaction.getDescription());
++        mReplaceStatement.bindString(3, transaction.getNote());
++        mReplaceStatement.bindLong(4, transaction.getTimeMillis());
++        mReplaceStatement.bindLong(5, transaction.isExported() ? 1 : 0);
++        mReplaceStatement.bindString(6, transaction.getCurrencyCode());
++        mReplaceStatement.bindString(7, transaction.getCreatedTimestamp().toString());
++        if (transaction.getScheduledActionUID() == null)
++            mReplaceStatement.bindNull(8);
++        else
++            mReplaceStatement.bindString(8,  transaction.getScheduledActionUID());
++        mReplaceStatement.bindLong(9, transaction.isTemplate() ? 1 : 0);
++
++        return mReplaceStatement;
+     }
+-	
+-	/**
++
++    @Override
++    protected ContentValues buildContentValues(@NonNull Transaction transaction) {
++        ContentValues contentValues = new ContentValues();
++        contentValues.put(TransactionEntry.COLUMN_DESCRIPTION, transaction.getDescription());
++        contentValues.put(TransactionEntry.COLUMN_TIMESTAMP, transaction.getTimeMillis());
++        contentValues.put(TransactionEntry.COLUMN_NOTES,        transaction.getNote());
++        contentValues.put(TransactionEntry.COLUMN_EXPORTED,     transaction.isExported() ? 1 : 0);
++        contentValues.put(TransactionEntry.COLUMN_TEMPLATE,     transaction.isTemplate() ? 1 : 0);
++        contentValues.put(TransactionEntry.COLUMN_CURRENCY,     transaction.getCurrencyCode());
++        contentValues.put(TransactionEntry.COLUMN_SCHEDX_ACTION_UID, transaction.getScheduledActionUID());
++        populateBaseModelAttributes(contentValues, transaction);
++
++        return contentValues;
++    }
++
++    /**
+ 	 * Returns a cursor to a set of all transactions which have a split belonging to the accound with unique ID
+ 	 * <code>accountUID</code>.
+ 	 * @param accountUID UID of the account whose transactions are to be retrieved
+@@ -304,7 +289,7 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+ 		ArrayList<Transaction> transactionsList = new ArrayList<>();
+         try {
+             while (c.moveToNext()) {
+-                transactionsList.add(buildTransactionInstance(c));
++                transactionsList.add(buildModelInstance(c));
+             }
+         } finally {
+             c.close();
+@@ -321,7 +306,7 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+         List<Transaction> transactions = new ArrayList<Transaction>();
+         try {
+             while (cursor.moveToNext()) {
+-                transactions.add(buildTransactionInstance(cursor));
++                transactions.add(buildModelInstance(cursor));
+             }
+         } finally {
+             cursor.close();
+@@ -361,19 +346,19 @@ public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] column
+      * Return number of transactions in the database which are non recurring
+      * @return Number of transactions
+      */
+-    public int getTotalTransactionsCount() {
++    public long getRecordsCount() {
+         String queryCount = "SELECT COUNT(*) FROM " + TransactionEntry.TABLE_NAME +
+                 " WHERE " + TransactionEntry.COLUMN_TEMPLATE + " =0";
+         Cursor cursor = mDb.rawQuery(queryCount, null);
+         try {
+             cursor.moveToFirst();
+-            return cursor.getInt(0);
++            return cursor.getLong(0);
+         } finally {
+             cursor.close();
+         }
+     }
+ 
+-    public int getTotalTransactionsCount(@Nullable String where, @Nullable String[] whereArgs) {
++    public long getRecordsCount(@Nullable String where, @Nullable String[] whereArgs) {
+         Cursor cursor = mDb.query(true, TransactionEntry.TABLE_NAME + " , trans_extra_info ON "
+                         + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID
+                         + " = trans_extra_info.trans_acct_t_uid",
+@@ -386,7 +371,7 @@ public int getTotalTransactionsCount(@Nullable String where, @Nullable String[]
+                 null);
+         try{
+             cursor.moveToFirst();
+-            return cursor.getInt(0);
++            return cursor.getLong(0);
+         } finally {
+             cursor.close();
+         }
+@@ -398,10 +383,11 @@ public int getTotalTransactionsCount(@Nullable String where, @Nullable String[]
+ 	 * @param c Cursor pointing to transaction record in database
+ 	 * @return {@link Transaction} object constructed from database record
+ 	 */
+-    public Transaction buildTransactionInstance(Cursor c){
++    @Override
++    public Transaction buildModelInstance(@NonNull final Cursor c){
+ 		String name   = c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_DESCRIPTION));
+ 		Transaction transaction = new Transaction(name);
+-        populateModel(c, transaction);
++        populateBaseModelAttributes(c, transaction);
+ 
+ 		transaction.setTime(c.getLong(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TIMESTAMP)));
+ 		transaction.setNote(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_NOTES)));
+@@ -456,7 +442,7 @@ public int moveTransaction(String transactionUID, String srcAccountUID, String d
+         for (Split split : splits) {
+             split.setAccountUID(dstAccountUID);
+         }
+-        mSplitsDbAdapter.bulkAddSplits(splits);
++        mSplitsDbAdapter.bulkAddRecords(splits);
+         return splits.size();
+ 	}
+ 	
+@@ -541,15 +527,6 @@ public int updateTransaction(ContentValues contentValues, String whereClause, St
+     }
+ 
+     /**
+-     * Returns a transaction for the given transaction GUID
+-     * @param transactionUID GUID of the transaction
+-     * @return Retrieves a transaction from the database
+-     */
+-    public Transaction getTransaction(String transactionUID) {
+-        return getTransaction(getID(transactionUID));
+-    }
+-
+-    /**
+      * Return the number of currencies used in the transaction.
+      * For example if there are different splits with different currencies
+      * @param transactionUID GUID of the transaction
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 601070ce..631231dd 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -409,7 +409,7 @@ private void backupAndDeleteTransactions(){
+         transactionsDbAdapter.deleteAllNonTemplateTransactions();
+ 
+         if (preserveOpeningBalances) {
+-            transactionsDbAdapter.bulkAddTransactions(openingBalances);
++            transactionsDbAdapter.bulkAddRecords(openingBalances);
+         }
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+index f7eb81e0..8a8a1e07 100644
+--- a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -43,7 +43,6 @@
+ import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.transform.OutputKeys;
+ import javax.xml.transform.Transformer;
+-import javax.xml.transform.TransformerConfigurationException;
+ import javax.xml.transform.TransformerException;
+ import javax.xml.transform.TransformerFactory;
+ import javax.xml.transform.dom.DOMSource;
+@@ -103,7 +102,7 @@ private void generateOfx(Document doc, Element parent){
+ 
+     public String generateExport() throws ExporterException {
+         mAccountsList = mParameters.shouldExportAllTransactions() ?
+-                mAccountsDbAdapter.getAllAccounts() : mAccountsDbAdapter.getExportableAccounts();
++                mAccountsDbAdapter.getAllRecords() : mAccountsDbAdapter.getExportableAccounts();
+ 
+         DocumentBuilderFactory docFactory = DocumentBuilderFactory
+                 .newInstance();
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index fd3fef1e..bd4ec2f0 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -660,7 +660,7 @@ public void generateExport(Writer writer) throws ExporterException{
+             //transaction count
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_COUNT_DATA);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, "transaction");
+-            xmlSerializer.text(mTransactionsDbAdapter.getTotalTransactionsCount() + "");
++            xmlSerializer.text(mTransactionsDbAdapter.getRecordsCount() + "");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_COUNT_DATA);
+             // export the commodities used in the DB
+             exportCommodity(xmlSerializer, currencies);
+diff --git a/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+index 254faa50..75aff02d 100644
+--- a/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+@@ -2,12 +2,14 @@
+ 
+ import android.database.sqlite.SQLiteDatabase;
+ 
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.model.Commodity;
+ import org.xml.sax.Attributes;
+ import org.xml.sax.SAXException;
+ import org.xml.sax.helpers.DefaultHandler;
+ 
++import java.util.ArrayList;
+ import java.util.List;
+ 
+ /**
+@@ -15,32 +17,51 @@
+  */
+ public class CommoditiesXmlHandler extends DefaultHandler {
+ 
++    public static final String TAG_CURRENCY         = "currency";
++    public static final String ATTR_ISO_CODE        = "isocode";
++    public static final String ATTR_FULL_NAME       = "fullname";
++    public static final String ATTR_NAMESPACE       = "namespace";
++    public static final String ATTR_EXCHANGE_CODE   = "exchange-code";
++    public static final String ATTR_SMALLEST_FRACTION = "smallest-fraction";
++    public static final String ATTR_LOCAL_SYMBOL = "local-symbol";
++    /**
++     * List of commodities parsed from the XML file.
++     * They will be all added to db at once at the end of the document
++     */
+     private List<Commodity> mCommodities;
+ 
+     private CommoditiesDbAdapter mCommoditiesDbAdapter;
+ 
+     public CommoditiesXmlHandler(SQLiteDatabase db){
+-        //TODO: initialize adapter
++        if (db == null){
++            mCommoditiesDbAdapter = GnuCashApplication.getCommoditiesDbAdapter();
++        } else {
++            mCommoditiesDbAdapter = new CommoditiesDbAdapter(db);
++        }
++        mCommodities = new ArrayList<>();
+     }
+ 
+     @Override
+     public void startElement(String uri, String localName, String qName, Attributes attributes) throws SAXException {
+-        String isoCode      = attributes.getValue("isocode");
+-        String fullname     = attributes.getValue("fullname");
+-        String namespace    = attributes.getValue("namespace");
+-        String cusip        = attributes.getValue("exchange-code");
+-        String smallestFraction = attributes.getValue("smallest-fraction");
++        if (qName.equals(TAG_CURRENCY)) {
++            String isoCode = attributes.getValue(ATTR_ISO_CODE);
++            String fullname = attributes.getValue(ATTR_FULL_NAME);
++            String namespace = attributes.getValue(ATTR_NAMESPACE);
++            String cusip = attributes.getValue(ATTR_EXCHANGE_CODE);
++            String smallestFraction = attributes.getValue(ATTR_SMALLEST_FRACTION);
++            String localSymbol = attributes.getValue(ATTR_LOCAL_SYMBOL);
+ 
++            Commodity commodity = new Commodity(fullname, isoCode, Integer.parseInt(smallestFraction));
++            commodity.setNamespace(Commodity.Namespace.valueOf(namespace));
++            commodity.setCusip(cusip);
++            commodity.setLocalSymbol(localSymbol);
+ 
+-        Commodity commodity = new Commodity(fullname, isoCode, Integer.parseInt(smallestFraction));
+-        commodity.setNamespace(Commodity.Namespace.valueOf(namespace));
+-        commodity.setCusip(cusip);
+-
+-        mCommodities.add(commodity);
++            mCommodities.add(commodity);
++        }
+     }
+ 
+     @Override
+     public void endDocument() throws SAXException {
+-        //TODO: bulk add commodities
++        mCommoditiesDbAdapter.bulkAddRecords(mCommodities);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 75b5dd9a..2b88d929 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -710,17 +710,17 @@ public void endDocument() throws SAXException {
+         try {
+             mAccountsDbAdapter.deleteAllRecords();
+ 
+-            long nAccounts = mAccountsDbAdapter.bulkAddAccounts(mAccountList);
++            long nAccounts = mAccountsDbAdapter.bulkAddRecords(mAccountList);
+             Log.d("Handler:", String.format("%d accounts inserted", nAccounts));
+             //We need to add scheduled actions first because there is a foreign key constraint on transactions
+             //which are generated from scheduled actions (we do auto-create some transactions during import)
+-            int nSchedActions = mScheduledActionsDbAdapter.bulkAddScheduledActions(mScheduledActionsList);
++            long nSchedActions = mScheduledActionsDbAdapter.bulkAddRecords(mScheduledActionsList);
+             Log.d("Handler:", String.format("%d scheduled actions inserted", nSchedActions));
+ 
+-            long nTempTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTemplateTransactions);
++            long nTempTransactions = mTransactionsDbAdapter.bulkAddRecords(mTemplateTransactions);
+             Log.d("Handler:", String.format("%d template transactions inserted", nTempTransactions));
+ 
+-            long nTransactions = mTransactionsDbAdapter.bulkAddTransactions(mTransactionList);
++            long nTransactions = mTransactionsDbAdapter.bulkAddRecords(mTransactionList);
+             Log.d("Handler:", String.format("%d transactions inserted", nTransactions));
+ 
+             long endTime = System.nanoTime();
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index 3da83bf0..b6c34d43 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -81,6 +81,11 @@
+     private String mFullName;
+ 
+ 	/**
++	 * Account description
++	 */
++	private String mDescription;
++
++	/**
+ 	 * Currency used by transactions in this account
+ 	 */
+ 	private Currency mCurrency; 
+@@ -195,6 +200,22 @@ public void setFullName(String fullName) {
+     }
+ 
+ 	/**
++	 * Returns the account mDescription
++	 * @return String with mDescription
++	 */
++	public String getDescription() {
++		return mDescription;
++	}
++
++	/**
++	 * Sets the account mDescription
++	 * @param description String mDescription
++	 */
++	public void setDescription(String description) {
++		this.mDescription = description;
++	}
++
++	/**
+ 	 * Get the type of account
+ 	 * @return {@link AccountType} type of account
+ 	 */
+diff --git a/app/src/main/java/org/gnucash/android/model/Commodity.java b/app/src/main/java/org/gnucash/android/model/Commodity.java
+index de605dec..169e2d15 100644
+--- a/app/src/main/java/org/gnucash/android/model/Commodity.java
++++ b/app/src/main/java/org/gnucash/android/model/Commodity.java
+@@ -8,9 +8,14 @@
+     public enum Namespace { ISO4217 } //Namespace for commodities
+ 
+     private Namespace mNamespace = Namespace.ISO4217;
++
++    /**
++     * This is the currency code for ISO4217 currencies
++     */
+     private String mMnemonic;
+     private String mFullname;
+     private String mCusip;
++    private String mLocalSymbol = "";
+     private int mFraction;
+     private int mQuoteFlag;
+ 
+@@ -34,6 +39,10 @@ public void setNamespace(Namespace namespace) {
+         this.mNamespace = namespace;
+     }
+ 
++    /**
++     * Returns the mnemonic, or currency code for ISO4217 currencies
++     * @return Mnemonic of the commodity
++     */
+     public String getMnemonic() {
+         return mMnemonic;
+     }
+@@ -58,6 +67,27 @@ public void setCusip(String mCusip) {
+         this.mCusip = mCusip;
+     }
+ 
++    public String getLocalSymbol() {
++        return mLocalSymbol;
++    }
++
++    /**
++     * Returns the symbol for this commodity.
++     * <p>Normally this would be the local symbol, but in it's absence, the mnemonic (currency code)
++     * is returned.</p>
++     * @return
++     */
++    public String getSymbol(){
++        if (mLocalSymbol == null || mLocalSymbol.isEmpty()){
++            return mMnemonic;
++        }
++        return mLocalSymbol;
++    }
++
++    public void setLocalSymbol(String localSymbol) {
++        this.mLocalSymbol = localSymbol;
++    }
++
+     public int getFraction() {
+         return mFraction;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/model/Price.java b/app/src/main/java/org/gnucash/android/model/Price.java
+index 8ab74ac3..6b0bc839 100644
+--- a/app/src/main/java/org/gnucash/android/model/Price.java
++++ b/app/src/main/java/org/gnucash/android/model/Price.java
+@@ -15,6 +15,15 @@
+     private int mValueNum;
+     private int mValueDenom;
+ 
++    public Price(){
++        //nothing to see here, just call base
++    }
++
++    public Price(String commodityUID, String currencyUID){
++        this.mCommodityUID = commodityUID;
++        this.mCurrencyUID = currencyUID;
++    }
++
+     public String getCommodityUID() {
+         return mCommodityUID;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java b/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
+index 8f0c172f..3985e850 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
++++ b/app/src/main/java/org/gnucash/android/receivers/AccountCreator.java
+@@ -57,7 +57,7 @@ public void onReceive(Context context, Intent intent) {
+ 		if (uid != null)
+ 			account.setUID(uid);
+ 		
+-		AccountsDbAdapter.getInstance().addAccount(account);
++		AccountsDbAdapter.getInstance().addRecord(account);
+ 	}
+ 
+ }
+diff --git a/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java b/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
+index 99c826d6..7630d1f5 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
++++ b/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
+@@ -98,7 +98,7 @@ public void onReceive(Context context, Intent intent) {
+             }
+         }
+ 
+-		TransactionsDbAdapter.getInstance().addTransaction(transaction);
++		TransactionsDbAdapter.getInstance().addRecord(transaction);
+ 		
+ 		WidgetConfigurationActivity.updateAllWidgets(context);
+ 	}
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index aa85d985..232f48c6 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -99,7 +99,7 @@ private void executeScheduledEvent(ScheduledAction scheduledAction){
+             case TRANSACTION:
+                 String eventUID = scheduledAction.getActionUID();
+                 TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+-                Transaction trxnTemplate = transactionsDbAdapter.getTransaction(eventUID);
++                Transaction trxnTemplate = transactionsDbAdapter.getRecord(eventUID);
+                 Transaction recurringTrxn = new Transaction(trxnTemplate, true);
+ 
+                 //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+@@ -112,7 +112,7 @@ private void executeScheduledEvent(ScheduledAction scheduledAction){
+                 }
+                 recurringTrxn.setTime(transactionTime);
+                 recurringTrxn.setCreatedTimestamp(new Timestamp(transactionTime));
+-                transactionsDbAdapter.addTransaction(recurringTrxn);
++                transactionsDbAdapter.addRecord(recurringTrxn);
+                 break;
+ 
+             case BACKUP:
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 6255309e..dcac0b74 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -338,7 +338,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 
+         ActionBar supportActionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
+         if (mAccountUID != null) {
+-            mAccount = mAccountsDbAdapter.getAccount(mAccountUID);
++            mAccount = mAccountsDbAdapter.getRecord(mAccountUID);
+             supportActionBar.setTitle(R.string.title_edit_account);
+         } else {
+             supportActionBar.setTitle(R.string.title_create_account);
+@@ -825,7 +825,7 @@ private void saveAccount() {
+ 		if (mAccountsDbAdapter == null)
+ 			mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+         // bulk update, will not update transactions
+-		mAccountsDbAdapter.bulkAddAccounts(accountsToUpdate);
++		mAccountsDbAdapter.bulkAddRecords(accountsToUpdate);
+ 
+ 		finishFragment();
+ 	}
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 82daf019..817663d1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -24,7 +24,6 @@
+ import android.database.Cursor;
+ import android.graphics.Color;
+ import android.os.Bundle;
+-import android.support.design.widget.FloatingActionButton;
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.LoaderManager.LoaderCallbacks;
+ import android.support.v4.content.Loader;
+@@ -204,7 +203,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+      * @param rowId The record ID of the account
+      */
+     public void tryDeleteAccount(long rowId) {
+-        Account acc = mAccountsDbAdapter.getAccount(rowId);
++        Account acc = mAccountsDbAdapter.getRecord(rowId);
+         if (acc.getTransactionCount() > 0 || mAccountsDbAdapter.getSubAccountCount(acc.getUID()) > 0) {
+             showConfirmationDialog(rowId);
+         } else {
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+index cbf1c69d..e6fdc52c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+@@ -208,7 +208,7 @@ private void startExport(){
+ 		for (ScheduledAction scheduledAction : scheduledActions) {
+ 			scheduledAction.setTag(exportParameters.toCsv());
+ 			scheduledAction.setActionUID(UUID.randomUUID().toString().replaceAll("-", ""));
+-			ScheduledActionDbAdapter.getInstance().addScheduledAction(scheduledAction);
++			ScheduledActionDbAdapter.getInstance().addRecord(scheduledAction);
+ 		}
+ 
+ 		Log.i(TAG, "Commencing async export of transactions");
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ScheduledExportListFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ScheduledExportListFragment.java
+index d73c9bfe..a9c4dd98 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ScheduledExportListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ScheduledExportListFragment.java
+@@ -339,7 +339,7 @@ public void run() {
+         public void bindView(View view, Context context, Cursor cursor) {
+             super.bindView(view, context, cursor);
+ 
+-            ScheduledAction scheduledAction = mScheduledActionDbAdapter.buildScheduledActionInstance(cursor);
++            ScheduledAction scheduledAction = mScheduledActionDbAdapter.buildModelInstance(cursor);
+ 
+             TextView primaryTextView = (TextView) view.findViewById(R.id.primary_text);
+             ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransactionsConfirmationDialog.java b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransactionsConfirmationDialog.java
+index 3f37e2ee..2b192096 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransactionsConfirmationDialog.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/DeleteAllTransactionsConfirmationDialog.java
+@@ -73,7 +73,7 @@ public void onClick(DialogInterface dialog, int whichButton) {
+                                 Log.i("DeleteDialog", String.format("Deleted %d transactions successfully", count));
+ 
+                                 if (preserveOpeningBalances) {
+-                                    transactionsDbAdapter.bulkAddTransactions(openingBalances);
++                                    transactionsDbAdapter.bulkAddRecords(openingBalances);
+                                 }
+                                 Toast.makeText(context, R.string.toast_all_transactions_deleted, Toast.LENGTH_SHORT).show();
+                                 WidgetConfigurationActivity.updateAllWidgets(getActivity());
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 146a464c..f809cb5e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -367,7 +367,7 @@ public boolean onPreferenceClick(Preference preference) {
+                 transactionsDbAdapter.deleteAllRecords();
+ 
+                 if (preserveOpeningBalances) {
+-                    transactionsDbAdapter.bulkAddTransactions(openingBalances);
++                    transactionsDbAdapter.bulkAddRecords(openingBalances);
+                 }
+                 Toast.makeText(this, R.string.toast_all_transactions_deleted, Toast.LENGTH_LONG).show();
+             }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index eac5daa1..5e905c2d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -183,7 +183,7 @@ public void onListItemClick(ListView l, View v, int position, long id) {
+             checkbox.setChecked(!checkbox.isChecked());
+             return;
+         }
+-        Transaction transaction = mTransactionsDbAdapter.getTransaction(id);
++        Transaction transaction = mTransactionsDbAdapter.getRecord(id);
+ 
+         //this should actually never happen, but has happened once. So perform check for the future
+         if (transaction.getSplits().size() == 0){
+@@ -369,7 +369,7 @@ public void run() {
+         public void bindView(View view, Context context, Cursor cursor) {
+             super.bindView(view, context, cursor);
+ 
+-            Transaction transaction = mTransactionsDbAdapter.buildTransactionInstance(cursor);
++            Transaction transaction = mTransactionsDbAdapter.buildModelInstance(cursor);
+ 
+             TextView amountTextView = (TextView) view.findViewById(R.id.right_text);
+             if (transaction.getSplits().size() == 2){
+@@ -384,7 +384,7 @@ public void bindView(View view, Context context, Cursor cursor) {
+             ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+             String scheduledActionUID = cursor.getString(cursor.getColumnIndexOrThrow("origin_scheduled_action_uid")); //column created from join when fetching scheduled transactions
+             view.setTag(scheduledActionUID);
+-            ScheduledAction scheduledAction = scheduledActionDbAdapter.getScheduledAction(scheduledActionUID);
++            ScheduledAction scheduledAction = scheduledActionDbAdapter.getRecord(scheduledActionUID);
+             descriptionTextView.setText(scheduledAction.getRepeatString());
+ 
+         }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 88ecc758..021bf256 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -258,7 +258,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         String transactionUID = getArguments().getString(UxArgument.SELECTED_TRANSACTION_UID);
+ 		mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
+ 		if (transactionUID != null)
+-            mTransaction = mTransactionsDbAdapter.getTransaction(transactionUID);
++            mTransaction = mTransactionsDbAdapter.getRecord(transactionUID);
+         if (mTransaction != null) {
+             mMultiCurrency = mTransactionsDbAdapter.getNumCurrencies(mTransaction.getUID()) > 1;
+         }
+@@ -356,7 +356,7 @@ public Cursor runQuery(CharSequence name) {
+         mDescriptionEditText.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+             @Override
+             public void onItemClick(AdapterView<?> adapterView, View view, int position, long id) {
+-                mTransaction = new Transaction(mTransactionsDbAdapter.getTransaction(id), true);
++                mTransaction = new Transaction(mTransactionsDbAdapter.getRecord(id), true);
+                 mTransaction.setTime(System.currentTimeMillis());
+                 //we check here because next method will modify it and we want to catch user-modification
+                 boolean amountEntered = mAmountInputFormatter.isInputModified();
+@@ -435,7 +435,7 @@ private void initializeViewsWithTransaction(){
+         mSaveTemplateCheckbox.setChecked(mTransaction.isTemplate());
+         String scheduledActionUID = getArguments().getString(UxArgument.SCHEDULED_ACTION_UID);
+         if (scheduledActionUID != null && !scheduledActionUID.isEmpty()) {
+-            ScheduledAction scheduledAction = ScheduledActionDbAdapter.getInstance().getScheduledAction(scheduledActionUID);
++            ScheduledAction scheduledAction = ScheduledActionDbAdapter.getInstance().getRecord(scheduledActionUID);
+             mRecurrenceRule = scheduledAction.getRuleString();
+             mEventRecurrence.parse(mRecurrenceRule);
+             mRecurrenceTextView.setText(scheduledAction.getRepeatString());
+@@ -785,13 +785,13 @@ private void saveNewTransaction() {
+ 
+             // set as not exported because we have just edited it
+             mTransaction.setExported(false);
+-            mTransactionsDbAdapter.addTransaction(mTransaction);
++            mTransactionsDbAdapter.addRecord(mTransaction);
+ 
+             if (mSaveTemplateCheckbox.isChecked()) {//template is automatically checked when a transaction is scheduled
+                 if (!mEditMode) { //means it was new transaction, so a new template
+                     Transaction templateTransaction = new Transaction(mTransaction, true);
+                     templateTransaction.setTemplate(true);
+-                    mTransactionsDbAdapter.addTransaction(templateTransaction);
++                    mTransactionsDbAdapter.addRecord(templateTransaction);
+                     scheduleRecurringTransaction(templateTransaction.getUID());
+                 } else
+                     scheduleRecurringTransaction(mTransaction.getUID());
+@@ -842,7 +842,7 @@ private void scheduleRecurringTransaction(String transactionUID) {
+ 
+         for (ScheduledAction event : events) {
+             event.setActionUID(transactionUID);
+-            scheduledActionDbAdapter.addScheduledAction(event);
++            scheduledActionDbAdapter.addRecord(event);
+ 
+             Log.i("TransactionFormFragment", event.toString());
+         }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java
+index c05d4046..71ca4273 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionInfoActivity.java
+@@ -90,7 +90,7 @@ protected void onCreate(Bundle savedInstanceState) {
+      */
+     private void bindViews(){
+         TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+-        Transaction transaction = transactionsDbAdapter.getTransaction(mTransactionUID);
++        Transaction transaction = transactionsDbAdapter.getRecord(mTransactionUID);
+ 
+         mTransactionDescription.setText(transaction.getDescription());
+         Money balance = transaction.getBalance(mAccountUID);
+@@ -123,7 +123,7 @@ private void bindViews(){
+         mTimeAndDate.setText(timeAndDate);
+ 
+         if (transaction.getScheduledActionUID() != null){
+-            ScheduledAction scheduledAction = ScheduledActionDbAdapter.getInstance().getScheduledAction(transaction.getScheduledActionUID());
++            ScheduledAction scheduledAction = ScheduledActionDbAdapter.getInstance().getRecord(transaction.getScheduledActionUID());
+             mRecurrence.setText(scheduledAction.getRepeatString());
+             findViewById(R.id.row_trn_recurrence).setVisibility(View.VISIBLE);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
+index e7f02034..80e33b76 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
+@@ -74,7 +74,7 @@ public void onClick(DialogInterface dialog, int whichButton) {
+                                     transactionsDbAdapter.deleteAllRecords();
+ 
+                                     if (preserveOpeningBalances) {
+-                                        transactionsDbAdapter.bulkAddTransactions(openingBalances);
++                                        transactionsDbAdapter.bulkAddRecords(openingBalances);
+                                     }
+                                 } else {
+                                     transactionsDbAdapter.deleteRecord(rowId);
+diff --git a/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index df30e071..415e8b63 100644
+--- a/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -147,7 +147,7 @@ public static void updateWidget(Context context, int appWidgetId, String account
+ 		AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
+ 		Account account;
+         try {
+-            account = accountsDbAdapter.getAccount(accountUID);
++            account = accountsDbAdapter.getRecord(accountUID);
+         } catch (IllegalArgumentException e) {
+ 			Log.i("WidgetConfiguration", "Account not found, resetting widget " + appWidgetId);
+ 			//if account has been deleted, let the user know
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index fc5d33e7..e177d5f0 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -29,8 +29,8 @@
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.junit.Assert.assertEquals;
+ 
+-@RunWith(GnucashTestRunner.class)
+-@Config(constants = BuildConfig.class, shadows = {ShadowCrashlytics.class})
++@RunWith(GnucashTestRunner.class) //package is required so that resources can be found in dev mode
++@Config(constants = BuildConfig.class, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class})
+ public class AccountsDbAdapterTest{
+ 
+ 	private static final String BRAVO_ACCOUNT_NAME = "Bravo";
+@@ -55,10 +55,10 @@ public void shouldBeAlphabeticallySortedByDefault(){
+         Account first = new Account(ALPHA_ACCOUNT_NAME);
+         Account second = new Account(BRAVO_ACCOUNT_NAME);
+         //purposefully added the second after the first
+-        mAccountsDbAdapter.addAccount(second);
+-        mAccountsDbAdapter.addAccount(first);
++        mAccountsDbAdapter.addRecord(second);
++        mAccountsDbAdapter.addRecord(first);
+ 
+-		List<Account> accountsList = mAccountsDbAdapter.getAllAccounts();
++		List<Account> accountsList = mAccountsDbAdapter.getAllRecords();
+ 		assertEquals(2, accountsList.size());
+ 		//bravo was saved first, but alpha should be first alphabetically
+         assertThat(accountsList).contains(first, Index.atIndex(0));
+@@ -80,13 +80,13 @@ public void bulkAddAccountsShouldNotModifyTransactions(){
+         accounts.add(account1);
+         accounts.add(account2);
+ 
+-        mAccountsDbAdapter.bulkAddAccounts(accounts);
++        mAccountsDbAdapter.bulkAddRecords(accounts);
+ 
+         SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
+         assertThat(splitsDbAdapter.getSplitsForTransactionInAccount(transaction.getUID(), account1.getUID())).hasSize(1);
+         assertThat(splitsDbAdapter.getSplitsForTransactionInAccount(transaction.getUID(), account2.getUID())).hasSize(1);
+ 
+-        assertThat(mAccountsDbAdapter.getAccount(account1.getUID()).getTransactions()).hasSize(1);
++        assertThat(mAccountsDbAdapter.getRecord(account1.getUID()).getTransactions()).hasSize(1);
+     }
+ 
+     @Test
+@@ -100,8 +100,8 @@ public void shouldAddAccountsToDatabase(){
+         account1.addTransaction(transaction);
+         account2.addTransaction(transaction);
+ 
+-        long id1 = mAccountsDbAdapter.addAccount(account1);
+-        long id2 = mAccountsDbAdapter.addAccount(account2);
++        long id1 = mAccountsDbAdapter.addRecord(account1);
++        long id2 = mAccountsDbAdapter.addRecord(account2);
+ 
+         assertThat(id1).isGreaterThan(0);
+         assertThat(id2).isGreaterThan(0);
+@@ -119,20 +119,20 @@ public void shouldDeleteSplitsWhenAccountDeleted(){
+         Account second = new Account(BRAVO_ACCOUNT_NAME);
+         second.setUID(BRAVO_ACCOUNT_NAME);
+ 
+-        mAccountsDbAdapter.addAccount(second);
+-        mAccountsDbAdapter.addAccount(first);
++        mAccountsDbAdapter.addRecord(second);
++        mAccountsDbAdapter.addRecord(first);
+ 
+         Transaction transaction = new Transaction("TestTrn");
+         Split split = new Split(Money.getZeroInstance(), ALPHA_ACCOUNT_NAME);
+         transaction.addSplit(split);
+         transaction.addSplit(split.createPair(BRAVO_ACCOUNT_NAME));
+ 
+-        long id = mTransactionsDbAdapter.addTransaction(transaction);
++        long id = mTransactionsDbAdapter.addRecord(transaction);
+         assertThat(id).isGreaterThan(0);
+ 
+         mAccountsDbAdapter.deleteRecord(ALPHA_ACCOUNT_NAME);
+ 
+-        Transaction trxn = mTransactionsDbAdapter.getTransaction(transaction.getUID());
++        Transaction trxn = mTransactionsDbAdapter.getRecord(transaction.getUID());
+         assertThat(trxn.getSplits().size()).isEqualTo(1);
+         assertThat(trxn.getSplits().get(0).getAccountUID()).isEqualTo(BRAVO_ACCOUNT_NAME);
+     }
+@@ -143,7 +143,7 @@ public void shouldDeleteSplitsWhenAccountDeleted(){
+     @Test
+     public void shouldCreateDefaultRootAccount(){
+         Account account = new Account("Some account");
+-        mAccountsDbAdapter.addAccount(account);
++        mAccountsDbAdapter.addRecord(account);
+         assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(2L);
+ 
+         List<Account> accounts = mAccountsDbAdapter.getSimpleAccountList();
+@@ -158,14 +158,14 @@ public void shouldUpdateFullNameAfterParentChange(){
+         Account parent = new Account("Test");
+         Account child = new Account("Child");
+ 
+-        mAccountsDbAdapter.addAccount(parent);
+-        mAccountsDbAdapter.addAccount(child);
++        mAccountsDbAdapter.addRecord(parent);
++        mAccountsDbAdapter.addRecord(child);
+ 
+         child.setParentUID(parent.getUID());
+-        mAccountsDbAdapter.addAccount(child);
++        mAccountsDbAdapter.addRecord(child);
+ 
+-        child = mAccountsDbAdapter.getAccount(child.getUID());
+-        parent = mAccountsDbAdapter.getAccount(parent.getUID());
++        child = mAccountsDbAdapter.getRecord(child.getUID());
++        parent = mAccountsDbAdapter.getRecord(parent.getUID());
+ 
+         assertThat(mAccountsDbAdapter.getSubAccountCount(parent.getUID())).isEqualTo(1);
+         assertThat(parent.getUID()).isEqualTo(child.getParentUID());
+@@ -176,7 +176,7 @@ public void shouldUpdateFullNameAfterParentChange(){
+     @Test
+     public void shouldAddTransactionsAndSplitsWhenAddingAccounts(){
+         Account account = new Account("Test");
+-        mAccountsDbAdapter.addAccount(account);
++        mAccountsDbAdapter.addRecord(account);
+ 
+         Transaction transaction = new Transaction("Test description");
+         Split split = new Split(Money.getZeroInstance(), account.getUID());
+@@ -185,7 +185,7 @@ public void shouldAddTransactionsAndSplitsWhenAddingAccounts(){
+         transaction.addSplit(split.createPair(account1.getUID()));
+         account1.addTransaction(transaction);
+ 
+-        mAccountsDbAdapter.addAccount(account1);
++        mAccountsDbAdapter.addRecord(account1);
+ 
+         assertThat(mTransactionsDbAdapter.getRecordsCount()).isEqualTo(1);
+         assertThat(mSplitsDbAdapter.getRecordsCount()).isEqualTo(2);
+@@ -202,14 +202,14 @@ public void shouldClearAllTablesWhenDeletingAllAccounts(){
+         Account account2 = new Account("Transfer account");
+         transaction.addSplit(split.createPair(account2.getUID()));
+ 
+-        mAccountsDbAdapter.addAccount(account);
+-        mAccountsDbAdapter.addAccount(account2);
++        mAccountsDbAdapter.addRecord(account);
++        mAccountsDbAdapter.addRecord(account2);
+ 
+         ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
+         scheduledAction.setActionUID("Test-uid");
+         ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+ 
+-        scheduledActionDbAdapter.addScheduledAction(scheduledAction);
++        scheduledActionDbAdapter.addRecord(scheduledAction);
+ 
+         mAccountsDbAdapter.deleteAllRecords();
+ 
+@@ -228,8 +228,8 @@ public void simpleAccountListShouldNotContainTransactions(){
+         Account account1 = new Account("Transfer");
+         transaction.addSplit(split.createPair(account1.getUID()));
+ 
+-        mAccountsDbAdapter.addAccount(account);
+-        mAccountsDbAdapter.addAccount(account1);
++        mAccountsDbAdapter.addRecord(account);
++        mAccountsDbAdapter.addRecord(account1);
+ 
+         List<Account> accounts = mAccountsDbAdapter.getSimpleAccountList();
+         for (Account testAcct : accounts) {
+@@ -243,11 +243,11 @@ public void shouldComputeAccountBalanceCorrectly(){
+         account.setAccountType(AccountType.ASSET); //debit normal account balance
+         Account transferAcct = new Account("Transfer");
+ 
+-        mAccountsDbAdapter.addAccount(account);
+-        mAccountsDbAdapter.addAccount(transferAcct);
++        mAccountsDbAdapter.addRecord(account);
++        mAccountsDbAdapter.addRecord(transferAcct);
+ 
+         Transaction transaction = new Transaction("Test description");
+-        mTransactionsDbAdapter.addTransaction(transaction);
++        mTransactionsDbAdapter.addRecord(transaction);
+         Split split = new Split(new Money(BigDecimal.TEN, Currency.getInstance("USD")), account.getUID());
+         split.setTransactionUID(transaction.getUID());
+         split.setType(TransactionType.DEBIT);
+@@ -286,7 +286,7 @@ public void shouldComputeAccountBalanceCorrectly(){
+     public void shouldCreateAccountHierarchy(){
+         String uid = mAccountsDbAdapter.createAccountHierarchy("Assets:Current Assets:Cash in Wallet", AccountType.ASSET);
+ 
+-        List<Account> accounts = mAccountsDbAdapter.getAllAccounts();
++        List<Account> accounts = mAccountsDbAdapter.getAllRecords();
+         assertThat(accounts).hasSize(3);
+         assertThat(accounts).extracting("mUID").contains(uid);
+     }
+@@ -304,8 +304,8 @@ public void shouldRecursivelyDeleteAccount(){
+         transaction.addSplit(split);
+         transaction.addSplit(split.createPair(account2.getUID()));
+ 
+-        mAccountsDbAdapter.addAccount(account);
+-        mAccountsDbAdapter.addAccount(account2);
++        mAccountsDbAdapter.addRecord(account);
++        mAccountsDbAdapter.addRecord(account2);
+ 
+         assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(3);
+         assertThat(mTransactionsDbAdapter.getRecordsCount()).isEqualTo(1);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
+index 09b9081e..88af6c7a 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
+@@ -24,8 +24,8 @@
+ /**
+  * Some tests for the splits database adapter
+  */
+-@RunWith(GnucashTestRunner.class)
+-@Config(constants = BuildConfig.class, shadows = {ShadowCrashlytics.class})
++@RunWith(GnucashTestRunner.class) //package is required so that resources can be found in dev mode
++@Config(constants = BuildConfig.class, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class})
+ public class SplitsDbAdapterTest {
+ 
+     private AccountsDbAdapter mAccountsDbAdapter;
+@@ -40,13 +40,13 @@ public void setUp() throws Exception {
+         mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
+         mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+         mAccount = new Account("Test account");
+-        mAccountsDbAdapter.addAccount(mAccount);
++        mAccountsDbAdapter.addRecord(mAccount);
+     }
+ 
+     @Test
+     public void shouldHaveAccountInDatabase(){
+         Transaction transaction = new Transaction("");
+-        mTransactionsDbAdapter.addTransaction(transaction);
++        mTransactionsDbAdapter.addRecord(transaction);
+ 
+         Split split = new Split(Money.getZeroInstance(), "non-existent");
+         split.setTransactionUID(transaction.getUID());
+@@ -63,7 +63,7 @@ public void shouldHaveAccountInDatabase(){
+     public void addingSplitShouldUnsetExportedFlagOfTransaction(){
+         Transaction transaction = new Transaction("");
+         transaction.setExported(true);
+-        mTransactionsDbAdapter.addTransaction(transaction);
++        mTransactionsDbAdapter.addRecord(transaction);
+ 
+         assertThat(transaction.isExported()).isTrue();
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+index 8a7e3e26..3ff151d2 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+@@ -24,8 +24,8 @@
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
+ 
+-@RunWith(GnucashTestRunner.class)
+-@Config(constants = BuildConfig.class, shadows = {ShadowCrashlytics.class})
++@RunWith(GnucashTestRunner.class) //package is required so that resources can be found in dev mode
++@Config(constants = BuildConfig.class, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class})
+ public class TransactionsDbAdapterTest {
+ 	private static final String ALPHA_ACCOUNT_NAME  = "Alpha";
+ 	private static final String BRAVO_ACCOUNT_NAME  = "Bravo";
+@@ -48,8 +48,8 @@ public void setUp() throws Exception {
+ 		alphaAccount = new Account(ALPHA_ACCOUNT_NAME);
+ 		bravoAccount = new Account(BRAVO_ACCOUNT_NAME);
+ 
+-		long id1 = mAccountsDbAdapter.addAccount(bravoAccount);
+-		long id2 = mAccountsDbAdapter.addAccount(alphaAccount);
++		long id1 = mAccountsDbAdapter.addRecord(bravoAccount);
++		long id2 = mAccountsDbAdapter.addRecord(alphaAccount);
+ 
+ 		assertThat(id1).isGreaterThan(0);
+ 		assertThat(id2).isGreaterThan(0);
+@@ -71,8 +71,8 @@ public void testTransactionsAreTimeSorted(){
+ 		t2.addSplit(split2);
+ 		t2.addSplit(split2.createPair(alphaAccount.getUID()));
+ 
+-		mTransactionsDbAdapter.addTransaction(t1);
+-		mTransactionsDbAdapter.addTransaction(t2);
++		mTransactionsDbAdapter.addRecord(t1);
++		mTransactionsDbAdapter.addRecord(t2);
+ 
+ 		List<Transaction> transactionsList = mTransactionsDbAdapter.getAllTransactionsForAccount(alphaAccount.getUID());
+ 		assertThat(transactionsList).contains(t2, Index.atIndex(0));
+@@ -84,7 +84,7 @@ public void deletingTransactionsShouldDeleteSplits(){
+ 		Transaction transaction = new Transaction("");
+ 		Split split = new Split(Money.getZeroInstance(), alphaAccount.getUID());
+ 		transaction.addSplit(split);
+-		mTransactionsDbAdapter.addTransaction(transaction);
++		mTransactionsDbAdapter.addRecord(transaction);
+ 
+ 		assertThat(mSplitsDbAdapter.getSplitsForTransaction(transaction.getUID())).hasSize(1);
+ 
+@@ -117,10 +117,10 @@ public void testComputeBalance(){
+ 		split = new Split(secondSplitAmount, bravoAccount.getUID());
+ 		transaction.addSplit(split);
+ 
+-		mTransactionsDbAdapter.addTransaction(transaction);
++		mTransactionsDbAdapter.addRecord(transaction);
+ 
+ 		//balance is negated because the CASH account has inverse normal balance
+-		transaction = mTransactionsDbAdapter.getTransaction(transaction.getUID());
++		transaction = mTransactionsDbAdapter.getRecord(transaction.getUID());
+ 		Money savedBalance = transaction.getBalance(alphaAccount.getUID());
+ 		assertThat(savedBalance).isEqualTo(firstSplitAmount.negate());
+ 

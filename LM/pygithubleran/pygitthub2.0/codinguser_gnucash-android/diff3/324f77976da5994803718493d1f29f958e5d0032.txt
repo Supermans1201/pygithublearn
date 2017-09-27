@@ -1,0 +1,302 @@
+From 324f77976da5994803718493d1f29f958e5d0032 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 12 May 2015 17:25:07 +0200
+Subject: [PATCH] Added tests
+
+---
+ .../android/test/ui/ExportTransactionsTest.java    |   9 +-
+ .../android/test/ui/TransactionsActivityTest.java  | 151 ++++++++++++++++++---
+ .../test/unit/db/TransactionsDbAdapterTest.java    |  42 +++---
+ 3 files changed, 162 insertions(+), 40 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 798197fe..a795b632 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -164,10 +164,11 @@ public void testCreateExportSchedule(){
+ 		mSolo.clickOnText(ExportFormat.XML.name());
+ 		mSolo.clickOnView(mSolo.getView(R.id.input_recurrence));
+ 		mSolo.waitForDialogToOpen();
+-		mSolo.sleep(5000);
++		mSolo.sleep(2000);
+ 		mSolo.clickOnButton(0); //switch on the recurrence dialog
+-		mSolo.sleep(5000);
+-		mSolo.clickOnText("Done");
++		mSolo.sleep(2000);
++		mSolo.pressSpinnerItem(0,-1);
++		mSolo.clickOnButton(1);
+ 		mSolo.waitForDialogToClose();
+ 
+ 		mSolo.clickOnButton(mSolo.getString(R.string.btn_export));
+@@ -181,7 +182,7 @@ public void testCreateExportSchedule(){
+ 				.extracting("mActionType").contains(ScheduledAction.ActionType.BACKUP);
+ 
+ 		ScheduledAction action = scheduledactionDbAdapter.getAllScheduledActions().get(0);
+-		assertThat(action.getPeriodType()).isEqualTo(PeriodType.WEEK);
++		assertThat(action.getPeriodType()).isEqualTo(PeriodType.DAY);
+ 		assertThat(action.getEndTime()).isEqualTo(0);
+ 	}
+ 
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 3cbda114..65bfa673 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -28,6 +28,7 @@
+ import android.util.Log;
+ import android.view.View;
+ import android.widget.EditText;
++import android.widget.LinearLayout;
+ import android.widget.Spinner;
+ import android.widget.TextView;
+ import android.widget.ToggleButton;
+@@ -278,6 +279,123 @@ public void testEditTransaction(){
+ 		mSolo.waitForText("Pasta");
+ 	}
+ 
++	/**
++	 * Tests that transactions splits are automatically balanced and an imbalance account will be created
++	 * This test case assumes that single entry is used
++	 */
++	public void testAutoBalanceTransactions(){
++		setDoubleEntryEnabled(false);
++		mTransactionsDbAdapter.deleteAllRecords();
++		mSolo.sleep(1000);
++		assertThat(mTransactionsDbAdapter.getTotalTransactionsCount()).isEqualTo(0);
++		String imbalanceAcctUID = mAccountsDbAdapter.getImbalanceAccountUID(Currency.getInstance(CURRENCY_CODE));
++		assertThat(imbalanceAcctUID).isNull();
++
++		mSolo.waitForText(TRANSACTION_NAME);
++
++		validateTransactionListDisplayed();
++		clickSherlockActionBarItem(R.id.menu_add_transaction);
++
++		mSolo.waitForText("New transaction");
++
++		//validate creation of transaction
++		mSolo.enterText(0, "Autobalance");
++		mSolo.enterText(1, "499");
++
++		View typeToogleButton = mSolo.getView(R.id.btn_open_splits);
++		assertThat(typeToogleButton).isNotVisible(); //no double entry so no split editor
++
++		mSolo.clickOnActionBarItem(R.id.menu_save);
++
++		mSolo.sleep(2000);
++
++		assertThat(mTransactionsDbAdapter.getTotalTransactionsCount()).isEqualTo(1);
++		Transaction transaction = mTransactionsDbAdapter.getAllTransactions().get(0);
++		assertThat(transaction.getSplits()).hasSize(2);
++		imbalanceAcctUID = mAccountsDbAdapter.getImbalanceAccountUID(Currency.getInstance(CURRENCY_CODE));
++		assertThat(imbalanceAcctUID).isNotNull();
++		assertThat(imbalanceAcctUID).isNotEmpty();
++		assertTrue(mAccountsDbAdapter.isHiddenAccount(imbalanceAcctUID)); //imbalance account should be hidden in single entry mode
++
++		assertThat(transaction.getSplits()).extracting("mAccountUID").contains(imbalanceAcctUID);
++
++	}
++
++	/**
++	 * Tests input of transaction splits using the split editor.
++	 * Also validates that the imbalance from the split editor will be automatically added as a split
++	 */
++	public void testSplitEditor(){
++		setDoubleEntryEnabled(true);
++		mTransactionsDbAdapter.deleteAllRecords();
++		mSolo.sleep(1000);
++		//when we start there should be no imbalance account in the system
++		String imbalanceAcctUID = mAccountsDbAdapter.getImbalanceAccountUID(Currency.getInstance(CURRENCY_CODE));
++		assertThat(imbalanceAcctUID).isNull();
++
++		mSolo.waitForText(TRANSACTION_NAME);
++
++		validateTransactionListDisplayed();
++		clickSherlockActionBarItem(R.id.menu_add_transaction);
++
++		mSolo.waitForText("New transaction");
++
++		//validate creation of transaction
++		mSolo.enterText(0, "Autobalance");
++		mSolo.enterText(1, "4499");
++
++		mSolo.clickOnButton(1);
++		mSolo.waitForDialogToOpen();
++
++		LinearLayout splitListView = (LinearLayout) mSolo.getView(R.id.split_list_layout);
++		assertThat(splitListView).hasChildCount(1);
++
++		//TODO: enable this assert when we fix the sign of amounts in split editor
++		//assertThat(mSolo.getEditText(0).getText().toString()).isEqualTo("44.99");
++		View addSplit = mSolo.getView(R.id.btn_add_split);
++		mSolo.clickOnView(addSplit);
++		mSolo.sleep(5000);
++		assertThat(splitListView).hasChildCount(2);
++
++		mSolo.enterText(0, "4000");
++
++		TextView imbalanceTextView = (TextView) mSolo.getView(R.id.imbalance_textview);
++		assertThat(imbalanceTextView).hasText("-4.99 $");
++
++		mSolo.clickOnView(mSolo.getView(R.id.btn_save));
++		mSolo.waitForDialogToClose();
++		mSolo.sleep(3000);
++		//after we use split editor, we should not be able to toggle the transaction type
++		assertThat(mSolo.getView(R.id.input_transaction_type)).isNotVisible();
++
++		mSolo.clickOnActionBarItem(R.id.menu_save);
++
++		mSolo.sleep(3000);
++
++		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactions();
++		assertThat(transactions).hasSize(1);
++
++		Transaction transaction = transactions.get(0);
++
++		assertThat(transaction.getSplits()).hasSize(3); //auto-balanced
++		imbalanceAcctUID = mAccountsDbAdapter.getImbalanceAccountUID(Currency.getInstance(CURRENCY_CODE));
++		assertThat(imbalanceAcctUID).isNotNull();
++		assertThat(imbalanceAcctUID).isNotEmpty();
++		assertFalse(mAccountsDbAdapter.isHiddenAccount(imbalanceAcctUID));
++
++		//at least one split will belong to the imbalance account
++		assertThat(transaction.getSplits()).extracting("mAccountUID").contains(imbalanceAcctUID);
++
++		List<Split> imbalanceSplits = mSplitsDbAdapter.getSplitsForTransactionInAccount(transaction.getUID(), imbalanceAcctUID);
++		assertThat(imbalanceSplits).hasSize(1);
++
++		Split split = imbalanceSplits.get(0);
++		assertThat(split.getAmount().toPlainString()).isEqualTo("4.99");
++		assertThat(split.getType()).isEqualTo(TransactionType.CREDIT);
++
++	}
++
++
+     private void setDoubleEntryEnabled(boolean enabled){
+         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+         Editor editor = prefs.edit();
+@@ -346,34 +464,27 @@ public void testToggleTransactionType(){
+ 		validateEditTransactionFields(mTransaction);
+ 
+         TransactionTypeToggleButton toggleButton = (TransactionTypeToggleButton) mSolo.getView(R.id.input_transaction_type);
+-        assertThat(toggleButton).isVisible();
+-
+-        String label = toggleButton.getText().toString();
+-        assertTrue(mSolo.searchToggleButton(label));
+-		assertThat(getActivity().getString(R.string.label_receive)).isEqualTo(label);
++        assertThat(toggleButton).isNotNull();
++		assertThat(toggleButton).isVisible();
++		assertThat(toggleButton).hasText(R.string.label_receive);
+ 
+         mSolo.clickOnView(toggleButton);
+-		mSolo.sleep(3000);
+-		String amountString = mSolo.getEditText(1).getText().toString();
+-		NumberFormat formatter = NumberFormat.getInstance();
+-		try {
+-			amountString = formatter.parse(amountString).toString();
+-		} catch (ParseException e) {
+-			e.printStackTrace();
+-		}
+-		Money amount = new Money(amountString, Currency.getInstance(Locale.getDefault()).getCurrencyCode());
+-		assertThat("-9.99").isEqualTo(amount.toPlainString());
++		mSolo.sleep(2000);
+ 
+-		clickSherlockActionBarItem(R.id.menu_save);
++		assertThat(toggleButton).hasText(R.string.label_spend);
++		EditText amountView = (EditText) mSolo.getView(R.id.input_transaction_amount);
++		String amountString = amountView.getText().toString();
++		assertThat(amountString).startsWith("-");
++		assertThat("-9.99").isEqualTo(amountString);
++
++		mSolo.clickOnActionBarItem(R.id.menu_save);
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		
+ 		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
+-		
+-		assertEquals(1, transactions.size());
++		assertThat(transactions).hasSize(1);
+ 		Transaction trx = transactions.get(0);
++		assertThat(trx.getSplits()).hasSize(2); //auto-balancing of splits
+ 		assertTrue(trx.getBalance(DUMMY_ACCOUNT_UID).isNegative());
+-
+-        mSolo.goBack();
+ 	}
+ 	
+ 	public void testOpenTransactionEditShouldNotModifyTransaction(){
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+index 6a2c987c..8a7e3e26 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+@@ -17,6 +17,7 @@
+ import org.junit.runner.RunWith;
+ import org.robolectric.annotation.Config;
+ 
++import java.math.BigDecimal;
+ import java.util.Currency;
+ import java.util.List;
+ 
+@@ -36,6 +37,8 @@
+ 	private Account alphaAccount;
+ 	private Account bravoAccount;
+ 
++	private Split mTestSplit;
++
+ 	@Before
+ 	public void setUp() throws Exception {
+         mSplitsDbAdapter = SplitsDbAdapter.getInstance();
+@@ -45,9 +48,13 @@ public void setUp() throws Exception {
+ 		alphaAccount = new Account(ALPHA_ACCOUNT_NAME);
+ 		bravoAccount = new Account(BRAVO_ACCOUNT_NAME);
+ 
+-		
+-		mAccountsDbAdapter.addAccount(bravoAccount);
+-		mAccountsDbAdapter.addAccount(alphaAccount);
++		long id1 = mAccountsDbAdapter.addAccount(bravoAccount);
++		long id2 = mAccountsDbAdapter.addAccount(alphaAccount);
++
++		assertThat(id1).isGreaterThan(0);
++		assertThat(id2).isGreaterThan(0);
++
++		mTestSplit = new Split(new Money(BigDecimal.TEN, DEFAULT_CURRENCY), alphaAccount.getUID());
+ 	}
+ 
+ 	@Test
+@@ -100,24 +107,27 @@ public void addingSplitsShouldSetTransactionUID(){
+ 		assertThat(split.getTransactionUID()).isEqualTo(transaction.getUID());
+ 	}
+ 
+-/**
+- //TODO: move this test to UI code. Autobalancing is done before the database level
+ 	@Test
+-	public void shouldAutoBalanceTransactions(){
+-		Transaction t = new Transaction("Autobalance");
+-		Split split = new Split(new Money(BigDecimal.TEN, DEFAULT_CURRENCY), alphaAccount.getUID());
+-		t.addSplit(split);
++	public void testComputeBalance(){
++		Transaction transaction = new Transaction("Compute");
++		Money firstSplitAmount = new Money("4.99", DEFAULT_CURRENCY.getCurrencyCode());
++		Split split = new Split(firstSplitAmount, alphaAccount.getUID());
++		transaction.addSplit(split);
++		Money secondSplitAmount = new Money("3.50", DEFAULT_CURRENCY.getCurrencyCode());
++		split = new Split(secondSplitAmount, bravoAccount.getUID());
++		transaction.addSplit(split);
+ 
+-		mTransactionsDbAdapter.addTransaction(t);
++		mTransactionsDbAdapter.addTransaction(transaction);
+ 
+-		Transaction balanced = mTransactionsDbAdapter.getTransaction(t.getUID());
+-		assertThat(balanced).isNotNull();
+-		assertThat(balanced.getSplits()).hasSize(2);
++		//balance is negated because the CASH account has inverse normal balance
++		transaction = mTransactionsDbAdapter.getTransaction(transaction.getUID());
++		Money savedBalance = transaction.getBalance(alphaAccount.getUID());
++		assertThat(savedBalance).isEqualTo(firstSplitAmount.negate());
+ 
+-		String imbalanceUID = mAccountsDbAdapter.getImbalanceAccountUID(DEFAULT_CURRENCY);
+-		assertThat(balanced.getSplits()).extracting("mAccountUID").contains(imbalanceUID);
++		savedBalance = transaction.getBalance(bravoAccount.getUID());
++		assertThat(savedBalance).isEqualTo(secondSplitAmount.negate());
+ 	}
+-**/
++
+ 	@After
+ 	public void tearDown() throws Exception {
+ 		mAccountsDbAdapter.deleteAllRecords();

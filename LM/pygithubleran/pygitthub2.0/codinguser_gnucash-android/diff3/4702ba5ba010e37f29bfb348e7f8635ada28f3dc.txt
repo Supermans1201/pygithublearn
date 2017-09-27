@@ -1,0 +1,472 @@
+From 4702ba5ba010e37f29bfb348e7f8635ada28f3dc Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sun, 4 Nov 2012 14:58:59 +0100
+Subject: [PATCH] Added support for double entry. A single transaction can now
+ be reflected in two accounts
+
+---
+ .../res/layout/fragment_new_transaction.xml        | 19 +++++++-
+ GnucashMobile/res/values/strings.xml               |  1 +
+ .../src/org/gnucash/android/data/Account.java      |  1 +
+ .../src/org/gnucash/android/data/Transaction.java  | 23 +++++++++
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  1 +
+ .../src/org/gnucash/android/db/DatabaseHelper.java | 23 ++++++---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 57 +++++++++++++++-------
+ .../ui/transactions/NewTransactionFragment.java    | 47 +++++++++++++++---
+ .../ui/transactions/TransactionsListFragment.java  |  7 +++
+ 9 files changed, 147 insertions(+), 32 deletions(-)
+
+diff --git a/GnucashMobile/res/layout/fragment_new_transaction.xml b/GnucashMobile/res/layout/fragment_new_transaction.xml
+index ee739db2..1df37199 100644
+--- a/GnucashMobile/res/layout/fragment_new_transaction.xml
++++ b/GnucashMobile/res/layout/fragment_new_transaction.xml
+@@ -136,6 +136,7 @@
+ 	   </LinearLayout>
+ 	    <LinearLayout android:layout_width="match_parent"
+ 	        android:layout_height="wrap_content"
++	        android:layout_marginBottom="@dimen/dialog_padding"
+ 	        android:orientation="vertical" >
+ 	        
+ 			<TextView
+@@ -151,6 +152,22 @@
+ 		        android:layout_height="wrap_content" 
+ 		        android:minHeight="?android:attr/listPreferredItemHeight" />
+ 	    </LinearLayout>
+-	
++		<LinearLayout android:layout_width="match_parent"
++	        android:layout_height="wrap_content"
++	        android:orientation="vertical" >
++	        
++			<TextView
++			    android:id="@+id/label_split_account"
++			    android:text="@string/label_split_account"
++			    android:layout_height="wrap_content"
++			    android:layout_width="wrap_content"
++			    android:layout_marginBottom="-8dip"
++			    style="@style/TextAppearance.EditTransaction_LabelSmall" />
++		    <Spinner
++		        android:id="@+id/input_split_accounts_spinner"        
++		        android:layout_width="match_parent"
++		        android:layout_height="wrap_content" 
++		        android:minHeight="?android:attr/listPreferredItemHeight" />
++	    </LinearLayout>
+ 	</LinearLayout>
+ </ScrollView>
+\ No newline at end of file
+diff --git a/GnucashMobile/res/values/strings.xml b/GnucashMobile/res/values/strings.xml
+index 861502e9..5e16c9f1 100644
+--- a/GnucashMobile/res/values/strings.xml
++++ b/GnucashMobile/res/values/strings.xml
+@@ -473,4 +473,5 @@
+ 		<item>CREDIT</item>
+ 		<item>DEBIT</item>
+ 	</string-array>
++	<string name="label_split_account">Split with account</string>
+ </resources>
+\ No newline at end of file
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index bbac1ed1..2c9a0cac 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -246,6 +246,7 @@ public boolean hasUnexportedTransactions(){
+ 	 * @return {@link Money} aggregate amount of all transactions in account.
+ 	 */
+ 	public Money getBalance(){
++		//TODO: Consider split transactions
+ 		Money balance = new Money(new BigDecimal(0), this.mCurrency);
+ 		for (Transaction transx : mTransactionsList) {
+ 			balance = balance.add(transx.getAmount());		
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index e47eed29..cc8bad0d 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -83,6 +83,12 @@
+ 	private String mAccountUID = null;
+ 	
+ 	/**
++	 * Unique Identifier of the account with which this transaction is split.
++	 * This value is null by default for transactions which are not split
++	 */
++	private String mSplitAccountUID = null;
++	
++	/**
+ 	 * Flag indicating if this transaction has been exported before or not
+ 	 * The transactions are typically exported as bank statement in the OFX format
+ 	 */
+@@ -300,6 +306,23 @@ public String getUID() {
+ 	}
+ 
+ 	/**
++	 * Returns the Unique Identifier of account with which this transaction is split
++	 * @return Unique Identifier of account with which this transaction is split
++	 */
++	public String getSplitAccountUID() {
++		return mSplitAccountUID;
++	}
++
++	/**
++	 * Sets the account UID with which to split this transaction
++	 * @param splitAccountUID Unique Identifier to set
++	 */
++	public void setSplitAccountUID(String splitAccountUID) {
++		this.mSplitAccountUID = splitAccountUID;
++	}
++	
++
++	/**
+ 	 * Returns UID of account to which this transaction belongs
+ 	 * @return the UID of the account to which this transaction belongs
+ 	 */
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
+index 430dec07..233373f1 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -48,6 +48,7 @@
+ 	public static final int COLUMN_TIMESTAMP 	= 6;
+ 	public static final int COLUMN_ACCOUNT_UID 	= 7;
+ 	public static final int COLUMN_EXPORTED 	= 8;
++	public static final int COLUMN_SPLIT_ACCOUNT_UID = 9;
+ 	
+ 	//columns specific to accounts
+ 	public static final int COLUMN_CURRENCY_CODE = 4;
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+index 04f0b13a..9b5ec691 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -43,7 +43,7 @@
+ 	 * Database version.
+ 	 * With any change to the database schema, this number must increase
+ 	 */
+-	private static final int DATABASE_VERSION = 1;
++	private static final int DATABASE_VERSION = 2;
+ 	
+ 	/**
+ 	 * Name of accounts table
+@@ -96,6 +96,11 @@
+ 	public static final String KEY_ACCOUNT_UID 	= "account_uid";
+ 	
+ 	/**
++	 * Account with which this transaction is split
++	 */
++	public static final String KEY_SPLIT_ACCOUNT_UID 	= "split_account_uid";
++	
++	/**
+ 	 * Transaction description database column
+ 	 */
+ 	public static final String KEY_DESCRIPTION 	= "description";
+@@ -139,9 +144,11 @@
+ 			+ KEY_AMOUNT 		+ " varchar(255) not null, "
+ 			+ KEY_DESCRIPTION 	+ " text, "
+ 			+ KEY_TIMESTAMP 	+ " integer not null, "
+-			+ KEY_ACCOUNT_UID 	+ " varchar(255) not null, "
++			+ KEY_ACCOUNT_UID 	+ " varchar(255) not null, "			
+ 			+ KEY_EXPORTED 		+ " tinyint default 0, "
++			+ KEY_SPLIT_ACCOUNT_UID 	+ " varchar(255), "
+ 			+ "FOREIGN KEY (" 	+ KEY_ACCOUNT_UID + ") REFERENCES " + ACCOUNTS_TABLE_NAME + " (" + KEY_UID + "), "
++			+ "FOREIGN KEY (" 	+ KEY_SPLIT_ACCOUNT_UID + ") REFERENCES " + ACCOUNTS_TABLE_NAME + " (" + KEY_UID + "), "
+ 			+ "UNIQUE (" 		+ KEY_UID + ") " 
+ 			+ ");";
+ 
+@@ -166,15 +173,15 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 				+ oldVersion + " to " + newVersion
+ 				+ " which will destroy all old data");
+ 		
+-		if (oldVersion < newVersion){
+-			/*
+-			Log.i("DatabaseHelper", "Upgrading database to version " + newVersion);
+-			if (oldVersion == 1 && newVersion == 2){				
++		if (oldVersion < newVersion){			
++			Log.i(TAG, "Upgrading database to version " + newVersion);
++			if (oldVersion == 1 && newVersion == 2){		
++				Log.i(TAG, "Adding column for splitting transactions");
+ 				String addColumnSql = "ALTER TABLE " + TRANSACTIONS_TABLE_NAME + 
+-									" ADD COLUMN " + KEY_EXPORTED + " tinyint default 0";
++									" ADD COLUMN " + KEY_SPLIT_ACCOUNT_UID + " varchar(255) default 0";
+ 				db.execSQL(addColumnSql);
+ 			}
+-			*/
++			
+ 		} else {
+ 			Log.i(TAG, "Cannot downgrade database.");
+ 			/*
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 28059ea6..267a6e72 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -28,6 +28,7 @@
+ import android.content.ContentValues;
+ import android.content.Context;
+ import android.database.Cursor;
++import android.database.sqlite.SQLiteStatement;
+ import android.util.Log;
+ 
+ /**
+@@ -64,6 +65,7 @@ public long addTransaction(Transaction transaction){
+ 		contentValues.put(DatabaseHelper.KEY_TIMESTAMP, transaction.getTimeMillis());
+ 		contentValues.put(DatabaseHelper.KEY_DESCRIPTION, transaction.getDescription());
+ 		contentValues.put(DatabaseHelper.KEY_EXPORTED, transaction.isExported() ? 1 : 0);
++		contentValues.put(DatabaseHelper.KEY_SPLIT_ACCOUNT_UID, transaction.getSplitAccountUID());
+ 		
+ 		long rowId = -1;
+ 		if ((rowId = fetchTransactionWithUID(transaction.getUID())) > 0){
+@@ -119,13 +121,15 @@ public Transaction getTransaction(long rowId){
+ 	
+ 	/**
+ 	 * Returns a cursor to a set of all transactions for the account with UID <code>accountUID</code>
++	 * or for which this account is the split account i.e <code>accountUID</code> is split account UID
+ 	 * @param accountUID UID of the account whose transactions are to be retrieved
+ 	 * @return Cursor holding set of transactions for particular account
+ 	 */
+ 	public Cursor fetchAllTransactionsForAccount(String accountUID){
+ 		Cursor cursor = mDb.query(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
+ 				null, 
+-				DatabaseHelper.KEY_ACCOUNT_UID + " = '" + accountUID + "'", 
++				"(" + DatabaseHelper.KEY_ACCOUNT_UID + " = '" + accountUID + "') "
++				+ "OR (" + DatabaseHelper.KEY_SPLIT_ACCOUNT_UID + " = '" + accountUID + "' )", 
+ 				null, null, null, DatabaseHelper.KEY_TIMESTAMP + " DESC");
+ 		
+ 		return cursor;
+@@ -133,6 +137,7 @@ public Cursor fetchAllTransactionsForAccount(String accountUID){
+ 	
+ 	/**
+ 	 * Returns a cursor to a set of all transactions for the account with ID <code>accountID</code>
++	 * * or for which this account is the split account in a double entry
+ 	 * @param accountUID ID of the account whose transactions are to be retrieved
+ 	 * @return Cursor holding set of transactions for particular account
+ 	 */
+@@ -153,6 +158,12 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+ 			return transactionsList;
+ 		
+ 		while (c.moveToNext()) {
++			Transaction transaction = buildTransactionInstance(c);
++			String splitAccountUID = transaction.getSplitAccountUID();
++			//negate split transactions for the split account
++			if (splitAccountUID != null && splitAccountUID.equals(accountUID)){
++				transaction.setAmount(transaction.getAmount().negate());
++			}
+ 			transactionsList.add(buildTransactionInstance(c));
+ 		}
+ 		c.close();
+@@ -178,7 +189,8 @@ public Transaction buildTransactionInstance(Cursor c){
+ 		transaction.setTime(c.getLong(DatabaseAdapter.COLUMN_TIMESTAMP));
+ 		transaction.setDescription(c.getString(DatabaseAdapter.COLUMN_DESCRIPTION));
+ 		transaction.setExported(c.getInt(DatabaseAdapter.COLUMN_EXPORTED) == 1);
+-				
++		transaction.setSplitAccountUID(c.getString(DatabaseAdapter.COLUMN_SPLIT_ACCOUNT_UID));
++		
+ 		return transaction;
+ 	}
+ 
+@@ -284,16 +296,11 @@ public int getTransactionsCount(long accountId){
+ 	 * regardless of what account they belong to
+ 	 * @return Number of transaction in the database
+ 	 */
+-	public int getAllTransactionsCount(){
+-		Cursor cursor = fetchAllRecords(DatabaseHelper.TRANSACTIONS_TABLE_NAME);
+-		int count = 0;
+-		if (cursor == null)
+-			return count;
+-		else {
+-			count = cursor.getCount();
+-			cursor.close();
+-		}
+-		return count;
++	public long getAllTransactionsCount(){
++		String sql = "SELECT COUNT(*) FROM " + DatabaseHelper.TRANSACTIONS_TABLE_NAME;		
++		SQLiteStatement statement = mDb.compileStatement(sql);
++	    long count = statement.simpleQueryForLong();
++	    return count;
+ 	}
+ 	
+ 	/**
+@@ -302,10 +309,11 @@ public int getAllTransactionsCount(){
+ 	 * @return Sum of transactions belonging to the account
+ 	 */
+ 	public Money getTransactionsSum(long accountId){
+-		Cursor c = mDb.query(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
+-				new String[]{DatabaseHelper.KEY_AMOUNT}, 
+-				DatabaseHelper.KEY_ACCOUNT_UID + "= '" + getAccountUID(accountId) + "'", 
+-				null, null, null, null);
++		Cursor c = fetchAllTransactionsForAccount(accountId); 
++//		mDb.query(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
++//				new String[]{DatabaseHelper.KEY_AMOUNT}, 
++//				DatabaseHelper.KEY_ACCOUNT_UID + "= '" + getAccountUID(accountId) + "'", 
++//				null, null, null, null);
+ 
+ 		//transactions will have the currency of the account
+ 		String currencyCode = getCurrencyCode(accountId);
+@@ -316,12 +324,27 @@ public Money getTransactionsSum(long accountId){
+ 		Money amountSum = new Money("0", currencyCode);
+ 		
+ 		while(c.moveToNext()){
+-			amountSum = amountSum.add(new Money(c.getString(0), currencyCode));
++			Money money = new Money(c.getString(DatabaseAdapter.COLUMN_AMOUNT), currencyCode);
++			if (c.getString(DatabaseAdapter.COLUMN_SPLIT_ACCOUNT_UID) != null){
++				amountSum = amountSum.add(money.negate());
++			} else {
++				amountSum = amountSum.add(money);
++			}
+ 		}
+ 		c.close();
+ 		
+ 		return amountSum;
+ 	}
++	
++	/**
++	 * Returns true if <code>rowId</code> and <code>accountUID</code> belong to the same account
++	 * @param rowId Database record ID
++	 * @param accountUID Unique Identifier string of the account
++	 * @return <code>true</code> if both are properties of the same account, <code>false</code> otherwise
++	 */
++	public boolean isSameAccount(long rowId, String accountUID){
++		return getAccountID(accountUID) == rowId;
++	}
+ 		
+ 	/**
+ 	 * Marks an account record as exported
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index af6154ed..fa908f08 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -66,6 +66,7 @@
+ import android.widget.Spinner;
+ import android.widget.TextView;
+ import android.widget.TimePicker;
++import android.widget.Toast;
+ import android.widget.ToggleButton;
+ 
+ import com.actionbarsherlock.app.ActionBar;
+@@ -164,6 +165,11 @@
+ 	private Spinner mAccountsSpinner;
+ 	
+ 	/**
++	 * Spinner for selecting the account to split the transaction with
++	 */
++	private Spinner mSplitAccountSpinner;
++	
++	/**
+ 	 * Accounts database adapter. 
+ 	 * Used for getting list of transactions to populate the {@link #mAccountsSpinner}
+ 	 */
+@@ -200,6 +206,7 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 		mAmountEditText = (EditText) v.findViewById(R.id.input_transaction_amount);		
+ 		mCurrencyTextView = (TextView) v.findViewById(R.id.currency_symbol);
+ 		mAccountsSpinner = (Spinner) v.findViewById(R.id.input_accounts_spinner);
++		mSplitAccountSpinner = (Spinner) v.findViewById(R.id.input_split_accounts_spinner);
+ 		mTransactionTypeButton = (ToggleButton) v.findViewById(R.id.input_transaction_type);
+ 		
+ 		return v;
+@@ -226,7 +233,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 				to, 
+ 				0);
+ 		mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-		mAccountsSpinner.setAdapter(mCursorAdapter);
++		mAccountsSpinner.setAdapter(mCursorAdapter);		
+ 		mAccountsSpinner.setOnItemSelectedListener(new OnItemSelectedListener() {
+ 
+ 			@Override
+@@ -242,6 +249,9 @@ public void onNothingSelected(AdapterView<?> parent) {
+ 				// nothing to see here, move along				
+ 			}
+ 		});
++		
++		mSplitAccountSpinner.setAdapter(mCursorAdapter);
++		
+ 		mTransactionId = getArguments().getLong(SELECTED_TRANSACTION_ID);
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+ 		mTransaction = mTransactionsDbAdapter.getTransaction(mTransactionId);
+@@ -272,10 +282,14 @@ private void initializeViewsWithTransaction(){
+ 		mDate = mTime = cal;
+ 				
+ 		final long accountId = mAccountsDbAdapter.fetchAccountWithUID(mTransaction.getAccountUID());
+-		final int count = mCursorAdapter.getCount();
+-		for (int pos = 0; pos < count; pos++) {
+-			if (mCursorAdapter.getItemId(pos) == accountId)
+-				mAccountsSpinner.setSelection(pos);
++		refreshSelectedAccount(accountId);
++		
++		String splitAccountUID = mTransaction.getSplitAccountUID();		
++		if (splitAccountUID != null){
++			final long splitAccountId = mAccountsDbAdapter.fetchAccountWithUID(splitAccountUID);
++			refreshSelectedSplitAccount(splitAccountId);
++		} else {
++			refreshSelectedSplitAccount(accountId);
+ 		}
+ 		
+ 		String code = mTransactionsDbAdapter.getCurrencyCode(accountId);
+@@ -304,6 +318,7 @@ private void initalizeViews() {
+ 				
+ 		final long accountId = getArguments().getLong(TransactionsListFragment.SELECTED_ACCOUNT_ID);
+ 		refreshSelectedAccount(accountId);
++		refreshSelectedSplitAccount(accountId);
+ 		
+ 		String code = Money.DEFAULT_CURRENCY_CODE;
+ 		if (accountId != 0)
+@@ -315,12 +330,27 @@ private void initalizeViews() {
+ 	}
+ 	
+ 	public void refreshSelectedAccount(long accountId){
++		long previousAccountId = mAccountsSpinner.getSelectedItemId();
+ 		for (int pos = 0; pos < mCursorAdapter.getCount(); pos++) {
+ 			if (mCursorAdapter.getItemId(pos) == accountId){
+ 				mAccountsSpinner.setSelection(pos);				
+ 				break;
+ 			}
+ 		}
++		
++		//if accountId and split account Id were the same, then make them the same.
++		//this avoid users inadvertently creating split transactions
++		long splitAccountId = mSplitAccountSpinner.getSelectedItemId();
++		if (previousAccountId == splitAccountId){
++			refreshSelectedSplitAccount(accountId);
++		}
++	}
++	
++	public void refreshSelectedSplitAccount(long splitAccountId){
++		for (int pos = 0; pos < mCursorAdapter.getCount(); pos++) {
++			if (mCursorAdapter.getItemId(pos) == splitAccountId)
++				mSplitAccountSpinner.setSelection(pos);
++		}
+ 	}
+ 	
+ 	/**
+@@ -408,8 +438,10 @@ private void saveNewTransaction() {
+ 		String name = mNameEditText.getText().toString();
+ 		String description = mDescriptionEditText.getText().toString();
+ 		BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
+-		
++				
+ 		long accountID 	= mAccountsSpinner.getSelectedItemId();
++		long splitAccountId = mSplitAccountSpinner.getSelectedItemId();
++		
+ 		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getCurrencyCode(accountID));
+ 		Money amount 	= new Money(amountBigd, currency);
+ 		TransactionType type = mTransactionTypeButton.isChecked() ? TransactionType.DEBIT : TransactionType.CREDIT;
+@@ -421,6 +453,9 @@ private void saveNewTransaction() {
+ 			mTransaction = new Transaction(amount, name, type);
+ 		}
+ 		mTransaction.setAccountUID(mTransactionsDbAdapter.getAccountUID(accountID));
++		if(splitAccountId != accountID){
++			mTransaction.setSplitAccountUID(mTransactionsDbAdapter.getAccountUID(splitAccountId));
++		}
+ 		mTransaction.setTime(cal.getTimeInMillis());
+ 		mTransaction.setDescription(description);
+ 		
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+index b8703507..a7cfc256 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+@@ -456,6 +456,13 @@ public void bindView(View view, Context context, Cursor cursor) {
+ 					cursor.getString(DatabaseAdapter.COLUMN_AMOUNT), 
+ 					mTransactionsDbAdapter.getCurrencyCode(mAccountID));
+ 			
++			//negate any transactions if they only belong to this account as split
++			String splitAccountUID = cursor.getString(DatabaseAdapter.COLUMN_SPLIT_ACCOUNT_UID);
++			if (splitAccountUID != null 
++					&& mTransactionsDbAdapter.isSameAccount(mAccountID, splitAccountUID)){
++				amount = amount.negate();				
++			}
++				
+ 			TextView tramount = (TextView) view.findViewById(R.id.transaction_amount);
+ 			tramount.setText(amount.formattedString(Locale.getDefault()));
+ 						

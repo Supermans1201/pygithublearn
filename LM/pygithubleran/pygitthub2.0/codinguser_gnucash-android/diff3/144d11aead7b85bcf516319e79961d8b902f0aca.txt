@@ -1,0 +1,321 @@
+From 144d11aead7b85bcf516319e79961d8b902f0aca Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Tue, 12 Aug 2014 22:16:26 +0300
+Subject: [PATCH] Implemented the passcode lock with handling resuming
+
+---
+ app/AndroidManifest.xml                            | 10 ++---
+ .../gnucash/android/app/GnuCashApplication.java    | 10 +++++
+ app/src/org/gnucash/android/ui/UxArgument.java     |  5 +++
+ .../android/ui/account/AccountsActivity.java       |  8 ++--
+ .../android/ui/passcode/PassLockActivity.java      | 51 ++++++++++++++++++++++
+ .../ui/passcode/PasscodeLockScreenActivity.java    | 30 ++++++++-----
+ .../ui/settings/PasscodePreferenceFragment.java    |  1 -
+ .../android/ui/settings/SettingsActivity.java      |  6 +++
+ .../ui/transaction/TransactionsActivity.java       | 12 ++---
+ 9 files changed, 107 insertions(+), 26 deletions(-)
+ create mode 100644 app/src/org/gnucash/android/ui/passcode/PassLockActivity.java
+
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index 61a7a671..f2c23526 100644
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -48,17 +48,17 @@
+         android:label="@string/app_name" 
+         android:theme="@style/Theme.Sherlock.Light.DarkActionBar">
+         <activity
+-            android:name=".ui.passcode.PasscodeLockScreenActivity"
+-            android:noHistory="true"
+-            android:windowSoftInputMode="stateAlwaysHidden">
++            android:name=".ui.account.AccountsActivity"
++            android:label="@string/app_name">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+                 <category android:name="android.intent.category.LAUNCHER" />
+             </intent-filter>
+         </activity>
+         <activity
+-            android:name=".ui.account.AccountsActivity"
+-            android:label="@string/app_name">
++            android:name=".ui.passcode.PasscodeLockScreenActivity"
++            android:noHistory="true"
++            android:windowSoftInputMode="stateAlwaysHidden">
+         </activity>
+         <activity android:name=".ui.settings.SettingsActivity"/>
+         <activity android:name=".ui.passcode.PasscodePreferenceActivity" />
+diff --git a/app/src/org/gnucash/android/app/GnuCashApplication.java b/app/src/org/gnucash/android/app/GnuCashApplication.java
+index 9a91f2e8..e556d9a3 100644
+--- a/app/src/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/org/gnucash/android/app/GnuCashApplication.java
+@@ -32,6 +32,16 @@
+  */
+ public class GnuCashApplication extends Application{
+ 
++    /**
++     * Lifetime of passcode session
++     */
++    public static final long SESSION_TIMEOUT = 5 * 1000;
++
++    /**
++     * Init time of passcode session
++     */
++    public static long PASSCODE_SESSION_INIT_TIME = 0l;
++
+     private static Context context;
+ 
+     public void onCreate(){
+diff --git a/app/src/org/gnucash/android/ui/UxArgument.java b/app/src/org/gnucash/android/ui/UxArgument.java
+index abff1fa7..0bc60732 100644
+--- a/app/src/org/gnucash/android/ui/UxArgument.java
++++ b/app/src/org/gnucash/android/ui/UxArgument.java
+@@ -63,6 +63,11 @@
+      */
+     public static final String AMOUNT_STRING = "starting_amount";
+ 
++    /**
++     * Class caller, which will be launched after the unlocking
++     */
++    public static final String PASSCODE_CLASS_CALLER = "passcode_class_caller";
++
+     //prevent initialization of instances of this class
+     private UxArgument(){
+         //prevent even the native class from calling the ctor
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+index 485ecc9b..5589d31c 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -36,21 +36,23 @@
+ import android.util.SparseArray;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import com.actionbarsherlock.app.SherlockFragmentActivity;
++
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ import com.viewpagerindicator.TitlePageIndicator;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.UxArgument;
++import org.gnucash.android.ui.passcode.PassLockActivity;
+ import org.gnucash.android.ui.settings.SettingsActivity;
+ import org.gnucash.android.ui.transaction.ScheduledTransactionsListFragment;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+ import org.gnucash.android.ui.util.OnAccountClickedListener;
++import org.gnucash.android.ui.util.Refreshable;
+ 
+ import java.io.FileNotFoundException;
+ import java.io.InputStream;
+@@ -61,7 +63,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  * 
+  */
+-public class AccountsActivity extends SherlockFragmentActivity implements OnAccountClickedListener {
++public class AccountsActivity extends PassLockActivity implements OnAccountClickedListener {
+ 
+ 	/**
+ 	 * Tag used for identifying the account list fragment when it is added to this activity
+diff --git a/app/src/org/gnucash/android/ui/passcode/PassLockActivity.java b/app/src/org/gnucash/android/ui/passcode/PassLockActivity.java
+new file mode 100644
+index 00000000..3972a2ac
+--- /dev/null
++++ b/app/src/org/gnucash/android/ui/passcode/PassLockActivity.java
+@@ -0,0 +1,51 @@
++package org.gnucash.android.ui.passcode;
++
++import android.content.Intent;
++import android.content.SharedPreferences;
++import android.preference.PreferenceManager;
++
++import com.actionbarsherlock.app.SherlockFragmentActivity;
++
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.ui.UxArgument;
++
++/**
++ * This activity used as the parent class for enabling passcode lock
++ *
++ * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
++ * @see org.gnucash.android.ui.account.AccountsActivity
++ * @see org.gnucash.android.ui.transaction.TransactionsActivity
++ */
++public class PassLockActivity extends SherlockFragmentActivity {
++
++    private static final String TAG = "PassLockActivity";
++
++    @Override
++    protected void onResume() {
++        super.onResume();
++
++        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
++        if (sharedPreferences.getBoolean(UxArgument.ENABLED_PASSCODE, false) && !isSessionActive()) {
++            startActivity(new Intent(this, PasscodeLockScreenActivity.class)
++                    .setAction(getIntent().getAction())
++                    .putExtra(UxArgument.PASSCODE_CLASS_CALLER, this.getClass().getName())
++                    .putExtra(UxArgument.SELECTED_ACCOUNT_ID, getIntent().getLongExtra(UxArgument.SELECTED_ACCOUNT_ID, 0L))
++            );
++        }
++    }
++
++    @Override
++    protected void onPause() {
++        super.onPause();
++        GnuCashApplication.PASSCODE_SESSION_INIT_TIME = System.currentTimeMillis();
++    }
++
++    /**
++     * @return {@code true} if passcode session is active, and {@code false} otherwise
++     */
++    private boolean isSessionActive() {
++        return System.currentTimeMillis() - GnuCashApplication.PASSCODE_SESSION_INIT_TIME
++                < GnuCashApplication.SESSION_TIMEOUT ? true : false;
++    }
++
++}
+diff --git a/app/src/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java b/app/src/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
+index 1ffc206a..9bac9665 100644
+--- a/app/src/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
++++ b/app/src/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
+@@ -17,7 +17,6 @@
+ package org.gnucash.android.ui.passcode;
+ 
+ import android.content.Intent;
+-import android.content.SharedPreferences;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.util.Log;
+@@ -26,8 +25,8 @@
+ import com.actionbarsherlock.app.SherlockFragmentActivity;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.ui.UxArgument;
+-import org.gnucash.android.ui.account.AccountsActivity;
+ 
+ /**
+  * Activity for displaying and managing the passcode lock screen.
+@@ -37,29 +36,38 @@
+         implements KeyboardFragment.OnPasscodeEnteredListener {
+ 
+     private static final String TAG = "PasscodeLockScreenActivity";
+-    private SharedPreferences sharedPreferences;
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         setContentView(R.layout.passcode_lockscreen);
+-
+-        sharedPreferences = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
+-        if (!sharedPreferences.getBoolean(UxArgument.ENABLED_PASSCODE, false)) {
+-            Log.i(TAG, "Passcode disabled");
+-            startActivity(new Intent(this, AccountsActivity.class));
+-        }
+     }
+ 
+     @Override
+     public void onPasscodeEntered(String pass) {
+-        String passcode = sharedPreferences.getString(UxArgument.PASSCODE, "");
++        String passcode = PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
++                .getString(UxArgument.PASSCODE, "");
+         Log.d(TAG, "Passcode: " + passcode);
++
+         if (passcode.equals(pass)) {
+-            startActivity(new Intent(this, AccountsActivity.class));
++            GnuCashApplication.PASSCODE_SESSION_INIT_TIME = System.currentTimeMillis();
++            startActivity(new Intent()
++                    .setClassName(this, getIntent().getStringExtra(UxArgument.PASSCODE_CLASS_CALLER))
++                    .setAction(getIntent().getAction())
++                    .setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
++                    .putExtra(UxArgument.SELECTED_ACCOUNT_ID, getIntent().getLongExtra(UxArgument.SELECTED_ACCOUNT_ID, 0L))
++            );
+         } else {
+             Toast.makeText(this, R.string.toast_wrong_passcode, Toast.LENGTH_SHORT).show();
+         }
+     }
+ 
++    @Override
++    public void onBackPressed() {
++        GnuCashApplication.PASSCODE_SESSION_INIT_TIME = System.currentTimeMillis() - GnuCashApplication.SESSION_TIMEOUT;
++        startActivity(new Intent(Intent.ACTION_MAIN)
++                .addCategory(Intent.CATEGORY_HOME)
++                .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
++    }
++
+ }
+diff --git a/app/src/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java b/app/src/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+index 2c9ca704..52744e07 100644
+--- a/app/src/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
++++ b/app/src/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+@@ -94,7 +94,6 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 
+         if (resultCode == Activity.RESULT_OK && requestCode == PASSCODE_REQUEST_CODE && data!= null) {
+             editor.putString(UxArgument.PASSCODE, data.getStringExtra(UxArgument.PASSCODE));
+-            editor.commit();
+             Toast.makeText(getActivity(), R.string.toast_passcode_set, Toast.LENGTH_SHORT).show();
+         } else {
+             editor.putBoolean(UxArgument.ENABLED_PASSCODE, false);
+diff --git a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+index 7527c6bb..1a2b3d2e 100644
+--- a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -158,6 +158,12 @@ protected void onResume() {
+     }
+ 
+     @Override
++    protected void onPause() {
++        super.onPause();
++        GnuCashApplication.PASSCODE_SESSION_INIT_TIME = System.currentTimeMillis();
++    }
++
++    @Override
+ 	public boolean onOptionsItemSelected(MenuItem item) {
+ 		switch (item.getItemId()) {
+ 		case android.R.id.home:		
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 56474abe..1ef5fe2f 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -35,33 +35,33 @@
+ import android.view.inputmethod.InputMethodManager;
+ import android.widget.SpinnerAdapter;
+ import android.widget.TextView;
++
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.ActionBar.OnNavigationListener;
+-import com.actionbarsherlock.app.SherlockFragmentActivity;
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuItem;
+ import com.viewpagerindicator.TitlePageIndicator;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.model.Account;
+-import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.DatabaseAdapter;
+-import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.account.AccountsListFragment;
++import org.gnucash.android.ui.passcode.PassLockActivity;
+ import org.gnucash.android.ui.util.OnAccountClickedListener;
+ import org.gnucash.android.ui.util.OnTransactionClickedListener;
++import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ /**
+  * Activity for displaying, creating and editing transactions
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class TransactionsActivity extends SherlockFragmentActivity implements
++public class TransactionsActivity extends PassLockActivity implements
+         Refreshable, OnAccountClickedListener, OnTransactionClickedListener{
+ 
+ 	/**

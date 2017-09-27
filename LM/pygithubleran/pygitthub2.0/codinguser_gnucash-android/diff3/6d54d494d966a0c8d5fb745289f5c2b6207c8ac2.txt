@@ -1,0 +1,495 @@
+From 6d54d494d966a0c8d5fb745289f5c2b6207c8ac2 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 18 Sep 2015 18:05:00 +0200
+Subject: [PATCH] Enable landscape mode for calculator keyboard
+
+Extract some string resources
+---
+ .../ui/transaction/SplitEditorFragment.java        | 36 ++++++++++++-
+ .../ui/transaction/TransactionFormFragment.java    | 59 ++++++++++++----------
+ .../android/ui/util/CalculatorEditText.java        |  4 +-
+ app/src/main/res/values-de/strings.xml             |  2 +
+ app/src/main/res/values-el/strings.xml             |  2 +
+ app/src/main/res/values-es-rMX/strings.xml         |  2 +
+ app/src/main/res/values-es/strings.xml             |  2 +
+ app/src/main/res/values-fr/strings.xml             |  2 +
+ app/src/main/res/values-hu/strings.xml             |  2 +
+ app/src/main/res/values-it/strings.xml             |  2 +
+ app/src/main/res/values-nb/strings.xml             |  2 +
+ app/src/main/res/values-nl/strings.xml             |  2 +
+ app/src/main/res/values-pl/strings.xml             |  2 +
+ app/src/main/res/values-pt-rBR/strings.xml         |  2 +
+ app/src/main/res/values-ru/strings.xml             |  2 +
+ app/src/main/res/values-uk/strings.xml             |  2 +
+ app/src/main/res/values-zh-rTW/strings.xml         |  2 +
+ app/src/main/res/values-zh/strings.xml             |  2 +
+ app/src/main/res/values/strings.xml                |  2 +
+ app/src/main/res/xml-land/calculator_keyboard.xml  | 22 ++++----
+ 20 files changed, 112 insertions(+), 41 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+index 21a0a410..c6b83e62 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+@@ -17,6 +17,7 @@
+ 
+ import android.app.Activity;
+ import android.content.Intent;
++import android.content.res.Configuration;
+ import android.database.Cursor;
+ import android.inputmethodservice.KeyboardView;
+ import android.os.Bundle;
+@@ -39,6 +40,7 @@
+ import android.widget.LinearLayout;
+ import android.widget.Spinner;
+ import android.widget.TextView;
++import android.widget.Toast;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
+@@ -87,6 +89,7 @@
+     private ArrayList<String> mRemovedSplitUIDs = new ArrayList<>();
+ 
+     CalculatorKeyboard mCalculatorKeyboard;
++
+     /**
+      * Create and return a new instance of the fragment with the appropriate paramenters
+      * @param args Arguments to be set to the fragment. <br>
+@@ -144,6 +147,12 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         }
+     }
+ 
++    @Override
++    public void onConfigurationChanged(Configuration newConfig) {
++        super.onConfigurationChanged(newConfig);
++        mCalculatorKeyboard = new CalculatorKeyboard(getActivity(), mKeyboardView, R.xml.calculator_keyboard);
++    }
++
+     private void loadSplitViews(List<Split> splitList) {
+         for (Split split : splitList) {
+             addSplitView(split);
+@@ -295,7 +304,32 @@ private void updateTransferAccountsList(Spinner transferAccountSpinner){
+         transferAccountSpinner.setAdapter(mCursorAdapter);
+     }
+ 
++    /**
++     * Check if all the split amounts have valid values that can be saved
++     * @return {@code true} if splits can be saved, {@code false} otherwise
++     */
++    private boolean canSave(){
++        for (View splitView : mSplitItemViewList) {
++            SplitViewHolder viewHolder = (SplitViewHolder) splitView.getTag();
++            viewHolder.splitAmountEditText.evaluate();
++            if (viewHolder.splitAmountEditText.getError() != null){
++                return false;
++            }
++            //TODO: also check that multicurrency splits have a conversion amount present
++        }
++        return true;
++    }
++
++    /**
++     * Save all the splits from the split editor
++     */
+     private void saveSplits() {
++        if (!canSave()){
++            Toast.makeText(getActivity(), R.string.toast_error_check_split_amounts,
++                    Toast.LENGTH_SHORT).show();
++            return;
++        }
++
+         List<Split> splitList = extractSplitsFromView();
+         ArrayList<String> splitStrings = new ArrayList<>();
+         for (Split split : splitList) {
+@@ -317,7 +351,7 @@ private void saveSplits() {
+         List<Split> splitList = new ArrayList<>();
+         for (View splitView : mSplitItemViewList) {
+             SplitViewHolder viewHolder = (SplitViewHolder) splitView.getTag();
+-            if (viewHolder.splitAmountEditText.getText().length() == 0)
++            if (viewHolder.splitAmountEditText.getValue() == null)
+                 continue;
+ 
+             BigDecimal amountBigDecimal = viewHolder.splitAmountEditText.getValue();
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 32121d7c..0c551571 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -189,6 +189,11 @@
+     @Bind(R.id.input_recurrence) TextView mRecurrenceTextView;
+ 
+     /**
++     * View which displays the calculator keyboard
++     */
++    @Bind(R.id.calculator_keyboard) KeyboardView mKeyboardView;
++
++    /**
+      * Flag to note if double entry accounting is in use or not
+      */
+ 	private boolean mUseDoubleEntry;
+@@ -220,14 +225,30 @@
+     private boolean mEditMode = false;
+ 
+     /**
+-     * Custom calculator keyboard
+-     */
+-    private CalculatorKeyboard mCalculatorKeyboard;
+-
+-    /**
+      * Split quantity which will be set from the funds transfer dialog
+      */
+     private Money mSplitQuantity;
++    private View.OnTouchListener mAmountEditTextTouchListener = new View.OnTouchListener() {
++        @Override
++        public boolean onTouch(View v, MotionEvent event) {
++            final int DRAWABLE_LEFT = 0;
++            final int DRAWABLE_TOP = 1;
++            final int DRAWABLE_RIGHT = 2;
++            final int DRAWABLE_BOTTOM = 3;
++
++            if (event.getAction() == MotionEvent.ACTION_UP) {
++                if (event.getRawX() >= (mAmountEditText.getRight() - mAmountEditText.getCompoundDrawables()[DRAWABLE_RIGHT].getBounds().width())) {
++                    openSplitEditor();
++                    return true;
++                } else if (!mAmountEditText.getCalculatorKeyboard().isCustomKeyboardVisible()) {
++                    mAmountEditText.getCalculatorKeyboard().showCustomKeyboard(v);
++                }
++            }
++
++            mAmountEditText.onTouchEvent(event);
++            return false;
++        }
++    };;
+ 
+     /**
+ 	 * Create the view and retrieve references to the UI elements
+@@ -237,7 +258,7 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+ 		View v = inflater.inflate(R.layout.fragment_transaction_form, container, false);
+         ButterKnife.bind(this, v);
+-        mAmountEditText.bindListeners((KeyboardView) v.findViewById(R.id.calculator_keyboard));
++        mAmountEditText.bindListeners(mKeyboardView);
+         return v;
+ 	}
+ 
+@@ -261,12 +282,14 @@ private void startTransferFunds() {
+ 
+         TransferFundsDialogFragment fragment
+                 = TransferFundsDialogFragment.getInstance(amount, targetCurrency, this);
+-        fragment.show(getFragmentManager(), "tranfer_funds_editor");
++        fragment.show(getFragmentManager(), "transfer_funds_editor");
+     }
+ 
+     @Override
+     public void onConfigurationChanged(Configuration newConfig) {
+         super.onConfigurationChanged(newConfig);
++        mAmountEditText.bindListeners(mKeyboardView);
++        mAmountEditText.setOnTouchListener(mAmountEditTextTouchListener);
+     }
+ 
+     @Override
+@@ -601,27 +624,7 @@ private void openSplitEditor(){
+ 	 * Sets click listeners for the dialog buttons
+ 	 */
+ 	private void setListeners() {
+-        mAmountEditText.setOnTouchListener(new View.OnTouchListener() {
+-            @Override
+-            public boolean onTouch(View v, MotionEvent event) {
+-                final int DRAWABLE_LEFT = 0;
+-                final int DRAWABLE_TOP = 1;
+-                final int DRAWABLE_RIGHT = 2;
+-                final int DRAWABLE_BOTTOM = 3;
+-
+-                if (event.getAction() == MotionEvent.ACTION_UP) {
+-                    if (event.getRawX() >= (mAmountEditText.getRight() - mAmountEditText.getCompoundDrawables()[DRAWABLE_RIGHT].getBounds().width())) {
+-                        openSplitEditor();
+-                        return true;
+-                    } else if (!mAmountEditText.getCalculatorKeyboard().isCustomKeyboardVisible()) {
+-                        mAmountEditText.getCalculatorKeyboard().showCustomKeyboard(v);
+-                    }
+-                }
+-
+-                mAmountEditText.onTouchEvent(event);
+-                return false;
+-            }
+-        });
++        mAmountEditText.setOnTouchListener(mAmountEditTextTouchListener);
+ 
+ 		mTransactionTypeSwitch.setAmountFormattingListener(mAmountEditText, mCurrencyTextView);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/CalculatorEditText.java b/app/src/main/java/org/gnucash/android/ui/util/CalculatorEditText.java
+index 16955a6c..39044d0c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/CalculatorEditText.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/CalculatorEditText.java
+@@ -263,7 +263,7 @@ public String evaluate(){
+             expression = expressionBuilder.build();
+         } catch (RuntimeException e) {
+             // FIXME: i18n
+-            setError("Invalid expression!");
++            setError(getContext().getString(R.string.label_error_invalid_expression));
+             String msg = "Invalid expression: " + amountText;
+             Log.e(this.getClass().getSimpleName(), msg);
+             Crashlytics.log(msg);
+@@ -284,7 +284,7 @@ public String evaluate(){
+             setSelection(resultString.length());
+         } else {
+             // FIXME: i18n
+-            setError("Invalid expression!");
++            setError(getContext().getString(R.string.label_error_invalid_expression));
+             Log.w(VIEW_LOG_TAG, "Expression is null or invalid: " + expression);
+         }
+         return getText().toString();
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index 0d369ba9..f9dfe278 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -523,6 +523,8 @@ No user-identifiable information will be collected as part of this process!</str
+ 	<string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+ 	<string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+ 	<string name="title_split_editor">Split Editor</string>
++	<string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++	<string name="label_error_invalid_expression">Invalid expression!</string>
+ 	<string-array name="report_time_range">
+ 		<item>All time</item>
+ 		<item>Current month</item>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index eca4cb61..f0b3c756 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -542,6 +542,8 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+ 	<string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+ 	<string name="title_split_editor">Split Editor</string>
++	<string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++	<string name="label_error_invalid_expression">Invalid expression!</string>
+ 	<string-array name="report_time_range">
+ 		<item>All time</item>
+ 		<item>Current month</item>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 60c2e19a..f404e9ae 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -527,6 +527,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 83e660be..b34dfd98 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -524,6 +524,8 @@ Este proceso solo recoge informaci&#243;n que no permite identificar al usuario<
+ 	<string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+ 	<string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+ 	<string name="title_split_editor">Split Editor</string>
++	<string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++	<string name="label_error_invalid_expression">Invalid expression!</string>
+ 	<string-array name="report_time_range">
+ 		<item>All time</item>
+ 		<item>Current month</item>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index a292f54b..2352b886 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -524,6 +524,8 @@ Aucune information permettant d\'identifier l\'utilisateur ne sera recueillis da
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 794d7897..fbaad1e9 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -528,6 +528,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index cf17ebda..9741d433 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -528,6 +528,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index db7151a7..f5e39ad5 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -525,6 +525,8 @@ Ingen brukerinformasjon vil bli delt i denne prosessen!
+ 	<string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+ 	<string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+ 	<string name="title_split_editor">Split Editor</string>
++	<string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++	<string name="label_error_invalid_expression">Invalid expression!</string>
+ 	<string-array name="report_time_range">
+ 		<item>All time</item>
+ 		<item>Current month</item>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index b5aa2199..f6851116 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -529,6 +529,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-pl/strings.xml b/app/src/main/res/values-pl/strings.xml
+index c91e3abf..befb9f28 100644
+--- a/app/src/main/res/values-pl/strings.xml
++++ b/app/src/main/res/values-pl/strings.xml
+@@ -525,6 +525,8 @@
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index e5fde424..08829950 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -527,6 +527,8 @@ Nenhuma informao de  identificao do usurio ser coletada neste proces
+ 	<string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+ 	<string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+ 	<string name="title_split_editor">Split Editor</string>
++	<string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++	<string name="label_error_invalid_expression">Invalid expression!</string>
+ 	<string-array name="report_time_range">
+ 		<item>All time</item>
+ 		<item>Current month</item>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index b5651a09..0602b1e8 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -531,6 +531,8 @@
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-uk/strings.xml b/app/src/main/res/values-uk/strings.xml
+index b31ccb34..a5d4774b 100644
+--- a/app/src/main/res/values-uk/strings.xml
++++ b/app/src/main/res/values-uk/strings.xml
+@@ -511,6 +511,8 @@
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+index 4eacdb09..0ae2ec21 100644
+--- a/app/src/main/res/values-zh-rTW/strings.xml
++++ b/app/src/main/res/values-zh-rTW/strings.xml
+@@ -525,6 +525,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index 063d6a26..e3bd69e1 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -526,6 +526,8 @@ No user-identifiable information will be collected as part of this process!
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 4df85f44..f1fb700a 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -531,6 +531,8 @@
+     <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+     <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+     <string name="title_split_editor">Split Editor</string>
++    <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++    <string name="label_error_invalid_expression">Invalid expression!</string>
+     <string-array name="report_time_range">
+         <item>All time</item>
+         <item>Current month</item>
+diff --git a/app/src/main/res/xml-land/calculator_keyboard.xml b/app/src/main/res/xml-land/calculator_keyboard.xml
+index ecc1d5b0..07259449 100644
+--- a/app/src/main/res/xml-land/calculator_keyboard.xml
++++ b/app/src/main/res/xml-land/calculator_keyboard.xml
+@@ -1,30 +1,32 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <!-- FIXME: make locale independent -->
+ <Keyboard xmlns:android="http://schemas.android.com/apk/res/android"
+-    android:keyWidth="20%p"
++    android:keyWidth="25%p"
+     android:keyHeight="15%p">
+ 
+     <Row>
+-        <Key android:codes="53" android:keyLabel="5" android:keyEdgeFlags="left" />
+-        <Key android:codes="54" android:keyLabel="6" />
+-        <Key android:codes="55" android:keyLabel="7" />
++        <Key android:codes="55" android:keyLabel="7" android:keyEdgeFlags="left" />
+         <Key android:codes="56" android:keyLabel="8" />
+         <Key android:codes="57" android:keyLabel="9" />
+         <Key android:codes="42" android:keyLabel="*" />
+         <Key android:codes="47" android:keyLabel="/" android:keyEdgeFlags="right" />
+-        <Key android:codes="46" android:keyLabel="." />
+         <Key android:codes="-5" android:keyIcon="@drawable/ic_backspace_normal_dark"
+             android:isRepeatable="true" android:keyEdgeFlags="right"/>
+     </Row>
+     <Row>
+-        <Key android:codes="48" android:keyLabel="0" android:keyEdgeFlags="left" />
+-        <Key android:codes="49" android:keyLabel="1" />
+-        <Key android:codes="50" android:keyLabel="2" />
+-        <Key android:codes="51" android:keyLabel="3" />
+         <Key android:codes="52" android:keyLabel="4" android:keyEdgeFlags="left" />
++        <Key android:codes="53" android:keyLabel="5" />
++        <Key android:codes="54" android:keyLabel="6" />
++        <Key android:codes="46" android:keyLabel="." />
+         <Key android:codes="43" android:keyLabel="+" />
+         <Key android:codes="45" android:keyLabel="-" android:keyEdgeFlags="right" />
+-        <Key android:codes="1001" android:keyLabel="=" android:horizontalGap="20%" />
++    </Row>
++    <Row>
++        <Key android:codes="49" android:keyLabel="1" android:keyEdgeFlags="left"/>
++        <Key android:codes="50" android:keyLabel="2" />
++        <Key android:codes="51" android:keyLabel="3" />
++        <Key android:codes="48" android:keyLabel="0"  />
++        <Key android:codes="1001" android:keyLabel="=" />
+         <Key android:codes="1002" android:keyIcon="@drawable/ic_chevron_right_white_24dp"
+             android:keyEdgeFlags="right" />
+     </Row>

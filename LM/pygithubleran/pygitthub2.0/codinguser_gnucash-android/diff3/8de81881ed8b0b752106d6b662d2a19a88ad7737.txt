@@ -1,0 +1,215 @@
+From 8de81881ed8b0b752106d6b662d2a19a88ad7737 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 2 Sep 2015 16:50:40 +0200
+Subject: [PATCH] Add price to database after conversion operation
+
+Hide button for fetching price quotes until such a feature is implemented
+---
+ .../main/java/org/gnucash/android/model/Price.java | 13 +++++++-
+ .../ui/transaction/TransactionsActivity.java       | 35 +++-------------------
+ .../dialog/TransferFundsDialogFragment.java        | 27 +++++++++++++----
+ app/src/main/res/layout/dialog_transfer_funds.xml  |  9 ++++--
+ 4 files changed, 44 insertions(+), 40 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/Price.java b/app/src/main/java/org/gnucash/android/model/Price.java
+index 6b0bc839..4d3f8f00 100644
+--- a/app/src/main/java/org/gnucash/android/model/Price.java
++++ b/app/src/main/java/org/gnucash/android/model/Price.java
+@@ -15,13 +15,24 @@
+     private int mValueNum;
+     private int mValueDenom;
+ 
++    /**
++     * String indicating that the price was provided by the user
++     */
++    public static final String SOURCE_USER = "user:xfer-dialog";
++
+     public Price(){
+-        //nothing to see here, just call base
++        mDate = new Timestamp(System.currentTimeMillis());
+     }
+ 
++    /**
++     * Create new instance with the GUIDs of the commodities
++     * @param commodityUID GUID of the origin commodity
++     * @param currencyUID GUID of the target commodity
++     */
+     public Price(String commodityUID, String currencyUID){
+         this.mCommodityUID = commodityUID;
+         this.mCurrencyUID = currencyUID;
++        mDate = new Timestamp(System.currentTimeMillis());
+     }
+ 
+     public String getCommodityUID() {
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index f41d8b51..02f09828 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -59,6 +59,8 @@
+ import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
++import java.math.BigDecimal;
++
+ /**
+  * Activity for displaying, creating and editing transactions
+  * @author Ngewi Fet <ngewif@gmail.com>
+@@ -441,15 +443,6 @@ protected void onDestroy() {
+         mAccountsCursor.close();
+ 	}
+ 
+-    /**
+-     * Returns the current fragment (either sub-accounts, or transactions) displayed in the activity
+-     * @return Current fragment displayed by the view pager
+-     */
+-    public Fragment getCurrentPagerFragment(){
+-        int index = mViewPager.getCurrentItem();
+-        return (Fragment) mFragmentPageReferenceMap.get(index);
+-    }
+-
+ 	/**
+ 	 * Returns the global unique ID of the current account
+ 	 * @return GUID of the current account
+@@ -458,28 +451,6 @@ public String getCurrentAccountUID(){
+ 		return mAccountUID;
+ 	}
+ 
+-	/**
+-	 * Opens a fragment to create a new transaction. 
+-	 * Is called from the XML views
+-	 * @param v View which triggered this method
+-	 */
+-	public void onNewTransactionClick(View v){
+-		createNewTransaction(mAccountUID);
+-	}
+-
+-
+-    /**
+-     * Opens a dialog fragment to create a new account which is a sub account of the current account
+-     * @param v View which triggered this callback
+-     */
+-    public void onNewAccountClick(View v) {
+-        Intent addAccountIntent = new Intent(this, AccountsActivity.class);
+-        addAccountIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+-        addAccountIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-        addAccountIntent.putExtra(UxArgument.PARENT_ACCOUNT_UID, mAccountUID);
+-        startActivityForResult(addAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);
+-    }
+-
+     /**
+      * Display the balance of a transaction in a text view and format the text color to match the sign of the amount
+      * @param balanceTextView {@link android.widget.TextView} where balance is to be displayed
+@@ -491,6 +462,8 @@ public static void displayBalance(TextView balanceTextView, Money balance){
+         int fontColor = balance.isNegative() ?
+                 context.getResources().getColor(R.color.debit_red) :
+                 context.getResources().getColor(R.color.credit_green);
++        if (balance.asBigDecimal().compareTo(BigDecimal.ZERO) == 0)
++            fontColor = context.getResources().getColor(android.R.color.black);
+         balanceTextView.setTextColor(fontColor);
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+index b0c0b505..d96cf6b6 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+@@ -34,7 +34,10 @@
+ import android.widget.TextView;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.db.CommoditiesDbAdapter;
++import org.gnucash.android.db.PricesDbAdapter;
+ import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Price;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+ import org.gnucash.android.ui.util.AmountInputFormatter;
+@@ -70,7 +73,7 @@
+ 
+     @Bind(R.id.btn_save) Button mSaveButton;
+     @Bind(R.id.btn_cancel) Button mCancelButton;
+-    Money mTransactionAmount;
++    Money mOriginAmount;
+     Currency mTargetCurrency;
+ 
+     Money mConvertedAmount;
+@@ -79,7 +82,7 @@
+     public static TransferFundsDialogFragment getInstance(Money transactionAmount, String targetCurrencyCode,
+                                                           OnTransferFundsListener transferFundsListener){
+         TransferFundsDialogFragment fragment = new TransferFundsDialogFragment();
+-        fragment.mTransactionAmount = transactionAmount;
++        fragment.mOriginAmount = transactionAmount;
+         fragment.mTargetCurrency = Currency.getInstance(targetCurrencyCode);
+         fragment.mOnTransferFundsListener = transferFundsListener;
+         return fragment;
+@@ -91,8 +94,8 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle sa
+         View view = inflater.inflate(R.layout.dialog_transfer_funds, container, false);
+         ButterKnife.bind(this, view);
+ 
+-        TransactionsActivity.displayBalance(mStartAmountLabel, mTransactionAmount);
+-        Currency fromCurrency = mTransactionAmount.getCurrency();
++        TransactionsActivity.displayBalance(mStartAmountLabel, mOriginAmount);
++        Currency fromCurrency = mOriginAmount.getCurrency();
+         mFromCurrencyLabel.setText(fromCurrency.getCurrencyCode());
+         mToCurrencyLabel.setText(mTargetCurrency.getCurrencyCode());
+         mConvertedAmountCurrencyLabel.setText(mTargetCurrency.getCurrencyCode());
+@@ -172,7 +175,7 @@ private void transferFunds(){
+             }
+ 
+             BigDecimal rate = TransactionFormFragment.parseInputToDecimal(exchangeRateString);
+-            mConvertedAmount = mTransactionAmount.multiply(rate);
++            mConvertedAmount = mOriginAmount.multiply(rate);
+         }
+ 
+         if (mConvertedAmountRadioButton.isChecked()){
+@@ -186,8 +189,20 @@ private void transferFunds(){
+             mConvertedAmount = new Money(amount, mTargetCurrency);
+         }
+ 
+-        if (mOnTransferFundsListener != null)
++        if (mOnTransferFundsListener != null) {
++            PricesDbAdapter pricesDbAdapter = PricesDbAdapter.getInstance();
++            CommoditiesDbAdapter commoditiesDbAdapter = CommoditiesDbAdapter.getInstance();
++            Price price = new Price(commoditiesDbAdapter.getCommodityUID(mOriginAmount.getCurrency().getCurrencyCode()),
++                    commoditiesDbAdapter.getCommodityUID(mTargetCurrency.getCurrencyCode()));
++            price.setSource(Price.SOURCE_USER);
++            BigDecimal rateDecimal = mConvertedAmount.asBigDecimal().divide(mOriginAmount.asBigDecimal());
++            Money rate = new Money(rateDecimal, mTargetCurrency); //the currency is irrelevant
++            price.setValueNum(rate.getNumerator());
++            price.setValueDenom(rate.getDenominator());
++            pricesDbAdapter.addRecord(price);
++
+             mOnTransferFundsListener.transferComplete(mConvertedAmount);
++        }
+         dismiss();
+     }
+ 
+diff --git a/app/src/main/res/layout/dialog_transfer_funds.xml b/app/src/main/res/layout/dialog_transfer_funds.xml
+index 1b04d293..cce85afa 100644
+--- a/app/src/main/res/layout/dialog_transfer_funds.xml
++++ b/app/src/main/res/layout/dialog_transfer_funds.xml
+@@ -71,7 +71,9 @@
+         android:text="Provide either the converted amount or exchange rate in order to transfer funds"
+         />
+     <TableRow android:gravity="center_vertical"
+-        android:padding="@dimen/dialog_padding">
++        android:paddingTop="@dimen/dialog_padding">
++        android:paddingLeft="@dimen/dialog_padding">
++        android:paddingRight="@dimen/dialog_padding">
+         <RadioButton android:id="@+id/radio_exchange_rate"
+             android:layout_width="0dp"
+             android:layout_weight="0.5"
+@@ -98,10 +100,13 @@
+             android:layout_weight="1"
+             android:layout_height="wrap_content"
+             android:enabled="false"
++            android:visibility="gone"
+             android:text="Fetch quote"/>
+     </TableRow>
+     <TextView android:id="@+id/label_exchange_rate_example"
+-        android:padding="@dimen/dialog_padding"
++        android:paddingLeft="@dimen/dialog_padding"
++        android:paddingRight="@dimen/dialog_padding"
++        android:paddingBottom="@dimen/dialog_padding"
+         android:layout_width="match_parent"
+         android:layout_height="wrap_content"
+         android:gravity="center"

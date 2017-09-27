@@ -1,0 +1,1348 @@
+From b0477f8f2840af00f8b0c8805da2d1cc5e64a354 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 17 Apr 2015 18:38:41 +0200
+Subject: [PATCH] Implemented backup/export to Google Drive
+
+---
+ app/build.gradle                                   |   4 +-
+ .../gnucash/android/export/ExportAsyncTask.java    | 226 +++++++++++++++------
+ .../android/export/ExportDialogFragment.java       |  41 ++--
+ .../org/gnucash/android/export/ExportParams.java   |   2 -
+ .../ui/settings/BackupPreferenceFragment.java      |   4 +
+ .../android/ui/settings/SettingsActivity.java      | 151 ++++++++++++--
+ app/src/main/res/drawable-hdpi/ic_google_drive.png | Bin 0 -> 2859 bytes
+ app/src/main/res/drawable-mdpi/ic_google_drive.png | Bin 0 -> 1258 bytes
+ .../main/res/drawable-xhdpi/ic_google_drive.png    | Bin 0 -> 6676 bytes
+ app/src/main/res/values-de/strings.xml             |   4 +-
+ app/src/main/res/values-el/strings.xml             |   4 +-
+ app/src/main/res/values-es-rMX/strings.xml         |   4 +-
+ app/src/main/res/values-es/strings.xml             |   4 +-
+ app/src/main/res/values-fr/strings.xml             |   4 +-
+ app/src/main/res/values-hu/strings.xml             |   4 +-
+ app/src/main/res/values-it/strings.xml             |   4 +-
+ app/src/main/res/values-nb/strings.xml             |   4 +-
+ app/src/main/res/values-nl/strings.xml             |   4 +-
+ app/src/main/res/values-pt-rBR/strings.xml         |   4 +-
+ app/src/main/res/values-ru/strings.xml             |   4 +-
+ app/src/main/res/values-zh/strings.xml             |   4 +-
+ app/src/main/res/values/donottranslate.xml         |   2 +
+ app/src/main/res/values/strings.xml                |   4 +-
+ .../main/res/xml/fragment_backup_preferences.xml   |   6 +
+ 24 files changed, 372 insertions(+), 116 deletions(-)
+ create mode 100644 app/src/main/res/drawable-hdpi/ic_google_drive.png
+ create mode 100644 app/src/main/res/drawable-mdpi/ic_google_drive.png
+ create mode 100644 app/src/main/res/drawable-xhdpi/ic_google_drive.png
+
+diff --git a/app/build.gradle b/app/build.gradle
+index ffe59eed..4961e888 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -44,12 +44,12 @@ android {
+         development {
+             applicationId 'org.gnucash.android.devel'
+             testApplicationId 'org.gnucash.android.test.devel'
+-            resValue "string", "app_name", "GnuCash (devel)"
++            resValue "string", "app_name", "GnuCash-devel"
+             versionName "${versionMajor}.${versionMinor}.${versionPatch}-dev${versionBuild} @rev ${gitSha()} - BuildTime ${buildTime()} "
+         }
+ 
+         beta {
+-            resValue "string", "app_name", "GnuCash (beta)"
++            resValue "string", "app_name", "GnuCash - beta"
+             versionName "${versionMajor}.${versionMinor}.${versionPatch}-beta${versionBuild} @rev ${gitSha()} - BuildTime ${buildTime()}"
+         }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 86597ea8..e4339798 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -22,6 +22,7 @@
+ import android.app.ProgressDialog;
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.SharedPreferences;
+ import android.net.Uri;
+ import android.os.AsyncTask;
+ import android.os.Build;
+@@ -34,6 +35,14 @@
+ import com.dropbox.sync.android.DbxFile;
+ import com.dropbox.sync.android.DbxFileSystem;
+ import com.dropbox.sync.android.DbxPath;
++import com.google.android.gms.common.api.GoogleApiClient;
++import com.google.android.gms.common.api.ResultCallback;
++import com.google.android.gms.drive.Drive;
++import com.google.android.gms.drive.DriveApi;
++import com.google.android.gms.drive.DriveContents;
++import com.google.android.gms.drive.DriveFolder;
++import com.google.android.gms.drive.DriveId;
++import com.google.android.gms.drive.MetadataChangeSet;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -56,6 +65,7 @@
+ import java.io.FileReader;
+ import java.io.FileWriter;
+ import java.io.IOException;
++import java.io.OutputStream;
+ import java.io.OutputStreamWriter;
+ import java.nio.channels.FileChannel;
+ import java.text.SimpleDateFormat;
+@@ -138,10 +148,12 @@ protected Boolean doInBackground(ExportParams... params) {
+             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"));
+             try {
+                 mExporter.generateExport(writer);
++                writer.flush();
+             }
+             finally {
+                 writer.close();
+             }
++
+         } catch (Exception e) {
+             e.printStackTrace();
+             Log.e(TAG, "" + e.getMessage());
+@@ -160,6 +172,26 @@ public void run() {
+             }
+             return false;
+         }
++
++        switch (mExportParams.getExportTarget()) {
++            case SHARING:
++                shareFile(mExportParams.getTargetFilepath());
++                break;
++
++            case DROPBOX:
++                copyExportToDropbox();
++                break;
++
++            case GOOGLE_DRIVE:
++                copyExportToGoogleDrive();
++                break;
++
++            case SD_CARD:
++            default:
++                copyExportToSDCard();
++                break;
++        }
++
+         return true;
+     }
+ 
+@@ -178,89 +210,148 @@ protected void onPostExecute(Boolean exportResult) {
+             }
+         }
+ 
+-        switch (mExportParams.getExportTarget()) {
+-            case SHARING:
+-                shareFile(mExportParams.getTargetFilepath());
+-                break;
++        if (mExportParams.shouldDeleteTransactionsAfterExport()) {
++            backupAndDeleteTransactions();
+ 
+-            case SD_CARD:
+-                File src = new File(mExportParams.getTargetFilepath());
+-                File dst = Exporter.createExportFile(mExportParams.getExportFormat());
++            //now refresh the respective views
++            if (mContext instanceof AccountsActivity){
++                ((AccountsActivity) mContext).getCurrentAccountListFragment().refresh();
++            }
++            if (mContext instanceof TransactionsActivity){
++                ((TransactionsActivity) mContext).refresh();
++            }
++        }
+ 
+-                try {
+-                    copyFile(src, dst);
+-                } catch (IOException e) {
+-                    if (mContext instanceof Activity) {
+-                        Toast.makeText(mContext,
+-                                mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name())
+-                                        + dst.getAbsolutePath(),
+-                                Toast.LENGTH_LONG).show();
+-                        Log.e(TAG, e.getMessage());
+-                    } else {
+-                        Log.e(TAG, e.getMessage());
+-                    }
+-                    break;
+-                }
++        if (mContext instanceof Activity) {
++            if (mProgressDialog != null && mProgressDialog.isShowing())
++                mProgressDialog.dismiss();
++        }
++    }
+ 
+-                if (mContext instanceof Activity) {
+-                    //file already exists, just let the user know
+-                    Toast.makeText(mContext,
+-                            mContext.getString(R.string.toast_format_exported_to, mExportParams.getExportFormat().name())
+-                                    + dst.getAbsolutePath(),
+-                            Toast.LENGTH_LONG).show();
++    private void copyExportToGoogleDrive(){
++        final GoogleApiClient googleApiClient = SettingsActivity.getGoogleApiClient(GnuCashApplication.getAppContext());
++        googleApiClient.blockingConnect();
++        final ResultCallback<DriveFolder.DriveFileResult> fileCallback = new
++                ResultCallback<DriveFolder.DriveFileResult>() {
++                    @Override
++                    public void onResult(DriveFolder.DriveFileResult result) {
++                        if (!result.getStatus().isSuccess()) {
++                            Log.e(TAG, "Error while trying to sync to Google Drive");
++                            return;
++                        }
++                        Log.i(TAG, "Created a file with content: " + result.getDriveFile().getDriveId());
++                    }
++                };
++
++        Drive.DriveApi.newDriveContents(googleApiClient).setResultCallback(new ResultCallback<DriveApi.DriveContentsResult>() {
++            @Override
++            public void onResult(DriveApi.DriveContentsResult result) {
++                if (!result.getStatus().isSuccess()) {
++                    Log.e(TAG, "Error while trying to create new file contents");
++                    return;
+                 }
+-                break;
+-
++                final DriveContents driveContents = result.getDriveContents();
++                // write content to DriveContents
++                OutputStream outputStream = driveContents.getOutputStream();
++                File exportedFile = new File(mExportParams.getTargetFilepath());
+ 
+-            case DROPBOX:
+-                DbxAccountManager mDbxAcctMgr = DbxAccountManager.getInstance(mContext.getApplicationContext(),
+-                        SettingsActivity.DROPBOX_APP_KEY, SettingsActivity.DROPBOX_APP_SECRET);
+-                DbxFile dbExportFile = null;
+                 try {
+-                    DbxFileSystem dbxFileSystem = DbxFileSystem.forAccount(mDbxAcctMgr.getLinkedAccount());
+-                    File exportedFile = new File(mExportParams.getTargetFilepath());
+-                    dbExportFile = dbxFileSystem.create(new DbxPath(exportedFile.getName()));
+-                    dbExportFile.writeFromExistingFile(exportedFile, false);
+-                } catch (DbxException.Unauthorized unauthorized) {
+-                    unauthorized.printStackTrace();
+-                    Log.e(TAG, unauthorized.getMessage());
+-                    if (mContext instanceof Activity){
+-                        Toast.makeText(mContext, "DropBox access not authorized. Check your Settings", Toast.LENGTH_LONG).show();
++                    FileInputStream fileInputStream = new FileInputStream(exportedFile);
++                    byte[] buffer = new byte[1024];
++                    int count = 0;
++
++                    while ((count = fileInputStream.read(buffer)) >= 0) {
++                        outputStream.write(buffer, 0, count);
+                     }
+-                } catch (DbxException e) {
+-                    e.printStackTrace();
+-                    Log.e(TAG, e.getMessage());
++                    fileInputStream.close();
++                    outputStream.flush();
+                 } catch (IOException e) {
+                     Log.e(TAG, e.getMessage());
+-                    e.printStackTrace();
+-                } finally {
+-                    if (dbExportFile != null) {
+-                        dbExportFile.close();
+-                    }
+                 }
+-                break;
+ 
+-            case GOOGLE_DRIVE:
+-                break;
++                MetadataChangeSet changeSet = new MetadataChangeSet.Builder()
++                        .setTitle(exportedFile.getName())
++                        .setMimeType(getExportMimeType())
++                        .build();
++
++                SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
++                String folderId = sharedPreferences.getString(mContext.getString(R.string.key_google_drive_app_folder_id), "");
++                DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
++                // create a file on root folder
++                folder.createFile(googleApiClient, changeSet, driveContents)
++                        .setResultCallback(fileCallback);
++            }
++        });
++    }
++
++    /**
++     * Returns the mime type for the configured export format
++     * @return MIME type as string
++     */
++    public String getExportMimeType(){
++        switch (mExportParams.getExportFormat()){
++            case OFX:
++            case XML:
++                return "text/xml";
++            case QIF:
+             default:
+-                break;
++                return "text/plain";
+         }
++    }
+ 
+-        if (mExportParams.shouldDeleteTransactionsAfterExport()) {
+-            backupAndDeleteTransactions();
+-
+-            //now refresh the respective views
+-            if (mContext instanceof AccountsActivity){
+-                ((AccountsActivity) mContext).getCurrentAccountListFragment().refresh();
++    private void copyExportToDropbox() {
++        DbxAccountManager mDbxAcctMgr = DbxAccountManager.getInstance(mContext.getApplicationContext(),
++                SettingsActivity.DROPBOX_APP_KEY, SettingsActivity.DROPBOX_APP_SECRET);
++        DbxFile dbExportFile = null;
++        try {
++            DbxFileSystem dbxFileSystem = DbxFileSystem.forAccount(mDbxAcctMgr.getLinkedAccount());
++            File exportedFile = new File(mExportParams.getTargetFilepath());
++            dbExportFile = dbxFileSystem.create(new DbxPath(exportedFile.getName()));
++            dbExportFile.writeFromExistingFile(exportedFile, false);
++        } catch (DbxException.Unauthorized unauthorized) {
++            unauthorized.printStackTrace();
++            Log.e(TAG, unauthorized.getMessage());
++            if (mContext instanceof Activity){
++                Toast.makeText(mContext, "DropBox access not authorized. Check your Settings", Toast.LENGTH_LONG).show();
+             }
+-            if (mContext instanceof TransactionsActivity){
+-                ((TransactionsActivity) mContext).refresh();
++        } catch (DbxException e) {
++            e.printStackTrace();
++            Log.e(TAG, e.getMessage());
++        } catch (IOException e) {
++            Log.e(TAG, e.getMessage());
++            e.printStackTrace();
++        } finally {
++            if (dbExportFile != null) {
++                dbExportFile.close();
+             }
+         }
++    }
++
++    private void copyExportToSDCard() {
++        File src = new File(mExportParams.getTargetFilepath());
++        File dst = Exporter.createExportFile(mExportParams.getExportFormat());
++
++        try {
++            copyFile(src, dst);
++        } catch (IOException e) {
++            if (mContext instanceof Activity) {
++                Toast.makeText(mContext,
++                        mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name())
++                                + dst.getAbsolutePath(),
++                        Toast.LENGTH_LONG).show();
++                Log.e(TAG, e.getMessage());
++            } else {
++                Log.e(TAG, e.getMessage());
++            }
++            return;
++        }
+ 
+         if (mContext instanceof Activity) {
+-            if (mProgressDialog != null && mProgressDialog.isShowing())
+-                mProgressDialog.dismiss();
++            //file already exists, just let the user know
++            Toast.makeText(mContext,
++                    mContext.getString(R.string.toast_format_exported_to, mExportParams.getExportFormat().name())
++                            + dst.getAbsolutePath(),
++                    Toast.LENGTH_LONG).show();
+         }
+     }
+ 
+@@ -293,8 +384,8 @@ private void shareFile(String path) {
+         String defaultEmail = PreferenceManager.getDefaultSharedPreferences(mContext)
+                 .getString(mContext.getString(R.string.key_default_export_email), null);
+         Intent shareIntent = new Intent(Intent.ACTION_SEND_MULTIPLE);
+-        shareIntent.setType("application/xml");
+-        ArrayList<Uri> exportFiles = new ArrayList<Uri>();
++        shareIntent.setType("text/xml");
++        ArrayList<Uri> exportFiles = new ArrayList<>();
+         if (mExportParams.getExportFormat() == ExportFormat.QIF) {
+             try {
+                 List<String> splitFiles = splitQIF(new File(path), new File(path));
+@@ -358,7 +449,7 @@ public void copyFile(File src, File dst) throws IOException {
+     private static List<String> splitQIF(File src, File dst) throws IOException {
+         // split only at the last dot
+         String[] pathParts = dst.getPath().split("(?=\\.[^\\.]+$)");
+-        ArrayList<String> splitFiles = new ArrayList<String>();
++        ArrayList<String> splitFiles = new ArrayList<>();
+         String line;
+         BufferedReader in = new BufferedReader(new FileReader(src));
+         BufferedWriter out = null;
+@@ -387,4 +478,5 @@ public void copyFile(File src, File dst) throws IOException {
+         }
+         return splitFiles;
+     }
++
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+index 4724e017..390238f7 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+@@ -17,6 +17,7 @@
+ package org.gnucash.android.export;
+ 
+ import android.app.Activity;
++import android.app.ProgressDialog;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.os.Bundle;
+@@ -35,12 +36,16 @@
+ import android.widget.RadioButton;
+ import android.widget.Spinner;
+ import android.widget.TextView;
+-import android.widget.Toast;
+ 
+ import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence;
+ import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrenceFormatter;
+ import com.doomonafireball.betterpickers.recurrencepicker.RecurrencePickerDialog;
+ import com.dropbox.sync.android.DbxAccountManager;
++import com.google.android.gms.common.api.GoogleApiClient;
++import com.google.android.gms.common.api.ResultCallback;
++import com.google.android.gms.drive.Drive;
++import com.google.android.gms.drive.DriveFolder;
++import com.google.android.gms.drive.MetadataChangeSet;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -93,11 +98,6 @@
+     TextView mExportWarningTextView;
+ 
+ 	/**
+-	 * File path for saving the OFX files
+-	 */
+-	String mFilePath;
+-
+-	/**
+ 	 * Recurrence text view
+ 	 */
+ 	TextView mRecurrenceTextView;
+@@ -124,7 +124,8 @@
+ 
+ 	private ExportParams.ExportTarget mExportTarget = ExportParams.ExportTarget.SD_CARD;
+ 
+-	private DbxAccountManager mDbxAcctMgr;
++	private GoogleApiClient mGoogleApiClient;
++
+ 
+ 	/**
+ 	 * Click listener for positive button in the dialog.
+@@ -136,11 +137,9 @@
+ 		public void onClick(View v) {
+             ExportParams exportParameters = new ExportParams(mExportFormat);
+             exportParameters.setExportAllTransactions(mExportAllCheckBox.isChecked());
+-            exportParameters.setTargetFilepath(mFilePath);
+ 			exportParameters.setExportTarget(mExportTarget);
+ 			exportParameters.setDeleteTransactionsAfterExport(mDeleteAllCheckBox.isChecked());
+ 
+-			//TODO: Block from creating scheduled action with SHARE target
+ 			ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+ 			scheduledActionDbAdapter.deleteScheduledBackupAction(mExportFormat);
+ 			List<ScheduledAction> events = RecurrenceParser.parse(mEventRecurrence,
+@@ -190,7 +189,6 @@ public void onRadioButtonClicked(View view){
+ 				break;
+         }
+ 		refreshRecurrenceTextView(mExportFormat);
+-        mFilePath = getActivity().getExternalFilesDir(null) + "/" + Exporter.buildExportFilename(mExportFormat);
+     }
+ 
+ 	/**
+@@ -224,7 +222,6 @@ public void onCreate(Bundle savedInstanceState) {
+ 	public void onActivityCreated(Bundle savedInstanceState) {		
+ 		super.onActivityCreated(savedInstanceState);
+         bindViews();
+-		mFilePath = getActivity().getExternalFilesDir(null) + "/" + Exporter.buildExportFilename(mExportFormat);
+ 		getDialog().setTitle(R.string.title_export_dialog);
+ 	}
+ 
+@@ -248,19 +245,26 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 					case 1:
+ 						recurrenceOptionsView.setVisibility(View.VISIBLE);
+ 						mExportTarget = ExportParams.ExportTarget.DROPBOX;
+-						mDbxAcctMgr = DbxAccountManager.getInstance(getActivity().getApplicationContext(),
++						DbxAccountManager mDbxAccountManager = DbxAccountManager.getInstance(getActivity().getApplicationContext(),
+ 								SettingsActivity.DROPBOX_APP_KEY, SettingsActivity.DROPBOX_APP_SECRET);
+-						if (!mDbxAcctMgr.hasLinkedAccount()){
+-							Toast.makeText(getActivity(), "You need to first link to your DropBox account in Settings", Toast.LENGTH_SHORT).show();
+-							startActivity(new Intent(getActivity(), SettingsActivity.class));							//TODO: Try to open directly to the export preferences
++						if (!mDbxAccountManager.hasLinkedAccount()){
++							mDbxAccountManager.startLink(getActivity(), 0);
+ 						}
+ 						break;
+ 					case 2:
+ 						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						mExportTarget = ExportParams.ExportTarget.GOOGLE_DRIVE;
++						mGoogleApiClient = SettingsActivity.getGoogleApiClient(getActivity());
++						mGoogleApiClient.connect();
+ 						break;
+ 					case 3:
++						mExportTarget = ExportParams.ExportTarget.SHARING;
+ 						recurrenceOptionsView.setVisibility(View.GONE);
+ 						break;
++
++					default:
++						mExportTarget = ExportParams.ExportTarget.SD_CARD;
++						break;
+ 				}
+ 			}
+ 
+@@ -365,11 +369,8 @@ public void onRecurrenceSet(String rrule) {
+ 	 */
+ 	@Override
+ 	public void onActivityResult(int requestCode, int resultCode, Intent data) {
+-		//TODO: fix the exception which is thrown on return
+-		if (resultCode == Activity.RESULT_OK){
+-			//uploading or emailing has finished. clean up now.
+-			File file = new File(mFilePath);
+-			file.delete();
++		if (requestCode == SettingsActivity.REQUEST_RESOLVE_CONNECTION && resultCode == Activity.RESULT_OK) {
++			mGoogleApiClient.connect();
+ 		}
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index 23c51596..2645f829 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -28,8 +28,6 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class ExportParams {
+-    final static private String DROPBOX_APP_KEY = "INSERT_APP_KEY";
+-    final static private String DROPBOX_APP_SECRET = "INSERT_APP_SECRET";
+     /**
+      * Options for the destination of the exported transctions file.
+      * It could be stored on the {@link #SD_CARD} or exported through another program via {@link #SHARING}
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index c4c856ea..18a89348 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -84,6 +84,10 @@ public void onResume() {
+ 		pref = findPreference(getString(R.string.key_dropbox_sync));
+ 		pref.setOnPreferenceClickListener((SettingsActivity)getActivity());
+ 		((SettingsActivity)getActivity()).toggleDropboxPreference(pref);
++
++		pref = findPreference(getString(R.string.key_google_drive_sync));
++		pref.setOnPreferenceClickListener((SettingsActivity) getActivity());
++		((SettingsActivity)getActivity()).toggleGoogleDrivePreference(pref);
+ 	}
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 38f842fc..96bef234 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -19,7 +19,10 @@
+ 
+ import android.annotation.TargetApi;
+ import android.app.Activity;
++import android.app.ProgressDialog;
++import android.content.Context;
+ import android.content.Intent;
++import android.content.IntentSender;
+ import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
+ import android.content.pm.PackageManager.NameNotFoundException;
+@@ -36,6 +39,13 @@
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
+ import com.actionbarsherlock.view.MenuItem;
+ import com.dropbox.sync.android.DbxAccountManager;
++import com.google.android.gms.common.ConnectionResult;
++import com.google.android.gms.common.GooglePlayServicesUtil;
++import com.google.android.gms.common.api.GoogleApiClient;
++import com.google.android.gms.common.api.ResultCallback;
++import com.google.android.gms.drive.Drive;
++import com.google.android.gms.drive.DriveFolder;
++import com.google.android.gms.drive.MetadataChangeSet;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -69,6 +79,7 @@
+  */
+ public class SettingsActivity extends SherlockPreferenceActivity implements OnPreferenceChangeListener, Preference.OnPreferenceClickListener{
+ 
++    public static final String LOG_TAG = "SettingsActivity";
+     /**
+      * Allowed delay between two consecutive taps of a setting for it to be considered a double tap
+      * Used on Android v2.3.3 or lower devices where dialogs cannot be instantiated easily in settings
+@@ -80,6 +91,7 @@
+      * Collects references to the UI elements and binds click listeners
+      */
+     public static final int REQUEST_LINK_TO_DBX = 0x11;
++    public static final int REQUEST_RESOLVE_CONNECTION = 0x12;
+ 
+     /**
+      * Counts the number of times the preference for deleting all accounts has been clicked.
+@@ -95,6 +107,10 @@
+      */
+     private int mDeleteTransactionsClickCount;
+     private DbxAccountManager mDbxAccountManager;
++    /**
++     * Client for Google Drive Sync
++     */
++    static GoogleApiClient mGoogleApiClient;
+ 
+     /**
+ 	 * Constructs the headers to display in the header list when the Settings activity is first opened
+@@ -114,6 +130,8 @@ protected void onCreate(Bundle savedInstanceState) {
+         mDbxAccountManager = DbxAccountManager.getInstance(getApplicationContext(),
+                 DROPBOX_APP_KEY, DROPBOX_APP_SECRET);
+ 
++        mGoogleApiClient = getGoogleApiClient(this);
++
+ 		//retrieve version from Manifest and set it
+ 		String version = null;
+ 		try {
+@@ -172,6 +190,10 @@ protected void onCreate(Bundle savedInstanceState) {
+             toggleDropboxPreference(pref);
+             pref.setOnPreferenceClickListener(this);
+ 
++            pref = findPreference(getString(R.string.key_google_drive_sync));
++            pref.setOnPreferenceClickListener(this);
++            toggleGoogleDrivePreference(pref);
++
+             pref = findPreference(getString(R.string.key_create_backup));
+             pref.setOnPreferenceClickListener(this);
+ 
+@@ -182,11 +204,6 @@ protected void onCreate(Bundle savedInstanceState) {
+         }
+ 	}
+ 
+-    public void toggleDropboxPreference(Preference pref) {
+-        ((CheckBoxPreference)pref).setChecked(mDbxAccountManager.hasLinkedAccount());
+-    }
+-
+-
+     @Override
+     protected void onResume() {
+         super.onResume();
+@@ -298,6 +315,11 @@ public boolean onPreferenceClick(Preference preference) {
+             toggleDropboxPreference(preference);
+         }
+ 
++        if (key.equals(getString(R.string.key_google_drive_sync))){
++            toggleGoogleDriveSync();
++            toggleGoogleDrivePreference(preference);
++        }
++
+         if (key.equals(getString(R.string.key_create_backup))){
+             boolean result = GncXmlExporter.createBackup();
+             int msg = result ? R.string.toast_backup_successful : R.string.toast_backup_failed;
+@@ -355,6 +377,10 @@ public boolean onPreferenceClick(Preference preference) {
+         return false;
+     }
+ 
++    /**
++     * Toggles the authorization state of a DropBox account.
++     * If a link exists, it is removed else DropBox authorization is started
++     */
+     private void toggleDropboxSync() {
+         if (mDbxAccountManager.hasLinkedAccount()){
+             mDbxAccountManager.unlink();
+@@ -364,9 +390,100 @@ private void toggleDropboxSync() {
+     }
+ 
+     /**
++     * Toggles synchronization with Google Drive on or off
++     */
++    private void toggleGoogleDriveSync(){
++        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
++        final String appFolderId = sharedPreferences.getString(getString(R.string.key_google_drive_app_folder_id), null);
++        if (appFolderId != null){
++            sharedPreferences.edit().remove(getString(R.string.key_google_drive_app_folder_id)).commit(); //commit (not apply) because we need it to be saved *now*
++        } else {
++            mGoogleApiClient.connect();
++        }
++    }
++
++    /**
++     * Toggles the checkbox of the DropBox Sync preference if a DropBox account is linked
++     * @param pref DropBox Sync preference
++     */
++    public void toggleDropboxPreference(Preference pref) {
++        ((CheckBoxPreference)pref).setChecked(mDbxAccountManager.hasLinkedAccount());
++    }
++
++    /**
++     * Toggles the checkbox of the GoogleDrive Sync preference if a Google Drive account is linked
++     * @param pref Google Drive Sync preference
++     */
++    public void toggleGoogleDrivePreference(Preference pref){
++        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
++        String appFolderId = sharedPreferences.getString(getString(R.string.key_google_drive_app_folder_id),null);
++        ((CheckBoxPreference)pref).setChecked(appFolderId != null);
++    }
++
++
++    public static GoogleApiClient getGoogleApiClient(final Context context) {
++        return new GoogleApiClient.Builder(context)
++                .addApi(Drive.API)
++                .addScope(Drive.SCOPE_APPFOLDER)
++                .addScope(Drive.SCOPE_FILE)
++                .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
++                    @Override
++                    public void onConnected(Bundle bundle) {
++                        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context);
++                        String appFolderId = sharedPreferences.getString(context.getString(R.string.key_google_drive_app_folder_id), null);
++                        if (appFolderId == null) {
++                            MetadataChangeSet changeSet = new MetadataChangeSet.Builder()
++                                    .setTitle(context.getString(R.string.app_name)).build();
++                            Drive.DriveApi.getRootFolder(mGoogleApiClient).createFolder(
++                                    mGoogleApiClient, changeSet).setResultCallback(new ResultCallback<DriveFolder.DriveFolderResult>() {
++                                @Override
++                                public void onResult(DriveFolder.DriveFolderResult result) {
++                                    if (!result.getStatus().isSuccess()) {
++                                        Log.e(LOG_TAG, "Error creating the application folder");
++                                        return;
++                                    }
++
++                                    String folderId = result.getDriveFolder().getDriveId().toString();
++                                    PreferenceManager.getDefaultSharedPreferences(context)
++                                            .edit().putString(context.getString(R.string.key_google_drive_app_folder_id),
++                                            folderId).commit(); //commit because we need it to be saved *now*
++                                }
++                            });
++
++                        }
++                        Toast.makeText(context, "Connected to Google Drive", Toast.LENGTH_SHORT).show();
++                    }
++
++                    @Override
++                    public void onConnectionSuspended(int i) {
++                        Toast.makeText(context, "Connection to Google Drive suspended!", Toast.LENGTH_LONG).show();
++                    }
++                })
++                .addOnConnectionFailedListener(new GoogleApiClient.OnConnectionFailedListener() {
++                    @Override
++                    public void onConnectionFailed(ConnectionResult connectionResult) {
++                        Log.e(SettingsActivity.class.getName(), "Connection to Google Drive failed");
++                        if (connectionResult.hasResolution() && context instanceof Activity) {
++                            try {
++                                Log.e(SettingsActivity.class.getName(), "Trying resolution of Google API connection failure");
++                                connectionResult.startResolutionForResult((Activity) context, REQUEST_RESOLVE_CONNECTION);
++                            } catch (IntentSender.SendIntentException e) {
++                                Log.e(SettingsActivity.class.getName(), e.getMessage());
++                                Toast.makeText(context, "Unable to link to Google Drive", Toast.LENGTH_LONG).show();
++                            }
++                        } else {
++                            if (context instanceof Activity)
++                                GooglePlayServicesUtil.getErrorDialog(connectionResult.getErrorCode(), (Activity) context, 0).show();
++                        }
++                    }
++                })
++                .build();
++    }
++
++    /**
+      * Resets the tap counter for preferences which need to be double-tapped
+      */
+-    private class ResetCounter extends TimerTask{
++    private class ResetCounter extends TimerTask {
+ 
+         @Override
+         public void run() {
+@@ -387,11 +504,11 @@ public void importAccounts() {
+ 
+     }
+ 
+-    public void importMostRecentBackup(){
++    public void importMostRecentBackup() {
+         Log.i("Settings", "Importing GnuCash XML");
+         File backupFile = Exporter.getMostRecentBackupFile();
+ 
+-        if (backupFile == null){
++        if (backupFile == null) {
+             Toast.makeText(this, R.string.toast_no_recent_backup, Toast.LENGTH_SHORT).show();
+             return;
+         }
+@@ -407,7 +524,7 @@ public void importMostRecentBackup(){
+ 
+     @Override
+     public void onActivityResult(int requestCode, int resultCode, Intent data) {
+-        if (resultCode == Activity.RESULT_CANCELED){
++        if (resultCode == Activity.RESULT_CANCELED) {
+             if (requestCode == PasscodePreferenceFragment.PASSCODE_REQUEST_CODE) {
+                 PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
+                         .edit()
+@@ -418,7 +535,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+             return;
+         }
+ 
+-        switch (requestCode){
++        switch (requestCode) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 try {
+                     InputStream accountInputStream = getContentResolver().openInputStream(data.getData());
+@@ -429,7 +546,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+                 }
+                 break;
+             case PasscodePreferenceFragment.PASSCODE_REQUEST_CODE:
+-                if (data!= null) {
++                if (data != null) {
+                     PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
+                             .edit()
+                             .putString(UxArgument.PASSCODE, data.getStringExtra(UxArgument.PASSCODE))
+@@ -442,9 +559,19 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+             case REQUEST_LINK_TO_DBX:
+                 Preference preference = findPreference(getString(R.string.key_dropbox_sync));
+                 if (preference == null) //if we are in a preference header fragment, this may return null
+-                    return;
++                    break;
+                 toggleDropboxPreference(preference);
+                 break;
++
++            case REQUEST_RESOLVE_CONNECTION:
++                if (resultCode == RESULT_OK) {
++                    mGoogleApiClient.connect();
++                    Preference pref = findPreference(getString(R.string.key_dropbox_sync));
++                    if (pref == null) //if we are in a preference header fragment, this may return null
++                        break;
++                    toggleDropboxPreference(pref);
++                }
++                break;
+         }
+     }
+ }
+diff --git a/app/src/main/res/drawable-hdpi/ic_google_drive.png b/app/src/main/res/drawable-hdpi/ic_google_drive.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..d885ecf8b52017e4ce6d36708c717e03c5341ae4
+GIT binary patch
+literal 2859
+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
+JPDHLkV1g(1OB(<H
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-mdpi/ic_google_drive.png b/app/src/main/res/drawable-mdpi/ic_google_drive.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..10db8093d75565b808811beaae10de7da96d1e80
+GIT binary patch
+literal 1258
+zcmV<G1Qq*<P)<h;3K|Lk000e1NJLTq001BW001Be1^@s6b9#F8000EBNkl<ZSi|j?
+zPi$0G6vlt&y!rE{GsTGpQ>&4Zm}mq{DIuuDq(+t|vT-4n1QOV{YZtXK#uaI0i=mZ8
+zcSctl5|vS7TnJKwDaC)SRYOAfGeQe=I`1AA_rBLQl`_bp8(wnfzIl0b&v(A_o$uZe
+zGh;n3Wu32e2aro|L}bku3&-{yIF|cu^!2CG_r(83!i<3U=fJ`Eg|ElfS}!fVWH)O7
+zC>+~Y1<rO|y4+Rkxkj~;Lqrf&4*(A&ECfa!VRLa;t$sHEt(Kr4=$g*8abz-D8C(=p
+z5m97mu8PQDD+}M1fx-v-x-g~zm~T*;y~3#%=Xv(=q7Nnl>716qNI$mccYZN(Ukr%I
+zu&5v^NPCfa2XCFr({uu=ppj=oS1{n2K}PSZ3*ynfUJ>^CBn4E^a?I!d6#3{v6Ul^_
+z29Es5$|Bv1r}y;#|27mxQGrMyWucr0fp>o?aP3Btb%RLIgenq6S%(0Fi{HOey=MTW
+z5BvH>q${I8w41cYNTf_R^BkEp&=4qqNP!?(hg5;#dlF&k#QrKUEkc!4T&Z{xBRPK&
+z5XzC&|9I7Ci}TgxEMSJ2!(4(nKV$ZCVb`fzOCl5)7Qrv7;*$v)keniM0dmT`MDLf1
+z(LkzsBLp@F=KRwT$gts-N>DnnzZ>CzNC+4}r1ykw5S1B3M)Ex;#|*1s=CieQSjaMf
+zFzdek-AnzgXka*{!3QMNH&j9dDdj<BsPWEc^}y#qmbr6*cDGat%Rmg?`gV8M9RZZa
+z`t}07%WIyx>x%CiO0|WzKh3;8-*a-}tFu=}&YZ9F^Xwd#t}d|H4D~mIB}S^48~)GD
+zC_esX)nHf*5Cap;3<<L#OAZ&wz-ntthHlI!2kO@w)g&>J#3;wg!y6($+9PrbX14d{
+zH_!J1wG|8)^kZ~^kurvXIm4U<It|RmZoV<P%3k*z`k@}@8A^5FoTEOs$nSsO;>^?>
+zU!JaW=E5A)7Z<p4y*aw74ddf|*F>mh!VC5GBd|2PiRzC#z0s%=ML8;++lY!~|B4w;
+z=FVcyND_y0UYO1~EJ?C;^0F}V@q4drUQq&!34>lS-%cql=}s$)dCKRX1`IKWYMx5x
+zR`SI%8Wd_6e>QjEoFhq$B#6-^j-=VdIhRHoS|vim4yKg*IhciWm^0#EHxu2A!8s%<
+zQ0dr8u24ZmQBfjQB8`aDe^(VWoE0QHv;Z(Ob+mJA6@bQ}@fkB4%Ia<g&g((vVoFn+
+zz#Lj=qw>TKqGAQb2T@G{D4GUj*+E6Z&gnr6tmOkEW;Wx4ht_pQ`P>%N<<LTza_4qL
+za$ufzK>`r<rC1R>bJld!rjB-gaz_A-!{c?pvtVBR`OA+`yx4&j+G%^N2hkjvxtifT
+zQ8+W4h4Pts9W9em*l&jJ>V%EM<6~)$0<=#)hZfr@b#(jSS$n3#g2)^$F|YX4_%Z|r
+zP@5d-sI|Hs4*-;BpP|^;MEvMBkSOza3)wnzByMRmlZ3?i=iY)@wkL3~<?}$}@c2Y@
+zyEO99U%QDnZV8!(?1H^I=leWKmIwFu&N&jd1lC~erz0C@);tfa*Y)79*#iLo0!%E5
+UfaAmAYybcN07*qoM6N<$f^|_@4*&oF
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xhdpi/ic_google_drive.png b/app/src/main/res/drawable-xhdpi/ic_google_drive.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bbb4b80982f49d2ccd1a709e81d39a26fae0c0f
+GIT binary patch
+literal 6676
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index 2f4ffcd6..394b1067 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -456,7 +456,7 @@
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+ 	<string name="title_backup_preference_category">Backup</string>
+-	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+ 	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+ 	<string name="title_backup_prefs">Backup Preferences</string>
+ 	<string name="title_create_backup_pref">Create Backup</string>
+@@ -465,6 +465,8 @@
+ 	<string name="toast_backup_successful">Backup successful</string>
+ 	<string name="toast_backup_failed">Backup failed</string>
+ 	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<string name="title_google_drive_sync_pref">Google Drive Sync</string>
++	<string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+ 	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index 58e752a4..b4239ca5 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -481,7 +481,7 @@
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+ 	<string name="title_backup_preference_category">Backup</string>
+-	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+ 	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+ 	<string name="title_backup_prefs">Backup Preferences</string>
+ 	<string name="title_create_backup_pref">Create Backup</string>
+@@ -490,6 +490,8 @@
+ 	<string name="toast_backup_successful">Backup successful</string>
+ 	<string name="toast_backup_failed">Backup failed</string>
+ 	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<string name="title_google_drive_sync_pref">Google Drive Sync</string>
++	<string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+ 	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 13369425..a1b7dc60 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -466,7 +466,7 @@
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+     <string name="title_backup_preference_category">Backup</string>
+-    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+@@ -475,6 +475,8 @@
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
++    <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++    <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 9befc320..b86f7e17 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -463,7 +463,7 @@
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+ 	<string name="title_backup_preference_category">Backup</string>
+-	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+ 	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+ 	<string name="title_backup_prefs">Backup Preferences</string>
+ 	<string name="title_create_backup_pref">Create Backup</string>
+@@ -472,6 +472,8 @@
+ 	<string name="toast_backup_successful">Backup successful</string>
+ 	<string name="toast_backup_failed">Backup failed</string>
+ 	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<string name="title_google_drive_sync_pref">Google Drive Sync</string>
++	<string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+ 	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 837ee900..832f6e60 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -463,7 +463,7 @@
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+     <string name="title_backup_preference_category">Backup</string>
+-    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+@@ -472,6 +472,8 @@
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
++    <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++    <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 78a43241..0b043541 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -467,7 +467,7 @@
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+     <string name="title_backup_preference_category">Backup</string>
+-    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+@@ -476,6 +476,8 @@
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
++    <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++    <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index d7f31b1f..34042c26 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -467,7 +467,7 @@
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+     <string name="title_backup_preference_category">Backup</string>
+-    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+@@ -476,6 +476,8 @@
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
++    <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++    <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 6617df4e..7d11931a 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -463,7 +463,7 @@
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+ 	<string name="title_backup_preference_category">Backup</string>
+-	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+ 	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+ 	<string name="title_backup_prefs">Backup Preferences</string>
+ 	<string name="title_create_backup_pref">Create Backup</string>
+@@ -472,6 +472,8 @@
+ 	<string name="toast_backup_successful">Backup successful</string>
+ 	<string name="toast_backup_failed">Backup failed</string>
+ 	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<string name="title_google_drive_sync_pref">Google Drive Sync</string>
++	<string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+ 	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 6a2828be..245d4e80 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -468,7 +468,7 @@
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+     <string name="title_backup_preference_category">Backup</string>
+-    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+@@ -477,6 +477,8 @@
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
++    <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++    <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index d3ac3b80..50605829 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -466,7 +466,7 @@
+ 	<string name="header_backup_and_export_settings">Backup &amp; export</string>
+ 	<string name="title_dropbox_sync_preference">DropBox Sync</string>
+ 	<string name="title_backup_preference_category">Backup</string>
+-	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+ 	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+ 	<string name="title_backup_prefs">Backup Preferences</string>
+ 	<string name="title_create_backup_pref">Create Backup</string>
+@@ -475,6 +475,8 @@
+ 	<string name="toast_backup_successful">Backup successful</string>
+ 	<string name="toast_backup_failed">Backup failed</string>
+ 	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<string name="title_google_drive_sync_pref">Google Drive Sync</string>
++	<string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+ 	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 90bb8a9b..216a141e 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -469,7 +469,7 @@
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+     <string name="title_backup_preference_category">Backup</string>
+-    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+@@ -478,6 +478,8 @@
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
++    <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++    <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index ecce50b6..ccbdda32 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -462,7 +462,7 @@
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+     <string name="title_backup_preference_category">Backup</string>
+-    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+@@ -471,6 +471,8 @@
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
++    <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++    <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values/donottranslate.xml b/app/src/main/res/values/donottranslate.xml
+index b8accda2..ac67e9f2 100644
+--- a/app/src/main/res/values/donottranslate.xml
++++ b/app/src/main/res/values/donottranslate.xml
+@@ -26,6 +26,8 @@
+     <string name="key_restore_backup">restore_backup</string>
+     <string name="key_dropbox_sync">dropbox_sync</string>
+     <string name="key_create_backup">create_backup</string>
++    <string name="key_google_drive_sync">google_drive_sync</string>
++    <string name="key_google_drive_app_folder_id">google_drive_app_folder</string>
+ 
+     <string-array name="key_transaction_type_values">
+         <item>CREDIT</item>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 5a74571b..29185398 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -466,7 +466,7 @@
+     <string name="header_backup_and_export_settings">Backup &amp; export</string>
+     <string name="title_dropbox_sync_preference">DropBox Sync</string>
+     <string name="title_backup_preference_category">Backup</string>
+-    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+@@ -475,6 +475,8 @@
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
++    <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++    <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/xml/fragment_backup_preferences.xml b/app/src/main/res/xml/fragment_backup_preferences.xml
+index a38307b0..309f1760 100644
+--- a/app/src/main/res/xml/fragment_backup_preferences.xml
++++ b/app/src/main/res/xml/fragment_backup_preferences.xml
+@@ -31,6 +31,12 @@
+             android:checked="false"
+             android:key="@string/key_dropbox_sync"
+             android:icon="@drawable/ic_dropbox_android" />
++
++        <CheckBoxPreference android:title="@string/title_google_drive_sync_pref"
++            android:summary="@string/summary_google_drive_sync"
++            android:checked="false"
++            android:key="@string/key_google_drive_sync"
++            android:icon="@drawable/ic_google_drive" />
+     </PreferenceCategory>
+     <PreferenceCategory android:title="@string/title_export_preference_category">
+ 

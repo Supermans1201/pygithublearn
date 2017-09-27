@@ -1,0 +1,150 @@
+From beaf5875fe4f48cb8d292409249e2459fa231f47 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 15 Oct 2014 20:36:28 +0800
+Subject: [PATCH 1/2] delete splits when transaction is saved.
+
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 34 +++++++++++++++++++---
+ .../ui/transaction/TransactionFormFragment.java    | 16 ++++++----
+ 2 files changed, 41 insertions(+), 9 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index abfc0eb6..be24ba89 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -22,9 +22,11 @@
+ import android.content.ContentValues;
+ import android.content.Context;
+ import android.database.Cursor;
++import android.database.SQLException;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
++import android.text.TextUtils;
+ import android.util.Log;
+ 
+ import org.gnucash.android.model.*;
+@@ -86,16 +88,40 @@ public long addTransaction(Transaction transaction){
+         contentValues.put(TransactionEntry.COLUMN_RECURRENCE_PERIOD, transaction.getRecurrencePeriod());
+ 
+         Log.d(TAG, "Replacing transaction in db");
+-        long rowId = mDb.replace(TransactionEntry.TABLE_NAME, null, contentValues);
++        long rowId = -1;
++        mDb.beginTransaction();
++        try {
++            rowId = mDb.replaceOrThrow(TransactionEntry.TABLE_NAME, null, contentValues);
+ 
+-        if (rowId > 0){
+             Log.d(TAG, "Adding splits for transaction");
++            ArrayList<String> splitUIDs = new ArrayList<String>(transaction.getSplits().size());
+             for (Split split : transaction.getSplits()) {
+-                mSplitsDbAdapter.addSplit(split);
++                contentValues.clear();
++                contentValues.put(SplitEntry.COLUMN_UID,        split.getUID());
++                contentValues.put(SplitEntry.COLUMN_AMOUNT,     split.getAmount().absolute().toPlainString());
++                contentValues.put(SplitEntry.COLUMN_TYPE,       split.getType().name());
++                contentValues.put(SplitEntry.COLUMN_MEMO,       split.getMemo());
++                contentValues.put(SplitEntry.COLUMN_ACCOUNT_UID, split.getAccountUID());
++                contentValues.put(SplitEntry.COLUMN_TRANSACTION_UID, split.getTransactionUID());
++                splitUIDs.add(split.getUID());
++
++                Log.d(TAG, "Replace transaction split in db");
++                mDb.replaceOrThrow(SplitEntry.TABLE_NAME, null, contentValues);
+             }
+             Log.d(TAG, transaction.getSplits().size() + " splits added");
++
++            long deleted = mDb.delete(SplitEntry.TABLE_NAME,
++                    SplitEntry.COLUMN_TRANSACTION_UID + " = ? AND "
++                            + SplitEntry.COLUMN_UID + " NOT IN ('" + TextUtils.join("' , '", splitUIDs) + "')",
++                    new String[]{transaction.getUID()});
++            Log.d(TAG, deleted + " splits deleted");
++            mDb.setTransactionSuccessful();
++        } catch (SQLException sqle) {
++            sqle.printStackTrace();
++        } finally {
++            mDb.endTransaction();
+         }
+-		return rowId;
++        return rowId;
+ 	}
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index abb5d813..723bd989 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -182,6 +182,11 @@
+     private String mAccountUID;
+ 
+     private List<Split> mSplitsList = new ArrayList<Split>();
++    /**
++     * list to hold deleted splits. This split should only be deleted from
++     * DB when the transaction is saved.
++     */
++    private List<String> mDeletedSplitUIDList = new ArrayList<String>();
+ 
+     /**
+ 	 * Create the view and retrieve references to the UI elements
+@@ -671,6 +676,8 @@ private void saveNewTransaction() {
+ 		mTransaction.setTime(cal.getTimeInMillis());
+ 		mTransaction.setNote(notes);
+ 
++        // set as not exported.
++        mTransaction.setExported(false);
+         //save the normal transaction first
+         mTransactionsDbAdapter.addTransaction(mTransaction);
+         scheduleRecurringTransaction();
+@@ -761,11 +768,10 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+             setAmountEditViewVisible(View.GONE);
+         }
+ 
+-        SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
+-        for (String removedSplitUID : removedSplitUIDs) {
+-            splitsDbAdapter.deleteRecord(splitsDbAdapter.getID(removedSplitUID));
+-        }
+-        splitsDbAdapter.close();
++        // save the deleted UID list. Use add instead of assign in case this
++        // is called multiple times
++        // The splits will be actually deleted when the transaction is saved.
++        mDeletedSplitUIDList.addAll(removedSplitUIDs);
+     }
+ 
+     /**
+
+From 163be8d7d4bd5e74dcc37645a71673abaa4469a6 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 15 Oct 2014 20:45:05 +0800
+Subject: [PATCH 2/2] remove unused local variable
+
+---
+ .../android/ui/transaction/TransactionFormFragment.java        | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 723bd989..5fde6aa0 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -182,11 +182,6 @@
+     private String mAccountUID;
+ 
+     private List<Split> mSplitsList = new ArrayList<Split>();
+-    /**
+-     * list to hold deleted splits. This split should only be deleted from
+-     * DB when the transaction is saved.
+-     */
+-    private List<String> mDeletedSplitUIDList = new ArrayList<String>();
+ 
+     /**
+ 	 * Create the view and retrieve references to the UI elements
+@@ -767,11 +762,6 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+             mAmountEditText.setEnabled(false);
+             setAmountEditViewVisible(View.GONE);
+         }
+-
+-        // save the deleted UID list. Use add instead of assign in case this
+-        // is called multiple times
+-        // The splits will be actually deleted when the transaction is saved.
+-        mDeletedSplitUIDList.addAll(removedSplitUIDs);
+     }
+ 
+     /**

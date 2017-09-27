@@ -1,0 +1,2316 @@
+From 6849d6a608cb7b07b2a0ea43730e4fc1fa843b84 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 13 Aug 2016 00:29:23 +0200
+Subject: [PATCH 1/4] Execute scheduled actions for all books in the app so all
+ transactions in the books are always up-to-date - fixes #538
+
+Execute scheduled actions service based on the elapsed time since device boot rather than wall clock time. This is more efficient
+Change the Service so that the wakelock is always released, regardless of whether the service completed successfully or not - related to #535
+Recreate SchedulerService on db upgrade (to schema version13)
+
+Details:
+----------
+It does not matter if the book is the currently active one or not, it's scheduled transactions will be executed
+For this, it is necessary that the SchedulerService use different database adapter instances for each book which it checks.
+In turn, it is required to change the db adapters implementation so that none of them use the default adapter instances internally. The default instances always point to the current book, which is not desirable. Every database adapter should only have side-effects on the database on which it was opened.
+---
+ .../android/test/ui/TransactionsActivityTest.java  |  3 +-
+ .../gnucash/android/app/GnuCashApplication.java    | 19 ++++--
+ .../org/gnucash/android/db/MigrationHelper.java    | 10 +++
+ .../android/db/adapter/AccountsDbAdapter.java      | 44 ++++++++++--
+ .../gnucash/android/db/adapter/BooksDbAdapter.java |  2 +-
+ .../android/db/adapter/BudgetsDbAdapter.java       |  2 +-
+ .../android/db/adapter/DatabaseAdapter.java        | 19 +++++-
+ .../db/adapter/ScheduledActionDbAdapter.java       |  2 +-
+ .../android/db/adapter/SplitsDbAdapter.java        |  2 +-
+ .../android/db/adapter/TransactionsDbAdapter.java  | 46 ++-----------
+ .../gnucash/android/export/ExportAsyncTask.java    | 13 ++--
+ .../org/gnucash/android/model/ScheduledAction.java |  1 -
+ .../gnucash/android/service/SchedulerService.java  | 78 +++++++++++++---------
+ .../android/ui/export/ExportFormFragment.java      |  2 +-
+ .../transaction/dialog/BulkMoveDialogFragment.java |  5 +-
+ 15 files changed, 152 insertions(+), 96 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 2766da8e..36d5fd7b 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -561,8 +561,7 @@ public void testDeleteTransaction(){
+ 		onView(withId(R.id.options_menu)).perform(click());
+ 		onView(withText(R.string.menu_delete)).perform(click());
+ 
+-		long id = mAccountsDbAdapter.getID(TRANSACTIONS_ACCOUNT_UID);
+-		assertThat(0).isEqualTo(mTransactionsDbAdapter.getTransactionsCount(id));
++		assertThat(0).isEqualTo(mTransactionsDbAdapter.getTransactionsCount(TRANSACTIONS_ACCOUNT_UID));
+ 	}
+ 
+ 	@Test
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 3f5b228d..13c976b0 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -25,6 +25,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.graphics.Color;
+ import android.os.Build;
++import android.os.SystemClock;
+ import android.support.annotation.NonNull;
+ import android.support.v7.preference.PreferenceManager;
+ import android.util.Log;
+@@ -217,6 +218,14 @@ public static void loadBook(@NonNull String bookUID){
+     }
+ 
+     /**
++     * Returns the currently active database in the application
++     * @return Currently active {@link SQLiteDatabase}
++     */
++    public static SQLiteDatabase getActiveDb(){
++        return mDbHelper.getWritableDatabase();
++    }
++
++    /**
+      * Returns the application context
+      * @return Application {@link Context} object
+      */
+@@ -329,16 +338,16 @@ public static Locale getDefaultLocale() {
+     public static void startScheduledActionExecutionService(Context context){
+         Intent alarmIntent = new Intent(context, SchedulerService.class);
+         PendingIntent pendingIntent = PendingIntent.getService(context, 0, alarmIntent, PendingIntent.FLAG_NO_CREATE);
+-        if (pendingIntent != null)
++
++        if (pendingIntent != null) //if service is already scheduled, just return
+             return;
+         else
+             pendingIntent = PendingIntent.getService(context, 0, alarmIntent, 0);
+ 
+         AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+-        alarmManager.setInexactRepeating(AlarmManager.RTC_WAKEUP,
+-                System.currentTimeMillis() + AlarmManager.INTERVAL_DAY,
+-                AlarmManager.INTERVAL_HALF_DAY,
+-                pendingIntent);
++        alarmManager.setInexactRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP,
++                SystemClock.elapsedRealtime() + AlarmManager.INTERVAL_FIFTEEN_MINUTES,
++                AlarmManager.INTERVAL_HALF_DAY, pendingIntent);
+ 
+         context.startService(alarmIntent); //run the service the first time
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index f32c5145..0aa1358a 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -46,6 +46,7 @@
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.service.SchedulerService;
+ import org.gnucash.android.util.PreferencesHelper;
+ import org.gnucash.android.util.TimestampHelper;
+ import org.xml.sax.InputSource;
+@@ -1463,6 +1464,15 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+                 .putBoolean(keyUseCompactView, useCompactTrnView)
+                 .apply();
+ 
++        //cancel the existing pending intent so that the alarm can be rescheduled
++        Intent alarmIntent = new Intent(context, SchedulerService.class);
++        PendingIntent pendingIntent = PendingIntent.getService(context, 0, alarmIntent, PendingIntent.FLAG_NO_CREATE);
++        AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
++        alarmManager.cancel(pendingIntent);
++        pendingIntent.cancel();
++
++        GnuCashApplication.startScheduledActionExecutionService(GnuCashApplication.getAppContext());
++
+         return oldVersion;
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+index cd942a92..d37d85b8 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+@@ -78,6 +78,11 @@
+     private final TransactionsDbAdapter mTransactionsAdapter;
+ 
+     /**
++     * Commodities database adapter for commodity manipulation
++     */
++    private final CommoditiesDbAdapter mCommoditiesDbAdapter;
++
++    /**
+      * Overloaded constructor. Creates an adapter for an already open database
+      * @param db SQliteDatabase instance
+      */
+@@ -98,6 +103,35 @@ public AccountsDbAdapter(SQLiteDatabase db, TransactionsDbAdapter transactionsDb
+                 AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID
+         });
+         mTransactionsAdapter = transactionsDbAdapter;
++        mCommoditiesDbAdapter = new CommoditiesDbAdapter(db);
++    }
++
++    /**
++     * Convenience overloaded constructor. 
++     * This is used when an AccountsDbAdapter object is needed quickly. Otherwise, the other 
++     * constructor {@link #AccountsDbAdapter(SQLiteDatabase, TransactionsDbAdapter)}
++     * should be used whenever possible
++     * @param db Database to create an adapter for
++     */
++    public AccountsDbAdapter(SQLiteDatabase db){
++        super(db, AccountEntry.TABLE_NAME, new String[]{
++                AccountEntry.COLUMN_NAME         ,
++                AccountEntry.COLUMN_DESCRIPTION  ,
++                AccountEntry.COLUMN_TYPE         ,
++                AccountEntry.COLUMN_CURRENCY     ,
++                AccountEntry.COLUMN_COLOR_CODE   ,
++                AccountEntry.COLUMN_FAVORITE     ,
++                AccountEntry.COLUMN_FULL_NAME    ,
++                AccountEntry.COLUMN_PLACEHOLDER  ,
++                AccountEntry.COLUMN_CREATED_AT   ,
++                AccountEntry.COLUMN_HIDDEN       ,
++                AccountEntry.COLUMN_COMMODITY_UID,
++                AccountEntry.COLUMN_PARENT_ACCOUNT_UID,
++                AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID
++        });
++
++        mTransactionsAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
++        mCommoditiesDbAdapter = new CommoditiesDbAdapter(db);
+     }
+ 
+     /**
+@@ -407,7 +441,7 @@ private Account buildSimpleAccountInstance(Cursor c) {
+         account.setParentUID(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_PARENT_ACCOUNT_UID)));
+         account.setAccountType(AccountType.valueOf(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_TYPE))));
+         Currency currency = Currency.getInstance(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_CURRENCY)));
+-        account.setCommodity(CommoditiesDbAdapter.getInstance().getCommodity(currency.getCurrencyCode()));
++        account.setCommodity(mCommoditiesDbAdapter.getCommodity(currency.getCurrencyCode()));
+         account.setPlaceHolderFlag(c.getInt(c.getColumnIndexOrThrow(AccountEntry.COLUMN_PLACEHOLDER)) == 1);
+         account.setDefaultTransferAccountUID(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID)));
+         String color = c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_COLOR_CODE));
+@@ -552,7 +586,7 @@ public AccountType getAccountType(long accountId){
+      */
+     public String getOrCreateImbalanceAccountUID(Currency currency){
+         String imbalanceAccountName = getImbalanceAccountName(currency);
+-        Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(currency.getCurrencyCode());
++        Commodity commodity = mCommoditiesDbAdapter.getCommodity(currency.getCurrencyCode());
+         String uid = findAccountUidByFullName(imbalanceAccountName);
+         if (uid == null){
+             Account account = new Account(imbalanceAccountName, commodity);
+@@ -755,7 +789,7 @@ public Money getAccountBalance(AccountType accountType, long startTimestamp, lon
+         String currencyCode = GnuCashApplication.getDefaultCurrencyCode();
+ 
+         Log.d(LOG_TAG, "all account list : " + accountUidList.size());
+-        SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
++        SplitsDbAdapter splitsDbAdapter = mTransactionsAdapter.getSplitDbAdapter();
+ 
+         return (startTimestamp == -1 && endTimestamp == -1)
+                 ? splitsDbAdapter.computeSplitBalance(accountUidList, currencyCode, hasDebitNormalBalance)
+@@ -788,7 +822,7 @@ private Money computeBalance(String accountUID, long startTimestamp, long endTim
+         accountsList.add(0, accountUID);
+ 
+         Log.d(LOG_TAG, "all account list : " + accountsList.size());
+-        SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
++        SplitsDbAdapter splitsDbAdapter = mTransactionsAdapter.getSplitDbAdapter();
+         return (startTimestamp == -1 && endTimestamp == -1)
+                 ? splitsDbAdapter.computeSplitBalance(accountsList, currencyCode, hasDebitNormalBalance)
+                 : splitsDbAdapter.computeSplitBalance(accountsList, currencyCode, hasDebitNormalBalance, startTimestamp, endTimestamp);
+@@ -812,7 +846,7 @@ public Money getAccountsBalance(@NonNull  List<String> accountUIDList, long star
+ 
+         boolean hasDebitNormalBalance = getAccountType(accountUIDList.get(0)).hasDebitNormalBalance();
+ 
+-        SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
++        SplitsDbAdapter splitsDbAdapter = mTransactionsAdapter.getSplitDbAdapter();
+         Money splitSum = (startTimestamp == -1 && endTimestamp == -1)
+                 ? splitsDbAdapter.computeSplitBalance(accountUIDList, currencyCode, hasDebitNormalBalance)
+                 : splitsDbAdapter.computeSplitBalance(accountUIDList, currencyCode, hasDebitNormalBalance, startTimestamp, endTimestamp);
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index bc6116e7..75b763ca 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -100,7 +100,7 @@ public Book buildModelInstance(@NonNull Cursor cursor) {
+      */
+     public String setActive(@NonNull String bookUID){
+         if (bookUID == null)
+-            return BooksDbAdapter.getInstance().getActiveBookUID();
++            return getActiveBookUID();
+ 
+         ContentValues contentValues = new ContentValues();
+         contentValues.put(BookEntry.COLUMN_ACTIVE, 0);
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BudgetsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BudgetsDbAdapter.java
+index 86cc2c24..c0365d96 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BudgetsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BudgetsDbAdapter.java
+@@ -186,6 +186,6 @@ public Money getAccountSum(String budgetUID, long periodStart, long periodEnd){
+             accountUIDs.add(budgetAmount.getAccountUID());
+         }
+ 
+-        return AccountsDbAdapter.getInstance().getAccountsBalance(accountUIDs, periodStart, periodEnd);
++        return new AccountsDbAdapter(mDb).getAccountsBalance(accountUIDs, periodStart, periodEnd);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
+index 8c24eb8e..5ebfd32b 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
+@@ -721,7 +721,24 @@ public boolean deleteRecord(@NonNull String uid){
+      * @throws IllegalArgumentException if either the {@code recordUID} or {@code columnName} do not exist in the database
+      */
+     public String getAttribute(@NonNull String recordUID, @NonNull String columnName){
+-        Cursor cursor = mDb.query(mTableName,
++        return getAttribute(mTableName, recordUID, columnName);
++    }
++
++    /**
++     * Returns an attribute from a specific column in the database for a specific record and specific table.
++     * <p>The attribute is returned as a string which can then be converted to another type if
++     * the caller was expecting something other type </p>
++     * <p>This method is an override of {@link #getAttribute(String, String)} which allows to select a value from a
++     * different table than the one of current adapter instance
++     * </p>
++     * @param tableName Database table name. See {@link DatabaseSchema}
++     * @param recordUID GUID of the record
++     * @param columnName Name of the column to be retrieved
++     * @return String value of the column entry
++     * @throws IllegalArgumentException if either the {@code recordUID} or {@code columnName} do not exist in the database
++     */
++    protected String getAttribute(@NonNull String tableName, @NonNull String recordUID, @NonNull String columnName){
++        Cursor cursor = mDb.query(tableName,
+                 new String[]{columnName},
+                 AccountEntry.COLUMN_UID + " = ?",
+                 new String[]{recordUID}, null, null, null);
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
+index 329f4722..85daa8d2 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
+@@ -104,7 +104,7 @@ public long bulkAddRecords(@NonNull List<ScheduledAction> scheduledActions, Upda
+     public long updateRecurrenceAttributes(ScheduledAction scheduledAction){
+         //since we are updating, first fetch the existing recurrence UID and set it to the object
+         //so that it will be updated and not a new one created
+-        RecurrenceDbAdapter recurrenceDbAdapter = RecurrenceDbAdapter.getInstance();
++        RecurrenceDbAdapter recurrenceDbAdapter = new RecurrenceDbAdapter(mDb);
+         String recurrenceUID = recurrenceDbAdapter.getAttribute(scheduledAction.getUID(), ScheduledActionEntry.COLUMN_RECURRENCE_UID);
+ 
+         Recurrence recurrence = scheduledAction.getRecurrence();
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/SplitsDbAdapter.java
+index 661b9fc6..9750504d 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/SplitsDbAdapter.java
+@@ -131,7 +131,7 @@ public Split buildModelInstance(@NonNull final Cursor cursor){
+         String reconcileState = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_RECONCILE_STATE));
+         String reconcileDate  = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_RECONCILE_DATE));
+ 
+-        String transactionCurrency = TransactionsDbAdapter.getInstance().getAttribute(transxUID, TransactionEntry.COLUMN_CURRENCY);
++        String transactionCurrency = getAttribute(TransactionEntry.TABLE_NAME, transxUID, TransactionEntry.COLUMN_CURRENCY);
+         Money value = new Money(valueNum, valueDenom, transactionCurrency);
+         String currencyCode = getAccountCurrencyCode(accountUID);
+         Money quantity = new Money(quantityNum, quantityDenom, currencyCode);
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+index da9341b3..099373a2 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+@@ -58,6 +58,8 @@
+ 
+     private final SplitsDbAdapter mSplitsDbAdapter;
+ 
++    private final CommoditiesDbAdapter mCommoditiesDbAdapter;
++
+     /**
+      * Overloaded constructor. Creates adapter for already open db
+      * @param db SQlite db instance
+@@ -75,6 +77,7 @@ public TransactionsDbAdapter(SQLiteDatabase db, SplitsDbAdapter splitsDbAdapter)
+                 TransactionEntry.COLUMN_TEMPLATE
+         });
+         mSplitsDbAdapter = splitsDbAdapter;
++        mCommoditiesDbAdapter = new CommoditiesDbAdapter(db);
+     }
+ 
+     /**
+@@ -102,7 +105,7 @@ public void addRecord(@NonNull Transaction transaction, UpdateMethod updateMetho
+         try {
+             Split imbalanceSplit = transaction.createAutoBalanceSplit();
+             if (imbalanceSplit != null){
+-                String imbalanceAccountUID = AccountsDbAdapter.getInstance().getOrCreateImbalanceAccountUID(transaction.getCurrency());
++                String imbalanceAccountUID = new AccountsDbAdapter(mDb, this).getOrCreateImbalanceAccountUID(transaction.getCurrency());
+                 imbalanceSplit.setAccountUID(imbalanceAccountUID);
+             }
+             super.addRecord(transaction, updateMethod);
+@@ -183,7 +186,7 @@ public long bulkAddRecords(@NonNull List<Transaction> transactionList, UpdateMet
+ 
+         Commodity commodity = transaction.getCommodity();
+         if (commodity == null)
+-            commodity = CommoditiesDbAdapter.getInstance().getCommodity(transaction.getCurrencyCode());
++            commodity = mCommoditiesDbAdapter.getCommodity(transaction.getCurrencyCode());
+ 
+         stmt.bindString(6, commodity.getUID());
+         stmt.bindString(7, TimestampHelper.getUtcStringFromTimestamp(transaction.getCreatedTimestamp()));
+@@ -290,17 +293,6 @@ public Cursor fetchAllScheduledTransactions(){
+     }
+ 
+ 	/**
+-	 * Returns a cursor to a set of all transactions for the account with ID <code>accountID</code>
+-	 * or for which this account is the origin account in a double entry
+-	 * @param accountID ID of the account whose transactions are to be retrieved
+-	 * @return Cursor holding set of transactions for particular account
+-	 */
+-	public Cursor fetchAllTransactionsForAccount(long accountID){
+-        String accountUID = AccountsDbAdapter.getInstance().getUID(accountID);
+-		return fetchAllTransactionsForAccount(accountUID);
+-	}
+-	
+-	/**
+ 	 * Returns list of all transactions for account with UID <code>accountUID</code>
+ 	 * @param accountUID UID of account whose transactions are to be retrieved
+ 	 * @return List of {@link Transaction}s for account with UID <code>accountUID</code>
+@@ -416,7 +408,7 @@ public Transaction buildModelInstance(@NonNull final Cursor c){
+ 		transaction.setTemplate(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TEMPLATE)) == 1);
+         String currencyCode = c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_CURRENCY));
+         transaction.setCurrencyCode(currencyCode);
+-        transaction.setCommodity(CommoditiesDbAdapter.getInstance().getCommodity(currencyCode));
++        transaction.setCommodity(mCommoditiesDbAdapter.getCommodity(currencyCode));
+         transaction.setScheduledActionUID(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_SCHEDX_ACTION_UID)));
+         long transactionID = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
+         transaction.setSplits(mSplitsDbAdapter.getSplitsForTransaction(transactionID));
+@@ -424,18 +416,6 @@ public Transaction buildModelInstance(@NonNull final Cursor c){
+ 		return transaction;
+ 	}
+ 
+-	/**
+-	 * Returns the currency code (ISO 4217) used by the account with id <code>accountId</code>
+-	 * If you do not have the database record Id, you can call {@link #getID(String)}  instead.
+-	 * @param accountId Database record id of the account 
+-	 * @return Currency code of the account with Id <code>accountId</code>
+-	 * @see #getAccountCurrencyCode(String)
+-	 */
+-	public String getAccountCurrencyCode(long accountId){
+-		String accountUID = AccountsDbAdapter.getInstance().getUID(accountId);
+-		return getAccountCurrencyCode(accountUID);
+-	}
+-
+     /**
+      * Returns the transaction balance for the transaction for the specified account.
+      * <p>We consider only those splits which belong to this account</p>
+@@ -468,20 +448,6 @@ public int moveTransaction(String transactionUID, String srcAccountUID, String d
+         mSplitsDbAdapter.bulkAddRecords(splits, UpdateMethod.update);
+         return splits.size();
+ 	}
+-	
+-	/**
+-	 * Returns the number of transactions belonging to account with id <code>accountId</code>
+-	 * @param accountId Long ID of account
+-	 * @return Number of transactions assigned to account with id <code>accountId</code>
+-	 */
+-	public int getTransactionsCount(long accountId){
+-		Cursor cursor = fetchAllTransactionsForAccount(accountId);
+-        try {
+-            return cursor.getCount();
+-        } finally {
+-            cursor.close();
+-		}
+-	}
+ 
+     /**
+      * Returns the number of transactions belonging to an account
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 442f7d70..b701058c 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -24,6 +24,7 @@
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.content.pm.ResolveInfo;
++import android.database.sqlite.SQLiteDatabase;
+ import android.net.Uri;
+ import android.os.AsyncTask;
+ import android.os.Build;
+@@ -58,6 +59,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.DatabaseAdapter;
++import org.gnucash.android.db.adapter.SplitsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.export.ofx.OfxExporter;
+ import org.gnucash.android.export.qif.QifExporter;
+@@ -93,6 +95,8 @@
+ 
+     private ProgressDialog mProgressDialog;
+ 
++    private SQLiteDatabase mDb;
++
+     /**
+      * Log tag
+      */
+@@ -108,8 +112,9 @@
+ 
+     private Exporter mExporter;
+ 
+-    public ExportAsyncTask(Context context){
++    public ExportAsyncTask(Context context, SQLiteDatabase db){
+         this.mContext = context;
++        this.mDb = db;
+     }
+ 
+     @Override
+@@ -440,11 +445,11 @@ private void backupAndDeleteTransactions(){
+         GncXmlExporter.createBackup(); //create backup before deleting everything
+         List<Transaction> openingBalances = new ArrayList<>();
+         boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
++
++        TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(mDb, new SplitsDbAdapter(mDb));
+         if (preserveOpeningBalances) {
+-            openingBalances = AccountsDbAdapter.getInstance().getAllOpeningBalanceTransactions();
++            openingBalances = new AccountsDbAdapter(mDb, transactionsDbAdapter).getAllOpeningBalanceTransactions();
+         }
+-
+-        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+         transactionsDbAdapter.deleteAllNonTemplateTransactions();
+ 
+         if (preserveOpeningBalances) {
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index 55dc5656..ad82ab1b 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -80,7 +80,6 @@
+ 
+     /**
+      * Flag for whether the scheduled transaction should be auto-created
+-     * TODO: Add this flag to the database. At the moment we always treat it as true
+      */
+     private boolean mAutoCreate = true;
+     private boolean mAutoNotify = false;
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 39172109..1ca2a54f 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -19,23 +19,32 @@
+ import android.app.IntentService;
+ import android.content.ContentValues;
+ import android.content.Intent;
++import android.database.sqlite.SQLiteDatabase;
+ import android.os.PowerManager;
+ import android.os.SystemClock;
++import android.text.format.DateFormat;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.DatabaseAdapter;
++import org.gnucash.android.db.adapter.RecurrenceDbAdapter;
+ import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
++import org.gnucash.android.db.adapter.SplitsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportAsyncTask;
+ import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.model.Book;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
++import org.joda.time.format.DateTimeFormatter;
+ 
+ import java.sql.Timestamp;
++import java.util.Date;
+ import java.util.List;
+ import java.util.concurrent.ExecutionException;
+ 
+@@ -50,37 +59,46 @@
+ 
+     public static final String LOG_TAG = "SchedulerService";
+ 
+-    /**
+-     * Wake lock for keeping the CPU on while export is in progress
+-     */
+-    PowerManager.WakeLock mWakeLock;
+-
+     public SchedulerService() {
+         super(LOG_TAG);
+     }
+ 
+     @Override
+-    public void onCreate() {
+-        super.onCreate();
+-        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+-        mWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, LOG_TAG);
+-        mWakeLock.acquire();
+-    }
+-
+-    @Override
+-    public void onDestroy() {
+-        super.onDestroy();
+-        if (mWakeLock.isHeld())
+-            mWakeLock.release(); //whenever this service is destroyed, release the lock
+-    }
+-
+-    @Override
+     protected void onHandleIntent(Intent intent) {
+         Log.i(LOG_TAG, "Starting scheduled action service");
+ 
+-        ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+-        List<ScheduledAction> scheduledActions = scheduledActionDbAdapter.getAllEnabledScheduledActions();
++        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
++        PowerManager.WakeLock wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, LOG_TAG);
++        wakeLock.acquire();
++
++        try {
++            BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
++            List<Book> books = booksDbAdapter.getAllRecords();
++            for (Book book : books) {
++                DatabaseHelper dbHelper = new DatabaseHelper(GnuCashApplication.getAppContext(), book.getUID());
++                SQLiteDatabase db = dbHelper.getWritableDatabase();
++                RecurrenceDbAdapter recurrenceDbAdapter = new RecurrenceDbAdapter(db);
++                ScheduledActionDbAdapter scheduledActionDbAdapter = new ScheduledActionDbAdapter(db, recurrenceDbAdapter);
++
++                List<ScheduledAction> scheduledActions = scheduledActionDbAdapter.getAllEnabledScheduledActions();
++                Log.i(LOG_TAG, String.format("Processing %d total scheduled actions for Book: %s",
++                        scheduledActions.size(), book.getDisplayName()));
++                processScheduledActions(scheduledActions, db);
++            }
++
++            Log.i(LOG_TAG, "Completed service @ " + java.text.DateFormat.getDateTimeInstance().format(new Date()));
++
++        } finally { //release the lock either way
++            wakeLock.release();
++        }
++
++    }
+ 
++    /**
++     * Process scheduled actions and execute any pending actions
++     * @param scheduledActions List of scheduled actions
++     */
++    private void processScheduledActions(List<ScheduledAction> scheduledActions, SQLiteDatabase db) {
+         for (ScheduledAction scheduledAction : scheduledActions) {
+             long endTime    = scheduledAction.getEndTime();
+             long now        = System.currentTimeMillis();
+@@ -93,25 +111,23 @@ protected void onHandleIntent(Intent intent) {
+                         && (nextRunTime <= now)  //one period has passed since last execution
+                         && scheduledAction.getStartTime() <= now
+                         && scheduledAction.isEnabled()) { //the start time has arrived
+-                    executeScheduledEvent(scheduledAction);
++                    executeScheduledEvent(scheduledAction, db);
+                 }
+             } while (nextRunTime <= now && scheduledAction.getActionType() == ScheduledAction.ActionType.TRANSACTION);
+         }
+-
+-        Log.i(LOG_TAG, "Completed service @ " + SystemClock.elapsedRealtime());
+     }
+ 
+     /**
+      * Executes a scheduled event according to the specified parameters
+      * @param scheduledAction ScheduledEvent to be executed
+      */
+-    private void executeScheduledEvent(ScheduledAction scheduledAction){
++    private void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDatabase db){
+         Log.i(LOG_TAG, "Executing scheduled action: " + scheduledAction.toString());
+         switch (scheduledAction.getActionType()){
+             case TRANSACTION:
+-                String eventUID = scheduledAction.getActionUID();
+-                TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+-                Transaction trxnTemplate = transactionsDbAdapter.getRecord(eventUID);
++                String actionUID = scheduledAction.getActionUID();
++                TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
++                Transaction trxnTemplate = transactionsDbAdapter.getRecord(actionUID);
+                 Transaction recurringTrxn = new Transaction(trxnTemplate, true);
+ 
+                 //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+@@ -126,7 +142,7 @@ private void executeScheduledEvent(ScheduledAction scheduledAction){
+                 ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
+                 try {
+                     //wait for async task to finish before we proceed (we are holding a wake lock)
+-                    new ExportAsyncTask(GnuCashApplication.getAppContext()).execute(params).get();
++                    new ExportAsyncTask(GnuCashApplication.getAppContext(), db).execute(params).get();
+                 } catch (InterruptedException | ExecutionException e) {
+                     //TODO: Create special log for scheduler service
+                     Crashlytics.logException(e);
+@@ -142,7 +158,7 @@ private void executeScheduledEvent(ScheduledAction scheduledAction){
+         ContentValues contentValues = new ContentValues();
+         contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, lastRun);
+         contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, executionCount);
+-        ScheduledActionDbAdapter.getInstance().updateRecord(scheduledAction.getUID(), contentValues);
++        new ScheduledActionDbAdapter(db, new RecurrenceDbAdapter(db)).updateRecord(scheduledAction.getUID(), contentValues);
+ 
+         scheduledAction.setLastRun(lastRun);
+         scheduledAction.setExecutionCount(executionCount);
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+index 5ff63942..a5b8ee1c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+@@ -274,7 +274,7 @@ private void startExport(){
+ 		exportParameters.setDeleteTransactionsAfterExport(mDeleteAllCheckBox.isChecked());
+ 
+ 		Log.i(TAG, "Commencing async export of transactions");
+-		new ExportAsyncTask(getActivity()).execute(exportParameters);
++		new ExportAsyncTask(getActivity(), GnuCashApplication.getActiveDb()).execute(exportParameters);
+ 
+ 		if (mRecurrenceRule != null) {
+ 			ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+index 9771537f..b18c9e49 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+@@ -154,13 +154,14 @@ public void onClick(View v) {
+ 				}
+ 
+ 				long dstAccountId = mDestinationAccountSpinner.getSelectedItemId();
++				String dstAccountUID = AccountsDbAdapter.getInstance().getUID(dstAccountId);
+ 				TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
+-				if (!trxnAdapter.getAccountCurrencyCode(dstAccountId).equals(trxnAdapter.getAccountCurrencyCode(mOriginAccountUID))) {
++				if (!trxnAdapter.getAccountCurrencyCode(dstAccountUID).equals(trxnAdapter.getAccountCurrencyCode(mOriginAccountUID))) {
+ 					Toast.makeText(getActivity(), R.string.toast_incompatible_currency, Toast.LENGTH_LONG).show();
+ 					return;
+ 				}
+ 				String srcAccountUID = ((TransactionsActivity) getActivity()).getCurrentAccountUID();
+-				String dstAccountUID = AccountsDbAdapter.getInstance().getUID(dstAccountId);
++
+ 				for (long trxnId : mTransactionIds) {
+ 					trxnAdapter.moveTransaction(trxnAdapter.getUID(trxnId), srcAccountUID, dstAccountUID);
+ 				}
+
+From 893bd1a9cb89671fa312414d2d36a4ec04d5a1d1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 15 Aug 2016 23:04:37 +0200
+Subject: [PATCH 2/4] Improve reliability of scheduled actions - computation of
+ when a scheduled action is due is now based on the execution count (and not
+ the last runtime like before)
+
+Last RunTime now stores the actual time when the scheduled action was executed, which is not necessarily when it was due
+Add tests for scheduled actions service
+Tapping a book in the BookManager should launch the book
+
+Fix bug causing some scheduled actions to be executed in a loop forever inside the service - fixes #535
+There was a bug in the computation of the nextRun time of scheduled actions.
+This could lead to situations where the nextRun time remains negative and the service holds a wakelock forever.
+---
+ .../org/gnucash/android/test/ui/MultiBookTest.java |  11 +
+ .../gnucash/android/app/GnuCashApplication.java    |  10 +-
+ .../android/db/adapter/TransactionsDbAdapter.java  |   8 +-
+ .../java/org/gnucash/android/model/Recurrence.java |   5 +-
+ .../org/gnucash/android/model/ScheduledAction.java |  80 +++++-
+ .../gnucash/android/service/SchedulerService.java  |  75 +++--
+ .../android/ui/budget/BudgetDetailFragment.java    |   2 +-
+ .../android/ui/settings/BookManagerFragment.java   |  10 +
+ .../test/unit/model/ScheduledActionTest.java       |  41 +++
+ .../unit/service/ScheduledActionServiceTest.java   | 303 +++++++++++++++++++++
+ 10 files changed, 498 insertions(+), 47 deletions(-)
+ create mode 100644 app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
+index 3a964482..86e19576 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
+@@ -71,6 +71,17 @@ public void shouldOpenBookManager(){
+         Intents.intended(hasComponent(PreferenceActivity.class.getName()));
+     }
+ 
++    public void testLoadBookFromBookManager(){
++        Book book = new Book();
++        book.setDisplayName("Launch Codes");
++        BooksDbAdapter.getInstance().addRecord(book);
++
++        shouldOpenBookManager();
++        onView(withText(book.getDisplayName())).perform(click());
++
++        assertThat(BooksDbAdapter.getInstance().getActiveBookUID()).isEqualTo(book.getUID());
++    }
++
+     @Test
+     public void creatingNewAccounts_shouldCreatedNewBook(){
+         long booksCount = mBooksDbAdapter.getRecordsCount();
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 13c976b0..219b8c36 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -132,7 +132,7 @@ public void onCreate(){
+ 
+         setDefaultCurrencyCode(getDefaultCurrencyCode());
+ 
+-        if (BuildConfig.DEBUG)
++        if (BuildConfig.DEBUG && !isRoboUnitTest())
+             setUpRemoteDebuggingFromChrome();
+     }
+ 
+@@ -242,6 +242,14 @@ public static boolean isCrashlyticsEnabled(){
+     }
+ 
+     /**
++     * Returns {@code true} if the app is being run by robolectric
++     * @return {@code true} if in unit testing, {@code false} otherwise
++     */
++    public static boolean isRoboUnitTest(){
++        return "robolectric".equals(Build.FINGERPRINT);
++    }
++
++    /**
+      * Returns <code>true</code> if double entry is enabled in the app settings, <code>false</code> otherwise.
+      * If the value is not set, the default value can be specified in the parameters.
+      * @return <code>true</code> if double entry is enabled, <code>false</code> otherwise
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+index 099373a2..4facc734 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+@@ -356,7 +356,7 @@ public Cursor fetchTransactionsWithSplitsWithTransactionAccount(String [] column
+     }
+ 
+     /**
+-     * Return number of transactions in the database which are non recurring
++     * Return number of transactions in the database (excluding templates)
+      * @return Number of transactions
+      */
+     public long getRecordsCount() {
+@@ -371,6 +371,12 @@ public long getRecordsCount() {
+         }
+     }
+ 
++    /**
++     * Returns the number of transactions in the database which fulfill the conditions
++     * @param where SQL WHERE clause without the "WHERE" itself
++     * @param whereArgs Arguments to substitute question marks for
++     * @return Number of records in the databases
++     */
+     public long getRecordsCount(@Nullable String where, @Nullable String[] whereArgs) {
+         Cursor cursor = mDb.query(true, TransactionEntry.TABLE_NAME + " , trans_extra_info ON "
+                         + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index 1446f0a5..79ee1b37 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -98,6 +98,7 @@ public void setPeriodStart(Timestamp periodStart) {
+      * <p>The period is approximate because months do not all have the same number of days,
+      * but that is assumed</p>
+      * @return Milliseconds since Epoch representing the period
++     * @deprecated Do not use in new code. Uses fixed period values for months and years (which have variable units of time)
+      */
+     public long getPeriod(){
+         long baseMillis = 0;
+@@ -195,14 +196,16 @@ public int getDaysLeftInCurrentPeriod(){
+     }
+ 
+     /**
+-     * Returns the number of periods from the start date of this occurence until the end of the
++     * Returns the number of periods from the start date of this recurrence until the end of the
+      * interval multiplier specified in the {@link PeriodType}
++     * //fixme: Improve the documentation
+      * @return Number of periods in this recurrence
+      */
+     public int getNumberOfPeriods(int numberOfPeriods) {
+         LocalDate startDate = new LocalDate(mPeriodStart.getTime());
+         LocalDate endDate;
+         int interval = mPeriodType.getMultiplier();
++        //// TODO: 15.08.2016 Why do we add the number of periods. maybe rename method or param
+         switch (mPeriodType){
+ 
+             case DAY:
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index ad82ab1b..3fcbd03a 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -17,7 +17,9 @@
+ 
+ import android.support.annotation.NonNull;
+ 
++import org.joda.time.DateTime;
+ import org.joda.time.LocalDate;
++import org.joda.time.LocalDateTime;
+ 
+ import java.sql.Timestamp;
+ import java.text.DateFormat;
+@@ -127,6 +129,7 @@ public void setActionUID(String actionUID) {
+ 
+     /**
+      * Returns the timestamp of the last execution of this scheduled action
++     * <p>This is not necessarily the time when the scheduled action was due, only when it was actually last executed.</p>
+      * @return Timestamp in milliseconds since Epoch
+      */
+     public long getLastRunTime() {
+@@ -134,31 +137,65 @@ public long getLastRunTime() {
+     }
+ 
+     /**
+-     * Computes the next time that this scheduled action is supposed to be executed, taking the
+-     * last execution time into account
++     * Returns the time when the last schedule in the sequence of planned executions was executed.
++     * This relies on the number of executions of the scheduled action
++     * <p>This is different from {@link #getLastRunTime()} which returns the date when the system last
++     * run the scheduled action.</p>
++     * @return Time of last schedule, or -1 if the scheduled action has never been run
++     */
++    public long getTimeOfLastSchedule(){
++        if (mExecutionCount == 0)
++            return  -1;
++
++        LocalDateTime startTime = LocalDateTime.fromDateFields(new Date(mStartDate));
++        int multiplier = mRecurrence.getPeriodType().getMultiplier();
++
++        int factor = (mExecutionCount-1) * multiplier;
++        switch (mRecurrence.getPeriodType()){
++            case DAY:
++                startTime = startTime.plusDays(factor);
++                break;
++            case WEEK:
++                startTime = startTime.plusWeeks(factor);
++                break;
++            case MONTH:
++                startTime = startTime.plusMonths(factor);
++                break;
++            case YEAR:
++                startTime = startTime.plusYears(factor);
++                break;
++        }
++
++        return startTime.toDate().getTime();
++    }
++
++    /**
++     * Computes the next time that this scheduled action is supposed to be executed
+      * <p>This method does not consider the end time, or number of times it should be run.
+      * It only considers when the next execution would theoretically be due</p>
+      * @return Next run time in milliseconds
+      */
+-    public long computeNextRunTime(){
++    public long computeNextScheduledExecutionTime(){
+         int multiplier = mRecurrence.getPeriodType().getMultiplier();
+-        long time = mLastRun;
+-        if (time == 0) {
+-            time = mStartDate;
++        //this is the last planned time for the action to occur, not the last run time
++        long lastActionTime = getTimeOfLastSchedule(); //mStartDate + ((mExecutionCount-1)*getPeriod());
++        if (lastActionTime < 0){
++            return mStartDate;
+         }
+-        LocalDate localDate = LocalDate.fromDateFields(new Date(mLastRun));
++
++        LocalDateTime localDate = LocalDateTime.fromDateFields(new Date(lastActionTime));
+         switch (mRecurrence.getPeriodType()) {
+             case DAY:
+-                localDate.plusDays(multiplier);
++                localDate = localDate.plusDays(multiplier);
+                 break;
+             case WEEK:
+-                localDate.plusWeeks(multiplier);
++                localDate = localDate.plusWeeks(multiplier);
+                 break;
+             case MONTH:
+-                localDate.plusMonths(multiplier);
++                localDate = localDate.plusMonths(multiplier);
+                 break;
+             case YEAR:
+-                localDate.plusYears(multiplier);
++                localDate = localDate.plusYears(multiplier);
+                 break;
+         }
+         return localDate.toDate().getTime();
+@@ -173,8 +210,9 @@ public void setLastRun(long nextRun) {
+     }
+ 
+     /**
+-     * Returns the period of this scheduled action
++     * Returns the period of this scheduled action in milliseconds.
+      * @return Period in milliseconds since Epoch
++     * @deprecated Uses fixed values for time of months and years (which actually vary depending on number of days in month or leap year)
+      */
+     public long getPeriod() {
+         return mRecurrence.getPeriod();
+@@ -256,8 +294,8 @@ public void setEnabled(boolean enabled){
+     }
+ 
+     /**
+-     * Returns the total number of occurences of this scheduled action.
+-     * @return Total number of occurences of this action
++     * Returns the total number of planned occurrences of this scheduled action.
++     * @return Total number of planned occurrences of this action
+      */
+     public int getTotalFrequency(){
+         return mTotalFrequency;
+@@ -427,6 +465,20 @@ public Recurrence getRecurrence() {
+     }
+ 
+     /**
++     * Overloaded method for setting the recurrence of the scheduled action.
++     * <p>This method allows you to specify the periodicity and the ordinal of it. For example,
++     * a recurrence every fortnight would give parameters: {@link PeriodType#WEEK}, ordinal:2</p>
++     * @param periodType Periodicity of the scheduled action
++     * @param ordinal Ordinal of the periodicity. If unsure, specify 1
++     * @see #setRecurrence(Recurrence)
++     */
++    public void setRecurrence(PeriodType periodType, int ordinal){
++        periodType.setMultiplier(ordinal);
++        Recurrence recurrence = new Recurrence(periodType);
++        setRecurrence(recurrence);
++    }
++
++    /**
+      * Sets the recurrence pattern of this scheduled action
+      * <p>This also sets the start period of the recurrence object, if there is one</p>
+      * @param recurrence {@link Recurrence} object
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 1ca2a54f..1d6e461e 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -21,8 +21,6 @@
+ import android.content.Intent;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.PowerManager;
+-import android.os.SystemClock;
+-import android.text.format.DateFormat;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+@@ -41,9 +39,8 @@
+ import org.gnucash.android.model.Book;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
+-import org.joda.time.format.DateTimeFormatter;
+ 
+-import java.sql.Timestamp;
++import java.util.ArrayList;
+ import java.util.Date;
+ import java.util.List;
+ import java.util.concurrent.ExecutionException;
+@@ -98,22 +95,21 @@ protected void onHandleIntent(Intent intent) {
+      * Process scheduled actions and execute any pending actions
+      * @param scheduledActions List of scheduled actions
+      */
+-    private void processScheduledActions(List<ScheduledAction> scheduledActions, SQLiteDatabase db) {
++    //made public static for testing. Do not call these methods directly
++    public static void processScheduledActions(List<ScheduledAction> scheduledActions, SQLiteDatabase db) {
+         for (ScheduledAction scheduledAction : scheduledActions) {
+-            long endTime    = scheduledAction.getEndTime();
++
+             long now        = System.currentTimeMillis();
+-            long nextRunTime;
+-            do { //loop so that we can add transactions which were missed while device was off
+-                nextRunTime = scheduledAction.computeNextRunTime();
+-                if (((endTime > 0 && now < endTime) //if and endTime is set and we did not reach it yet
+-                        || (scheduledAction.getExecutionCount() < scheduledAction.getTotalFrequency()) //or the number of scheduled runs
+-                        || (endTime == 0 && scheduledAction.getTotalFrequency() == 0)) //or the action is to run forever
+-                        && (nextRunTime <= now)  //one period has passed since last execution
+-                        && scheduledAction.getStartTime() <= now
+-                        && scheduledAction.isEnabled()) { //the start time has arrived
+-                    executeScheduledEvent(scheduledAction, db);
+-                }
+-            } while (nextRunTime <= now && scheduledAction.getActionType() == ScheduledAction.ActionType.TRANSACTION);
++            int totalPlannedExecutions = scheduledAction.getTotalFrequency();
++            int executionCount = scheduledAction.getExecutionCount();
++
++            if (scheduledAction.getStartTime() > now    //if schedule begins in the future
++                    || !scheduledAction.isEnabled()     // of if schedule is disabled
++                    || (totalPlannedExecutions > 0 && executionCount >= totalPlannedExecutions)) { //limit was set and we reached or exceeded it
++                Log.i(LOG_TAG, "Skipping scheduled action: " + scheduledAction.toString());
++                continue;
++            }
++            executeScheduledEvent(scheduledAction, db);
+         }
+     }
+ 
+@@ -121,21 +117,41 @@ private void processScheduledActions(List<ScheduledAction> scheduledActions, SQL
+      * Executes a scheduled event according to the specified parameters
+      * @param scheduledAction ScheduledEvent to be executed
+      */
+-    private void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDatabase db){
++    //made public static for testing. Do not call directly
++    public static void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDatabase db){
+         Log.i(LOG_TAG, "Executing scheduled action: " + scheduledAction.toString());
++        int executionCount = scheduledAction.getExecutionCount();
++
+         switch (scheduledAction.getActionType()){
+             case TRANSACTION:
+                 String actionUID = scheduledAction.getActionUID();
+                 TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
+                 Transaction trxnTemplate = transactionsDbAdapter.getRecord(actionUID);
+-                Transaction recurringTrxn = new Transaction(trxnTemplate, true);
++
++                long now = System.currentTimeMillis();
++                //if there is an end time in the past, we execute all schedules up to the end time.
++                //if the end time is in the future, we execute all schedules until now (current time)
++                //if there is no end time, we execute all schedules until now
++                long endTime = scheduledAction.getEndTime() > 0 ? Math.min(scheduledAction.getEndTime(), now) : now;
++                int totalPlannedExecutions = scheduledAction.getTotalFrequency();
++                List<Transaction> transactions = new ArrayList<>();
+ 
+                 //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+                 //so compute the actual transaction time from pre-known values
+-                long transactionTime = scheduledAction.computeNextRunTime(); //default
+-                recurringTrxn.setTime(transactionTime);
+-                recurringTrxn.setCreatedTimestamp(new Timestamp(transactionTime));
+-                transactionsDbAdapter.addRecord(recurringTrxn, DatabaseAdapter.UpdateMethod.insert);
++                long transactionTime = scheduledAction.computeNextScheduledExecutionTime();
++                while (transactionTime <= endTime) {
++                    Transaction recurringTrxn = new Transaction(trxnTemplate, true);
++                    recurringTrxn.setTime(transactionTime);
++                    transactions.add(recurringTrxn);
++                    recurringTrxn.setScheduledActionUID(scheduledAction.getUID());
++                    scheduledAction.setExecutionCount(++executionCount);
++
++                    if (totalPlannedExecutions > 0 && executionCount >= totalPlannedExecutions)
++                        break; //if we hit the total planned executions set, then abort
++                    transactionTime = scheduledAction.computeNextScheduledExecutionTime();
++                }
++
++                transactionsDbAdapter.bulkAddRecords(transactions, DatabaseAdapter.UpdateMethod.insert);
+                 break;
+ 
+             case BACKUP:
+@@ -143,8 +159,8 @@ private void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDataba
+                 try {
+                     //wait for async task to finish before we proceed (we are holding a wake lock)
+                     new ExportAsyncTask(GnuCashApplication.getAppContext(), db).execute(params).get();
++                    scheduledAction.setExecutionCount(++executionCount);
+                 } catch (InterruptedException | ExecutionException e) {
+-                    //TODO: Create special log for scheduler service
+                     Crashlytics.logException(e);
+                     Log.e(LOG_TAG, e.getMessage());
+                     return; //return immediately, do not update last run time of event
+@@ -152,15 +168,16 @@ private void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDataba
+                 break;
+         }
+ 
+-        long lastRun = scheduledAction.computeNextRunTime();
+-        int executionCount = scheduledAction.getExecutionCount() + 1;
++        //the last run time is computed instead of just using "now" so that if the more than
++        // one period has been skipped, all intermediate transactions can be created
++
+         //update the last run time and execution count
+         ContentValues contentValues = new ContentValues();
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, lastRun);
++        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, System.currentTimeMillis());
+         contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, executionCount);
+         new ScheduledActionDbAdapter(db, new RecurrenceDbAdapter(db)).updateRecord(scheduledAction.getUID(), contentValues);
+ 
+-        scheduledAction.setLastRun(lastRun);
++        //set the values in the object because they will be checked for the next iteration in the calling loop
+         scheduledAction.setExecutionCount(executionCount);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java b/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
+index 195476f2..730eb993 100644
+--- a/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
+@@ -254,7 +254,7 @@ public void generateChartData(BarChart barChart, BudgetAmount budgetAmount) {
+             //todo: refactor getNumberOfPeriods into budget
+             int budgetPeriods = (int) mBudget.getNumberOfPeriods();
+             budgetPeriods = budgetPeriods == 0 ? 12 : budgetPeriods;
+-            int periods = mBudget.getRecurrence().getNumberOfPeriods(budgetPeriods);
++            int periods = mBudget.getRecurrence().getNumberOfPeriods(budgetPeriods); //// FIXME: 15.08.2016 why do we need number of periods
+ 
+             for (int periodNum = 1; periodNum <= periods; periodNum++) {
+                 BigDecimal amount = accountsDbAdapter.getAccountBalance(budgetAmount.getAccountUID(),
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+index d0a11d0e..510d259c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+@@ -219,6 +219,16 @@ public void onClick(DialogInterface dialog, int which) {
+                     }
+                 });
+             }
++
++            view.setOnClickListener(new View.OnClickListener() {
++                @Override
++                public void onClick(View v) {
++                    //do nothing if the active book is tapped
++                    if (!BooksDbAdapter.getInstance().getActiveBookUID().equals(bookUID)) {
++                        GnuCashApplication.loadBook(bookUID);
++                    }
++                }
++            });
+         }
+     }
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+index 3c298cee..c1a0b927 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/ScheduledActionTest.java
+@@ -19,6 +19,7 @@
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
++import org.joda.time.DateTime;
+ import org.junit.Test;
+ 
+ import java.sql.Timestamp;
+@@ -89,6 +90,46 @@ public void settingRecurrence_shouldSetEndTime(){
+         assertThat(scheduledAction.getEndTime()).isEqualTo(endTime);
+     }
+ 
++    /**
++     * Checks that scheduled actions accurately compute the next run time based on the start date
++     * and the last time the action was run
++     */
++    @Test
++    public void testComputingNextScheduledExecution(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        PeriodType periodType = PeriodType.MONTH;
++        periodType.setMultiplier(2);
++
++        Recurrence recurrence = new Recurrence(periodType);
++        DateTime startDate = new DateTime(2015, 8, 15, 12, 0);
++        recurrence.setPeriodStart(new Timestamp(startDate.getMillis()));
++        scheduledAction.setRecurrence(recurrence);
++
++        assertThat(scheduledAction.computeNextScheduledExecutionTime()).isEqualTo(startDate.getMillis());
++
++        scheduledAction.setExecutionCount(3);
++        DateTime expectedTime = new DateTime(2016, 2, 15, 12, 0);
++        assertThat(scheduledAction.computeNextScheduledExecutionTime()).isEqualTo(expectedTime.getMillis());
++    }
++
++    @Test
++    public void testComputingTimeOfLastSchedule(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        PeriodType periodType = PeriodType.WEEK;
++        periodType.setMultiplier(2);
++        Recurrence recurrence = new Recurrence(periodType);
++        scheduledAction.setRecurrence(recurrence);
++        DateTime startDate = new DateTime(2016, 6, 6, 9, 0);
++        scheduledAction.setStartTime(startDate.getMillis());
++
++        assertThat(scheduledAction.getTimeOfLastSchedule()).isEqualTo(-1L);
++
++        scheduledAction.setExecutionCount(3);
++        DateTime expectedDate = new DateTime(2016, 7, 4, 9, 0);
++        assertThat(scheduledAction.getTimeOfLastSchedule()).isEqualTo(expectedDate.getMillis());
++
++    }
++
+     private long getTimeInMillis(int year, int month, int day) {
+         Calendar calendar = Calendar.getInstance();
+         calendar.set(year, month, day);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+new file mode 100644
+index 00000000..722fb26c
+--- /dev/null
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -0,0 +1,303 @@
++/*
++ * Copyright (c) 2016 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.test.unit.service;
++
++import android.database.sqlite.SQLiteDatabase;
++
++import org.gnucash.android.BuildConfig;
++import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
++import org.gnucash.android.db.adapter.DatabaseAdapter;
++import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
++import org.gnucash.android.db.adapter.TransactionsDbAdapter;
++import org.gnucash.android.export.ExportFormat;
++import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.export.Exporter;
++import org.gnucash.android.importer.GncXmlImporter;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Commodity;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.PeriodType;
++import org.gnucash.android.model.Recurrence;
++import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.service.SchedulerService;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
++import org.joda.time.DateTime;
++import org.joda.time.Weeks;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.BeforeClass;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
++import org.xml.sax.SAXException;
++
++import java.io.File;
++import java.io.IOException;
++import java.math.BigDecimal;
++import java.util.ArrayList;
++import java.util.List;
++
++import javax.xml.parsers.ParserConfigurationException;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/**
++ * Test the the scheduled actions service runs as expected
++ */
++@RunWith(GnucashTestRunner.class) //package is required so that resources can be found in dev mode
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android",
++        shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
++public class ScheduledActionServiceTest {
++
++    private static String mActionUID;
++    private SQLiteDatabase mDb;
++
++    private static Account mBaseAccount = new Account("Base Account");
++    private static Account mTransferAccount = new Account("Transfer Account");
++
++    private static Transaction mTemplateTransaction;
++
++    public void createAccounts(){
++        try {
++            String bookUID = GncXmlImporter.parse(GnuCashApplication.getAppContext().getResources().openRawResource(R.raw.default_accounts));
++            GnuCashApplication.loadBook(bookUID);
++            //initAdapters(bookUID);
++        } catch (ParserConfigurationException | SAXException | IOException e) {
++            e.printStackTrace();
++            throw new RuntimeException("Could not create default accounts");
++        }
++    }
++
++    @BeforeClass
++    public static void makeAccounts(){
++        mTemplateTransaction = new Transaction("Recurring Transaction");
++        mTemplateTransaction.setTemplate(true);
++
++        mActionUID = mTemplateTransaction.getUID();
++    }
++
++    @Before
++    public void setUp(){
++        mDb = GnuCashApplication.getActiveDb();
++        new CommoditiesDbAdapter(mDb); //initializes commodity static values
++        mBaseAccount.setCommodity(Commodity.DEFAULT_COMMODITY);
++        mTransferAccount.setCommodity(Commodity.DEFAULT_COMMODITY);
++        mTemplateTransaction.setCommodity(Commodity.DEFAULT_COMMODITY);
++
++        Split split1 = new Split(new Money(BigDecimal.TEN, Commodity.DEFAULT_COMMODITY), mBaseAccount.getUID());
++        Split split2 = split1.createPair(mTransferAccount.getUID());
++
++        mTemplateTransaction.addSplit(split1);
++        mTemplateTransaction.addSplit(split2);
++
++        AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++        accountsDbAdapter.addRecord(mBaseAccount);
++        accountsDbAdapter.addRecord(mTransferAccount);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        transactionsDbAdapter.addRecord(mTemplateTransaction, DatabaseAdapter.UpdateMethod.insert);
++
++    }
++
++    @Test
++    public void disabledScheduledActions_shouldNotRun(){
++        Recurrence recurrence = new Recurrence(PeriodType.WEEK);
++        ScheduledAction scheduledAction1 = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        scheduledAction1.setStartTime(System.currentTimeMillis() - 100000);
++        scheduledAction1.setEnabled(false);
++        scheduledAction1.setActionUID(mActionUID);
++        scheduledAction1.setRecurrence(recurrence);
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction1);
++
++        TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
++
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++        SchedulerService.processScheduledActions(actions, mDb);
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++    }
++
++    @Test
++    public void futureScheduledActions_shouldNotRun(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        scheduledAction.setStartTime(System.currentTimeMillis() + 100000);
++        scheduledAction.setEnabled(true);
++        scheduledAction.setRecurrence(new Recurrence(PeriodType.MONTH));
++        scheduledAction.setActionUID(mActionUID);
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++
++        TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
++
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++        SchedulerService.processScheduledActions(actions, mDb);
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++    }
++
++    /**
++     * Transactions whose execution count has reached or exceeded the planned execution count
++     */
++    @Test
++    public void exceededExecutionCounts_shouldNotRun(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        scheduledAction.setActionUID(mActionUID);
++        scheduledAction.setStartTime(new DateTime(2015, 5, 31, 14, 0).getMillis());
++        scheduledAction.setEnabled(true);
++        scheduledAction.setRecurrence(new Recurrence(PeriodType.WEEK));
++        scheduledAction.setTotalFrequency(4);
++        scheduledAction.setExecutionCount(4);
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++
++        TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++        SchedulerService.processScheduledActions(actions, mDb);
++        assertThat(trxnAdapter.getRecordsCount()).isZero();
++    }
++
++    /**
++     * Test that normal scheduled transactions would lead to new transaction entries
++     */
++    @Test
++    public void missedScheduledTransactions_shouldBeGenerated(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        DateTime startTime = new DateTime(2016, 6, 6, 9, 0);
++        scheduledAction.setStartTime(startTime.getMillis());
++        scheduledAction.setActionUID(mActionUID);
++
++        scheduledAction.setRecurrence(PeriodType.WEEK, 2);
++        ScheduledActionDbAdapter.getInstance().addRecord(scheduledAction, DatabaseAdapter.UpdateMethod.insert);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++        SchedulerService.processScheduledActions(actions, mDb);
++
++        int weeks = Weeks.weeksBetween(startTime, new DateTime(2016, 8, 29, 10, 0)).getWeeks();
++        int expectedTransactionCount = weeks/2;
++
++        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(expectedTransactionCount);
++    }
++
++    public void endTimeInTheFuture_shouldExecuteOnlyUntilPresent(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        DateTime startTime = new DateTime(2016, 6, 6, 9, 0);
++        scheduledAction.setStartTime(startTime.getMillis());
++        scheduledAction.setActionUID(mActionUID);
++
++        scheduledAction.setRecurrence(PeriodType.WEEK, 2);
++        scheduledAction.setEndTime(new DateTime(2017, 8, 16, 9, 0).getMillis());
++        ScheduledActionDbAdapter.getInstance().addRecord(scheduledAction, DatabaseAdapter.UpdateMethod.insert);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++        SchedulerService.processScheduledActions(actions, mDb);
++
++        int weeks = Weeks.weeksBetween(startTime, new DateTime(2016, 8, 29, 10, 0)).getWeeks();
++        int expectedTransactionCount = weeks/2; //multiplier from the PeriodType
++
++        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(expectedTransactionCount);
++    }
++
++    /**
++     * Test that the end time for scheduled actions should be respected
++     */
++    @Test
++    public void scheduledActionsWithEndTimeInPast_shouldBeExecuted(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        DateTime startTime = new DateTime(2016, 6, 6, 9, 0);
++        scheduledAction.setStartTime(startTime.getMillis());
++        scheduledAction.setActionUID(mActionUID);
++
++        scheduledAction.setRecurrence(PeriodType.WEEK, 2);
++        scheduledAction.setEndTime(new DateTime(2016, 8, 8, 9, 0).getMillis());
++        ScheduledActionDbAdapter.getInstance().addRecord(scheduledAction, DatabaseAdapter.UpdateMethod.insert);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++        SchedulerService.processScheduledActions(actions, mDb);
++
++        int expectedCount = 5;
++        assertThat(scheduledAction.getExecutionCount()).isEqualTo(expectedCount);
++        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(expectedCount); //would be 6 if the end time is not respected
++    }
++
++    /**
++     * Test that only scheduled actions with action UIDs are processed
++     */
++    @Test(expected = IllegalArgumentException.class)
++    public void recurringTransactions_shouldHaveScheduledActionUID(){
++        ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
++        DateTime startTime = new DateTime(2016, 7, 4, 12 ,0);
++        scheduledAction.setStartTime(startTime.getMillis());
++        scheduledAction.setRecurrence(PeriodType.MONTH, 1);
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledAction);
++        SchedulerService.processScheduledActions(actions, mDb);
++    }
++
++    //// FIXME: 16.08.2016 Cannot find the file after export. But the export task is called and run
++    public void scheduledBackups_shouldRunOnlyOnce(){
++        ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
++        scheduledBackup.setStartTime(new DateTime(2016, 2, 17, 17, 0).getMillis());
++        scheduledBackup.setRecurrence(PeriodType.MONTH, 1);
++        scheduledBackup.setExecutionCount(2);
++
++        ExportParams backupParams = new ExportParams(ExportFormat.XML);
++        backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
++        scheduledBackup.setTag(backupParams.toCsv());
++
++        File backupFolder = new File(Exporter.getBackupFolderPath());
++        assertThat(backupFolder).exists();
++        assertThat(backupFolder.listFiles()).isEmpty();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledBackup);
++        SchedulerService.processScheduledActions(actions, mDb);
++
++        File[] backupFiles = backupFolder.listFiles();
++        assertThat(backupFiles).hasSize(1);
++        assertThat(backupFiles[0]).hasExtension("gnca");
++    }
++
++
++    @After
++    public void tearDown(){
++        TransactionsDbAdapter.getInstance().deleteAllRecords();
++    }
++}
+
+From e83dc930829f4b0d32b01bd9ddf953335ff08b30 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 16 Aug 2016 15:18:17 +0200
+Subject: [PATCH 3/4] Code refactoring and cleanup
+
+Renamed SchedulerService to ScheduledActionService
+---
+ app/src/main/AndroidManifest.xml                     |  2 +-
+ .../org/gnucash/android/app/GnuCashApplication.java  |  7 ++-----
+ .../java/org/gnucash/android/db/MigrationHelper.java |  4 ++--
+ .../android/db/adapter/ScheduledActionDbAdapter.java |  6 +++---
+ .../org/gnucash/android/export/ExportAsyncTask.java  |  1 -
+ .../org/gnucash/android/export/ofx/OfxExporter.java  |  6 +++++-
+ .../org/gnucash/android/importer/GncXmlHandler.java  |  4 ++--
+ .../org/gnucash/android/model/ScheduledAction.java   | 10 +++++-----
+ ...dulerService.java => ScheduledActionService.java} | 10 +++++-----
+ .../test/unit/db/ScheduledActionDbAdapterTest.java   |  2 +-
+ .../unit/service/ScheduledActionServiceTest.java     | 20 ++++++++++----------
+ 11 files changed, 36 insertions(+), 36 deletions(-)
+ rename app/src/main/java/org/gnucash/android/service/{SchedulerService.java => ScheduledActionService.java} (97%)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 18d3dead..45ec83f6 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -125,7 +125,7 @@
+             android:enabled="true"
+             android:exported="false"
+             android:label="Dropbox Sync" />
+-        <service android:name=".service.SchedulerService"
++        <service android:name=".service.ScheduledActionService"
+             android:exported="false"
+             android:label="GnuCash Android Scheduler Execution Service"/>
+         <receiver android:name=".receivers.TransactionRecorder"
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 219b8c36..325ceb04 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -52,7 +52,7 @@
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.service.SchedulerService;
++import org.gnucash.android.service.ScheduledActionService;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.settings.PreferenceActivity;
+ 
+@@ -127,9 +127,6 @@ public void onCreate(){
+         mBooksDbAdapter = new BooksDbAdapter(bookDbHelper.getWritableDatabase());
+ 
+         initDatabaseAdapters();
+-
+-        //TODO: migrate preferences from defaultShared to book
+-
+         setDefaultCurrencyCode(getDefaultCurrencyCode());
+ 
+         if (BuildConfig.DEBUG && !isRoboUnitTest())
+@@ -344,7 +341,7 @@ public static Locale getDefaultLocale() {
+      * @param context Application context
+      */
+     public static void startScheduledActionExecutionService(Context context){
+-        Intent alarmIntent = new Intent(context, SchedulerService.class);
++        Intent alarmIntent = new Intent(context, ScheduledActionService.class);
+         PendingIntent pendingIntent = PendingIntent.getService(context, 0, alarmIntent, PendingIntent.FLAG_NO_CREATE);
+ 
+         if (pendingIntent != null) //if service is already scheduled, just return
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 0aa1358a..9bbc01f6 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -46,7 +46,7 @@
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
+-import org.gnucash.android.service.SchedulerService;
++import org.gnucash.android.service.ScheduledActionService;
+ import org.gnucash.android.util.PreferencesHelper;
+ import org.gnucash.android.util.TimestampHelper;
+ import org.xml.sax.InputSource;
+@@ -1465,7 +1465,7 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+                 .apply();
+ 
+         //cancel the existing pending intent so that the alarm can be rescheduled
+-        Intent alarmIntent = new Intent(context, SchedulerService.class);
++        Intent alarmIntent = new Intent(context, ScheduledActionService.class);
+         PendingIntent pendingIntent = PendingIntent.getService(context, 0, alarmIntent, PendingIntent.FLAG_NO_CREATE);
+         AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+         alarmManager.cancel(pendingIntent);
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
+index 85daa8d2..9e6ddea9 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/ScheduledActionDbAdapter.java
+@@ -116,7 +116,7 @@ public long updateRecurrenceAttributes(ScheduledAction scheduledAction){
+         contentValues.put(ScheduledActionEntry.COLUMN_START_TIME, scheduledAction.getStartTime());
+         contentValues.put(ScheduledActionEntry.COLUMN_END_TIME,  scheduledAction.getEndTime());
+         contentValues.put(ScheduledActionEntry.COLUMN_TAG,       scheduledAction.getTag());
+-        contentValues.put(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY, scheduledAction.getTotalFrequency());
++        contentValues.put(ScheduledActionEntry.COLUMN_TOTAL_FREQUENCY, scheduledAction.getTotalPlannedExecutionCount());
+ 
+         Log.d(LOG_TAG, "Updating scheduled event recurrence attributes");
+         String where = ScheduledActionEntry.COLUMN_UID + "=?";
+@@ -138,7 +138,7 @@ public long updateRecurrenceAttributes(ScheduledAction scheduledAction){
+             stmt.bindNull(8);
+         else
+             stmt.bindString(8, schedxAction.getTag());
+-        stmt.bindString(9, Integer.toString(schedxAction.getTotalFrequency()));
++        stmt.bindString(9, Integer.toString(schedxAction.getTotalPlannedExecutionCount()));
+         stmt.bindString(10, schedxAction.getRecurrence().getUID());
+         stmt.bindLong(11,   schedxAction.shouldAutoCreate() ? 1 : 0);
+         stmt.bindLong(12,   schedxAction.shouldAutoNotify() ? 1 : 0);
+@@ -182,7 +182,7 @@ public ScheduledAction buildModelInstance(@NonNull final Cursor cursor){
+         event.setLastRun(lastRun);
+         event.setTag(tag);
+         event.setEnabled(enabled);
+-        event.setTotalFrequency(numOccurrences);
++        event.setTotalPlannedExecutionCount(numOccurrences);
+         event.setExecutionCount(execCount);
+         event.setAutoCreate(autoCreate == 1);
+         event.setAutoNotify(autoNotify == 1);
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index b701058c..c9d8f9ba 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -522,7 +522,6 @@ private void shareFiles(List<String> paths) {
+      * @throws IOException if the file could not be moved.
+      */
+     public void moveFile(String src, String dst) throws IOException {
+-        //TODO: Make this asynchronous at some time, t in the future.
+         File srcFile = new File(src);
+         File dstFile = new File(dst);
+         FileChannel inChannel = new FileInputStream(srcFile).getChannel();
+diff --git a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+index ef3dee92..367d0549 100644
+--- a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -113,7 +113,11 @@ private void generateOfx(Document doc, Element parent){
+ 		}
+ 	}
+ 
+-    // FIXME: Move code to generateExport()
++    /**
++     * Generate OFX export file from the transactions in the database
++     * @return String containing OFX export
++     * @throws ExporterException
++     */
+     private String generateOfxExport() throws ExporterException {
+         mAccountsList = mAccountsDbAdapter.getExportableAccounts(mExportParams.getExportStartTime());
+ 
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index f77eacf9..1d7938eb 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -729,7 +729,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             //todo: export auto_notify, advance_create, advance_notify
+             case GncXmlHelper.TAG_SX_NUM_OCCUR:
+-                mScheduledAction.setTotalFrequency(Integer.parseInt(characterString));
++                mScheduledAction.setTotalPlannedExecutionCount(Integer.parseInt(characterString));
+                 break;
+             case GncXmlHelper.TAG_RX_MULT:
+                 mRecurrenceMultiplier = Integer.parseInt(characterString);
+@@ -1078,7 +1078,7 @@ private int generateMissedScheduledTransactions(ScheduledAction scheduledAction)
+         if (scheduledAction.getActionType() != ScheduledAction.ActionType.TRANSACTION
+                 || !scheduledAction.isEnabled() || !scheduledAction.shouldAutoCreate()
+                 || (scheduledAction.getEndTime() > 0 && scheduledAction.getEndTime() > System.currentTimeMillis())
+-                || (scheduledAction.getTotalFrequency() > 0 && scheduledAction.getExecutionCount() >= scheduledAction.getTotalFrequency())){
++                || (scheduledAction.getTotalPlannedExecutionCount() > 0 && scheduledAction.getExecutionCount() >= scheduledAction.getTotalPlannedExecutionCount())){
+             return 0;
+         }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index 3fcbd03a..e44d89f9 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -71,7 +71,7 @@
+     private ActionType mActionType;
+ 
+     /**
+-     * Number of times this event is to be executed
++     * Number of times this event is planned to be executed
+      */
+     private int mTotalFrequency = 0;
+ 
+@@ -297,16 +297,16 @@ public void setEnabled(boolean enabled){
+      * Returns the total number of planned occurrences of this scheduled action.
+      * @return Total number of planned occurrences of this action
+      */
+-    public int getTotalFrequency(){
++    public int getTotalPlannedExecutionCount(){
+         return mTotalFrequency;
+     }
+ 
+     /**
+      * Sets the number of occurences of this action
+-     * @param occurencesCount Number of occurences
++     * @param plannedExecutions Number of occurences
+      */
+-    public void setTotalFrequency(int occurencesCount){
+-        this.mTotalFrequency = occurencesCount;
++    public void setTotalPlannedExecutionCount(int plannedExecutions){
++        this.mTotalFrequency = plannedExecutions;
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+similarity index 97%
+rename from app/src/main/java/org/gnucash/android/service/SchedulerService.java
+rename to app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index 1d6e461e..0d55b9fa 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -52,11 +52,11 @@
+  * Scheduled runs of the service should be achieved using an {@link android.app.AlarmManager}</p>
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class SchedulerService extends IntentService {
++public class ScheduledActionService extends IntentService {
+ 
+-    public static final String LOG_TAG = "SchedulerService";
++    public static final String LOG_TAG = "ScheduledActionService";
+ 
+-    public SchedulerService() {
++    public ScheduledActionService() {
+         super(LOG_TAG);
+     }
+ 
+@@ -100,7 +100,7 @@ public static void processScheduledActions(List<ScheduledAction> scheduledAction
+         for (ScheduledAction scheduledAction : scheduledActions) {
+ 
+             long now        = System.currentTimeMillis();
+-            int totalPlannedExecutions = scheduledAction.getTotalFrequency();
++            int totalPlannedExecutions = scheduledAction.getTotalPlannedExecutionCount();
+             int executionCount = scheduledAction.getExecutionCount();
+ 
+             if (scheduledAction.getStartTime() > now    //if schedule begins in the future
+@@ -133,7 +133,7 @@ public static void executeScheduledEvent(ScheduledAction scheduledAction, SQLite
+                 //if the end time is in the future, we execute all schedules until now (current time)
+                 //if there is no end time, we execute all schedules until now
+                 long endTime = scheduledAction.getEndTime() > 0 ? Math.min(scheduledAction.getEndTime(), now) : now;
+-                int totalPlannedExecutions = scheduledAction.getTotalFrequency();
++                int totalPlannedExecutions = scheduledAction.getTotalPlannedExecutionCount();
+                 List<Transaction> transactions = new ArrayList<>();
+ 
+                 //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/ScheduledActionDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/ScheduledActionDbAdapterTest.java
+index 39e702e9..51f5c7ff 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/ScheduledActionDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/ScheduledActionDbAdapterTest.java
+@@ -63,7 +63,7 @@ public void testGenerateRepeatString(){
+         PeriodType periodType = PeriodType.MONTH;
+         periodType.setMultiplier(2);
+         scheduledAction.setRecurrence(new Recurrence(periodType));
+-        scheduledAction.setTotalFrequency(4);
++        scheduledAction.setTotalPlannedExecutionCount(4);
+ 
+         String repeatString = "Every 2 months,  for 4 times";
+         assertThat(scheduledAction.getRepeatString().trim()).isEqualTo(repeatString);
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 722fb26c..858934d2 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -37,7 +37,7 @@
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+-import org.gnucash.android.service.SchedulerService;
++import org.gnucash.android.service.ScheduledActionService;
+ import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
+ import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
+ import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+@@ -134,7 +134,7 @@ public void disabledScheduledActions_shouldNotRun(){
+         TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
+ 
+         assertThat(trxnAdapter.getRecordsCount()).isZero();
+-        SchedulerService.processScheduledActions(actions, mDb);
++        ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(trxnAdapter.getRecordsCount()).isZero();
+     }
+ 
+@@ -152,7 +152,7 @@ public void futureScheduledActions_shouldNotRun(){
+         TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
+ 
+         assertThat(trxnAdapter.getRecordsCount()).isZero();
+-        SchedulerService.processScheduledActions(actions, mDb);
++        ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(trxnAdapter.getRecordsCount()).isZero();
+     }
+ 
+@@ -166,7 +166,7 @@ public void exceededExecutionCounts_shouldNotRun(){
+         scheduledAction.setStartTime(new DateTime(2015, 5, 31, 14, 0).getMillis());
+         scheduledAction.setEnabled(true);
+         scheduledAction.setRecurrence(new Recurrence(PeriodType.WEEK));
+-        scheduledAction.setTotalFrequency(4);
++        scheduledAction.setTotalPlannedExecutionCount(4);
+         scheduledAction.setExecutionCount(4);
+ 
+         List<ScheduledAction> actions = new ArrayList<>();
+@@ -174,7 +174,7 @@ public void exceededExecutionCounts_shouldNotRun(){
+ 
+         TransactionsDbAdapter trxnAdapter = TransactionsDbAdapter.getInstance();
+         assertThat(trxnAdapter.getRecordsCount()).isZero();
+-        SchedulerService.processScheduledActions(actions, mDb);
++        ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(trxnAdapter.getRecordsCount()).isZero();
+     }
+ 
+@@ -196,7 +196,7 @@ public void missedScheduledTransactions_shouldBeGenerated(){
+ 
+         List<ScheduledAction> actions = new ArrayList<>();
+         actions.add(scheduledAction);
+-        SchedulerService.processScheduledActions(actions, mDb);
++        ScheduledActionService.processScheduledActions(actions, mDb);
+ 
+         int weeks = Weeks.weeksBetween(startTime, new DateTime(2016, 8, 29, 10, 0)).getWeeks();
+         int expectedTransactionCount = weeks/2;
+@@ -219,7 +219,7 @@ public void endTimeInTheFuture_shouldExecuteOnlyUntilPresent(){
+ 
+         List<ScheduledAction> actions = new ArrayList<>();
+         actions.add(scheduledAction);
+-        SchedulerService.processScheduledActions(actions, mDb);
++        ScheduledActionService.processScheduledActions(actions, mDb);
+ 
+         int weeks = Weeks.weeksBetween(startTime, new DateTime(2016, 8, 29, 10, 0)).getWeeks();
+         int expectedTransactionCount = weeks/2; //multiplier from the PeriodType
+@@ -246,7 +246,7 @@ public void scheduledActionsWithEndTimeInPast_shouldBeExecuted(){
+ 
+         List<ScheduledAction> actions = new ArrayList<>();
+         actions.add(scheduledAction);
+-        SchedulerService.processScheduledActions(actions, mDb);
++        ScheduledActionService.processScheduledActions(actions, mDb);
+ 
+         int expectedCount = 5;
+         assertThat(scheduledAction.getExecutionCount()).isEqualTo(expectedCount);
+@@ -268,7 +268,7 @@ public void recurringTransactions_shouldHaveScheduledActionUID(){
+ 
+         List<ScheduledAction> actions = new ArrayList<>();
+         actions.add(scheduledAction);
+-        SchedulerService.processScheduledActions(actions, mDb);
++        ScheduledActionService.processScheduledActions(actions, mDb);
+     }
+ 
+     //// FIXME: 16.08.2016 Cannot find the file after export. But the export task is called and run
+@@ -288,7 +288,7 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+ 
+         List<ScheduledAction> actions = new ArrayList<>();
+         actions.add(scheduledBackup);
+-        SchedulerService.processScheduledActions(actions, mDb);
++        ScheduledActionService.processScheduledActions(actions, mDb);
+ 
+         File[] backupFiles = backupFolder.listFiles();
+         assertThat(backupFiles).hasSize(1);
+
+From 86ac8410b407e7fbd9ccf97a4cc57fded4431f6c Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 16 Aug 2016 15:23:22 +0200
+Subject: [PATCH 4/4] Update version string for v2.1.0-beta3 release
+
+Update Catalan translation
+---
+ app/build.gradle                           |   2 +-
+ app/src/main/res/values-ca-rES/strings.xml | 248 ++++++++++++++---------------
+ app/src/main/res/values-de/strings.xml     |   2 +-
+ 3 files changed, 125 insertions(+), 127 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 2ec111a7..a4b052d4 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -7,7 +7,7 @@ apply plugin: 'io.fabric'
+ def versionMajor = 2
+ def versionMinor = 1
+ def versionPatch = 0
+-def versionBuild = 2
++def versionBuild = 3
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd HH:mm 'UTC'")
+diff --git a/app/src/main/res/values-ca-rES/strings.xml b/app/src/main/res/values-ca-rES/strings.xml
+index 8d4291b2..d2848c8f 100644
+--- a/app/src/main/res/values-ca-rES/strings.xml
++++ b/app/src/main/res/values-ca-rES/strings.xml
+@@ -21,11 +21,11 @@
+   <string name="info_details">Informaci</string>
+   <string name="menu_export">Exporta&#8230;</string>
+   <string name="description_add_transaction_icon">Afegeix un assentament nou al compte</string>
+-  <string name="label_no_accounts">No accounts to display</string>
++  <string name="label_no_accounts">No hi ha comptes per mostrar</string>
+   <string name="label_account_name">Nom del compte</string>
+   <string name="btn_cancel">Cancella</string>
+   <string name="btn_save">Desa</string>
+-  <string name="btn_test">Test</string>
++  <string name="btn_test">Prova</string>
+   <string name="label_passcode">Introdueix la contrasenya</string>
+   <string name="toast_wrong_passcode">Wrong passcode, please try again</string>
+   <string name="toast_passcode_set">Passcode set</string>
+@@ -34,8 +34,8 @@
+   <string name="label_transaction_name">Descripci</string>
+   <string name="label_transaction_amount">Import</string>
+   <string name="title_add_transaction">Transacci Nova</string>
+-  <string name="label_no_transactions">No transactions to display</string>
+-  <string name="label_timeanddate">DATE &amp; TIME</string>
++  <string name="label_no_transactions">No hi ha cap transacci per mostrar</string>
++  <string name="label_timeanddate">DATA I HORA</string>
+   <string name="label_account">Compte</string>
+   <string name="label_debit">DBIT</string>
+   <string name="label_credit">CRDIT</string>
+@@ -44,56 +44,56 @@
+   <string name="menu_delete">Suprimeix</string>
+   <string name="alert_dialog_ok_delete">Suprimeix</string>
+   <string name="alert_dialog_cancel">Cancella</string>
+-  <string name="toast_account_deleted">Account deleted</string>
+-  <string name="title_confirm_delete">Confirm delete</string>
+-  <string name="delete_account_confirmation_message">All transactions in this account will also be deleted</string>
++  <string name="toast_account_deleted">S\'ha eliminat el compte</string>
++  <string name="title_confirm_delete">Confirma la supressi</string>
++  <string name="delete_account_confirmation_message">Tamb es suprimiran totes les transaccions en aquest compte</string>
+   <string name="title_edit_transaction">Edita l\'assentament</string>
+   <string name="label_transaction_description">Afegiu una nota</string>
+   <string name="menu_move">MOU</string>
+-  <string name="title_selected">%1$d selected</string>
++  <string name="title_selected">%1$d seleccionats</string>
+   <string name="label_account_balance">Saldo:</string>
+   <string name="label_export_destination">Exporta a:</string>
+   <string name="title_export_dialog">Exporta els assentaments</string>
+   <string name="option_export_all_transactions">Exporta tots els assentaments</string>
+-  <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+-  <string name="toast_export_error">Error exporting %1$s file</string>
++  <string name="hint_export_choice">Per defecte, noms s\'exportaran les transaccions noves des de l\'ltima exportaci. Marqueu aquesta opci per exportar totes les transaccions</string>
++  <string name="toast_export_error">S\'ha produt un error en exportar el fitxer %1$s</string>
+   <string name="btn_export">Exporta</string>
+-  <string name="option_delete_after_export">Delete transactions after export</string>
+-  <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
++  <string name="option_delete_after_export">Suprimeix les transaccions desprs d\'exportar</string>
++  <string name="hint_delete_after_export">S\'eliminaran totes les transaccions exportades en finalitzar l\'exportaci</string>
+   <string name="title_settings">Preferncies</string>
+   <string-array name="export_destinations">
+     <item>Targeta SD</item>
+     <item>DropBox</item>
+     <item>Google Drive</item>
+     <item>ownCloud</item>
+-    <item>Send to&#8230;</item>
++    <item>Envia a&#8230;</item>
+   </string-array>
+   <string name="btn_move">Mou</string>
+-  <string name="title_move_transactions">Move %1$d transaction(s)</string>
++  <string name="title_move_transactions">Mou %1$d transaccions</string>
+   <string name="label_move_destination">Compte dest</string>
+-  <string name="permission_access_sdcard">Access SD Card</string>
+-  <string name="toast_incompatible_currency">Cannot move transactions.\nThe destination account uses a different currency from origin account</string>
++  <string name="permission_access_sdcard">Accs a la targeta SD</string>
++  <string name="toast_incompatible_currency">No s\'han pogut moure les transaccions.\nEl compte desti utilitza una moneda diferent del compte origen</string>
+   <string name="header_general_settings">General</string>
+   <string name="header_about_gnucash">Quant a</string>
+   <string name="title_choose_currency">Trieu la moneda per defecte</string>
+   <string name="title_default_currency">Moneda per defecte</string>
+-  <string name="summary_default_currency">Default currency to assign to new accounts</string>
+-  <string name="label_permission_record_transactions">Enables recording transactions in GnuCash for Android</string>
+-  <string name="label_permission_create_accounts">Enables creation of accounts in GnuCash for Android</string>
+-  <string name="label_permission_group">Your GnuCash data</string>
+-  <string name="description_permission_group">Read and modify GnuCash data</string>
+-  <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
+-  <string name="label_permission_create_account">Create accounts in GnuCash</string>
++  <string name="summary_default_currency">Moneda a assignar per defecte a nous comptes</string>
++  <string name="label_permission_record_transactions">Permet registrar transaccions en GnuCash per Android</string>
++  <string name="label_permission_create_accounts">Permet crear comptes en GnuCash per Android</string>
++  <string name="label_permission_group">Les vostres dades de GnuCash</string>
++  <string name="description_permission_group">Llegir i modificar les dades de GnuCash</string>
++  <string name="label_permission_record_transaction">Registrar transaccions en GnuCash</string>
++  <string name="label_permission_create_account">Crear comptes en GnuCash</string>
+   <string name="label_display_account">Display account</string>
+   <string name="btn_create_accounts">Crea els comptes</string>
+   <string name="title_default_accounts">Seleccioneu els comptes a crear</string>
+-  <string name="error_no_accounts">No accounts exist in GnuCash.\nCreate an account before adding a widget</string>
+-  <string name="title_build_version">Build version</string>
++  <string name="error_no_accounts">No hi ha comptes en GnuCash.\nCreeu un compte abans d\'afegir un giny</string>
++  <string name="title_build_version">Versi de la compilaci</string>
+   <string name="title_license">Llicncia</string>
+-  <string name="summary_licence_details">Apache License v2.0. Click for details</string>
++  <string name="summary_licence_details">Llicncia Apache 2.0. Feu clic per a ms detalls</string>
+   <string name="title_general_prefs">Preferncies generals</string>
+   <string name="label_widget_configuration">Seleccioneu un compte</string>
+-  <string name="toast_no_transactions_to_export">There are no transactions available to export</string>
++  <string name="toast_no_transactions_to_export">No hi ha cap transacci per exportar</string>
+   <string name="header_passcode_settings">Contrasenya</string>
+   <string name="title_passcode_preferences">PreferncIes de contrasenya</string>
+   <string name="title_passcode_enabled">Contrasenya activada</string>
+@@ -102,34 +102,34 @@
+   <string name="title_about_gnucash">Quant a GnuCash</string>
+   <string name="summary_about_gnucash">A mobile finance management and expense-tracker designed for Android</string>
+   <string name="title_about">Quant a</string>
+-  <string name="toast_format_exported_to">%1$s file exported to:\n</string>
++  <string name="toast_format_exported_to">%1$s fitxer exportat a:\n</string>
+   <string name="title_export_email">GnuCash Android %1$s export</string>
+-  <string name="description_export_email">GnuCash Android Export from </string>
++  <string name="description_export_email">Exportaci de GnuCash Android de </string>
+   <string name="header_transaction_settings">Assentaments</string>
+   <string name="title_transaction_preferences">Preferncies d\'assentaments</string>
+   <string name="title_account_preferences">Preferncies de comptes</string>
+   <string name="title_default_transaction_type">Tipus d\'assentament per defecte</string>
+-  <string name="summary_default_transaction_type">The type of transaction to use by default, CREDIT or DEBIT</string>
++  <string name="summary_default_transaction_type">Tipus de transacci a utilitzar per defecte, CRDIT o DBIT</string>
+   <string-array name="transaction_types">
+     <item>CRDIT</item>
+     <item>DBIT</item>
+   </string-array>
+-  <string name="msg_delete_all_transactions_confirmation">Are you sure you want to delete ALL transactions?</string>
+-  <string name="msg_delete_transaction_confirmation">Are you sure you want to delete this transaction?</string>
++  <string name="msg_delete_all_transactions_confirmation">Esteu segur que voleu suprimir TOTES les transaccions?</string>
++  <string name="msg_delete_transaction_confirmation">Esteu segur que voleu suprimir aquesta transacci?</string>
+   <string name="title_export_preference_category">Exportaci</string>
+   <string name="title_export_all_transactions">Exporta tots els assentaments</string>
+   <string name="title_always_delete_exported_transactions">Suprimeix els assentaments exportats</string>
+-  <string name="title_default_export_email">Default export email</string>
+-  <string name="summary_default_export_email">The default email address to send exports to. You can still change this when you export.</string>
++  <string name="title_default_export_email">Adrea electrnica d\'exportaci per defecte</string>
++  <string name="summary_default_export_email">L\'adrea electrnica per defecte on enviar les exportacions. La podeu canviar quan exporteu.</string>
+   <string name="label_double_entry_account">Compte d\'origen</string>
+-  <string name="summary_use_double_entry">All transactions will be a transfer from one account to another</string>
+-  <string name="title_use_double_entry">Activate Double Entry</string>
++  <string name="summary_use_double_entry">Totes les transaccions seran una transferncia d\'un compte a un altre</string>
++  <string name="title_use_double_entry">Activar la doble entrada</string>
+   <string name="account_balance">Balan</string>
+-  <string name="toast_no_account_name_entered">Enter an account name to create an account</string>
++  <string name="toast_no_account_name_entered">Introduu un nom de compte per crear el compte</string>
+   <string name="label_account_currency">Moneda</string>
+   <string name="label_parent_account">Compte pare</string>
+-  <string name="title_xml_ofx_header">Use XML OFX header</string>
+-  <string name="summary_xml_ofx_header">Enable this option when exporting to third-party application other than GnuCash for desktop</string>
++  <string name="title_xml_ofx_header">Utilitzar capalera XML d\'OFX</string>
++  <string name="summary_xml_ofx_header">Habiliteu aquesta opci quan exporteu a aplicacions de tercers diferents de GnuCash per escriptori</string>
+   <string name="title_whats_new">Novetats</string>
+   <string name="whats_new">
+         - New Material app design \n
+@@ -141,45 +141,43 @@
+ 	</string>
+   <string name="label_dismiss">Dismiss</string>
+   <string name="toast_transanction_amount_required">Introduu una quantitat per desar l\'assentament</string>
+-  <string name="toast_error_edit_multi_currency_transaction">Multi-currency transactions cannot be modified</string>
++  <string name="toast_error_edit_multi_currency_transaction">Les transaccions multimoneda no es poden modificar</string>
+   <string name="menu_import_accounts">Importa comptes de GnuCash</string>
+   <string name="btn_import_accounts">Importa els comptes</string>
+-  <string name="toast_error_importing_accounts">An error occurred while importing the GnuCash accounts</string>
+-  <string name="toast_success_importing_accounts">GnuCash Accounts successfully imported</string>
+-  <string name="summary_import_accounts">Import account structure exported from GnuCash desktop</string>
++  <string name="toast_error_importing_accounts">S\'ha produt un error en importar els comptes de GnuCash</string>
++  <string name="toast_success_importing_accounts">S\'han importat els comptes de GnuCash correctament</string>
++  <string name="summary_import_accounts">Importa l\'estructura de comptes exportada des de GnuCash per escriptori</string>
+   <string name="title_import_accounts">Importa XML de GnuCash</string>
+   <string name="summary_delete_all_accounts">Delete all accounts in the database. All transactions will be deleted as
+         well.
+     </string>
+   <string name="title_delete_all_accounts">Suprimeix tots els comptes</string>
+   <string name="header_account_settings">Comptes</string>
+-  <string name="toast_all_accounts_deleted">All accounts have been successfully deleted</string>
+-  <string name="confirm_delete_all_accounts">Are you sure you want to delete all accounts and transactions?\n\nThis
+-        operation cannot be undone!
+-    </string>
++  <string name="toast_all_accounts_deleted">S\'han suprimit tots els comptes</string>
++  <string name="confirm_delete_all_accounts">Esteu segur que voleu suprimir tots els comptes i transaccions?\n\nAquesta operaci no es pot desfer!    </string>
+   <string name="label_account_type">Tipus de compte</string>
+-  <string name="summary_delete_all_transactions">All transactions in all accounts will be deleted!</string>
++  <string name="summary_delete_all_transactions">Es suprimiran totes les transaccions de tots els comptes!</string>
+   <string name="title_delete_all_transactions">Suprimeix tots els assentaments</string>
+-  <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
+-  <string name="title_progress_importing_accounts">Importing accounts</string>
+-  <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
++  <string name="toast_all_transactions_deleted">S\'han suprimit totes les transaccions!</string>
++  <string name="title_progress_importing_accounts">S\'estan important els comptes</string>
++  <string name="toast_tap_again_to_confirm_delete">Torna a tocar per confirmar. S\'eliminaran TOTES les entrades!!</string>
+   <string name="section_header_transactions">Assentaments</string>
+   <string name="section_header_subaccounts">Subcomptes</string>
+   <string name="menu_search_accounts">Cerca</string>
+   <string name="title_default_export_format">Format d\'exportaci per defecte</string>
+-  <string name="summary_default_export_format">File format to use by default when exporting transactions</string>
++  <string name="summary_default_export_format">Format de fitxer a utilitzar per defecte en exportar transaccions</string>
+   <string name="menu_export_transactions">Exporta els assentaments&#8230;</string>
+   <string name="label_recurring_transaction">Periodicitat</string>
+   <!-- This should be the same name used by GnuCash desktop for imbalance accounts -->
+   <string name="imbalance_account_name">Desequilibri</string>
+-  <string name="title_progress_exporting_transactions">Exporting transactions</string>
+-  <string name="label_no_recurring_transactions">No recurring transactions to display.</string>
+-  <string name="toast_recurring_transaction_deleted">Successfully deleted recurring transaction</string>
++  <string name="title_progress_exporting_transactions">S\'estan exportant les transaccions</string>
++  <string name="label_no_recurring_transactions">No hi ha cap transacci recurrent per mostrar.</string>
++  <string name="toast_recurring_transaction_deleted">S\'ha suprimit la transacci recurrent</string>
+   <string name="label_placeholder_account">Compte contenidor</string>
+   <string name="label_default_transfer_account">Compte d\'origen per defecte</string>
+   <plurals name="label_sub_accounts">
+-    <item quantity="one">%d sub-account</item>
+-    <item quantity="other">%d sub-accounts</item>
++    <item quantity="one">%d Subcompte</item>
++    <item quantity="other">%d Subcomptes</item>
+   </plurals>
+   <string-array name="account_type_entry_values">
+     <item>EFECTIU</item>
+@@ -211,19 +209,19 @@
+   <string name="title_recent_accounts">Recents</string>
+   <string name="title_favorite_accounts">Preferits</string>
+   <string name="title_all_accounts">Tots</string>
+-  <string name="summary_create_default_accounts">Creates default GnuCash commonly-used account structure</string>
+-  <string name="title_create_default_accounts">Create default accounts</string>
+-  <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
++  <string name="summary_create_default_accounts">Crea l\'estructura de comptes per defecte de GnuCash d\'s ms com</string>
++  <string name="title_create_default_accounts">Crea els comptes per defecte</string>
++  <string name="msg_confirm_create_default_accounts_setting">Es suprimiran tots els comptes i transaccions del dispositiu.\n\nEsteu segurs de que voleu continuar?</string>
+   <string name="menu_scheduled_transactions">Assentaments peridics</string>
+   <string name="msg_confirm_create_default_accounts_first_run">Welcome to GnuCash Android! \nYou can either create
+         a hierarchy of commonly-used accounts, or import your own GnuCash account structure. \n\nBoth options are also
+         available in app Settings so you can decide later.
+     </string>
+   <string name="title_scheduled_transactions">Assentaments</string>
+-  <string name="title_select_export_destination">Select destination for export</string>
++  <string name="title_select_export_destination">Seleccioneu un dest per l\'exportaci</string>
+   <string name="hint_split_memo">Memo</string>
+-  <string name="label_spend">Spend</string>
+-  <string name="label_receive">Receive</string>
++  <string name="label_spend">Gastar</string>
++  <string name="label_receive">Rebre</string>
+   <string name="label_withdrawal">Withdrawal</string>
+   <string name="label_deposit">Ingrs</string>
+   <string name="label_payment">Pagament</string>
+@@ -234,22 +232,22 @@
+   <string name="label_rebate">Rebate</string>
+   <string name="label_expense">Expense</string>
+   <string name="label_bill">Bill</string>
+-  <string name="label_invoice">Invoice</string>
++  <string name="label_invoice">Factura</string>
+   <string name="label_buy">Buy</string>
+   <string name="label_sell">Sell</string>
+   <string name="label_repeats">Repeats</string>
+-  <string name="toast_no_recent_backup">No recent backup found</string>
++  <string name="toast_no_recent_backup">No s\'ha trobat cap cpia de seguretat recent</string>
+   <string name="account_name_opening_balances">Opening Balances</string>
+   <string name="account_name_equity">Equity</string>
+   <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+   <string name="title_save_opening_balances">Save account opening balances</string>
+-  <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-  <string name="export_warning_qif">Generates separate QIF files per currency</string>
++  <string name="export_warning_ofx">OFX no soporta transaccions de doble entrada</string>
++  <string name="export_warning_qif">Genera fitxers QIF separats per moneda</string>
+   <string name="title_transaction_splits">Desglossament de l\'assentament</string>
+   <string name="label_imbalance">Desequilibri:</string>
+   <string name="btn_add_split">Afegeix desgls</string>
+-  <string name="menu_title_favorite">Favorite</string>
++  <string name="menu_title_favorite">Preferit</string>
+   <string name="drawer_open">Navigation drawer opened</string>
+   <string name="drawer_close">Navigation drawer closed</string>
+   <string name="title_reports">Informes</string>
+@@ -278,78 +276,78 @@
+   <string name="label_delete_account_subaccounts_description">This account contains sub-accounts. \nWhat would you like to do with these sub-accounts</string>
+   <string name="label_delete_transactions">Suprimir els assentaments</string>
+   <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+-  <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-  <string name="title_restore_backup">Restore Backup&#8230;</string>
+-  <string name="header_backup_and_export_settings">Backup &amp; export</string>
+-  <string name="title_dropbox_sync_preference">Enable DropBox</string>
+-  <string name="title_owncloud_sync_preference">Enable ownCloud </string>
++  <string name="label_tap_to_create_schedule">Toca per planificar</string>
++  <string name="title_restore_backup">Restaura la cpia de seguretat&#8230;</string>
++  <string name="header_backup_and_export_settings">Cpia de seguretat i exportaci</string>
++  <string name="title_dropbox_sync_preference">Habilita el DropBox</string>
++  <string name="title_owncloud_sync_preference">Habilita l\'ownCloud</string>
+   <string name="title_backup_preference_category">Cpia de seguretat</string>
+-  <string name="summary_dropbox_sync">Enable exporting to DropBox</string>
+-  <string name="summary_owncloud_sync">Enable exporting to ownCloud</string>
+-  <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++  <string name="summary_dropbox_sync">Habilita l\'exportaci a DropBox</string>
++  <string name="summary_owncloud_sync">Habilita l\'exportaci a ownCloud</string>
++  <string name="title_select_gnucash_xml_file">Seleccioneu el fitxer XML de GnuCash</string>
+   <string name="title_backup_prefs">Preferncies de cpia de seguretat</string>
+-  <string name="title_create_backup_pref">Create Backup</string>
+-  <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
+-  <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
+-  <string name="toast_backup_successful">Backup successful</string>
+-  <string name="toast_backup_failed">Backup failed</string>
+-  <string name="export_warning_xml">Exports all accounts and transactions</string>
+-  <string name="title_google_drive_sync_pref">Enable Google Drive</string>
+-  <string name="summary_google_drive_sync">Enable exporting to Google Drive</string>
+-  <string name="toast_install_file_manager">Install a file manager to select files</string>
+-  <string name="title_select_backup_to_restore">Select backup to restore</string>
++  <string name="title_create_backup_pref">Fer una cpia de seguretat</string>
++  <string name="summary_create_backup_pref">Per defecte les cpies de seguretat es desen a la tarjeta SD</string>
++  <string name="summary_restore_backup_pref">Seleccioneu una cpia de seguretat per restaurar</string>
++  <string name="toast_backup_successful">La cpia de seguretat s\'ha fet correctament</string>
++  <string name="toast_backup_failed">S\'ha produt un error en fer la cpia de seguretat</string>
++  <string name="export_warning_xml">Exporta tots els comptes i transaccions</string>
++  <string name="title_google_drive_sync_pref">Habilita Google Drive</string>
++  <string name="summary_google_drive_sync">Habilita l\'exportaci a Google Drive</string>
++  <string name="toast_install_file_manager">Installeu un gestor de fitxers per seleccionar fitxers</string>
++  <string name="title_select_backup_to_restore">Seleccioneu una cpia de seguretat per restaurar</string>
+   <string name="nav_menu_favorites">Preferits</string>
+   <string name="nav_menu_open">Obre&#8230;</string>
+   <string name="nav_menu_reports">Informes</string>
+   <string name="nav_menu_scheduled_transactions">Assentaments peridics</string>
+   <string name="nav_menu_export">Exporta&#8230;</string>
+   <string name="nav_menu_settings">Preferncies</string>
+-  <string name="username">User Name</string>
+-  <string name="password">Password</string>
+-  <string name="owncloud_pref">owncloud</string>
++  <string name="username">Nom d\'usuari</string>
++  <string name="password">Contrasenya</string>
++  <string name="owncloud_pref">ownCloud</string>
+   <string name="owncloud_server">https://</string>
+-  <string name="owncloud_server_invalid">OC server not found</string>
+-  <string name="owncloud_user_invalid">OC username/password invalid</string>
+-  <string name="owncloud_dir_invalid">Invalid chars: \\ &lt; &gt; : \&quot; | * ? </string>
+-  <string name="owncloud_server_ok">OC server OK</string>
+-  <string name="owncloud_user_ok">OC username/password OK</string>
+-  <string name="owncloud_dir_ok">Dir name OK</string>
++  <string name="owncloud_server_invalid">No s\'ha trobat el servidor d\'OC</string>
++  <string name="owncloud_user_invalid">El nom d\'usuari/contrasenya d\'OC no s correcte</string>
++  <string name="owncloud_dir_invalid">Carcters invalids: \\ &lt; &gt; : \&quot; | * ? </string>
++  <string name="owncloud_server_ok">Servidor d\'OC correcte</string>
++  <string name="owncloud_user_ok">Nom d\'usuari/contrasenya d\'OC correcte</string>
++  <string name="owncloud_dir_ok">Nom de carpeta correcte</string>
+   <plurals name="label_every_x_days">
+-    <item quantity="one">Daily</item>
+-    <item quantity="other">Every %d days</item>
++    <item quantity="one">Diriament</item>
++    <item quantity="other">Cada %d dies</item>
+   </plurals>
+   <plurals name="label_every_x_weeks">
+-    <item quantity="one">Weekly</item>
+-    <item quantity="other">Every %d weeks</item>
++    <item quantity="one">Setmanalment</item>
++    <item quantity="other">Cada %d setmanes</item>
+   </plurals>
+   <plurals name="label_every_x_months">
+-    <item quantity="one">Monthly</item>
+-    <item quantity="other">Every %d months</item>
++    <item quantity="one">Mensualment</item>
++    <item quantity="other">Cada %d mesos</item>
+   </plurals>
+   <plurals name="label_every_x_years">
+-    <item quantity="one">Yearly</item>
+-    <item quantity="other">Every %d years</item>
++    <item quantity="one">Anualment</item>
++    <item quantity="other">Cada %d anys</item>
+   </plurals>
+   <string name="title_enable_crashlytics">Enable Crash Logging</string>
+   <string name="msg_enable_crashlytics">Automatically send information about app malfunction to the developers.</string>
+   <string name="label_export_format"> Format</string>
+-  <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
++  <string name="toast_backup_folder_not_found">No s\'ha trobat la carpeta de cpies de seguretat. Assegureu-vos que la tarjeta SD est muntada!</string>
+   <string name="label_old_passcode">Introduiu la contrasenya antiga</string>
+   <string name="label_new_passcode">Introduiu la contrasenya nova</string>
+   <string name="nav_menu_scheduled_backups">Exportacions peridiques</string>
+   <string name="title_scheduled_exports">Exportacions</string>
+-  <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++  <string name="label_no_scheduled_exports_to_display">No hi ha cap transacci planificada per mostrar</string>
+   <string name="title_create_export_schedule">Crea una exportaci peridica</string>
+-  <string name="toast_exported_to">Exported to: %1$s</string>
+-  <string name="toast_legend_too_long">The legend is too long</string>
++  <string name="toast_exported_to">S\'ha exportat a: %1$s</string>
++  <string name="toast_legend_too_long">La llegenda s massa llarga</string>
+   <string name="hint_account_description">Descripci del compte</string>
+-  <string name="label_no_recent_accounts">No recent accounts</string>
+-  <string name="label_no_favorite_accounts">No favorite accounts</string>
++  <string name="label_no_recent_accounts">No hi ha comptes recents</string>
++  <string name="label_no_favorite_accounts">No hi ha comptes preferits</string>
+   <string name="nav_menu_scheduled_actions">Accions peridiques</string>
+   <string name="label_scheduled_action_ended">"Ended, last executed on %1$s"</string>
+-  <string name="label_select_bar_to_view_details">Select a bar to view details</string>
++  <string name="label_select_bar_to_view_details">Seleccioneu una barra per veure els detalls</string>
+   <string name="btn_wizard_next">Segent</string>
+-  <string name="btn_wizard_finish">Done</string>
++  <string name="btn_wizard_finish">Fet</string>
+   <string name="wizard_title_default_currency">Moneda per defecte</string>
+   <string name="wizard_title_account_setup">Account Setup</string>
+   <string name="wizard_title_select_currency">Seleccioneu una moneda</string>
+@@ -357,17 +355,17 @@
+   <string name="wizard_option_create_default_accounts">Crea els comptes per defecte</string>
+   <string name="wizard_option_import_my_accounts">Importa els meus comptes</string>
+   <string name="wizard_option_let_me_handle_it">Let me handle it</string>
+-  <string name="wizard_option_currency_other">Other&#8230;</string>
++  <string name="wizard_option_currency_other">Altra&#8230;</string>
+   <string name="wizard_option_auto_send_crash_reports">Automatically send crash reports</string>
+   <string name="wizard_option_disable_crash_reports">Disable crash reports</string>
+   <string name="wizard_btn_back">Enrere</string>
+-  <string name="title_setup_gnucash">Setup GnuCash</string>
++  <string name="title_setup_gnucash">Configura el GnuCash</string>
+   <string name="wizard_title_welcome_to_gnucash">Benvingut a GnuCash</string>
+   <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+   <string name="title_split_editor">Editor de desglossament</string>
+   <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
+-  <string name="label_error_invalid_expression">Invalid expression!</string>
+-  <string name="toast_scheduled_recurring_transaction">Scheduled recurring transaction</string>
++  <string name="label_error_invalid_expression">Expressi invlida!</string>
++  <string name="toast_scheduled_recurring_transaction">S\'ha planificat la transacci recurrent</string>
+   <string name="error_exchange_rate_required">An exchange rate is required</string>
+   <string name="error_converted_amount_required">The converted amount is required</string>
+   <string name="title_transfer_funds">Transfer Funds</string>
+@@ -441,16 +439,16 @@
+   <string name="digit_nine_text">WXYZ</string>
+   <string name="digit_zero">0</string>
+   <string name="digit_zero_text">+</string>
+-  <string name="title_manage_books">Manage Books</string>
+-  <string name="menu_manage_books">Manage Books&#8230;</string>
+-  <string name="select_chart_to_view_details">Select any part of the chart to view details</string>
+-  <string name="title_confirm_delete_book">Confirm delete Book</string>
+-  <string name="msg_all_book_data_will_be_deleted">All accounts and transactions in this book will be deleted!</string>
+-  <string name="btn_delete_book">Delete Book</string>
+-  <string name="label_last_export_time">Last Exported:</string>
+-  <string name="menu_title_enable_sync">Enable Sync</string>
+-  <string name="menu_title_new_book">New Book</string>
+-  <string name="toast_transaction_has_no_splits_and_cannot_open">The selected transaction has no splits and cannot be opened</string>
++  <string name="title_manage_books">Gestiona els llibres</string>
++  <string name="menu_manage_books">Gestiona els llibres&#8230;</string>
++  <string name="select_chart_to_view_details">Seleccioneu qualsevol part de la grfica per veure els detalls</string>
++  <string name="title_confirm_delete_book">Confirmeu la supressi del llibre</string>
++  <string name="msg_all_book_data_will_be_deleted">S\'eliminaran tots els comptes i transaccions d\'aquest llibre!</string>
++  <string name="btn_delete_book">Suprimeix el llibre</string>
++  <string name="label_last_export_time">ltima exportaci:</string>
++  <string name="menu_title_enable_sync">Habilita la sincronitzaci</string>
++  <string name="menu_title_new_book">Nou llibre</string>
++  <string name="toast_transaction_has_no_splits_and_cannot_open">La transacci seleccionada no t desglossaments i no es pot obrir</string>
+   <string name="label_split_count">%1$d splits</string>
+   <string name="label_inside_account_with_name">in %1$s</string>
+ </resources>
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index abb15c41..57aaabaf 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -326,7 +326,7 @@
+     <item quantity="one">Jhrlich</item>
+     <item quantity="other">Alle %d Jahre</item>
+   </plurals>
+-  <string name="title_enable_crashlytics">Absturzprotokolloerung aktivieren</string>
++  <string name="title_enable_crashlytics">Absturzprotokollierung aktivieren</string>
+   <string name="msg_enable_crashlytics">Enable to send information about malfunctions to the developers for improvement (recommended).
+ No user-identifiable information will be collected as part of this process!</string>
+   <string name="label_export_format"> Format</string>

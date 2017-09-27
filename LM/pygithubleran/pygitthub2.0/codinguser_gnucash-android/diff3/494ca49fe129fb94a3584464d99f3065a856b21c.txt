@@ -1,0 +1,982 @@
+From 494ca49fe129fb94a3584464d99f3065a856b21c Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 29 Jul 2014 18:35:19 +0200
+Subject: [PATCH] Fixed: Transaction notes neither imported nor exported
+
+Refactored transactions - "name" becomes "description", and "description" becomes "notes", to match GnuCash XML nomenclature
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  2 +-
+ app/src/org/gnucash/android/db/DatabaseHelper.java |  5 +-
+ app/src/org/gnucash/android/db/DatabaseSchema.java |  7 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 15 ++--
+ .../gnucash/android/export/xml/GncXmlExporter.java | 12 +--
+ .../gnucash/android/export/xml/GncXmlHelper.java   | 52 +++++++++++--
+ .../gnucash/android/importer/GncXmlHandler.java    | 48 +++++-------
+ app/src/org/gnucash/android/model/Account.java     | 35 ++-------
+ app/src/org/gnucash/android/model/Split.java       |  2 +-
+ app/src/org/gnucash/android/model/Transaction.java | 90 ++++++++--------------
+ .../android/receivers/TransactionRecorder.java     |  2 +-
+ .../ScheduledTransactionsListFragment.java         |  3 +-
+ .../ui/transaction/TransactionFormFragment.java    | 32 ++++----
+ .../ui/transaction/TransactionsListFragment.java   |  8 +-
+ .../android/test/db/TransactionsDbAdapterTest.java |  4 +-
+ .../android/test/ui/ExportTransactionsTest.java    |  2 +-
+ .../android/test/ui/TransactionsActivityTest.java  | 12 +--
+ 17 files changed, 157 insertions(+), 174 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 67999f2e..f5d12081 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -965,7 +965,7 @@ public boolean isFavoriteAccount(long accountId){
+                     continue;
+ 
+                 Transaction transaction = new Transaction(mContext.getString(R.string.account_name_opening_balances));
+-                transaction.setDescription(getName(id));
++                transaction.setNote(getName(id));
+                 transaction.setCurrencyCode(currencyCode);
+                 TransactionType transactionType = Transaction.getTypeForBalance(getAccountType(accountUID),
+                         balance.isNegative());
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index 3dc00e5b..be2faf05 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -25,7 +25,6 @@
+ import android.util.Log;
+ import android.widget.Toast;
+ import org.gnucash.android.export.ExportFormat;
+-import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.*;
+@@ -79,8 +78,8 @@
+ 	private static final String TRANSACTIONS_TABLE_CREATE = "create table " + TransactionEntry.TABLE_NAME + " ("
+ 			+ TransactionEntry._ID 		            + " integer primary key autoincrement, "
+ 			+ TransactionEntry.COLUMN_UID 		    + " varchar(255) not null, "
+-			+ TransactionEntry.COLUMN_NAME		    + " varchar(255), "
+-			+ TransactionEntry.COLUMN_DESCRIPTION 	+ " text, "
++			+ TransactionEntry.COLUMN_DESCRIPTION   + " varchar(255), "
++			+ TransactionEntry.COLUMN_NOTES         + " text, "
+ 			+ TransactionEntry.COLUMN_TIMESTAMP     + " integer not null, "
+ 			+ TransactionEntry.COLUMN_EXPORTED      + " tinyint default 0, "
+             + TransactionEntry.COLUMN_CURRENCY      + " varchar(255) not null, "
+diff --git a/app/src/org/gnucash/android/db/DatabaseSchema.java b/app/src/org/gnucash/android/db/DatabaseSchema.java
+index a486f604..810d6cad 100644
+--- a/app/src/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/org/gnucash/android/db/DatabaseSchema.java
+@@ -68,9 +68,10 @@ private DatabaseSchema(){}
+     public static abstract class TransactionEntry implements CommonColumns {
+ 
+         public static final String TABLE_NAME                   = "transactions";
+-
+-        public static final String COLUMN_NAME                  = "name";
+-        public static final String COLUMN_DESCRIPTION           = "description";
++        //The actual names of columns for description and notes are unlike the variable names because of legacy
++        //We will not change them now for backwards compatibility reasons. But the variable names make sense
++        public static final String COLUMN_DESCRIPTION           = "name";
++        public static final String COLUMN_NOTES                 = "description";
+         public static final String COLUMN_CURRENCY              = "currency_code";
+         public static final String COLUMN_TIMESTAMP             = "timestamp";
+         public static final String COLUMN_EXPORTED              = "is_exported";
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 425f8479..c532f716 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -29,7 +29,6 @@
+ import static org.gnucash.android.db.DatabaseSchema.*;
+ 
+ import java.util.ArrayList;
+-import java.util.Currency;
+ import java.util.List;
+ 
+ /**
+@@ -75,10 +74,10 @@ public void close() {
+ 	 */
+ 	public long addTransaction(Transaction transaction){
+ 		ContentValues contentValues = new ContentValues();
+-		contentValues.put(TransactionEntry.COLUMN_NAME, transaction.getName());
++		contentValues.put(TransactionEntry.COLUMN_DESCRIPTION,  transaction.getDescription());
+ 		contentValues.put(TransactionEntry.COLUMN_UID,          transaction.getUID());
+ 		contentValues.put(TransactionEntry.COLUMN_TIMESTAMP,    transaction.getTimeMillis());
+-		contentValues.put(TransactionEntry.COLUMN_DESCRIPTION,  transaction.getDescription());
++		contentValues.put(TransactionEntry.COLUMN_NOTES,        transaction.getNote());
+ 		contentValues.put(TransactionEntry.COLUMN_EXPORTED,     transaction.isExported() ? 1 : 0);
+         contentValues.put(TransactionEntry.COLUMN_CURRENCY,     transaction.getCurrencyCode());
+         contentValues.put(TransactionEntry.COLUMN_RECURRENCE_PERIOD, transaction.getRecurrencePeriod());
+@@ -264,11 +263,11 @@ public int getTotalTransactionsCount(){
+ 	 * @return {@link Transaction} object constructed from database record
+ 	 */
+ 	public Transaction buildTransactionInstance(Cursor c){
+-		String name   = c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_NAME));
++		String name   = c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_DESCRIPTION));
+ 		Transaction transaction = new Transaction(name);
+ 		transaction.setUID(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_UID)));
+ 		transaction.setTime(c.getLong(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TIMESTAMP)));
+-		transaction.setDescription(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_DESCRIPTION)));
++		transaction.setNote(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_NOTES)));
+ 		transaction.setExported(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_EXPORTED)) == 1);
+ 
+         long recurrencePeriod = c.getLong(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_RECURRENCE_PERIOD));
+@@ -465,15 +464,15 @@ public Cursor fetchRecord(long rowId) {
+      * @return Cursor to the data set containing all matching transactions
+      */
+     public Cursor fetchTransactionsStartingWith(String prefix){
+-        StringBuffer stringBuffer = new StringBuffer(TransactionEntry.COLUMN_NAME)
++        StringBuffer stringBuffer = new StringBuffer(TransactionEntry.COLUMN_DESCRIPTION)
+                 .append(" LIKE '").append(prefix).append("%'");
+         String selection = stringBuffer.toString();
+ 
+         Cursor c = mDb.query(TransactionEntry.TABLE_NAME,
+-                new String[]{TransactionEntry._ID, TransactionEntry.COLUMN_NAME},
++                new String[]{TransactionEntry._ID, TransactionEntry.COLUMN_DESCRIPTION},
+                 selection,
+                 null, null, null,
+-                TransactionEntry.COLUMN_NAME + " ASC");
++                TransactionEntry.COLUMN_DESCRIPTION + " ASC");
+         return c;
+     }
+ 
+diff --git a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+index 358c147d..63c7f09e 100644
+--- a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -96,32 +96,32 @@ private void generateGncXml() throws ParserConfigurationException {
+         rootElement.setAttribute("xmlns:ts",     "http://www.gnucash.org/XML/ts");
+ 
+         Element bookCountNode = mDocument.createElement(GncXmlHelper.TAG_COUNT_DATA);
+-        bookCountNode.setAttribute("cd:type", "book");
++        bookCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, GncXmlHelper.ATTR_VALUE_BOOK);
+         bookCountNode.appendChild(mDocument.createTextNode("1"));
+         rootElement.appendChild(bookCountNode);
+ 
+         Element bookNode = mDocument.createElement(GncXmlHelper.TAG_BOOK);
+-        bookNode.setAttribute("version", GncXmlHelper.BOOK_VERSION);
++        bookNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+         rootElement.appendChild(bookNode);
+ 
+         Element bookIdNode = mDocument.createElement(GncXmlHelper.TAG_BOOK_ID);
+-        bookIdNode.setAttribute("type", "guid");
++        bookIdNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+         bookIdNode.appendChild(mDocument.createTextNode(UUID.randomUUID().toString().replaceAll("-", "")));
+         bookNode.appendChild(bookIdNode);
+ 
+         Element cmdtyCountData = mDocument.createElement(GncXmlHelper.TAG_COUNT_DATA);
+-        cmdtyCountData.setAttribute("cd:type", "commodity");
++        cmdtyCountData.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "commodity");
+         cmdtyCountData.appendChild(mDocument.createTextNode(String.valueOf(mAccountsDbAdapter.getCurrencies().size())));
+         bookNode.appendChild(cmdtyCountData);
+ 
+         Element accountCountNode = mDocument.createElement(GncXmlHelper.TAG_COUNT_DATA);
+-        accountCountNode.setAttribute("cd:type", "account");
++        accountCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "account");
+         int accountCount = mAccountsDbAdapter.getTotalAccountCount();
+         accountCountNode.appendChild(mDocument.createTextNode(String.valueOf(accountCount)));
+         bookNode.appendChild(accountCountNode);
+ 
+         Element transactionCountNode = mDocument.createElement(GncXmlHelper.TAG_COUNT_DATA);
+-        transactionCountNode.setAttribute("cd:type", "transaction");
++        transactionCountNode.setAttribute(GncXmlHelper.ATTR_KEY_CD_TYPE, "transaction");
+         int transactionCount = mTransactionsDbAdapter.getTotalTransactionsCount();
+         transactionCountNode.appendChild(mDocument.createTextNode(String.valueOf(transactionCount)));
+         bookNode.appendChild(transactionCountNode);
+diff --git a/app/src/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/org/gnucash/android/export/xml/GncXmlHelper.java
+index 03e27c22..79246a20 100644
+--- a/app/src/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -3,6 +3,8 @@
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.TransactionType;
++import org.w3c.dom.Document;
++import org.w3c.dom.Element;
+ 
+ import java.math.BigDecimal;
+ import java.text.ParseException;
+@@ -16,6 +18,15 @@
+  */
+ public abstract class GncXmlHelper {
+     public static final String TAG_PREFIX           = "gnc:";
++
++    public static final String ATTR_KEY_CD_TYPE     = "cd:type";
++    public static final String ATTR_KEY_TYPE        = "type";
++    public static final String ATTR_KEY_VERSION     = "version";
++    public static final String ATTR_VALUE_STRING    = "string";
++    public static final String ATTR_VALUE_GUID      = "guid";
++    public static final String ATTR_VALUE_BOOK      = "book";
++    public static final String ATTR_VALUE_GDATE     = "gdate";
++
+     /*
+     Qualified GnuCash XML tag names
+      */
+@@ -23,7 +34,6 @@
+     public static final String TAG_BOOK             = "gnc:book";
+     public static final String TAG_BOOK_ID          = "book:id";
+     public static final String TAG_COUNT_DATA       = "gnc:count-data";
+-    public static final String ATTRIBUTE_CD_TYPE    = "cd:type";
+ 
+     public static final String TAG_COMMODITY        = "gnc:commodity";
+     public static final String TAG_NAME             = "act:name";
+@@ -46,9 +56,10 @@
+     public static final String TAG_DATE_POSTED      = "trn:date-posted";
+     public static final String TAG_DATE             = "ts:date";
+     public static final String TAG_DATE_ENTERED     = "trn:date-entered";
+-    public static final String TAG_TRX_DESCRIPTION  = "trn:description";
+-    public static final String TAG_TRX_SPLITS       = "trn:splits";
+-    public static final String TAG_TRX_SPLIT        = "trn:split";
++    public static final String TAG_TRN_DESCRIPTION  = "trn:description";
++    public static final String TAG_TRN_SPLITS       = "trn:splits";
++    public static final String TAG_TRN_SPLIT        = "trn:split";
++    public static final String TAG_TRN_SLOTS        = "trn:slots";
+ 
+     public static final String TAG_SPLIT_ID         = "split:id";
+     public static final String TAG_SPLIT_MEMO       = "split:memo";
+@@ -61,7 +72,13 @@
+     public static final String TAG_RECURRENCE_PERIOD = "trn:recurrence_period";
+ 
+     public static final String BOOK_VERSION         = "2.0.0";
+-    public static final SimpleDateFormat DATE_FORMATTER = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z");
++    public static final SimpleDateFormat TIME_FORMATTER = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z");
++
++
++    public static final String KEY_PLACEHOLDER      = "placeholder";
++    public static final String KEY_COLOR            = "color";
++    public static final String KEY_FAVORITE         = "favorite";
++    public static final String KEY_NOTES            = "notes";
+ 
+ 
+     /**
+@@ -69,7 +86,7 @@
+      * @param milliseconds Milliseconds since epoch
+      */
+     public static String formatDate(long milliseconds){
+-        return DATE_FORMATTER.format(new Date(milliseconds));
++        return TIME_FORMATTER.format(new Date(milliseconds));
+     }
+ 
+     /**
+@@ -79,7 +96,7 @@ public static String formatDate(long milliseconds){
+      * @throws ParseException if the date string could not be parsed e.g. because of different format
+      */
+     public static long parseDate(String dateString) throws ParseException {
+-        Date date = DATE_FORMATTER.parse(dateString);
++        Date date = TIME_FORMATTER.parse(dateString);
+         return date.getTime();
+     }
+ 
+@@ -106,4 +123,25 @@ public static BigDecimal parseMoney(String amountString){
+ 
+         return numerator.divide(denominator);
+     }
++
++    /**
++     * Helper method for creating slot key-value pairs in the GnuCash XML structure.
++     * <p>This method is only a helper for creating slots whose values are of string type</p>
++     * @param doc {@link org.w3c.dom.Document} for creating nodes
++     * @param key Slot key as string
++     * @param value Slot value as String
++     * @return Element node containing the key-value pair
++     */
++    public static Element createSlot(Document doc, String key, String value){
++        Element slotNode  = doc.createElement(TAG_SLOT);
++        Element slotKeyNode = doc.createElement(TAG_SLOT_KEY);
++        slotKeyNode.appendChild(doc.createTextNode(key));
++        Element slotValueNode = doc.createElement(TAG_SLOT_VALUE);
++        slotValueNode.setAttribute(ATTR_KEY_TYPE, ATTR_VALUE_STRING);
++        slotValueNode.appendChild(doc.createTextNode(value));
++        slotNode.appendChild(slotKeyNode);
++        slotNode.appendChild(slotValueNode);
++
++        return slotNode;
++    }
+ }
+diff --git a/app/src/org/gnucash/android/importer/GncXmlHandler.java b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+index bf102a3d..c52e374d 100644
+--- a/app/src/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+@@ -19,23 +19,15 @@
+ import android.content.Context;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.util.Log;
+-import android.widget.Toast;
+-import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.xml.GncXmlHelper;
+ import org.gnucash.android.model.*;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.xml.sax.Attributes;
+-import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+-import org.xml.sax.XMLReader;
+ import org.xml.sax.helpers.DefaultHandler;
+ 
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.parsers.SAXParser;
+-import javax.xml.parsers.SAXParserFactory;
+-import java.io.*;
+ import java.text.ParseException;
+ import java.util.Currency;
+ import java.util.regex.Pattern;
+@@ -59,20 +51,8 @@
+     private static final String LOG_TAG = "GnuCashAccountImporter";
+ 
+     /**
+-     * Value for placeholder slots in GnuCash account structure file
++     * Adapter for saving the imported accounts
+      */
+-    private static final String PLACEHOLDER_KEY = "placeholder";
+-
+-    /**
+-     * Value of color slots in GnuCash account structure file
+-     */
+-    private static final String COLOR_KEY = "color";
+-
+-    /**
+-     * Value of favorite slots in GnuCash account structure file
+-     */
+-    private static final String FAVORITE_KEY = "favorite";
+-
+     AccountsDbAdapter mAccountsDbAdapter;
+ 
+     /**
+@@ -100,6 +80,7 @@
+     boolean mInFavoriteSlot     = false;
+     boolean mISO4217Currency    = false;
+     boolean mIsDatePosted       = false;
++    boolean mIsNote = false;
+ 
+     private Context mContext;
+     private TransactionsDbAdapter mTransactionsDbAdapter;
+@@ -133,7 +114,7 @@ public void startElement(String uri, String localName,
+             mTransaction = new Transaction(""); //dummy name will be replaced
+         }
+ 
+-        if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRX_SPLIT)){
++        if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRN_SPLIT)){
+             mSplit = new Split(Money.getZeroInstance(),"");
+         }
+ 
+@@ -190,16 +171,20 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+         }
+ 
+         if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SLOT_KEY)){
+-            if (characterString.equals(PLACEHOLDER_KEY)){
++            if (characterString.equals(GncXmlHelper.KEY_PLACEHOLDER)){
+                 mInPlaceHolderSlot = true;
+             }
+-            if (characterString.equals(COLOR_KEY)){
++            if (characterString.equals(GncXmlHelper.KEY_COLOR)){
+                 mInColorSlot = true;
+             }
+ 
+-            if (characterString.equals(FAVORITE_KEY)){
++            if (characterString.equals(GncXmlHelper.KEY_FAVORITE)){
+                 mInFavoriteSlot = true;
+             }
++
++            if (characterString.equals(GncXmlHelper.KEY_NOTES)){
++                mIsNote = true;
++            }
+         }
+ 
+         if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SLOT_VALUE)){
+@@ -231,6 +216,13 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 mAccount.setFavorite(Boolean.parseBoolean(characterString));
+                 mInFavoriteSlot = false;
+             }
++
++            if (mIsNote){
++                if (mTransaction != null){
++                    mTransaction.setNote(characterString);
++                    mIsNote = false;
++                }
++            }
+         }
+ 
+ 
+@@ -239,8 +231,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             mTransaction.setUID(characterString);
+         }
+ 
+-        if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRX_DESCRIPTION)){
+-            mTransaction.setName(characterString);
++        if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRN_DESCRIPTION)){
++            mTransaction.setDescription(characterString);
+         }
+ 
+         if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_DATE)){
+@@ -277,7 +269,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             mSplit.setAccountUID(characterString);
+         }
+ 
+-        if (qualifiedName.equals(GncXmlHelper.TAG_TRX_SPLIT)){
++        if (qualifiedName.equals(GncXmlHelper.TAG_TRN_SPLIT)){
+             mTransaction.addSplit(mSplit);
+         }
+ 
+diff --git a/app/src/org/gnucash/android/model/Account.java b/app/src/org/gnucash/android/model/Account.java
+index 0d9ebf8b..598bdc30 100644
+--- a/app/src/org/gnucash/android/model/Account.java
++++ b/app/src/org/gnucash/android/model/Account.java
+@@ -576,27 +576,6 @@ public String toQIF(boolean exportAllTransactions, List<String> exportedTransact
+     }
+ 
+     /**
+-     * Helper method for creating slot key-value pairs in the account XML structure.
+-     * <p>This method is for use with slots whose values are strings</p>
+-     * @param doc {@link org.w3c.dom.Document} for creating nodes
+-     * @param key Slot key as string
+-     * @param value Slot value as String
+-     * @return Element node containing the key-value pair
+-     */
+-    private Element createSlot(Document doc, String key, String value){
+-        Element slotNode  = doc.createElement(GncXmlHelper.TAG_SLOT);
+-        Element slotKeyNode = doc.createElement(GncXmlHelper.TAG_SLOT_KEY);
+-        slotKeyNode.appendChild(doc.createTextNode(key));
+-        Element slotValueNode = doc.createElement(GncXmlHelper.TAG_SLOT_VALUE);
+-        slotValueNode.setAttribute("type", "string");
+-        slotValueNode.appendChild(doc.createTextNode(value));
+-        slotNode.appendChild(slotKeyNode);
+-        slotNode.appendChild(slotValueNode);
+-
+-        return slotNode;
+-    }
+-
+-    /**
+      * Method which generates the GnuCash XML DOM for this account
+      * @param doc {@link org.w3c.dom.Document} for creating nodes
+      * @param rootNode {@link org.w3c.dom.Element} node to which to attach the XML
+@@ -606,7 +585,7 @@ public void toGncXml(Document doc, Element rootNode) {
+         nameNode.appendChild(doc.createTextNode(mName));
+ 
+         Element idNode = doc.createElement(GncXmlHelper.TAG_ACCT_ID);
+-        idNode.setAttribute("type", "guid");
++        idNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+         idNode.appendChild(doc.createTextNode(mUID));
+ 
+         Element typeNode = doc.createElement(GncXmlHelper.TAG_TYPE);
+@@ -628,16 +607,18 @@ public void toGncXml(Document doc, Element rootNode) {
+         descriptionNode.appendChild(doc.createTextNode(mName));
+ 
+         Element acctSlotsNode = doc.createElement(GncXmlHelper.TAG_ACT_SLOTS);
+-        acctSlotsNode.appendChild(createSlot(doc, "placeholder", Boolean.toString(mIsPlaceholderAccount)));
++        acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_PLACEHOLDER,
++                Boolean.toString(mIsPlaceholderAccount)));
+ 
+         if (mColorCode != null && mColorCode.trim().length() > 0){
+-            acctSlotsNode.appendChild(createSlot(doc, "color", mColorCode));
++            acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_COLOR, mColorCode));
+         }
+ 
+-        acctSlotsNode.appendChild(createSlot(doc, "favorite", Boolean.toString(mIsFavorite)));
++        acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc,
++                GncXmlHelper.KEY_FAVORITE, Boolean.toString(mIsFavorite)));
+ 
+         Element accountNode = doc.createElement(GncXmlHelper.TAG_ACCOUNT);
+-        accountNode.setAttribute("version", GncXmlHelper.BOOK_VERSION);
++        accountNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+         accountNode.appendChild(nameNode);
+         accountNode.appendChild(idNode);
+         accountNode.appendChild(typeNode);
+@@ -649,7 +630,7 @@ public void toGncXml(Document doc, Element rootNode) {
+ 
+         if (mParentAccountUID != null && mParentAccountUID.trim().length() > 0){
+             Element parentAccountNode = doc.createElement(GncXmlHelper.TAG_PARENT_UID);
+-            parentAccountNode.setAttribute("type", "guid");
++            parentAccountNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+             parentAccountNode.appendChild(doc.createTextNode(mParentAccountUID));
+             accountNode.appendChild(parentAccountNode);
+         }
+diff --git a/app/src/org/gnucash/android/model/Split.java b/app/src/org/gnucash/android/model/Split.java
+index 69192b5b..41961848 100644
+--- a/app/src/org/gnucash/android/model/Split.java
++++ b/app/src/org/gnucash/android/model/Split.java
+@@ -216,7 +216,7 @@ public void toGncXml(Document doc, Element rootNode) {
+         accountNode.setAttribute("type", "guid");
+         accountNode.appendChild(doc.createTextNode(mAccountUID));
+ 
+-        Element splitNode = doc.createElement(GncXmlHelper.TAG_TRX_SPLIT);
++        Element splitNode = doc.createElement(GncXmlHelper.TAG_TRN_SPLIT);
+         splitNode.appendChild(idNode);
+         splitNode.appendChild(memoNode);
+         splitNode.appendChild(stateNode);
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index 56606dd7..16aab167 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -94,12 +94,12 @@
+ 	/**
+ 	 * Name describing the transaction
+ 	 */
+-	private String mName;
++	private String mDescription;
+ 
+ 	/**
+ 	 * An extra note giving details about the transaction
+ 	 */
+-	private String mDescription = "";
++	private String mNotes = "";
+ 
+ 	/**
+ 	 * Flag indicating if this transaction has been exported before or not
+@@ -126,7 +126,7 @@
+ 	 */
+ 	public Transaction(String name) {
+ 		initDefaults();
+-		setName(name);
++		setDescription(name);
+ 	}
+ 
+     /**
+@@ -139,8 +139,8 @@ public Transaction(String name) {
+      */
+     public Transaction(Transaction transaction, boolean generateNewUID){
+         initDefaults();
+-        setName(transaction.getName());
+         setDescription(transaction.getDescription());
++        setNote(transaction.getNote());
+         for (Split split : transaction.mSplitList) {
+             addSplit(new Split(split, true));
+         }
+@@ -167,22 +167,6 @@ private void initDefaults(){
+     }
+ 
+     /**
+-     * Returns what kind of transaction this is for the specified account depending on the splits for that account.
+-     * <br>This is mostly necessary for generating OFX files.
+-     * @param accountUID Unique Identifier of the account
+-     * @return TransactionType of this transaction
+-     */
+-    public TransactionType getTransactionTypeForAccount(String accountUID){
+-        List<Split> splitList = getSplits(accountUID);
+-        if (splitList.size() == 1)
+-            return splitList.get(0).getType();
+-
+-        Money balance = getBalance(accountUID);
+-
+-        return balance.isNegative() ? TransactionType.DEBIT : TransactionType.CREDIT;
+-    }
+-
+-    /**
+      * Returns the list of splits belonging to a specific account
+      * @param accountUID Unique Identifier of the account
+      * @return List of {@link org.gnucash.android.model.Split}s
+@@ -314,51 +298,36 @@ public Currency getCurrency(){
+         return Currency.getInstance(this.mCurrencyCode);
+     }
+ 
+-    /**
+-	 * Returns the transaction amount for a specific account displayed by the account.
+-     * <p>This is specific to accounts because the total balance of every transaction in double entry mode is zero.</p>
+-	 * @return Properly formatted string amount for account
+-	 */
+-	public Money getFormattedAmount(String accountUID){
+-        Money balance = Money.createZeroInstance(mCurrencyCode);
+-        for (Split split : mSplitList) {
+-            if (split.getAccountUID().equals(accountUID)){
+-                balance = balance.add(split.getAmount());
+-            }
+-        }
+-        return balance;
+-	}
+-
+ 	/**
+ 	 * Returns the name of the transaction
+ 	 * @return Name of the transaction
+ 	 */
+-	public String getName() {
+-		return mName;
++	public String getDescription() {
++		return mDescription;
+ 	}
+ 
+ 	/**
+ 	 * Sets the name of the transaction
+ 	 * @param name String containing name of transaction to set
+ 	 */
+-	public void setName(String name) {
+-		this.mName = name.trim();
++	public void setDescription(String name) {
++		this.mDescription = name.trim();
+ 	}
+ 
+ 	/**
+ 	 * Set short description of the transaction
+ 	 * @param description String containing description of transaction
+ 	 */
+-	public void setDescription(String description) {
+-		this.mDescription = description;
++	public void setNote(String description) {
++		this.mNotes = description;
+ 	}
+ 
+ 	/**
+ 	 * Returns the description of the transaction
+ 	 * @return String containing description of transaction
+ 	 */
+-	public String getDescription() {
+-		return mDescription;
++	public String getNote() {
++		return mNotes;
+ 	}
+ 
+ 	/**
+@@ -505,12 +474,12 @@ public Element toOFX(Document doc, String accountUID){
+         transactionNode.appendChild(transID);
+ 
+         Element name = doc.createElement(OfxHelper.TAG_NAME);
+-        name.appendChild(doc.createTextNode(mName));
++        name.appendChild(doc.createTextNode(mDescription));
+         transactionNode.appendChild(name);
+ 
+-        if (mDescription != null && mDescription.length() > 0){
++        if (mNotes != null && mNotes.length() > 0){
+             Element memo = doc.createElement(OfxHelper.TAG_MEMO);
+-            memo.appendChild(doc.createTextNode(mDescription));
++            memo.appendChild(doc.createTextNode(mNotes));
+             transactionNode.appendChild(memo);
+         }
+ 
+@@ -558,7 +527,7 @@ public String toQIF(String accountUID){
+         StringBuilder transactionQIFBuilder = new StringBuilder();
+ 
+         transactionQIFBuilder.append(QifHelper.DATE_PREFIX).append(QifHelper.formatDate(mTimestamp)).append(newLine);
+-        transactionQIFBuilder.append(QifHelper.MEMO_PREFIX).append(mName).append(newLine);
++        transactionQIFBuilder.append(QifHelper.MEMO_PREFIX).append(mDescription).append(newLine);
+ 
+         List<String> processedSplitUIDs = new ArrayList<String>();
+         final List<Split> splitList = getSplits();
+@@ -625,8 +594,8 @@ public String toQIF(String accountUID){
+     public static Intent createIntent(Transaction transaction){
+         Intent intent = new Intent(Intent.ACTION_INSERT);
+         intent.setType(Transaction.MIME_TYPE);
+-        intent.putExtra(Intent.EXTRA_TITLE, transaction.getName());
+-        intent.putExtra(Intent.EXTRA_TEXT, transaction.getDescription());
++        intent.putExtra(Intent.EXTRA_TITLE, transaction.getDescription());
++        intent.putExtra(Intent.EXTRA_TEXT, transaction.getNote());
+         intent.putExtra(Account.EXTRA_CURRENCY_CODE, transaction.getCurrencyCode());
+         StringBuilder stringBuilder = new StringBuilder();
+         for (Split split : transaction.getSplits()) {
+@@ -638,7 +607,7 @@ public static Intent createIntent(Transaction transaction){
+ 
+     public void toGncXml(Document doc, Element rootElement) {
+         Element idNode = doc.createElement(GncXmlHelper.TAG_TRX_ID);
+-        idNode.setAttribute("type", "guid");
++        idNode.setAttribute(GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+         idNode.appendChild(doc.createTextNode(mUID));
+ 
+         Element currencyNode = doc.createElement(GncXmlHelper.TAG_TRX_CURRENCY);
+@@ -659,26 +628,31 @@ public void toGncXml(Document doc, Element rootElement) {
+         dateENode.appendChild(doc.createTextNode(GncXmlHelper.formatDate(mTimestamp)));
+         dateEneteredNode.appendChild(dateENode);
+ 
+-        Element descriptionNode = doc.createElement(GncXmlHelper.TAG_TRX_DESCRIPTION);
+-        if (mName != null) {
+-            descriptionNode.appendChild(doc.createTextNode(mName));
++        Element descriptionNode = doc.createElement(GncXmlHelper.TAG_TRN_DESCRIPTION);
++        if (mDescription != null) {
++            descriptionNode.appendChild(doc.createTextNode(mDescription));
+         }
+ 
+-        Element trnSplits = doc.createElement(GncXmlHelper.TAG_TRX_SPLITS);
++        Element trnSlotsNode = doc.createElement(GncXmlHelper.TAG_TRN_SLOTS);
++        if (mNotes != null && mNotes.length() > 0) {
++            trnSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_NOTES, mNotes));
++            //TODO: Consider adding future transactions date as slot here too
++        }
++        Element trnSplits = doc.createElement(GncXmlHelper.TAG_TRN_SPLITS);
+         for (Split split : mSplitList) {
+-            if (split.getMemo() == null || split.getMemo().trim().length() == 0) {
+-                split.setMemo(mDescription);
+-            }
+             split.toGncXml(doc, trnSplits);
+         }
+ 
+         Element transactionNode = doc.createElement(GncXmlHelper.TAG_TRANSACTION);
+-        transactionNode.setAttribute("version", GncXmlHelper.BOOK_VERSION);
++        transactionNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+         transactionNode.appendChild(idNode);
+         transactionNode.appendChild(currencyNode);
+         transactionNode.appendChild(datePostedNode);
+         transactionNode.appendChild(dateEneteredNode);
+         transactionNode.appendChild(descriptionNode);
++        if (mNotes != null && mNotes.length() > 0){
++            transactionNode.appendChild(trnSlotsNode);
++        }
+         //TODO: Improve xml compatibilty with desktop for scheduled actions
+         if (mRecurrencePeriod != 0) {
+             Element recurrenceNode = doc.createElement(GncXmlHelper.TAG_RECURRENCE_PERIOD);
+diff --git a/app/src/org/gnucash/android/receivers/TransactionRecorder.java b/app/src/org/gnucash/android/receivers/TransactionRecorder.java
+index a5e21f9a..cb27ed83 100644
+--- a/app/src/org/gnucash/android/receivers/TransactionRecorder.java
++++ b/app/src/org/gnucash/android/receivers/TransactionRecorder.java
+@@ -57,7 +57,7 @@ public void onReceive(Context context, Intent intent) {
+ 
+         Transaction transaction = new Transaction(name);
+         transaction.setTime(System.currentTimeMillis());
+-        transaction.setDescription(note);
++        transaction.setNote(note);
+         transaction.setCurrencyCode(currencyCode);
+ 
+         //Parse deprecated args for compatibility. Transactions were bound to accounts, now only splits are
+diff --git a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index ecdf0c89..d5a37b39 100644
+--- a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -40,7 +40,6 @@
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ import org.gnucash.android.R;
+-import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.db.*;
+ import org.gnucash.android.ui.UxArgument;
+@@ -132,7 +131,7 @@ public void onCreate(Bundle savedInstanceState) {
+         mCursorAdapter = new TransactionsCursorAdapter(
+                 getActivity().getApplicationContext(),
+                 R.layout.list_item_scheduled_trxn, null,
+-                new String[] {DatabaseSchema.TransactionEntry.COLUMN_NAME},
++                new String[] {DatabaseSchema.TransactionEntry.COLUMN_DESCRIPTION},
+                 new int[] {R.id.primary_text});
+         setListAdapter(mCursorAdapter);
+     }
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 4774ff09..1d9c4f10 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -112,7 +112,7 @@
+ 	/**
+ 	 * Input field for the transaction name (description)
+ 	 */
+-	private AutoCompleteTextView mNameEditText;
++	private AutoCompleteTextView mDescriptionEditText;
+ 
+ 	/**
+ 	 * Input field for the transaction amount
+@@ -128,7 +128,7 @@
+ 	/**
+ 	 * Input field for the transaction description (note)
+ 	 */
+-	private EditText mDescriptionEditText;
++	private EditText mNotesEditText;
+ 
+ 	/**
+ 	 * Input field for the transaction date
+@@ -186,8 +186,8 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+ 		View v = inflater.inflate(R.layout.fragment_new_transaction, container, false);
+ 
+-		mNameEditText           = (AutoCompleteTextView) v.findViewById(R.id.input_transaction_name);
+-		mDescriptionEditText    = (EditText) v.findViewById(R.id.input_description);
++		mDescriptionEditText = (AutoCompleteTextView) v.findViewById(R.id.input_transaction_name);
++		mNotesEditText = (EditText) v.findViewById(R.id.input_description);
+ 		mDateTextView           = (TextView) v.findViewById(R.id.input_date);
+ 		mTimeTextView           = (TextView) v.findViewById(R.id.input_time);
+ 		mAmountEditText         = (EditText) v.findViewById(R.id.input_transaction_amount);
+@@ -266,7 +266,7 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+      */
+     private void initTransactionNameAutocomplete() {
+         final int[] to = new int[]{android.R.id.text1};
+-        final String[] from = new String[]{DatabaseSchema.TransactionEntry.COLUMN_NAME};
++        final String[] from = new String[]{DatabaseSchema.TransactionEntry.COLUMN_DESCRIPTION};
+ 
+         SimpleCursorAdapter adapter = new SimpleCursorAdapter(
+                 getActivity(), android.R.layout.simple_dropdown_item_1line,
+@@ -275,7 +275,7 @@ private void initTransactionNameAutocomplete() {
+         adapter.setCursorToStringConverter(new SimpleCursorAdapter.CursorToStringConverter() {
+             @Override
+             public CharSequence convertToString(Cursor cursor) {
+-                final int colIndex = cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_NAME);
++                final int colIndex = cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_DESCRIPTION);
+                 return cursor.getString(colIndex);
+             }
+         });
+@@ -287,11 +287,11 @@ public Cursor runQuery(CharSequence name) {
+             }
+         });
+ 
+-        mNameEditText.setOnItemClickListener(new AdapterView.OnItemClickListener() {
++        mDescriptionEditText.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+             @Override
+             public void onItemClick(AdapterView<?> adapterView, View view, int position, long id) {
+                 mTransaction = new Transaction(mTransactionsDbAdapter.getTransaction(id), true);
+-                if (!GnuCashApplication.isDoubleEntryEnabled(true)){ //if no double entry, use only splits for this acct
++                if (!GnuCashApplication.isDoubleEntryEnabled(true)) { //if no double entry, use only splits for this acct
+                     List<Split> accountSplits = mTransaction.getSplits(mAccountsDbAdapter.getAccountUID(mAccountId));
+                     mTransaction.setSplits(accountSplits);
+                 }
+@@ -300,7 +300,7 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+             }
+         });
+ 
+-        mNameEditText.setAdapter(adapter);
++        mDescriptionEditText.setAdapter(adapter);
+     }
+ 
+     /**
+@@ -308,7 +308,7 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+ 	 * This method is called if the fragment is used for editing a transaction
+ 	 */
+ 	private void initializeViewsWithTransaction(){
+-		mNameEditText.setText(mTransaction.getName());
++		mDescriptionEditText.setText(mTransaction.getDescription());
+ 
+         String accountUID = mAccountsDbAdapter.getAccountUID(mAccountId);
+         mTransactionTypeButton.setAccountType(mAccountType);
+@@ -319,7 +319,7 @@ private void initializeViewsWithTransaction(){
+             mAmountEditText.setText(mTransaction.getBalance(accountUID).toPlainString());
+         }
+ 		mCurrencyTextView.setText(mTransaction.getCurrency().getSymbol(Locale.getDefault()));
+-		mDescriptionEditText.setText(mTransaction.getDescription());
++		mNotesEditText.setText(mTransaction.getNote());
+ 		mDateTextView.setText(DATE_FORMATTER.format(mTransaction.getTimeMillis()));
+ 		mTimeTextView.setText(TIME_FORMATTER.format(mTransaction.getTimeMillis()));
+ 		Calendar cal = GregorianCalendar.getInstance();
+@@ -556,8 +556,8 @@ private void saveNewTransaction() {
+ 				mTime.get(Calendar.HOUR_OF_DAY),
+ 				mTime.get(Calendar.MINUTE),
+ 				mTime.get(Calendar.SECOND));
+-		String name = mNameEditText.getText().toString();
+ 		String description = mDescriptionEditText.getText().toString();
++		String notes = mNotesEditText.getText().toString();
+ 		BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
+ 
+ 		long accountID 	= ((TransactionsActivity) getSherlockActivity()).getCurrentAccountID();
+@@ -578,9 +578,9 @@ private void saveNewTransaction() {
+                 }
+             }
+             mTransaction.setSplits(mSplitsList);
+-			mTransaction.setName(name);
++			mTransaction.setDescription(description);
+ 		} else {
+-			mTransaction = new Transaction(name);
++			mTransaction = new Transaction(description);
+             if (mSplitsList.isEmpty()) { //amount entered in the simple interface (not using splits Editor)
+                 Split split = new Split(amount, accountUID);
+                 split.setType(mTransactionTypeButton.getTransactionType());
+@@ -601,7 +601,7 @@ private void saveNewTransaction() {
+ 		}
+         mTransaction.setCurrencyCode(mAccountsDbAdapter.getCurrencyCode(accountID));
+ 		mTransaction.setTime(cal.getTimeInMillis());
+-		mTransaction.setDescription(description);
++		mTransaction.setNote(notes);
+ 
+         //save the normal transaction first
+         mTransactionsDbAdapter.addTransaction(mTransaction);
+@@ -654,7 +654,7 @@ public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+ 	public boolean onOptionsItemSelected(MenuItem item) {
+ 		//hide the keyboard if it is visible
+ 		InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
+-		imm.hideSoftInputFromWindow(mNameEditText.getApplicationWindowToken(), 0);
++		imm.hideSoftInputFromWindow(mDescriptionEditText.getApplicationWindowToken(), 0);
+ 
+ 		switch (item.getItemId()) {
+ 		case R.id.menu_cancel:
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 978d3b64..0e1beaf4 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -148,7 +148,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 		mCursorAdapter = new TransactionsCursorAdapter(
+ 				getActivity().getApplicationContext(), 
+ 				R.layout.list_item_transaction, null, 
+-				new String[] {DatabaseSchema.TransactionEntry.COLUMN_NAME},
++				new String[] {DatabaseSchema.TransactionEntry.COLUMN_DESCRIPTION},
+ 				new int[] {R.id.primary_text});
+ 		setListAdapter(mCursorAdapter);
+ 	}
+@@ -420,12 +420,12 @@ public void bindView(View view, Context context, Cursor cursor) {
+             TransactionsActivity.displayBalance(amountTextView, amount);
+ 
+ 			TextView trNote = (TextView) view.findViewById(R.id.secondary_text);
+-			String description = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_DESCRIPTION));
+-			if (description == null || description.length() == 0)
++			String notes = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_NOTES));
++			if (notes == null || notes.length() == 0)
+ 				trNote.setVisibility(View.GONE);
+ 			else {
+ 				trNote.setVisibility(View.VISIBLE);
+-				trNote.setText(description);
++				trNote.setText(notes);
+ 			}
+ 
+             setSectionHeaderVisibility(view, cursor);
+diff --git a/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java b/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+index 251d4304..304b29f4 100644
+--- a/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
++++ b/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+@@ -40,8 +40,8 @@ protected void setUp() throws Exception {
+ 	
+ 	public void testTransactionsAreTimeSorted(){
+ 		List<Transaction> transactionsList = mAdapter.getAllTransactionsForAccount(ALPHA_ACCOUNT_UID);
+-		assertEquals("T1000", transactionsList.get(0).getName());
+-		assertEquals("T800", transactionsList.get(1).getName());
++		assertEquals("T1000", transactionsList.get(0).getDescription());
++		assertEquals("T800", transactionsList.get(1).getDescription());
+ 	}
+ 	
+ 	@Override
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/ExportTransactionsTest.java b/integration-tests/src/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 47f8a055..6da6059b 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -49,7 +49,7 @@ protected void setUp() throws Exception {
+ 		
+ 		Account account = new Account("Exportable");		
+ 		Transaction transaction = new Transaction("Pizza");
+-		transaction.setDescription("What up?");
++		transaction.setNote("What up?");
+ 		transaction.setTime(System.currentTimeMillis());
+ 		
+ 		account.addTransaction(transaction);
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java b/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 2fa68105..1a1cff23 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -68,7 +68,7 @@ protected void setUp() throws Exception {
+         account.setUID(DUMMY_ACCOUNT_UID);
+         account.setCurrency(Currency.getInstance(Locale.getDefault()));
+         mTransaction = new Transaction(TRANSACTION_NAME);
+-        mTransaction.setDescription("What up?");
++        mTransaction.setNote("What up?");
+         mTransaction.setTime(mTransactionTimeMillis);
+ 
+         account.addTransaction(mTransaction);
+@@ -148,7 +148,7 @@ public void testAddTransactionShouldRequireAmount(){
+ 	private void validateEditTransactionFields(Transaction transaction){
+ 		
+ 		String name = mSolo.getEditText(0).getText().toString();
+-		assertEquals(transaction.getName(), name);
++		assertEquals(transaction.getDescription(), name);
+ 		
+ 		String amountString = mSolo.getEditText(1).getText().toString();
+ 		NumberFormat formatter = NumberFormat.getInstance();
+@@ -161,7 +161,7 @@ private void validateEditTransactionFields(Transaction transaction){
+ 		assertEquals(transaction.getBalance(DUMMY_ACCOUNT_UID), amount);
+ 		
+ 		String description = mSolo.getEditText(2).getText().toString();
+-		assertEquals(transaction.getDescription(), description);
++		assertEquals(transaction.getNote(), description);
+ 		
+ 		String expectedValue = TransactionFormFragment.DATE_FORMATTER.format(transaction.getTimeMillis());
+ 		TextView dateView = (TextView) mSolo.getView(R.id.input_date);
+@@ -308,7 +308,7 @@ public void testOpenTransactionEditShouldNotModifyTransaction(){
+ 			
+ 			assertEquals(1, transactions.size());
+ 			Transaction trx = transactions.get(0);
+-			assertEquals(TRANSACTION_NAME, trx.getName());
++			assertEquals(TRANSACTION_NAME, trx.getDescription());
+ 			Date expectedDate = new Date(mTransactionTimeMillis);
+ 			Date trxDate = new Date(trx.getTimeMillis());
+ 			assertEquals(TransactionFormFragment.DATE_FORMATTER.format(expectedDate),
+@@ -399,8 +399,8 @@ public void testIntentTransactionRecording(){
+ 		List<Transaction> transactions = trxnAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
+ 		
+ 		for (Transaction transaction : transactions) {
+-			if (transaction.getName().equals("Power intents")){
+-				assertEquals("Intents for sale", transaction.getDescription());
++			if (transaction.getDescription().equals("Power intents")){
++				assertEquals("Intents for sale", transaction.getNote());
+ 				assertEquals(4.99, transaction.getBalance(DUMMY_ACCOUNT_UID).asDouble());
+ 			}
+ 		}

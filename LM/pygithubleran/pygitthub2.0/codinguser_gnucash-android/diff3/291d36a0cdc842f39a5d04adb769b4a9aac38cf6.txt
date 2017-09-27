@@ -1,0 +1,106 @@
+From 291d36a0cdc842f39a5d04adb769b4a9aac38cf6 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sun, 13 Sep 2015 18:42:13 +0800
+Subject: [PATCH] remove decimal (intermediate) representation of price rate
+
+---
+ .../main/java/org/gnucash/android/model/Money.java | 18 ++++++++++---
+ .../main/java/org/gnucash/android/model/Price.java | 31 ++++++++++++++++++++++
+ .../dialog/TransferFundsDialogFragment.java        |  8 +++---
+ 3 files changed, 49 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 9b2587eb..a7664239 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -252,8 +252,8 @@ private void setCurrency(Currency currency) {
+ 	 * <p>Example: Given an amount 32.50$, the numerator will be 3250</p>
+ 	 * @return GnuCash numerator for this amount
+ 	 */
+-	public int getNumerator(){
+-		return mAmount.multiply(new BigDecimal(getDenominator())).intValue();
++	public int getNumerator() {
++		return mAmount.scaleByPowerOfTen(mCurrency.getDefaultFractionDigits()).intValueExact();
+ 	}
+ 
+ 	/**
+@@ -261,8 +261,18 @@ public int getNumerator(){
+ 	 * <p>The denominator is 10 raised to the power of number of fractional digits in the currency</p>
+ 	 * @return GnuCash format denominator
+ 	 */
+-	public int getDenominator(){
+-		return (int) Math.pow(10, mCurrency.getDefaultFractionDigits());
++	public int getDenominator() {
++		switch (mCurrency.getDefaultFractionDigits()) {
++			case 0:
++				return 1;
++			case 1:
++				return 10;
++			case 2:
++				return 100;
++			case 3:
++				return 1000;
++		}
++		throw new RuntimeException("Unsupported number of fraction digits");
+ 	}
+ 
+ 	/**
+diff --git a/app/src/main/java/org/gnucash/android/model/Price.java b/app/src/main/java/org/gnucash/android/model/Price.java
+index 4d3f8f00..2fb9c910 100644
+--- a/app/src/main/java/org/gnucash/android/model/Price.java
++++ b/app/src/main/java/org/gnucash/android/model/Price.java
+@@ -90,4 +90,35 @@ public int getValueDenom() {
+     public void setValueDenom(int valueDenom) {
+         this.mValueDenom = valueDenom;
+     }
++
++    public void reduce() {
++        if (mValueDenom < 0) {
++            mValueDenom = -mValueDenom;
++            mValueNum = -mValueNum;
++        }
++        if (mValueDenom != 0 && mValueNum != 0) {
++            int num1 = mValueNum;
++            if (num1 < 0) {
++                num1 = -num1;
++            }
++            int num2 = mValueDenom;
++            int commonDivisor = 1;
++            for(;;) {
++                int r = num1 % num2;
++                if (r == 0) {
++                    commonDivisor = num2;
++                    break;
++                }
++                num1 = r;
++                r = num2 % num1;
++                if (r == 0) {
++                    commonDivisor = num1;
++                    break;
++                }
++                num2 = r;
++            }
++            mValueNum /= commonDivisor;
++            mValueDenom /= commonDivisor;
++        }
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+index b90ab5cd..74d1813c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+@@ -197,10 +197,10 @@ private void transferFunds(){
+             Price price = new Price(commoditiesDbAdapter.getCommodityUID(mOriginAmount.getCurrency().getCurrencyCode()),
+                     commoditiesDbAdapter.getCommodityUID(mTargetCurrency.getCurrencyCode()));
+             price.setSource(Price.SOURCE_USER);
+-            BigDecimal rateDecimal = mConvertedAmount.asBigDecimal().divide(mOriginAmount.asBigDecimal(), RoundingMode.HALF_EVEN);
+-            Money rate = new Money(rateDecimal, mTargetCurrency); //the currency is irrelevant
+-            price.setValueNum(rate.getNumerator());
+-            price.setValueDenom(rate.getDenominator());
++            // fractions cannot be exacted represented by BigDecimal.
++            price.setValueNum(mConvertedAmount.getNumerator() * mOriginAmount.getDenominator());
++            price.setValueDenom(mOriginAmount.getNumerator() * mConvertedAmount.getDenominator());
++            price.reduce();
+             pricesDbAdapter.addRecord(price);
+ 
+             mOnTransferFundsListener.transferComplete(mConvertedAmount);

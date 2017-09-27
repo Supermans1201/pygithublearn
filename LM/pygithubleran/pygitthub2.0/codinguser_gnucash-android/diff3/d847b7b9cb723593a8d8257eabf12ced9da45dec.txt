@@ -1,0 +1,969 @@
+From d847b7b9cb723593a8d8257eabf12ced9da45dec Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 17 Mar 2015 16:16:37 +0100
+Subject: [PATCH] Code refactoring
+
+Renamed ScheduledEvents to ScheduledActions
+and all corresponding sub-classes, database adapters and variables.
+---
+ .../gnucash/android/app/GnuCashApplication.java    |   9 +-
+ .../org/gnucash/android/db/DatabaseHelper.java     |  48 +++++----
+ .../org/gnucash/android/db/DatabaseSchema.java     |  12 +--
+ ...bAdapter.java => ScheduledActionDbAdapter.java} | 112 ++++++++++-----------
+ .../gnucash/android/db/TransactionsDbAdapter.java  |   7 +-
+ .../java/org/gnucash/android/export/Exporter.java  |   8 +-
+ .../gnucash/android/export/xml/GncXmlExporter.java |  28 +++---
+ .../gnucash/android/export/xml/GncXmlHelper.java   |   4 +-
+ .../{ScheduledEvent.java => ScheduledAction.java}  |  20 ++--
+ .../gnucash/android/service/SchedulerService.java  |  44 ++++----
+ .../ScheduledTransactionsListFragment.java         |  18 ++--
+ .../ui/transaction/TransactionFormFragment.java    |   8 +-
+ .../gnucash/android/ui/util/RecurrenceParser.java  |  50 ++++-----
+ 13 files changed, 181 insertions(+), 187 deletions(-)
+ rename app/src/main/java/org/gnucash/android/db/{ScheduledEventDbAdapter.java => ScheduledActionDbAdapter.java} (51%)
+ rename app/src/main/java/org/gnucash/android/model/{ScheduledEvent.java => ScheduledAction.java} (92%)
+
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 09e86289..c4615c3f 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -23,7 +23,6 @@
+ import android.content.SharedPreferences;
+ import android.database.SQLException;
+ import android.database.sqlite.SQLiteDatabase;
+-import android.os.SystemClock;
+ import android.preference.PreferenceManager;
+ import android.util.Log;
+ import org.gnucash.android.R;
+@@ -62,7 +61,7 @@
+ 
+     private static SplitsDbAdapter mSplitsDbAdapter;
+ 
+-    private static ScheduledEventDbAdapter mScheduledEventDbAdapter;
++    private static ScheduledActionDbAdapter mScheduledActionDbAdapter;
+ 
+     @Override
+     public void onCreate(){
+@@ -78,7 +77,7 @@ public void onCreate(){
+         mSplitsDbAdapter = new SplitsDbAdapter(mDb);
+         mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
+         mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+-        mScheduledEventDbAdapter = new ScheduledEventDbAdapter(mDb);
++        mScheduledActionDbAdapter = new ScheduledActionDbAdapter(mDb);
+     }
+ 
+     public static AccountsDbAdapter getAccountsDbAdapter() {
+@@ -93,8 +92,8 @@ public static SplitsDbAdapter getSplitsDbAdapter() {
+         return mSplitsDbAdapter;
+     }
+ 
+-    public static ScheduledEventDbAdapter getScheduledEventDbAdapter(){
+-        return mScheduledEventDbAdapter;
++    public static ScheduledActionDbAdapter getScheduledEventDbAdapter(){
++        return mScheduledActionDbAdapter;
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 28074cca..80656e32 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2012 - 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -25,13 +25,11 @@
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.AccountType;
+-import org.gnucash.android.model.ScheduledEvent;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
+-import static org.gnucash.android.db.DatabaseSchema.ScheduledEventEntry;
+ import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
+ import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+-
++import static org.gnucash.android.db.DatabaseSchema.ScheduledActionEntry;
+ /**
+  * Helper class for managing the SQLite database.
+  * Creates the database and handles upgrades
+@@ -112,22 +110,22 @@
+             + ");" + createUpdatedAtTrigger(SplitEntry.TABLE_NAME);
+ 
+ 
+-    public static final String SCHEDULED_EVENTS_TABLE_CREATE = "CREATE TABLE " + ScheduledEventEntry.TABLE_NAME + " ("
+-            + ScheduledEventEntry._ID                   + " integer primary key autoincrement, "
+-            + ScheduledEventEntry.COLUMN_UID            + " varchar(255) not null UNIQUE, "
+-            + ScheduledEventEntry.COLUMN_EVENT_UID      + " varchar(255) not null, "
+-            + ScheduledEventEntry.COLUMN_TYPE           + " varchar(255) not null, "
+-            + ScheduledEventEntry.COLUMN_PERIOD         + " integer not null, "
+-            + ScheduledEventEntry.COLUMN_LAST_RUN       + " integer default 0, "
+-            + ScheduledEventEntry.COLUMN_START_TIME     + " integer not null, "
+-            + ScheduledEventEntry.COLUMN_END_TIME       + " integer default 0, "
+-            + ScheduledEventEntry.COLUMN_TAG            + " text, "
+-            + ScheduledEventEntry.COLUMN_ENABLED        + " tinyint default 1, " //enabled by default
+-            + ScheduledEventEntry.COLUMN_NUM_OCCURRENCES+ " integer default 0, "
+-            + ScheduledEventEntry.COLUMN_EXECUTION_COUNT+ " integer default 0, "
+-            + ScheduledEventEntry.COLUMN_CREATED_AT     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+-            + ScheduledEventEntry.COLUMN_MODIFIED_AT    + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+-            + ");" + createUpdatedAtTrigger(ScheduledEventEntry.TABLE_NAME);
++    public static final String SCHEDULED_ACTIONS_TABLE_CREATE = "CREATE TABLE " + ScheduledActionEntry.TABLE_NAME + " ("
++            + ScheduledActionEntry._ID                   + " integer primary key autoincrement, "
++            + ScheduledActionEntry.COLUMN_UID            + " varchar(255) not null UNIQUE, "
++            + ScheduledActionEntry.COLUMN_EVENT_UID      + " varchar(255) not null, "
++            + ScheduledActionEntry.COLUMN_TYPE           + " varchar(255) not null, "
++            + ScheduledActionEntry.COLUMN_PERIOD         + " integer not null, "
++            + ScheduledActionEntry.COLUMN_LAST_RUN       + " integer default 0, "
++            + ScheduledActionEntry.COLUMN_START_TIME     + " integer not null, "
++            + ScheduledActionEntry.COLUMN_END_TIME       + " integer default 0, "
++            + ScheduledActionEntry.COLUMN_TAG            + " text, "
++            + ScheduledActionEntry.COLUMN_ENABLED        + " tinyint default 1, " //enabled by default
++            + ScheduledActionEntry.COLUMN_NUM_OCCURRENCES+ " integer default 0, "
++            + ScheduledActionEntry.COLUMN_EXECUTION_COUNT+ " integer default 0, "
++            + ScheduledActionEntry.COLUMN_CREATED_AT     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++            + ScheduledActionEntry.COLUMN_MODIFIED_AT    + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
++            + ");" + createUpdatedAtTrigger(ScheduledActionEntry.TABLE_NAME);
+ 
+ 
+     /**
+@@ -375,7 +373,7 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+                 MigrationHelper.createUpdatedAndModifiedColumns(db, SplitEntry.TABLE_NAME);
+ 
+                 Log.i(LOG_TAG, "Creating scheduled events table");
+-                db.execSQL(SCHEDULED_EVENTS_TABLE_CREATE); //TODO: Use the actual SQL statements
++                db.execSQL(SCHEDULED_ACTIONS_TABLE_CREATE); //TODO: Use the actual SQL statements
+                 //TODO: Migrate existing scheduled transactions (cancel pending intents)
+ 
+                 //TODO: Migrate old scheduled events using only SQL, code had changed
+@@ -399,7 +397,7 @@ private void createDatabaseTables(SQLiteDatabase db) {
+         db.execSQL(ACCOUNTS_TABLE_CREATE);
+         db.execSQL(TRANSACTIONS_TABLE_CREATE);
+         db.execSQL(SPLITS_TABLE_CREATE);
+-        db.execSQL(SCHEDULED_EVENTS_TABLE_CREATE);
++        db.execSQL(SCHEDULED_ACTIONS_TABLE_CREATE);
+ 
+         String createAccountUidIndex = "CREATE UNIQUE INDEX '" + AccountEntry.INDEX_UID + "' ON "
+                 + AccountEntry.TABLE_NAME + "(" + AccountEntry.COLUMN_UID + ")";
+@@ -410,8 +408,8 @@ private void createDatabaseTables(SQLiteDatabase db) {
+         String createSplitUidIndex = "CREATE UNIQUE INDEX '" + SplitEntry.INDEX_UID +"' ON "
+                 + SplitEntry.TABLE_NAME + "(" + SplitEntry.COLUMN_UID + ")";
+ 
+-        String createScheduledEventUidIndex = "CREATE UNIQUE INDEX '" + ScheduledEventEntry.INDEX_UID
+-                +"' ON " + ScheduledEventEntry.TABLE_NAME + "(" + ScheduledEventEntry.COLUMN_UID + ")";
++        String createScheduledEventUidIndex = "CREATE UNIQUE INDEX '" + ScheduledActionEntry.INDEX_UID
++                +"' ON " + ScheduledActionEntry.TABLE_NAME + "(" + ScheduledActionEntry.COLUMN_UID + ")";
+ 
+         db.execSQL(createAccountUidIndex);
+         db.execSQL(createTransactionUidIndex);
+@@ -428,7 +426,7 @@ private void dropAllDatabaseTables(SQLiteDatabase db) {
+         db.execSQL("DROP TABLE IF EXISTS " + AccountEntry.TABLE_NAME);
+         db.execSQL("DROP TABLE IF EXISTS " + TransactionEntry.TABLE_NAME);
+         db.execSQL("DROP TABLE IF EXISTS " + SplitEntry.TABLE_NAME);
+-        db.execSQL("DROP TABLE IF EXISTS " + ScheduledEventEntry.TABLE_NAME);
++        db.execSQL("DROP TABLE IF EXISTS " + ScheduledActionEntry.TABLE_NAME);
+     }
+ 
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 63ff4e1c..21b0b556 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -103,23 +103,23 @@ private DatabaseSchema(){}
+         public static final String INDEX_UID                    = "split_uid_index";
+     }
+ 
+-    public static abstract class ScheduledEventEntry implements CommonColumns {
+-        public static final String TABLE_NAME           = "scheduled_events";
++    public static abstract class ScheduledActionEntry implements CommonColumns {
++        public static final String TABLE_NAME           = "scheduled_actions";
+ 
+         public static final String COLUMN_TYPE          = "type";
+-        public static final String COLUMN_EVENT_UID     = "event_uid";
++        public static final String COLUMN_EVENT_UID     = "action_uid";
+         public static final String COLUMN_START_TIME    = "start_time";
+         public static final String COLUMN_END_TIME      = "end_time";
+         public static final String COLUMN_LAST_RUN      = "last_run";
+         public static final String COLUMN_PERIOD        = "period";
+         /**
+-         * Tags for any scheduled event specific information
++         * Tags for any scheduled action-specific information
+          */
+         public static final String COLUMN_TAG               = "tag";
+         public static final String COLUMN_ENABLED           = "is_enabled";
+         public static final String COLUMN_NUM_OCCURRENCES   = "num_occurrences";
+         public static final String COLUMN_EXECUTION_COUNT   = "execution_count";
+ 
+-        public static final String INDEX_UID            = "scheduled_event_uid_index";
++        public static final String INDEX_UID            = "scheduled_action_uid_index";
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+similarity index 51%
+rename from app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+rename to app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index 49c82328..a5983c69 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -22,73 +22,73 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.DatabaseSchema.ScheduledEventEntry;
+-import org.gnucash.android.export.ExportParams;
+-import org.gnucash.android.model.ScheduledEvent;
++import org.gnucash.android.model.ScheduledAction;
+ 
+ import java.util.ArrayList;
+ import java.util.List;
+ 
++import static org.gnucash.android.db.DatabaseSchema.*;
++
+ /**
+  * Database adapter for fetching/saving/modifying scheduled events
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class ScheduledEventDbAdapter extends DatabaseAdapter {
++public class ScheduledActionDbAdapter extends DatabaseAdapter {
+ 
+-    public ScheduledEventDbAdapter(SQLiteDatabase db){
+-        super(db, ScheduledEventEntry.TABLE_NAME);
++    public ScheduledActionDbAdapter(SQLiteDatabase db){
++        super(db, ScheduledActionEntry.TABLE_NAME);
+     }
+ 
+     /**
+      * Returns application-wide instance of database adapter
+      * @return ScheduledEventDbAdapter instance
+      */
+-    public static ScheduledEventDbAdapter getInstance(){
++    public static ScheduledActionDbAdapter getInstance(){
+         return GnuCashApplication.getScheduledEventDbAdapter();
+     }
+ 
+     /**
+      * Adds a scheduled event to the database or replaces the existing entry if one with the same GUID exists
+-     * @param scheduledEvent {@link org.gnucash.android.model.ScheduledEvent} to be added
++     * @param scheduledAction {@link org.gnucash.android.model.ScheduledAction} to be added
+      * @return Database row ID of the newly created/replaced instance
+      */
+-    public long addScheduledEvent(ScheduledEvent scheduledEvent){
+-        ContentValues contentValues = getContentValues(scheduledEvent);
+-        contentValues.put(ScheduledEventEntry.COLUMN_EVENT_UID, scheduledEvent.getEventUID());
+-        contentValues.put(ScheduledEventEntry.COLUMN_PERIOD,    scheduledEvent.getPeriod());
+-        contentValues.put(ScheduledEventEntry.COLUMN_START_TIME, scheduledEvent.getStartTime());
+-        contentValues.put(ScheduledEventEntry.COLUMN_END_TIME,  scheduledEvent.getEndTime());
+-        contentValues.put(ScheduledEventEntry.COLUMN_LAST_RUN,  scheduledEvent.getLastRun());
+-        contentValues.put(ScheduledEventEntry.COLUMN_TYPE,      scheduledEvent.getEventType().name());
+-        contentValues.put(ScheduledEventEntry.COLUMN_TAG,       scheduledEvent.getTag());
+-        contentValues.put(ScheduledEventEntry.COLUMN_ENABLED,   scheduledEvent.isEnabled() ? "1":"0");
+-        contentValues.put(ScheduledEventEntry.COLUMN_NUM_OCCURRENCES, scheduledEvent.getNumberOfOccurences());
+-        contentValues.put(ScheduledEventEntry.COLUMN_EXECUTION_COUNT, scheduledEvent.getExecutionCount());
++    public long addScheduledEvent(ScheduledAction scheduledAction){
++        ContentValues contentValues = getContentValues(scheduledAction);
++        contentValues.put(ScheduledActionEntry.COLUMN_EVENT_UID, scheduledAction.getEventUID());
++        contentValues.put(ScheduledActionEntry.COLUMN_PERIOD,    scheduledAction.getPeriod());
++        contentValues.put(ScheduledActionEntry.COLUMN_START_TIME, scheduledAction.getStartTime());
++        contentValues.put(ScheduledActionEntry.COLUMN_END_TIME,  scheduledAction.getEndTime());
++        contentValues.put(ScheduledActionEntry.COLUMN_LAST_RUN,  scheduledAction.getLastRun());
++        contentValues.put(ScheduledActionEntry.COLUMN_TYPE,      scheduledAction.getActionType().name());
++        contentValues.put(ScheduledActionEntry.COLUMN_TAG,       scheduledAction.getTag());
++        contentValues.put(ScheduledActionEntry.COLUMN_ENABLED,   scheduledAction.isEnabled() ? "1":"0");
++        contentValues.put(ScheduledActionEntry.COLUMN_NUM_OCCURRENCES, scheduledAction.getNumberOfOccurences());
++        contentValues.put(ScheduledActionEntry.COLUMN_EXECUTION_COUNT, scheduledAction.getExecutionCount());
+ 
+         Log.d(TAG, "Replace scheduled event in the db");
+-        return mDb.replace(ScheduledEventEntry.TABLE_NAME, null, contentValues);
++        return mDb.replace(ScheduledActionEntry.TABLE_NAME, null, contentValues);
+     }
+ 
+     /**
+-     * Builds a {@link org.gnucash.android.model.ScheduledEvent} instance from a row to cursor in the database.
++     * Builds a {@link org.gnucash.android.model.ScheduledAction} instance from a row to cursor in the database.
+      * The cursor should be already pointing to the right entry in the data set. It will not be modified in any way
+      * @param cursor Cursor pointing to data set
+      * @return ScheduledEvent object instance
+      */
+-    private ScheduledEvent buildScheduledEventInstance(final Cursor cursor){
+-        String eventUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_EVENT_UID));
+-        long period     = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_PERIOD));
+-        long startTime  = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_START_TIME));
+-        long endTime    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_END_TIME));
+-        long lastRun    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_LAST_RUN));
+-        String typeString = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_TYPE));
+-        String tag      = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_TAG));
+-        boolean enabled = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_ENABLED)) > 0;
+-        int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_NUM_OCCURRENCES));
+-        int execCount = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_EXECUTION_COUNT));
+-
+-        ScheduledEvent event = new ScheduledEvent(ScheduledEvent.EventType.valueOf(typeString));
++    private ScheduledAction buildScheduledEventInstance(final Cursor cursor){
++        String eventUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_EVENT_UID));
++        long period     = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
++        long startTime  = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
++        long endTime    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_END_TIME));
++        long lastRun    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_LAST_RUN));
++        String typeString = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TYPE));
++        String tag      = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TAG));
++        boolean enabled = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ENABLED)) > 0;
++        int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_NUM_OCCURRENCES));
++        int execCount = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_EXECUTION_COUNT));
++
++        ScheduledAction event = new ScheduledAction(ScheduledAction.ActionType.valueOf(typeString));
+         populateModel(cursor, event);
+         event.setPeriod(period);
+         event.setStartTime(startTime);
+@@ -104,69 +104,69 @@ private ScheduledEvent buildScheduledEventInstance(final Cursor cursor){
+     }
+ 
+     /**
+-     * Returns an instance of {@link org.gnucash.android.model.ScheduledEvent} from the database record
++     * Returns an instance of {@link org.gnucash.android.model.ScheduledAction} from the database record
+      * @param uid GUID of event
+      * @return ScheduledEvent object instance
+      */
+-    public ScheduledEvent getScheduledEvent(String uid){
++    public ScheduledAction getScheduledEvent(String uid){
+         Cursor cursor = fetchRecord(getID(uid));
+ 
+-        ScheduledEvent scheduledEvent = null;
++        ScheduledAction scheduledAction = null;
+         if (cursor != null) {
+             if (cursor.moveToFirst()) {
+-                scheduledEvent = buildScheduledEventInstance(cursor);
++                scheduledAction = buildScheduledEventInstance(cursor);
+             }
+             cursor.close();
+         }
+-        return scheduledEvent;
++        return scheduledAction;
+     }
+ 
+     /**
+-     * Returns all {@link org.gnucash.android.model.ScheduledEvent}s from the database with the specified event UID
++     * Returns all {@link org.gnucash.android.model.ScheduledAction}s from the database with the specified event UID
+      * @param eventUID GUID of the event itself
+      * @return List of ScheduledEvents
+      */
+-    public List<ScheduledEvent> getScheduledEventsWithUID(@NonNull String eventUID){
+-        Cursor cursor = mDb.query(ScheduledEventEntry.TABLE_NAME, null,
+-                ScheduledEventEntry.COLUMN_EVENT_UID + "= ?",
++    public List<ScheduledAction> getScheduledEventsWithUID(@NonNull String eventUID){
++        Cursor cursor = mDb.query(ScheduledActionEntry.TABLE_NAME, null,
++                ScheduledActionEntry.COLUMN_EVENT_UID + "= ?",
+                 new String[]{eventUID}, null, null, null);
+ 
+-        List<ScheduledEvent> scheduledEvents = new ArrayList<ScheduledEvent>();
++        List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         try {
+             while (cursor.moveToNext()) {
+-                scheduledEvents.add(buildScheduledEventInstance(cursor));
++                scheduledActions.add(buildScheduledEventInstance(cursor));
+             }
+         } finally {
+             cursor.close();
+         }
+-        return scheduledEvents;
++        return scheduledActions;
+     }
+ 
+     /**
+      * Returns all scheduled events in the database
+      * @return List with all scheduled events
+      */
+-    public List<ScheduledEvent> getAllScheduledEvents(){
++    public List<ScheduledAction> getAllScheduledEvents(){
+         Cursor cursor = fetchAllRecords();
+-        List<ScheduledEvent> scheduledEvents = new ArrayList<ScheduledEvent>();
++        List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         while (cursor.moveToNext()){
+-            scheduledEvents.add(buildScheduledEventInstance(cursor));
++            scheduledActions.add(buildScheduledEventInstance(cursor));
+         }
+-        return scheduledEvents;
++        return scheduledActions;
+     }
+ 
+     /**
+      * Returns all enabled scheduled actions in the database
+      * @return List of enalbed scheduled actions
+      */
+-    public List<ScheduledEvent> getAllEnabledScheduledActions(){
++    public List<ScheduledAction> getAllEnabledScheduledActions(){
+         Cursor cursor = mDb.query(mTableName,
+-                        null, ScheduledEventEntry.COLUMN_ENABLED + "=1", null, null, null, null);
+-        List<ScheduledEvent> scheduledEvents = new ArrayList<ScheduledEvent>();
++                        null, ScheduledActionEntry.COLUMN_ENABLED + "=1", null, null, null, null);
++        List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         while (cursor.moveToNext()){
+-            scheduledEvents.add(buildScheduledEventInstance(cursor));
++            scheduledActions.add(buildScheduledEventInstance(cursor));
+         }
+-        return scheduledEvents;
++        return scheduledActions;
+     }
+ 
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 959fe6f5..fb8d9c20 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -17,10 +17,7 @@
+ 
+ package org.gnucash.android.db;
+ 
+-import android.app.AlarmManager;
+-import android.app.PendingIntent;
+ import android.content.ContentValues;
+-import android.content.Context;
+ import android.database.Cursor;
+ import android.database.SQLException;
+ import android.database.sqlite.SQLiteDatabase;
+@@ -243,9 +240,9 @@ public Cursor fetchAllTransactionsForAccount(String accountUID){
+      */
+     public Cursor fetchAllScheduledTransactions(){
+         SQLiteQueryBuilder queryBuilder = new SQLiteQueryBuilder();
+-        queryBuilder.setTables(TransactionEntry.TABLE_NAME + " INNER JOIN " + ScheduledEventEntry.TABLE_NAME + " ON "
++        queryBuilder.setTables(TransactionEntry.TABLE_NAME + " INNER JOIN " + ScheduledActionEntry.TABLE_NAME + " ON "
+                 + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = "
+-                + ScheduledEventEntry.TABLE_NAME + "." + ScheduledEventEntry.COLUMN_EVENT_UID);
++                + ScheduledActionEntry.TABLE_NAME + "." + ScheduledActionEntry.COLUMN_EVENT_UID);
+ 
+         String[] projectionIn = new String[]{TransactionEntry.TABLE_NAME + ".*"};
+         String sortOrder = TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_DESCRIPTION + " ASC";
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 910ec5a1..e9627a94 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -23,7 +23,7 @@
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.ScheduledEventDbAdapter;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ 
+@@ -63,7 +63,7 @@
+     protected AccountsDbAdapter mAccountsDbAdapter;
+     protected TransactionsDbAdapter mTransactionsDbAdapter;
+     protected SplitsDbAdapter mSplitsDbAdapter;
+-    protected ScheduledEventDbAdapter mScheduledEventDbAdapter;
++    protected ScheduledActionDbAdapter mScheduledActionDbAdapter;
+     protected Context mContext;
+ 
+     public Exporter(ExportParams params, SQLiteDatabase db) {
+@@ -73,12 +73,12 @@ public Exporter(ExportParams params, SQLiteDatabase db) {
+             mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+             mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
+             mSplitsDbAdapter = SplitsDbAdapter.getInstance();
+-            mScheduledEventDbAdapter = ScheduledEventDbAdapter.getInstance();
++            mScheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+         } else {
+             mSplitsDbAdapter = new SplitsDbAdapter(db);
+             mTransactionsDbAdapter = new TransactionsDbAdapter(db, mSplitsDbAdapter);
+             mAccountsDbAdapter = new AccountsDbAdapter(db, mTransactionsDbAdapter);
+-            mScheduledEventDbAdapter = new ScheduledEventDbAdapter(db);
++            mScheduledActionDbAdapter = new ScheduledActionDbAdapter(db);
+         }
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 16d9d403..dbb194ff 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -27,7 +27,7 @@
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+-import org.gnucash.android.model.ScheduledEvent;
++import org.gnucash.android.model.ScheduledAction;
+ import org.xmlpull.v1.XmlPullParserFactory;
+ import org.xmlpull.v1.XmlSerializer;
+ 
+@@ -306,24 +306,24 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+     }
+ 
+     /**
+-     * Serializes {@link org.gnucash.android.model.ScheduledEvent}s from the database to XML
++     * Serializes {@link org.gnucash.android.model.ScheduledAction}s from the database to XML
+      * @param xmlSerializer XML serializer
+      * @throws IOException
+      */
+     private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOException{
+-        Cursor cursor = mScheduledEventDbAdapter.fetchAllRecords();
++        Cursor cursor = mScheduledActionDbAdapter.fetchAllRecords();
+         while (cursor.moveToNext()) {
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SCHEDULED_ACTION);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_ID);
+-            String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_UID));
++            String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_UID));
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_VALUE_GUID, actionUID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_ID);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_NAME);
+-            xmlSerializer.text(cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_TYPE)));
++            xmlSerializer.text(cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TYPE)));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_NAME);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_ENABLED);
+-            boolean enabled = cursor.getShort(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_ENABLED)) > 0;
++            boolean enabled = cursor.getShort(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ENABLED)) > 0;
+             xmlSerializer.text(enabled ? "y" : "n");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_ENABLED);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_AUTO_CREATE);
+@@ -343,32 +343,32 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_INSTANCE_COUNT);
+ 
+             //start date
+-            long startTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_START_TIME));
++            long startTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
+             serializeDate(xmlSerializer, GncXmlHelper.TAG_SX_START, startTime);
+ 
+-            long lastRunTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_LAST_RUN));
++            long lastRunTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_LAST_RUN));
+             if (lastRunTime > 0){
+                 serializeDate(xmlSerializer, GncXmlHelper.TAG_SX_LAST, lastRunTime);
+             }
+ 
+-            long endTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_END_TIME));
++            long endTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_END_TIME));
+             if (endTime > 0) {
+                 //end date
+                 serializeDate(xmlSerializer, GncXmlHelper.TAG_SX_END, endTime);
+             } else { //add number of occurrences
+-                int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_NUM_OCCURRENCES));
++                int numOccurrences = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_NUM_OCCURRENCES));
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_NUM_OCCUR);
+                 xmlSerializer.text(Integer.toString(numOccurrences));
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_NUM_OCCUR);
+ 
+                 //remaining occurrences
+-                int executionCount = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_EXECUTION_COUNT));
++                int executionCount = cursor.getInt(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_EXECUTION_COUNT));
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_REM_OCCUR);
+                 xmlSerializer.text(Integer.toString(numOccurrences - executionCount));
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_REM_OCCUR);
+             }
+ 
+-            String tag = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_TAG));
++            String tag = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TAG));
+             if (tag != null && !tag.isEmpty()){
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_TAG);
+                 xmlSerializer.text(tag);
+@@ -383,8 +383,8 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.text("1");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RX_MULT);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_RX_PERIOD_TYPE);
+-            long period = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_PERIOD));
+-            xmlSerializer.text(GncXmlHelper.getScheduledPeriodType(ScheduledEvent.getPeriodType(period)));
++            long period = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_PERIOD));
++            xmlSerializer.text(GncXmlHelper.getScheduledPeriodType(ScheduledAction.getPeriodType(period)));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RX_PERIOD_TYPE);
+ 
+             serializeDate(xmlSerializer, GncXmlHelper.TAG_RX_START, startTime);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 1bcb02c5..89ac32eb 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -18,7 +18,7 @@
+ package org.gnucash.android.export.xml;
+ 
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.model.ScheduledEvent;
++import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.TransactionType;
+ import org.w3c.dom.Document;
+@@ -140,7 +140,7 @@ public static String formatDate(long milliseconds){
+      * @param periodType PeriodType from the scheduled action
+      * @return Period type as a noun
+      */
+-    public static String getScheduledPeriodType(ScheduledEvent.PeriodType periodType){
++    public static String getScheduledPeriodType(ScheduledAction.PeriodType periodType){
+         switch (periodType) {
+             case DAILY:
+                 return "day";
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+similarity index 92%
+rename from app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+rename to app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index 905d8503..03de9ad8 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -26,7 +26,7 @@
+ *
+ * @author Ngewi Fet <ngewif@gmail.com>
+ */
+-public class ScheduledEvent extends BaseModel{
++public class ScheduledAction extends BaseModel{
+ 
+     private long mPeriod;
+     private long mStartDate;
+@@ -36,7 +36,7 @@
+     /**
+      * Types of events which can be scheduled
+      */
+-    public enum EventType {TRANSACTION, EXPORT}
++    public enum ActionType {TRANSACTION, EXPORT}
+ 
+     public enum PeriodType {DAILY, WEEKLY, FORTNIGHTLY, MONTHLY, YEARLY}
+ 
+@@ -59,7 +59,7 @@
+     /**
+      * Type of event being scheduled
+      */
+-    private EventType mEventType;
++    private ActionType mActionType;
+ 
+     /**
+      * Number of occurences of this event
+@@ -71,19 +71,19 @@
+      */
+     private int mNumberOfExecutions = 0;
+ 
+-    public ScheduledEvent(EventType eventType){
+-        mEventType = eventType;
++    public ScheduledAction(ActionType actionType){
++        mActionType = actionType;
+         mStartDate = System.currentTimeMillis();
+         mEndDate = 0;
+         mIsEnabled = true; //all actions are enabled by default
+     }
+ 
+-    public EventType getEventType() {
+-        return mEventType;
++    public ActionType getActionType() {
++        return mActionType;
+     }
+ 
+-    public void setEventType(EventType eventType) {
+-        this.mEventType = eventType;
++    public void setActionType(ActionType actionType) {
++        this.mActionType = actionType;
+     }
+ 
+     public String getEventUID() {
+@@ -227,7 +227,7 @@ public String getRepeatString(){
+     @Override
+     public String toString() {
+ 
+-        String eventString = mEventType.name() + " - " + getRepeatString();
++        String eventString = mActionType.name() + " - " + getRepeatString();
+ 
+         return eventString;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 54fc630b..37af77a4 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -24,11 +24,11 @@
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseSchema;
+-import org.gnucash.android.db.ScheduledEventDbAdapter;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.ExporterAsyncTask;
+-import org.gnucash.android.model.ScheduledEvent;
++import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
+ 
+ import java.util.List;
+@@ -60,19 +60,19 @@ protected void onHandleIntent(Intent intent) {
+                 LOG_TAG);
+         wakeLock.acquire();
+ 
+-        ScheduledEventDbAdapter scheduledEventDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+-        List<ScheduledEvent> scheduledEvents = scheduledEventDbAdapter.getAllEnabledScheduledActions();
++        ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
++        List<ScheduledAction> scheduledActions = scheduledActionDbAdapter.getAllEnabledScheduledActions();
+ 
+-        for (ScheduledEvent scheduledEvent : scheduledEvents) {
+-            long lastRun    = scheduledEvent.getLastRun();
+-            long period     = scheduledEvent.getPeriod();
+-            long endTime    = scheduledEvent.getEndTime();
++        for (ScheduledAction scheduledAction : scheduledActions) {
++            long lastRun    = scheduledAction.getLastRun();
++            long period     = scheduledAction.getPeriod();
++            long endTime    = scheduledAction.getEndTime();
+ 
+             long now = System.currentTimeMillis();
+             //if we did not exceed the endtime (if there is one), and one execution period has passed since last run
+-            if (((endTime > 0 && now < endTime) || (scheduledEvent.getExecutionCount() < scheduledEvent.getNumberOfOccurences()) || endTime == 0)
++            if (((endTime > 0 && now < endTime) || (scheduledAction.getExecutionCount() < scheduledAction.getNumberOfOccurences()) || endTime == 0)
+                     && (lastRun + period) < now ){
+-                executeScheduledEvent(scheduledEvent);
++                executeScheduledEvent(scheduledAction);
+             }
+         }
+ 
+@@ -83,12 +83,12 @@ protected void onHandleIntent(Intent intent) {
+ 
+     /**
+      * Executes a scheduled event according to the specified parameters
+-     * @param scheduledEvent ScheduledEvent to be executed
++     * @param scheduledAction ScheduledEvent to be executed
+      */
+-    private void executeScheduledEvent(ScheduledEvent scheduledEvent){
+-        switch (scheduledEvent.getEventType()){
++    private void executeScheduledEvent(ScheduledAction scheduledAction){
++        switch (scheduledAction.getActionType()){
+             case TRANSACTION:
+-                String eventUID = scheduledEvent.getEventUID();
++                String eventUID = scheduledAction.getEventUID();
+                 TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+                 Transaction trxnTemplate = transactionsDbAdapter.getTransaction(eventUID);
+                 Transaction recurringTrxn = new Transaction(trxnTemplate, true);
+@@ -98,7 +98,7 @@ private void executeScheduledEvent(ScheduledEvent scheduledEvent){
+                 break;
+ 
+             case EXPORT:
+-                ExportParams params = ExportParams.parseCsv(scheduledEvent.getTag());
++                ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
+                 try {
+                     new ExporterAsyncTask(GnuCashApplication.getAppContext()).execute(params).get();
+                 } catch (InterruptedException e) {
+@@ -115,15 +115,15 @@ private void executeScheduledEvent(ScheduledEvent scheduledEvent){
+         }
+ 
+         //update last run time
+-        ScheduledEventDbAdapter.getInstance().updateRecord(
+-                scheduledEvent.getUID(),
+-                DatabaseSchema.ScheduledEventEntry.COLUMN_LAST_RUN,
++        ScheduledActionDbAdapter.getInstance().updateRecord(
++                scheduledAction.getUID(),
++                DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN,
+                 Long.toString(System.currentTimeMillis()));
+ 
+         //update the execution count
+-        ScheduledEventDbAdapter.getInstance().updateRecord(
+-                scheduledEvent.getUID(),
+-                DatabaseSchema.ScheduledEventEntry.COLUMN_EXECUTION_COUNT,
+-                Integer.toString(scheduledEvent.getExecutionCount()+1));
++        ScheduledActionDbAdapter.getInstance().updateRecord(
++                scheduledAction.getUID(),
++                DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT,
++                Integer.toString(scheduledAction.getExecutionCount()+1));
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index 1fc68f83..a4e503e6 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -48,9 +48,9 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseSchema;
+-import org.gnucash.android.db.ScheduledEventDbAdapter;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.model.ScheduledEvent;
++import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.ui.UxArgument;
+ 
+@@ -109,13 +109,13 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                     for (long id : getListView().getCheckedItemIds()) {
+                         Log.i(TAG, "Cancelling scheduled transaction(s)");
+                         String trnUID = mTransactionsDbAdapter.getUID(id);
+-                        ScheduledEventDbAdapter scheduledEventDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+-                        List<ScheduledEvent> events = scheduledEventDbAdapter.getScheduledEventsWithUID(trnUID);
++                        ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
++                        List<ScheduledAction> events = scheduledActionDbAdapter.getScheduledEventsWithUID(trnUID);
+ 
+                         if (mTransactionsDbAdapter.deleteRecord(id)){
+                             Toast.makeText(getActivity(), R.string.toast_recurring_transaction_deleted, Toast.LENGTH_SHORT).show();
+-                            for (ScheduledEvent event : events) {
+-                                scheduledEventDbAdapter.deleteRecord(event.getUID());
++                            for (ScheduledAction event : events) {
++                                scheduledActionDbAdapter.deleteRecord(event.getUID());
+                             }
+                         }
+                     }
+@@ -410,10 +410,10 @@ public void bindView(View view, Context context, Cursor cursor) {
+             }
+             TextView descriptionTextView = (TextView) view.findViewById(R.id.secondary_text);
+ 
+-            ScheduledEventDbAdapter scheduledEventDbAdapter = ScheduledEventDbAdapter.getInstance();
+-            List<ScheduledEvent> events = scheduledEventDbAdapter.getScheduledEventsWithUID(transaction.getUID());
++            ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
++            List<ScheduledAction> events = scheduledActionDbAdapter.getScheduledEventsWithUID(transaction.getUID());
+             StringBuilder repeatStringBuilder = new StringBuilder();
+-            for (ScheduledEvent event : events) {
++            for (ScheduledAction event : events) {
+                 repeatStringBuilder.append(event.getRepeatString()).append("\n");
+             }
+             descriptionTextView.setText(repeatStringBuilder.toString());
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 5c7b0187..5cdcfc81 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -673,7 +673,7 @@ private void saveNewTransaction() {
+      * @see #saveNewTransaction()
+      */
+     private void scheduleRecurringTransaction() {
+-        List<ScheduledEvent> events = RecurrenceParser.parse(mEventRecurrence, ScheduledEvent.EventType.TRANSACTION);
++        List<ScheduledAction> events = RecurrenceParser.parse(mEventRecurrence, ScheduledAction.ActionType.TRANSACTION);
+ 
+         if (events.size() == 0) //there are no scheduled events detected
+             return;
+@@ -684,11 +684,11 @@ private void scheduleRecurringTransaction() {
+         recurringTransaction.setTemplate(true);
+         mTransactionsDbAdapter.addTransaction(recurringTransaction);
+ 
+-        ScheduledEventDbAdapter scheduledEventDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+-        for (ScheduledEvent event : events) {
++        ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
++        for (ScheduledAction event : events) {
+             event.setEventUID(recurringTransaction.getUID());
+             event.setLastRun(System.currentTimeMillis());
+-            scheduledEventDbAdapter.addScheduledEvent(event);
++            scheduledActionDbAdapter.addScheduledEvent(event);
+ 
+             Log.i("TransactionFormFragment", event.toString());
+         }
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index 828860e2..e40530be 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -18,7 +18,7 @@
+ 
+ import android.text.format.Time;
+ import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence;
+-import org.gnucash.android.model.ScheduledEvent;
++import org.gnucash.android.model.ScheduledAction;
+ 
+ import java.util.ArrayList;
+ import java.util.Calendar;
+@@ -26,7 +26,7 @@
+ 
+ /**
+  * Parses {@link com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence}s to generate
+- * {@link org.gnucash.android.model.ScheduledEvent}s
++ * {@link org.gnucash.android.model.ScheduledAction}s
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+@@ -40,16 +40,16 @@
+ 
+ 
+     /**
+-     * Parses an event recurrence to produce {@link org.gnucash.android.model.ScheduledEvent}s for each recurrence.
+-     * <p>Each {@link org.gnucash.android.model.ScheduledEvent} represents just one simple repeating schedule, e.g. every Monday.
++     * Parses an event recurrence to produce {@link org.gnucash.android.model.ScheduledAction}s for each recurrence.
++     * <p>Each {@link org.gnucash.android.model.ScheduledAction} represents just one simple repeating schedule, e.g. every Monday.
+      * If there are multiple schedules in the recurrence e.g. every Monday and Tuesday, then two ScheduledEvents will be generated</p>
+      * @param eventRecurrence Event recurrence pattern obtained from dialog
+-     * @param eventType Type of event recurrence
++     * @param actionType Type of event recurrence
+      * @return List of ScheduledEvents
+      */
+-    public static List<ScheduledEvent> parse(EventRecurrence eventRecurrence, ScheduledEvent.EventType eventType){
++    public static List<ScheduledAction> parse(EventRecurrence eventRecurrence, ScheduledAction.ActionType actionType){
+         long period = 0;
+-        List<ScheduledEvent> scheduledEventList = new ArrayList<ScheduledEvent>();
++        List<ScheduledAction> scheduledActionList = new ArrayList<ScheduledAction>();
+         switch(eventRecurrence.freq){
+             case EventRecurrence.DAILY: {
+                 if (eventRecurrence.interval == 0) //I assume this is a bug from the picker library
+@@ -57,10 +57,10 @@
+                 else
+                     period = eventRecurrence.interval * DAY_MILLIS;
+ 
+-                ScheduledEvent scheduledEvent = new ScheduledEvent(eventType);
+-                scheduledEvent.setPeriod(period);
+-                parseEndTime(eventRecurrence, scheduledEvent);
+-                scheduledEventList.add(scheduledEvent);
++                ScheduledAction scheduledAction = new ScheduledAction(actionType);
++                scheduledAction.setPeriod(period);
++                parseEndTime(eventRecurrence, scheduledAction);
++                scheduledActionList.add(scheduledAction);
+             }
+                 break;
+ 
+@@ -70,12 +70,12 @@
+                 else
+                     period = eventRecurrence.interval * WEEK_MILLIS;
+                 for (int day : eventRecurrence.byday) {
+-                    ScheduledEvent scheduledEvent = new ScheduledEvent(eventType);
+-                    scheduledEvent.setPeriod(period);
++                    ScheduledAction scheduledAction = new ScheduledAction(actionType);
++                    scheduledAction.setPeriod(period);
+ 
+-                    scheduledEvent.setStartTime(nextDayOfWeek(day2CalendarDay(day)).getTimeInMillis());
+-                    parseEndTime(eventRecurrence, scheduledEvent);
+-                    scheduledEventList.add(scheduledEvent);
++                    scheduledAction.setStartTime(nextDayOfWeek(day2CalendarDay(day)).getTimeInMillis());
++                    parseEndTime(eventRecurrence, scheduledAction);
++                    scheduledActionList.add(scheduledAction);
+                 }
+             }
+             break;
+@@ -85,14 +85,14 @@
+                     period = MONTH_MILLIS;
+                 else
+                     period = eventRecurrence.interval * MONTH_MILLIS;
+-                ScheduledEvent event = new ScheduledEvent(eventType);
++                ScheduledAction event = new ScheduledAction(actionType);
+                 event.setPeriod(period);
+                 Calendar now = Calendar.getInstance();
+                 now.add(Calendar.MONTH, 1);
+                 event.setStartTime(now.getTimeInMillis());
+                 parseEndTime(eventRecurrence, event);
+ 
+-                scheduledEventList.add(event);
++                scheduledActionList.add(event);
+             }
+                 break;
+ 
+@@ -101,32 +101,32 @@
+                     period = YEAR_MILLIS;
+                 else
+                     period = eventRecurrence.interval * YEAR_MILLIS;
+-                ScheduledEvent event = new ScheduledEvent(eventType);
++                ScheduledAction event = new ScheduledAction(actionType);
+                 event.setPeriod(period);
+                 Calendar now = Calendar.getInstance();
+                 now.add(Calendar.YEAR, 1);
+                 event.setStartTime(now.getTimeInMillis());
+                 parseEndTime(eventRecurrence, event);
+-                scheduledEventList.add(event);
++                scheduledActionList.add(event);
+             }
+                 break;
+         }
+-        return scheduledEventList;
++        return scheduledActionList;
+     }
+ 
+     /**
+      * Parses the end time from an EventRecurrence object and sets it to the <code>scheduledEvent</code>.
+      * The end time is specified in the dialog either by number of occurences or a date.
+      * @param eventRecurrence Event recurrence pattern obtained from dialog
+-     * @param scheduledEvent ScheduledEvent to be to updated
++     * @param scheduledAction ScheduledEvent to be to updated
+      */
+-    private static void parseEndTime(EventRecurrence eventRecurrence, ScheduledEvent scheduledEvent) {
++    private static void parseEndTime(EventRecurrence eventRecurrence, ScheduledAction scheduledAction) {
+         if (eventRecurrence.until != null && eventRecurrence.until.length() > 0) {
+             Time endTime = new Time();
+             endTime.parse(eventRecurrence.until);
+-            scheduledEvent.setEndTime(endTime.toMillis(false));
++            scheduledAction.setEndTime(endTime.toMillis(false));
+         } else if (eventRecurrence.count > 0){
+-            scheduledEvent.setNumberOfOccurences(eventRecurrence.count);
++            scheduledAction.setNumberOfOccurences(eventRecurrence.count);
+         }
+     }
+ 

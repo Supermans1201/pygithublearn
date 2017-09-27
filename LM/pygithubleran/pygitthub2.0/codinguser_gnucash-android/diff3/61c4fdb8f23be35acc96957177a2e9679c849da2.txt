@@ -1,0 +1,796 @@
+From 61c4fdb8f23be35acc96957177a2e9679c849da2 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 16 Apr 2015 18:48:15 +0200
+Subject: [PATCH] Added ability to create schedules for backup
+
+Added option to select backup to restore from
+Updated strings for translation
+---
+ .../android/db/ScheduledActionDbAdapter.java       |  67 ++++++++++-
+ .../gnucash/android/export/ExportAsyncTask.java    |   6 +
+ .../android/export/ExportDialogFragment.java       | 123 ++++++++++++++++++++-
+ .../org/gnucash/android/export/ExportParams.java   |   9 +-
+ .../org/gnucash/android/model/ScheduledAction.java |   3 +-
+ .../gnucash/android/service/SchedulerService.java  |   2 +-
+ .../ui/settings/GeneralPreferenceFragment.java     |   7 +-
+ .../android/ui/settings/SettingsActivity.java      |   9 +-
+ app/src/main/res/layout/dialog_export.xml          |  34 +++++-
+ app/src/main/res/values-de/strings.xml             |   3 +
+ app/src/main/res/values-el/strings.xml             |   3 +
+ app/src/main/res/values-es-rMX/strings.xml         |   3 +
+ app/src/main/res/values-es/strings.xml             |   3 +
+ app/src/main/res/values-fr/strings.xml             |   3 +
+ app/src/main/res/values-hu/strings.xml             |   3 +
+ app/src/main/res/values-it/strings.xml             |   3 +
+ app/src/main/res/values-nb/strings.xml             |   3 +
+ app/src/main/res/values-nl/strings.xml             |   3 +
+ app/src/main/res/values-pt-rBR/strings.xml         |   5 +-
+ app/src/main/res/values-ru/strings.xml             |   3 +
+ app/src/main/res/values-zh/strings.xml             |   3 +
+ app/src/main/res/values/donottranslate.xml         |   3 +-
+ app/src/main/res/values/strings.xml                |   3 +
+ .../main/res/xml/fragment_general_preferences.xml  |  10 +-
+ 24 files changed, 290 insertions(+), 24 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index 7de737bd..61bcee47 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -23,6 +23,8 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.export.ExportFormat;
++import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.model.ScheduledAction;
+ 
+ import java.util.ArrayList;
+@@ -197,14 +199,15 @@ public ScheduledAction getScheduledAction(String uid){
+     }
+ 
+     /**
+-     * Returns all {@link org.gnucash.android.model.ScheduledAction}s from the database with the specified event UID
+-     * @param eventUID GUID of the event itself
++     * Returns all {@link org.gnucash.android.model.ScheduledAction}s from the database with the specified action UID.
++     * Note that the parameter is not of the the scheduled action record, but from the action table
++     * @param actionUID GUID of the event itself
+      * @return List of ScheduledEvents
+      */
+-    public List<ScheduledAction> getScheduledActionsWithUID(@NonNull String eventUID){
++    public List<ScheduledAction> getScheduledActionsWithUID(@NonNull String actionUID){
+         Cursor cursor = mDb.query(ScheduledActionEntry.TABLE_NAME, null,
+                 ScheduledActionEntry.COLUMN_ACTION_UID + "= ?",
+-                new String[]{eventUID}, null, null, null);
++                new String[]{actionUID}, null, null, null);
+ 
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         try {
+@@ -218,10 +221,64 @@ public ScheduledAction getScheduledAction(String uid){
+     }
+ 
+     /**
++     * Returns the first export scheduled action in the database which matches the ExportFormat.
++     * <p>There is an expectation that there will only be one scheduled action per export format in the database.</p>
++     * @param exportFormat ExportFormat of scheduled backup
++     * @return ScheduledAction for the backup or null
++     */
++    public ScheduledAction getScheduledBackupAction(ExportFormat exportFormat){
++        Cursor cursor = mDb.query(ScheduledActionEntry.TABLE_NAME, null,
++                ScheduledActionEntry.COLUMN_TYPE + "= ?",
++                new String[]{ScheduledAction.ActionType.BACKUP.name()}, null, null, null);
++        try{
++            while(cursor.moveToNext()){
++                String paramsCsv = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TAG));
++                ExportParams params = ExportParams.parseCsv(paramsCsv);
++                if (params.getExportFormat() == exportFormat){
++                    return buildScheduledEventInstance(cursor);
++                }
++            }
++        } finally {
++            cursor.close();
++        }
++        return null;
++    }
++
++    /**
++     * Deletes the scheduled backup actions which correspond to the export format
++     * @param exportFormat Export format
++     * @return Number of records deleted
++     */
++    public int deleteScheduledBackupAction(ExportFormat exportFormat){
++        List<String> uidsToBeDeleted = new ArrayList<>();
++        Cursor cursor = mDb.query(ScheduledActionEntry.TABLE_NAME,
++                new String[]{ScheduledActionEntry.COLUMN_UID, ScheduledActionEntry.COLUMN_TAG},
++                ScheduledActionEntry.COLUMN_TYPE + "= ?",
++                new String[]{ScheduledAction.ActionType.BACKUP.name()}, null, null, null);
++        try{
++            while(cursor.moveToNext()){
++                String paramsCsv = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TAG));
++                ExportParams params = ExportParams.parseCsv(paramsCsv);
++                if (params.getExportFormat() == exportFormat){
++                    uidsToBeDeleted.add(cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_UID)));
++                }
++            }
++        } finally {
++            cursor.close();
++        }
++
++        int count = 0;
++        for (String uid : uidsToBeDeleted) {
++            count += mDb.delete(mTableName, ScheduledActionEntry.COLUMN_UID + "=?", new String[]{uid});
++        }
++        return count;
++    }
++
++    /**
+      * Returns all scheduled events in the database
+      * @return List with all scheduled events
+      */
+-    public List<ScheduledAction> getAllScheduledEvents(){
++    public List<ScheduledAction> getAllScheduledActions(){
+         Cursor cursor = fetchAllRecords();
+         List<ScheduledAction> scheduledActions = new ArrayList<ScheduledAction>();
+         while (cursor.moveToNext()){
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 6cea9592..e3b28045 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -203,6 +203,12 @@ protected void onPostExecute(Boolean exportResult) {
+                 }
+                 break;
+ 
++
++            case DROPBOX:
++                break;
++
++            case GOOGLE_DRIVE:
++                break;
+             default:
+                 break;
+         }
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+index 60acebad..7f0180cb 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+@@ -22,6 +22,8 @@
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.DialogFragment;
++import android.support.v4.app.FragmentManager;
++import android.text.format.Time;
+ import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.View;
+@@ -33,16 +35,26 @@
+ import android.widget.Spinner;
+ import android.widget.TextView;
+ 
++import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence;
++import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrenceFormatter;
++import com.doomonafireball.betterpickers.recurrencepicker.RecurrencePickerDialog;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.ScheduledActionDbAdapter;
++import org.gnucash.android.model.BaseModel;
++import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.ui.util.RecurrenceParser;
+ 
+ import java.io.File;
++import java.util.List;
++import java.util.UUID;
+ 
+ /**
+  * Dialog fragment for exporting account information as OFX files.
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class ExportDialogFragment extends DialogFragment {
++public class ExportDialogFragment extends DialogFragment implements RecurrencePickerDialog.OnRecurrenceSetListener {
+ 		
+ 	/**
+ 	 * Spinner for selecting destination for the exported file.
+@@ -81,12 +93,30 @@
+ 	 * File path for saving the OFX files
+ 	 */
+ 	String mFilePath;
+-	
++
++	/**
++	 * Recurrence text view
++	 */
++	TextView mRecurrenceTextView;
++
++	/**
++	 * Event recurrence options
++	 */
++	EventRecurrence mEventRecurrence = new EventRecurrence();
++
++	/**
++	 * Recurrence rule
++	 */
++	String mRecurrenceRule;
++
+ 	/**
+ 	 * Tag for logging
+ 	 */
+ 	private static final String TAG = "ExportDialogFragment";
+ 
++	/**
++	 * Export format
++	 */
+     private ExportFormat mExportFormat = ExportFormat.QIF;
+ 
+ 	/**
+@@ -101,9 +131,23 @@ public void onClick(View v) {
+             exportParameters.setExportAllTransactions(mExportAllCheckBox.isChecked());
+             exportParameters.setTargetFilepath(mFilePath);
+             int position = mDestinationSpinner.getSelectedItemPosition();
++			//TODO: accomodate all the different export targets
+             exportParameters.setExportTarget(position == 0 ? ExportParams.ExportTarget.SHARING : ExportParams.ExportTarget.SD_CARD);
+             exportParameters.setDeleteTransactionsAfterExport(mDeleteAllCheckBox.isChecked());
+ 
++			//TODO: Block from creating scheduled action with SHARE target
++			ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
++			scheduledActionDbAdapter.deleteScheduledBackupAction(mExportFormat);
++			List<ScheduledAction> events = RecurrenceParser.parse(mEventRecurrence,
++					ScheduledAction.ActionType.BACKUP);
++			//this is done on purpose, we will add only one scheduled action per export type
++			//FIXME: Prevent user from setting multiple days in dialog or update scheduled action parser to return only one recurrence
++			if (!events.isEmpty()){
++				ScheduledAction scheduledAction = events.get(0);
++				scheduledAction.setTag(exportParameters.toCsv());
++				scheduledAction.setActionUID(UUID.randomUUID().toString().replaceAll("-", ""));
++				scheduledActionDbAdapter.addScheduledAction(scheduledAction);
++			}
+             dismiss();
+ 
+             Log.i(TAG, "Commencing async export of transactions");
+@@ -123,6 +167,7 @@ public void onRadioButtonClicked(View view){
+                     mExportWarningTextView.setVisibility(View.GONE);
+                 }
+                 break;
++
+             case R.id.radio_qif_format:
+                 mExportFormat = ExportFormat.QIF;
+                 //TODO: Also check that there exist transactions with multiple currencies before displaying warning
+@@ -132,10 +177,33 @@ public void onRadioButtonClicked(View view){
+                 } else {
+                     mExportWarningTextView.setVisibility(View.GONE);
+                 }
++				break;
++
++			case R.id.radio_xml_format:
++				mExportFormat = ExportFormat.GNC_XML;
++				mExportWarningTextView.setVisibility(View.GONE);
++				break;
+         }
++		refreshRecurrenceTextView(mExportFormat);
+         mFilePath = getActivity().getExternalFilesDir(null) + "/" + Exporter.buildExportFilename(mExportFormat);
+     }
+ 
++	/**
++	 * Refreshes the recurrence text view for the specified backup format
++	 * This is meant to be called every time the backup format is changed in the dialog
++	 * @param exportFormat ExportFormat
++	 */
++	private void refreshRecurrenceTextView(ExportFormat exportFormat){
++		String repeatString	= getString(R.string.label_tap_to_create_schedule);
++		ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
++		ScheduledAction scheduledBackup = scheduledActionDbAdapter.getScheduledBackupAction(exportFormat);
++		if (scheduledBackup != null){
++			repeatString = scheduledBackup.getRepeatString();
++			mRecurrenceRule = scheduledBackup.getRuleString();
++		}
++		mRecurrenceTextView.setText(repeatString);
++	}
++
+ 	@Override
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+@@ -158,7 +226,7 @@ private void bindViews(){
+         assert v != null;
+         mDestinationSpinner = (Spinner) v.findViewById(R.id.spinner_export_destination);
+ 		ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(getActivity(),
+-		        R.array.export_destinations, android.R.layout.simple_spinner_item);		
++		        R.array.export_destinations, android.R.layout.simple_spinner_item);
+ 		adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);		
+ 		mDestinationSpinner.setAdapter(adapter);
+ 		
+@@ -174,17 +242,44 @@ private void bindViews(){
+ 		mCancelButton = (Button) v.findViewById(R.id.btn_cancel);
+ 		
+ 		mCancelButton.setOnClickListener(new View.OnClickListener() {
+-			
++
+ 			@Override
+-			public void onClick(View v) {				
++			public void onClick(View v) {
+ 				dismiss();
+ 			}
+ 		});
+ 		
+ 		mSaveButton.setOnClickListener(new ExportClickListener());
+ 
++		mRecurrenceTextView     = (TextView) v.findViewById(R.id.input_recurrence);
++		mRecurrenceTextView.setOnClickListener(new View.OnClickListener() {
++			@Override
++			public void onClick(View view) {
++				FragmentManager fm = getActivity().getSupportFragmentManager();
++				Bundle b = new Bundle();
++				Time t = new Time();
++				t.setToNow();
++				b.putLong(RecurrencePickerDialog.BUNDLE_START_TIME_MILLIS, t.toMillis(false));
++				b.putString(RecurrencePickerDialog.BUNDLE_TIME_ZONE, t.timezone);
++
++				// may be more efficient to serialize and pass in EventRecurrence
++				b.putString(RecurrencePickerDialog.BUNDLE_RRULE, mRecurrenceRule);
++
++				RecurrencePickerDialog rpd = (RecurrencePickerDialog) fm.findFragmentByTag(
++						"recurrence_picker");
++				if (rpd != null) {
++					rpd.dismiss();
++				}
++				rpd = new RecurrencePickerDialog();
++				rpd.setArguments(b);
++				rpd.setOnRecurrenceSetListener(ExportDialogFragment.this);
++				rpd.show(fm, "recurrence_picker");
++			}
++		});
++
+         mExportWarningTextView = (TextView) v.findViewById(R.id.export_warning);
+ 
++		//this part (setting the export format) must come after the recurrence view bindings above
+         String defaultExportFormat = sharedPrefs.getString(getString(R.string.key_default_export_format), ExportFormat.QIF.name());
+         mExportFormat = ExportFormat.valueOf(defaultExportFormat);
+         View.OnClickListener clickListener = new View.OnClickListener() {
+@@ -205,8 +300,26 @@ public void onClick(View view) {
+         if (defaultExportFormat.equalsIgnoreCase(ExportFormat.QIF.name())){
+             qifRadioButton.performClick();
+         }
++
++		RadioButton xmlRadioButton = (RadioButton) v.findViewById(R.id.radio_xml_format);
++		xmlRadioButton.setOnClickListener(clickListener);
++		if (defaultExportFormat.equalsIgnoreCase(ExportFormat.GNC_XML.name())){
++			xmlRadioButton.performClick();
++		}
+ 	}
+ 
++	@Override
++	public void onRecurrenceSet(String rrule) {
++		mRecurrenceRule = rrule;
++		String repeatString = getString(R.string.label_tap_to_create_schedule);
++
++		if (mRecurrenceRule != null){
++			mEventRecurrence.parse(mRecurrenceRule);
++			repeatString = EventRecurrenceFormatter.getRepeatString(getActivity(), getResources(),
++					mEventRecurrence, true);
++		}
++		mRecurrenceTextView.setText(repeatString);
++	}
+ 
+ 	/**
+ 	 * Callback for when the activity chooser dialog is completed
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index 3aed8df6..23c51596 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -16,6 +16,8 @@
+ 
+ package org.gnucash.android.export;
+ 
++import org.gnucash.android.app.GnuCashApplication;
++
+ /**
+  * Encapsulation of the parameters used for exporting transactions.
+  * The parameters are determined by the user in the export dialog and are then transmitted to the asynchronous task which
+@@ -26,11 +28,13 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class ExportParams {
++    final static private String DROPBOX_APP_KEY = "INSERT_APP_KEY";
++    final static private String DROPBOX_APP_SECRET = "INSERT_APP_SECRET";
+     /**
+      * Options for the destination of the exported transctions file.
+      * It could be stored on the {@link #SD_CARD} or exported through another program via {@link #SHARING}
+      */
+-    public enum ExportTarget {SD_CARD, SHARING};
++    public enum ExportTarget {SD_CARD, SHARING, DROPBOX, GOOGLE_DRIVE }
+ 
+     /**
+      * Format to use for the exported transactions
+@@ -65,7 +69,7 @@
+      * @param format Format to use when exporting the transactions
+      */
+     public ExportParams(ExportFormat format){
+-        mExportFormat = format;
++        setExportFormat(format);
+     }
+ 
+     /**
+@@ -82,6 +86,7 @@ public ExportFormat getExportFormat() {
+      */
+     public void setExportFormat(ExportFormat exportFormat) {
+         this.mExportFormat = exportFormat;
++        mTargetFilepath = GnuCashApplication.getAppContext().getExternalFilesDir(null) + "/" + Exporter.buildExportFilename(mExportFormat);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index 91e0cd65..059c87e9 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -41,7 +41,8 @@
+     /**
+      * Types of events which can be scheduled
+      */
+-    public enum ActionType {TRANSACTION, EXPORT}
++    public enum ActionType {TRANSACTION, BACKUP
++    }
+ 
+     /**
+      * Next scheduled run of Event
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index bc0e3b94..1e30993b 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -97,7 +97,7 @@ private void executeScheduledEvent(ScheduledAction scheduledAction){
+                 transactionsDbAdapter.addTransaction(recurringTrxn);
+                 break;
+ 
+-            case EXPORT:
++            case BACKUP:
+                 ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
+                 try {
+                     new ExportAsyncTask(GnuCashApplication.getAppContext()).execute(params).get();
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
+index aac7aea9..6cdc26a5 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
+@@ -72,8 +72,11 @@ public void onResume() {
+         }
+         pref.setOnPreferenceChangeListener(this);
+ 
+-        pref = findPreference(getString(R.string.key_restore_backup));
+-        pref.setOnPreferenceClickListener((SettingsActivity)getActivity());
++        pref = findPreference(getString(R.string.key_restore_last_backup));
++        pref.setOnPreferenceClickListener((SettingsActivity) getActivity());
++
++		pref = findPreference(getString(R.string.key_restore_backup));
++		pref.setOnPreferenceClickListener((SettingsActivity)getActivity());
+ 	}
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 87f12125..ff9ff106 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -136,6 +136,9 @@ protected void onCreate(Bundle savedInstanceState) {
+             pref = findPreference(getString(R.string.key_import_accounts));
+             pref.setOnPreferenceClickListener(this);
+ 
++            pref = findPreference(getString(R.string.key_restore_backup));
++            pref.setOnPreferenceClickListener(this);
++
+             pref = findPreference(getString(R.string.key_use_double_entry));
+             pref.setOnPreferenceChangeListener(this);
+ 
+@@ -148,7 +151,7 @@ protected void onCreate(Bundle savedInstanceState) {
+             pref = findPreference(getString(R.string.key_build_version));
+             pref.setOnPreferenceClickListener(this);
+ 
+-            pref = findPreference(getString(R.string.key_restore_backup));
++            pref = findPreference(getString(R.string.key_restore_last_backup));
+             pref.setOnPreferenceClickListener(this);
+ 
+             pref = findPreference(getString(R.string.key_change_passcode));
+@@ -252,7 +255,7 @@ private void setDefaultCurrencyListener() {
+     @Override
+     public boolean onPreferenceClick(Preference preference) {
+         String key = preference.getKey();
+-        if (key.equals(getString(R.string.key_import_accounts))){
++        if (key.equals(getString(R.string.key_import_accounts)) || key.equals(getString(R.string.key_restore_backup))){
+             importAccounts();
+             return true;
+         }
+@@ -262,7 +265,7 @@ public boolean onPreferenceClick(Preference preference) {
+             return true;
+         }
+ 
+-        if (key.equals(getString(R.string.key_restore_backup))){
++        if (key.equals(getString(R.string.key_restore_last_backup))){
+             importMostRecentBackup();
+         }
+ 
+diff --git a/app/src/main/res/layout/dialog_export.xml b/app/src/main/res/layout/dialog_export.xml
+index 4af9f99a..05914a4e 100644
+--- a/app/src/main/res/layout/dialog_export.xml
++++ b/app/src/main/res/layout/dialog_export.xml
+@@ -67,7 +67,13 @@
+             <RadioButton android:id="@+id/radio_ofx_format"
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
++                android:layout_marginRight="20dp"
+                          android:text="OFX"/>
++
++            <RadioButton android:id="@+id/radio_xml_format"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:text="XML"/>
+         </RadioGroup>
+         <TextView android:id="@+id/export_warning"
+                   android:layout_marginLeft="@dimen/dialog_padding"
+@@ -81,10 +87,12 @@
+ 	        android:layout_height="wrap_content"
+ 	        android:layout_marginLeft="10dp"
+ 	        android:textAppearance="?android:attr/textAppearanceMedium"
+-	        android:text="@string/option_export_all_transactions"        
++	        android:text="@string/option_export_all_transactions"
++            android:visibility="gone"
+ 	        />
+ 	    <TextView android:layout_marginLeft="@dimen/dialog_padding"
+ 	        android:text="@string/hint_export_choice"
++            android:visibility="gone"
+ 	        style="@style/TextAppearance.Hint" />
+ 	    
+ 	    <CheckBox android:id="@+id/checkbox_post_export_delete"
+@@ -97,9 +105,31 @@
+ 	        />
+ 	        
+ 	    <TextView android:layout_marginLeft="@dimen/dialog_padding"
++            android:layout_marginBottom="@dimen/dialog_padding"
+ 	        android:text="@string/hint_delete_after_export"
+ 	        style="@style/TextAppearance.Hint" />
+-    	
++
++        <LinearLayout
++            android:layout_height="wrap_content"
++            android:layout_width="match_parent"
++            style="@style/FormRow">
++            <TextView
++                android:id="@+id/label_recurring_transaction"
++                android:text="@string/label_recurring_transaction"
++                android:layout_height="wrap_content"
++                android:layout_width="wrap_content"
++                android:layout_marginBottom="-8dip"
++                style="@style/TextAppearance.EditTransaction_LabelSmall" />
++
++            <TextView android:id="@+id/input_recurrence"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:gravity="center"
++                android:text="@string/label_tap_to_create_schedule"
++                style="@style/Dropdown.TextView" />
++
++        </LinearLayout>
++
+     	<include layout="@layout/default_buttons"/>
+ 
+ 	</LinearLayout>
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index eb18220f..b3f959a4 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -448,6 +448,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index ab71cd4b..26159d67 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -473,6 +473,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index cb4bbb97..f1d03408 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -458,6 +458,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index cc087fc7..66a8195a 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -455,6 +455,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 68b5c0aa..ad832eaa 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -455,6 +455,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 21ea3058..79930b63 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -459,6 +459,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index ea1a72fd..5d812b75 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -459,6 +459,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 11251834..3f1771a5 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -455,6 +455,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 28c952cb..cde60205 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -460,6 +460,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 80ffb1be..4724468f 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -458,7 +458,10 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-    <plurals name="label_every_x_days">
++	<string name="title_restore_last_backup">Restore last backup</string>
++	<string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++	<string name="title_restore_backup">Restore Backup...</string>
++	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+     </plurals>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 78f6befc..49f1ee3e 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -461,6 +461,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index f02d7df8..1e782b8e 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -456,6 +456,9 @@
+     <string name="label_delete_transactions"></string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule"></string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values/donottranslate.xml b/app/src/main/res/values/donottranslate.xml
+index 39f06ff0..33960b1d 100644
+--- a/app/src/main/res/values/donottranslate.xml
++++ b/app/src/main/res/values/donottranslate.xml
+@@ -21,8 +21,9 @@
+     <string name="key_default_export_format">default_export_format</string>
+     <string name="key_recurring_transaction_ids">recurring_transaction_ids</string>
+     <string name="key_create_default_accounts">create_default_accounts</string>
+-    <string name="key_restore_backup">restore_backup</string>
++    <string name="key_restore_last_backup">restore_last_backup</string>
+     <string name="key_save_opening_balances">save_opening_balances</string>
++    <string name="key_restore_backup">restore_backup</string>
+ 
+     <string-array name="key_transaction_type_values">
+         <item>CREDIT</item>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index a43a27b9..388908d3 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -458,6 +458,9 @@
+     <string name="label_delete_transactions">Delete transactions</string>
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++    <string name="title_restore_last_backup">Restore last backup</string>
++    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
++    <string name="title_restore_backup">Restore Backup...</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/xml/fragment_general_preferences.xml b/app/src/main/res/xml/fragment_general_preferences.xml
+index 0ae77125..3cf64644 100644
+--- a/app/src/main/res/xml/fragment_general_preferences.xml
++++ b/app/src/main/res/xml/fragment_general_preferences.xml
+@@ -16,7 +16,16 @@
+ -->
+ 
+ <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" >
++    <PreferenceCategory android:title="Backup">
++        <Preference android:summary="@string/summary_restore_last_backup"
++            android:key="@string/key_restore_last_backup"
++            android:title="@string/title_restore_last_backup" />
++        <Preference android:title="@string/title_restore_backup"
++            android:key="@string/key_restore_backup"
++            android:summary="Select a specific backup to restore from. \nBackups are located on SDCARD/org.gnucash.android/backups" />
++    </PreferenceCategory>
+     <PreferenceCategory android:title="@string/title_export_preference_category">
++
+         <ListPreference android:title="@string/title_default_export_format"
+                         android:entryValues="@array/key_export_format_values"
+                         android:entries="@array/export_formats"
+@@ -29,7 +38,6 @@
+         <CheckBoxPreference android:summary="@string/hint_export_choice" android:key="@string/key_export_all_transactions" android:title="@string/title_export_all_transactions"/>
+         <CheckBoxPreference android:summary="@string/hint_delete_after_export" android:key="@string/key_delete_transactions_after_export" android:title="@string/title_always_delete_exported_transactions"/>
+         <CheckBoxPreference android:key="@string/key_xml_ofx_header" android:summary="@string/summary_xml_ofx_header" android:title="@string/title_xml_ofx_header"/>
+-        <Preference android:summary="Restore accounts and transactions from the last backup" android:key="@string/key_restore_backup" android:title="Restore last backup" />
+     </PreferenceCategory>
+     
+     

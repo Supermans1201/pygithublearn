@@ -1,0 +1,731 @@
+From 6f61d35142daa9efc395ad7e03bb9e1e7c76cd3b Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 4 Jan 2013 14:17:46 +0100
+Subject: [PATCH 1/2] Fixed: OFX exports now correctly includes double account
+ information Fixed: Update transfer accounts in NewTransactionFragment when
+ the main account is changed Removed currency condition for transfer accounts.
+ Transferring to account with different currency is possible Account type is
+ now required in the database Removed code displaying total account balances.
+ Need to find a better way to display per currency balance (just as in GnuCash
+ for desktop) Added a GnucashApplication class to provide static context
+ Refactored OFX export code
+
+---
+ GnucashMobile/AndroidManifest.xml                  |  2 +-
+ .../gnucash/android/app/GnuCashApplication.java    | 27 +++++++
+ .../src/org/gnucash/android/data/Account.java      | 85 ++++++++++++++++++++--
+ .../src/org/gnucash/android/data/Transaction.java  | 20 +++--
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 28 +++++++
+ .../src/org/gnucash/android/db/DatabaseHelper.java |  2 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  5 +-
+ .../android/ui/accounts/AccountsListFragment.java  |  6 +-
+ .../android/ui/accounts/ExportDialogFragment.java  | 11 ++-
+ .../ui/transactions/NewTransactionFragment.java    | 18 +++--
+ .../src/org/gnucash/android/util/OfxFormatter.java | 65 +----------------
+ 11 files changed, 177 insertions(+), 92 deletions(-)
+ create mode 100644 GnucashMobile/src/org/gnucash/android/app/GnuCashApplication.java
+
+diff --git a/GnucashMobile/AndroidManifest.xml b/GnucashMobile/AndroidManifest.xml
+index eba68ba4..5386d5f6 100644
+--- a/GnucashMobile/AndroidManifest.xml
++++ b/GnucashMobile/AndroidManifest.xml
+@@ -43,7 +43,7 @@
+     <uses-permission android:label="@string/permission_access_sdcard"
+         android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+ 	    
+-    <application
++    <application android:name="org.gnucash.android.app.GnuCashApplication"
+         android:icon="@drawable/ic_launcher"
+         android:label="@string/app_name" 
+         android:theme="@style/Theme.Sherlock.Light.DarkActionBar">
+diff --git a/GnucashMobile/src/org/gnucash/android/app/GnuCashApplication.java b/GnucashMobile/src/org/gnucash/android/app/GnuCashApplication.java
+new file mode 100644
+index 00000000..38c6113d
+--- /dev/null
++++ b/GnucashMobile/src/org/gnucash/android/app/GnuCashApplication.java
+@@ -0,0 +1,27 @@
++package org.gnucash.android.app;
++
++import android.app.Application;
++import android.content.Context;
++
++/**
++ * An {@link Application} subclass for retrieving static context
++ * @author Ngewi Fet <ngewif@gmail.com>
++ *
++ */
++public class GnuCashApplication extends Application{
++
++    private static Context context;
++
++    public void onCreate(){
++        super.onCreate();
++        GnuCashApplication.context = getApplicationContext();
++    }
++
++    /**
++     * Returns the application context
++     * @return Application {@link Context} object
++     */
++    public static Context getAppContext() {
++        return GnuCashApplication.context;
++    }
++}
+\ No newline at end of file
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index 938e7490..56325058 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -23,6 +23,7 @@
+ import java.util.Locale;
+ import java.util.UUID;
+ 
++import org.gnucash.android.util.OfxFormatter;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ 
+@@ -186,13 +187,20 @@ public void setAccountType(AccountType mAccountType) {
+ 
+ 	/**
+ 	 * Adds a transaction to this account
+-	 * The currency of the transaction will be set to the currency of the account
++	 * <p>The currency of the transaction will be set to the currency of the account
+ 	 * if they are not the same. The currency value conversion is performed, just 
+-	 * a different currecy is assigned to the same value amount in the transaction.
++	 * a different currency is assigned to the same value amount in the transaction.</p>
++	 * <p>
++	 * If the transaction has no account Unique ID, it will be set to the UID of this account.
++	 * Some transactions already have the account UID and double account UID set. In that case,
++	 * nothing is changed
++	 * </p>
+ 	 * @param transaction {@link Transaction} to be added to the account
+ 	 */
+ 	public void addTransaction(Transaction transaction){
+-		transaction.setAccountUID(getUID());
++		//some double transactions may already an account UID. Set only for those with null
++		if (transaction.getAccountUID() == null)
++			transaction.setAccountUID(getUID());
+ 		transaction.setCurrency(mCurrency);
+ 		mTransactionsList.add(transaction);
+ 	}
+@@ -206,7 +214,8 @@ public void addTransaction(Transaction transaction){
+ 	 */
+ 	public void setTransactions(List<Transaction> transactionsList){
+ 		for (Transaction transaction : transactionsList) {
+-			transaction.setAccountUID(getUID());
++			if (transaction.getAccountUID() == null)
++				transaction.setAccountUID(getUID());
+ 			transaction.setCurrency(mCurrency);
+ 		}
+ 		this.mTransactionsList = transactionsList;
+@@ -336,12 +345,76 @@ public OfxAccountType ofxAccountTypeMapping(AccountType accountType){
+ 	 * @param parent Parent node to which to add this account's transactions in XML
+ 	 */
+ 	public void toOfx(Document doc, Element parent, boolean allTransactions){
++		Element currency = doc.createElement("CURDEF");
++		currency.appendChild(doc.createTextNode(mCurrency.getCurrencyCode()));						
++		
++		//================= BEGIN BANK ACCOUNT INFO (BANKACCTFROM) =================================
++		
++		Element bankId = doc.createElement("BANKID");
++		bankId.appendChild(doc.createTextNode(OfxFormatter.APP_ID));
++		
++		Element acctId = doc.createElement("ACCTID");
++		acctId.appendChild(doc.createTextNode(mUID));
++		
++		Element accttype = doc.createElement("ACCTTYPE");
++		accttype.appendChild(doc.createTextNode(mAccountType.toString()));
++		
++		Element bankFrom = doc.createElement("BANKACCTFROM");
++		bankFrom.appendChild(bankId);
++		bankFrom.appendChild(acctId);
++		bankFrom.appendChild(accttype);
++		
++		//================= END BANK ACCOUNT INFO ============================================
++		
++		
++		//================= BEGIN ACCOUNT BALANCE INFO =================================
++		String balance = getBalance().toPlainString();
++		String formattedCurrentTimeString = OfxFormatter.getFormattedCurrentTime();
++		
++		Element balanceAmount = doc.createElement("BALAMT");
++		balanceAmount.appendChild(doc.createTextNode(balance));			
++		Element dtasof = doc.createElement("DTASOF");
++		dtasof.appendChild(doc.createTextNode(formattedCurrentTimeString));
++		
++		Element ledgerBalance = doc.createElement("LEDGERBAL");
++		ledgerBalance.appendChild(balanceAmount);
++		ledgerBalance.appendChild(dtasof);
++		
++		//================= END ACCOUNT BALANCE INFO =================================
++		
++		
++		//================= BEGIN TIME PERIOD INFO =================================
++		
++		Element dtstart = doc.createElement("DTSTART");			
++		dtstart.appendChild(doc.createTextNode(formattedCurrentTimeString));
++		
++		Element dtend = doc.createElement("DTEND");
++		dtend.appendChild(doc.createTextNode(formattedCurrentTimeString));
++		
++		//================= END TIME PERIOD INFO =================================
++		
++		
++		//================= BEGIN TRANSACTIONS LIST =================================
++		Element bankTransactionsList = doc.createElement("BANKTRANLIST");
++		bankTransactionsList.appendChild(dtstart);
++		bankTransactionsList.appendChild(dtend);
++		
+ 		for (Transaction transaction : mTransactionsList) {
+ 			if (!allTransactions && transaction.isExported())
+ 				continue;
+ 			
+-			parent.appendChild(transaction.toOfx(doc));
+-		}
++			bankTransactionsList.appendChild(transaction.toOfx(doc, mUID));
++		}		
++		//================= END TRANSACTIONS LIST =================================
++					
++		Element statementTransactions = doc.createElement("STMTRS");
++		statementTransactions.appendChild(currency);
++		statementTransactions.appendChild(bankFrom);
++		statementTransactions.appendChild(bankTransactionsList);
++		statementTransactions.appendChild(ledgerBalance);
++		
++		parent.appendChild(statementTransactions);
++				
+ 	}
+ 
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index 9455bb11..3ae7b31c 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -22,7 +22,8 @@
+ import java.util.Locale;
+ import java.util.UUID;
+ 
+-import org.gnucash.android.data.Account.OfxAccountType;
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.util.OfxFormatter;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+@@ -357,11 +358,13 @@ public void setAccountUID(String accountUID) {
+ 	
+ 	/**
+ 	 * Converts transaction to XML DOM corresponding to OFX Statement transaction and 
+-	 * returns the element node for the transaction
++	 * returns the element node for the transaction.
++	 * The Unique ID of the account is needed in order to properly export double entry transactions
+ 	 * @param doc XML document to which transaction should be added
++	 * @param accountUID Unique Identifier of the account which called the method.
+ 	 * @return Element in DOM corresponding to transaction
+ 	 */
+-	public Element toOfx(Document doc){		
++	public Element toOfx(Document doc, String accountUID){		
+ 		Element transactionNode = doc.createElement("STMTTRN");
+ 		Element type = doc.createElement("TRNTYPE");
+ 		type.appendChild(doc.createTextNode(mType.toString()));
+@@ -398,11 +401,16 @@ public Element toOfx(Document doc){
+ 			Element bankId = doc.createElement("BANKID");
+ 			bankId.appendChild(doc.createTextNode(OfxFormatter.APP_ID));
+ 			
++			//select the proper account as the double account
++			String doubleAccountUID = mDoubleEntryAccountUID.equals(accountUID) ? mAccountUID : mDoubleEntryAccountUID;
++			
+ 			Element acctId = doc.createElement("ACCTID");
+-			acctId.appendChild(doc.createTextNode(mDoubleEntryAccountUID));
++			acctId.appendChild(doc.createTextNode(doubleAccountUID));
+ 			
+-			Element accttype = doc.createElement("ACCTTYPE");
+-			accttype.appendChild(doc.createTextNode(OfxAccountType.CHECKING.toString()));
++			Element accttype = doc.createElement("ACCTTYPE");			
++			AccountsDbAdapter acctDbAdapter = new AccountsDbAdapter(GnuCashApplication.getAppContext());
++			accttype.appendChild(doc.createTextNode(acctDbAdapter.getAccountType(doubleAccountUID).toString()));
++			acctDbAdapter.close();
+ 			
+ 			Element bankAccountTo = doc.createElement("BANKACCTTO");
+ 			bankAccountTo.appendChild(bankId);
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index a452f1fd..dc1f4db3 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -244,6 +244,24 @@ public String getAccountUID(long id){
+ 	}
+ 	
+ 	/**
++	 * Returns the {@link AccountType} of the account with unique ID <code>uid</code>
++	 * @param uid Unique ID of the account
++	 * @return {@link AccountType} of the account
++	 */
++	public AccountType getAccountType(String uid){
++		String type = null;
++		Cursor c = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
++				new String[]{DatabaseHelper.KEY_TYPE}, 
++				DatabaseHelper.KEY_UID + "='" + uid + "'", 
++				null, null, null, null);
++		if (c != null && c.moveToFirst()){
++			type = c.getString(0); //0 because we requested only the type column
++			c.close();
++		}
++		return AccountType.valueOf(type);
++	}
++	
++	/**
+ 	 * Returns the name of the account with id <code>accountID</code>
+ 	 * @param accountID Database ID of the account record
+ 	 * @return Name of the account 
+@@ -379,6 +397,16 @@ public String getCurrencyCode(long id){
+ 	}
+ 	
+ 	/**
++	 * Returns the currency code of account with database ID
++	 * @param accountUID Unique Identifier of the account
++	 * @return ISO 4217 currency code of the account
++	 * @see #getCurrencyCode(long) 
++	 */
++	public String getCurrencyCode(String accountUID){
++		return getCurrencyCode(getAccountID(accountUID));
++	}
++	
++	/**
+ 	 * Deletes all accounts and their transactions from the database
+ 	 */
+ 	public void deleteAllAccounts(){
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+index 6e6138d6..2eb49d39 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -133,7 +133,7 @@
+ 			+ KEY_ROW_ID + " integer primary key autoincrement, "
+ 			+ KEY_UID 	+ " varchar(255) not null, "
+ 			+ KEY_NAME 	+ " varchar(255) not null, "
+-			+ KEY_TYPE 	+ " varchar(255), "			
++			+ KEY_TYPE 	+ " varchar(255) not null, "			
+ 			+ KEY_CURRENCY_CODE + " varchar(255) not null, "
+ 			+ KEY_PARENT_ACCOUNT_UID + " varchar(255), "
+ 			+ "UNIQUE (" + KEY_UID + ")"	
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 295829b0..5b2da60a 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -161,7 +161,7 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+ 		while (c.moveToNext()) {
+ 			Transaction transaction = buildTransactionInstance(c);
+ 			String doubleEntryAccountUID = transaction.getDoubleEntryAccountUID();
+-			//negate double entry transactions for the origin account
++			//negate double entry transactions for the transfer account
+ 			if (doubleEntryAccountUID != null && doubleEntryAccountUID.equals(accountUID)){
+ 				transaction.setAmount(transaction.getAmount().negate());
+ 			}
+@@ -179,6 +179,7 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+ 	 */
+ 	public Transaction buildTransactionInstance(Cursor c){		
+ 		String accountUID = c.getString(DatabaseAdapter.COLUMN_ACCOUNT_UID);
++		String doubleAccountUID = c.getString(DatabaseAdapter.COLUMN_DOUBLE_ENTRY_ACCOUNT_UID);
+ 		Currency currency = Currency.getInstance(getCurrencyCode(accountUID));
+ 		String amount = c.getString(DatabaseAdapter.COLUMN_AMOUNT);
+ 		Money moneyAmount = new Money(new BigDecimal(amount), currency);
+@@ -190,7 +191,7 @@ public Transaction buildTransactionInstance(Cursor c){
+ 		transaction.setTime(c.getLong(DatabaseAdapter.COLUMN_TIMESTAMP));
+ 		transaction.setDescription(c.getString(DatabaseAdapter.COLUMN_DESCRIPTION));
+ 		transaction.setExported(c.getInt(DatabaseAdapter.COLUMN_EXPORTED) == 1);
+-		transaction.setDoubleEntryAccountUID(c.getString(DatabaseAdapter.COLUMN_DOUBLE_ENTRY_ACCOUNT_UID));
++		transaction.setDoubleEntryAccountUID(doubleAccountUID);
+ 		
+ 		return transaction;
+ 	}
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 95236efa..3b0bd5fe 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -40,7 +40,6 @@
+ import android.content.Intent;
+ import android.database.Cursor;
+ import android.os.Bundle;
+-import android.preference.PreferenceManager;
+ import android.support.v4.app.DialogFragment;
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.FragmentManager;
+@@ -411,7 +410,9 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	 */
+ 	public void refreshList(){
+ 		getLoaderManager().restartLoader(0, null, this);
+-		
++				
++/*
++		//TODO: Figure out a way to display account balances
+ 		boolean doubleEntryActive = PreferenceManager.getDefaultSharedPreferences(getActivity())
+ 				.getBoolean(getString(R.string.key_use_double_entry), false);
+ 		
+@@ -427,6 +428,7 @@ public void refreshList(){
+ 			tv.setTextColor(getResources().getColor(R.color.debit_red));
+ 		else
+ 			tv.setTextColor(getResources().getColor(R.color.credit_green));
++*/
+ 	}
+ 	
+ 	/**
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+index b53e4539..27738404 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+@@ -27,6 +27,7 @@
+ import java.nio.channels.FileChannel;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
++import java.util.Locale;
+ 
+ import javax.xml.parsers.DocumentBuilder;
+ import javax.xml.parsers.DocumentBuilderFactory;
+@@ -165,7 +166,8 @@ public void onClick(View v) {
+ 			if (mDeleteAllCheckBox.isChecked()){
+ 				Fragment currentFragment = getActivity().getSupportFragmentManager()
+ 						.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
+-				TransactionsDeleteConfirmationDialog alertFragment = TransactionsDeleteConfirmationDialog.newInstance(R.string.title_confirm_delete, 0);
++				TransactionsDeleteConfirmationDialog alertFragment = 
++						TransactionsDeleteConfirmationDialog.newInstance(R.string.title_confirm_delete, 0);
+ 				alertFragment.setTargetFragment(currentFragment, 0);
+ 				alertFragment.show(getActivity().getSupportFragmentManager(), "transactions_delete_confirmation_dialog");
+ 			}
+@@ -280,9 +282,10 @@ private void shareFile(String path){
+ 		if (defaultEmail != null && defaultEmail.trim().length() > 0){
+ 			shareIntent.putExtra(Intent.EXTRA_EMAIL, new String[]{defaultEmail});
+ 		}			
+-		SimpleDateFormat formatter = new SimpleDateFormat("yyyy.MM.dd HH:mm");
++		SimpleDateFormat formatter = (SimpleDateFormat) SimpleDateFormat.getDateTimeInstance();
++		
+ 		shareIntent.putExtra(Intent.EXTRA_TEXT, getString(R.string.description_export_email) 
+-							+ formatter.format(new Date(System.currentTimeMillis())));
++							+ " " + formatter.format(new Date(System.currentTimeMillis())));
+ 		startActivity(Intent.createChooser(shareIntent, getString(R.string.title_share_ofx_with)));	
+ 	}
+ 	
+@@ -315,7 +318,7 @@ public static void copyFile(File src, File dst) throws IOException
+ 	 * @return String containing the file name
+ 	 */
+ 	public static String buildExportFilename(){
+-		SimpleDateFormat formatter = new SimpleDateFormat("yyyyMMdd_HHmm");
++		SimpleDateFormat formatter = new SimpleDateFormat("yyyyMMdd_HHmm", Locale.US);
+ 		String filename = formatter.format(
+ 				new Date(System.currentTimeMillis())) 
+ 				+ "_gnucash_all.ofx";
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index 17aad77e..1101ff67 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -181,7 +181,7 @@
+ 	/**
+ 	 * Spinner for selecting the transfer account
+ 	 */
+-	private Spinner mTransferAccountSpinner;
++	private Spinner mDoubleAccountSpinner;
+ 
+ 	private boolean mUseDoubleEntry;  
+ 	
+@@ -200,7 +200,7 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 		mAmountEditText = (EditText) v.findViewById(R.id.input_transaction_amount);		
+ 		mCurrencyTextView = (TextView) v.findViewById(R.id.currency_symbol);
+ 		mTransactionTypeButton = (ToggleButton) v.findViewById(R.id.input_transaction_type);
+-		mTransferAccountSpinner = (Spinner) v.findViewById(R.id.input_double_entry_accounts_spinner);
++		mDoubleAccountSpinner = (Spinner) v.findViewById(R.id.input_double_entry_accounts_spinner);
+ 		
+ 		return v;
+ 	}
+@@ -300,8 +300,12 @@ private void initalizeViews() {
+ 	
+ 	private void updateTransferAccountsList(){
+ 		long accountId = ((TransactionsActivity)getActivity()).getCurrentAccountID();
+-		String conditions = "(" + DatabaseHelper.KEY_ROW_ID + " != " + accountId + ") AND " + "(" +
+-							DatabaseHelper.KEY_CURRENCY_CODE + " = '" + mAccountsDbAdapter.getCurrencyCode(accountId) + "')";
++		
++		//TODO: we'll leave out the currency condition for now, maybe look at this in the future
++//		String conditions = "(" + DatabaseHelper.KEY_ROW_ID + " != " + accountId + ") AND " + "(" +
++//							DatabaseHelper.KEY_CURRENCY_CODE + " = '" + mAccountsDbAdapter.getCurrencyCode(accountId) + "')";
++		
++		String conditions = "(" + DatabaseHelper.KEY_ROW_ID + " != " + accountId + ")";
+ 		mCursor = mAccountsDbAdapter.fetchAccounts(conditions);
+ 		
+ 		String[] from = new String[] {DatabaseHelper.KEY_NAME};
+@@ -310,7 +314,7 @@ private void updateTransferAccountsList(){
+ 				android.R.layout.simple_spinner_item, 
+ 				mCursor, from, to, 0);
+ 		mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);		
+-		mTransferAccountSpinner.setAdapter(mCursorAdapter);
++		mDoubleAccountSpinner.setAdapter(mCursorAdapter);
+ 	}
+ 	
+ 	/**
+@@ -386,7 +390,7 @@ public void onClick(View v) {
+ 	private void setSelectedTransferAccount(long accountId){
+ 		for (int pos = 0; pos < mCursorAdapter.getCount(); pos++) {
+ 			if (mCursorAdapter.getItemId(pos) == accountId){
+-				mTransferAccountSpinner.setSelection(pos);				
++				mDoubleAccountSpinner.setSelection(pos);				
+ 				break;
+ 			}
+ 		}
+@@ -441,7 +445,7 @@ private void saveNewTransaction() {
+ 		
+ 		//set the double account
+ 		if (mUseDoubleEntry){
+-			long doubleAccountId = mTransferAccountSpinner.getSelectedItemId();
++			long doubleAccountId = mDoubleAccountSpinner.getSelectedItemId();
+ 			//negate the transaction before saving if we are in the double account
+ 			if (isInDoubleAccount()){
+ 				mTransaction.setAmount(amount.negate());
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+index ac6bb7f7..dbdd7598 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+@@ -41,7 +41,7 @@
+ 	/**
+ 	 * A date formatter used when creating file names for the exported data
+ 	 */
+-	public final static SimpleDateFormat OFX_DATE_FORMATTER = new SimpleDateFormat("yyyyMMddHHmmss");
++	public final static SimpleDateFormat OFX_DATE_FORMATTER = new SimpleDateFormat("yyyyMMddHHmmss", Locale.US);
+ 	
+ 	/**
+ 	 * ID which will be used as the bank ID for OFX from this app
+@@ -140,69 +140,8 @@ public void toOfx(Document doc, Element parent){
+ 			if (account.getTransactionCount() == 0)
+ 				continue; 
+ 			
+-			Element currency = doc.createElement("CURDEF");
+-			currency.appendChild(doc.createTextNode(account.getCurrency().getCurrencyCode()));						
+-			
+-			//================= BEGIN BANK ACCOUNT INFO (BANKACCTFROM) =================================
+-			
+-			Element bankId = doc.createElement("BANKID");
+-			bankId.appendChild(doc.createTextNode(APP_ID));
+-			
+-			Element acctId = doc.createElement("ACCTID");
+-			acctId.appendChild(doc.createTextNode(account.getUID()));
+-			
+-			Element accttype = doc.createElement("ACCTTYPE");
+-			accttype.appendChild(doc.createTextNode(account.getAccountType().toString()));
+-			
+-			Element bankFrom = doc.createElement("BANKACCTFROM");
+-			bankFrom.appendChild(bankId);
+-			bankFrom.appendChild(acctId);
+-			bankFrom.appendChild(accttype);
+-			
+-			//================= END BANK ACCOUNT INFO ============================================
+-			
+-			
+-			//================= BEGIN ACCOUNT BALANCE INFO =================================
+-			String balance = account.getBalance().toPlainString();
+-			String formattedCurrentTimeString = getFormattedCurrentTime();
+-			
+-			Element balanceAmount = doc.createElement("BALAMT");
+-			balanceAmount.appendChild(doc.createTextNode(balance));			
+-			Element dtasof = doc.createElement("DTASOF");
+-			dtasof.appendChild(doc.createTextNode(formattedCurrentTimeString));
+-			
+-			Element ledgerBalance = doc.createElement("LEDGERBAL");
+-			ledgerBalance.appendChild(balanceAmount);
+-			ledgerBalance.appendChild(dtasof);
+-			
+-			//================= END ACCOUNT BALANCE INFO =================================
+-			
+-			
+-			//================= BEGIN TIME PERIOD INFO =================================
+-			
+-			Element dtstart = doc.createElement("DTSTART");			
+-			dtstart.appendChild(doc.createTextNode(formattedCurrentTimeString));
+-			
+-			Element dtend = doc.createElement("DTEND");
+-			dtend.appendChild(doc.createTextNode(formattedCurrentTimeString));
+-			
+-			Element bankTransactionsList = doc.createElement("BANKTRANLIST");
+-			bankTransactionsList.appendChild(dtstart);
+-			bankTransactionsList.appendChild(dtend);
+-			
+-			//================= END TIME PERIOD INFO =================================
+-			
+-						
+-			Element statementTransactions = doc.createElement("STMTRS");
+-			statementTransactions.appendChild(currency);
+-			statementTransactions.appendChild(bankFrom);
+-			statementTransactions.appendChild(bankTransactionsList);
+-			statementTransactions.appendChild(ledgerBalance);
+-			
+-			statementTransactionResponse.appendChild(statementTransactions);
+-			
+ 			//add account details (transactions) to the XML document			
+-			account.toOfx(doc, bankTransactionsList, mExportAll);
++			account.toOfx(doc, statementTransactionResponse, mExportAll);
+ 			
+ 			//mark as exported
+ 			transactionsDbAdapter.markAsExported(account.getUID());
+
+From 98f4d603556300e98801d2970dcd91d91608e4e1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 4 Jan 2013 15:24:15 +0100
+Subject: [PATCH 2/2] Convert database account type to GnuCash-compatible
+ account types Introduce mapping to fox Account types when exporting OFX data
+ Update beta version code in manifest
+
+---
+ GnucashMobile/AndroidManifest.xml                    |  2 +-
+ .../src/org/gnucash/android/data/Account.java        | 13 ++++++++-----
+ .../src/org/gnucash/android/data/Transaction.java    |  4 +++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java    |  3 ++-
+ .../src/org/gnucash/android/db/DatabaseHelper.java   | 20 +++++++++++++-------
+ 5 files changed, 27 insertions(+), 15 deletions(-)
+
+diff --git a/GnucashMobile/AndroidManifest.xml b/GnucashMobile/AndroidManifest.xml
+index 5386d5f6..1be8c073 100644
+--- a/GnucashMobile/AndroidManifest.xml
++++ b/GnucashMobile/AndroidManifest.xml
+@@ -18,7 +18,7 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+     android:versionCode="5"
+-    android:versionName="1.0.4.beta1" >
++    android:versionName="1.1.0.beta1" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="15"/>
+     
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index 56325058..f70b379e 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -52,7 +52,7 @@
+ 	 * they are currently not used except for exporting
+ 	 */
+ 	public enum AccountType {CASH, BANK, CREDIT_CARD, ASSET, LIABILITY, INCOME, EXPENSE, 
+-		EQUITY, CURRENCY, STOCK, MUTUAL_FUND, CHECKING, SAVINGS, MONEYMRKT, CREDITLINE};
++							PAYABLE, RECEIVABLE, EQUITY, CURRENCY, STOCK, MUTUAL_FUND};
+ 	
+ 	public enum OfxAccountType {CHECKING, SAVINGS, MONEYMRKT, CREDITLINE };
+ 		
+@@ -314,15 +314,16 @@ public String getParentUID() {
+ 	 * @see AccountType
+ 	 * @see OfxAccountType
+ 	 */
+-	public OfxAccountType ofxAccountTypeMapping(AccountType accountType){
++	public static OfxAccountType convertToOfxAccountType(AccountType accountType){
+ 		switch (accountType) {
+-		case CREDITLINE:
++		case CREDIT_CARD:
+ 			return OfxAccountType.CREDITLINE;
+ 			
+ 		case CASH:
+ 		case INCOME:
+ 		case EXPENSE:
+-		case CURRENCY:
++		case PAYABLE:
++		case RECEIVABLE:
+ 			return OfxAccountType.CHECKING;
+ 			
+ 		case BANK:
+@@ -332,6 +333,7 @@ public OfxAccountType ofxAccountTypeMapping(AccountType accountType){
+ 		case MUTUAL_FUND:
+ 		case STOCK:
+ 		case EQUITY:
++		case CURRENCY:
+ 			return OfxAccountType.MONEYMRKT;
+ 
+ 		default:
+@@ -357,7 +359,8 @@ public void toOfx(Document doc, Element parent, boolean allTransactions){
+ 		acctId.appendChild(doc.createTextNode(mUID));
+ 		
+ 		Element accttype = doc.createElement("ACCTTYPE");
+-		accttype.appendChild(doc.createTextNode(mAccountType.toString()));
++		String ofxAccountType = convertToOfxAccountType(mAccountType).toString();
++		accttype.appendChild(doc.createTextNode(ofxAccountType));
+ 		
+ 		Element bankFrom = doc.createElement("BANKACCTFROM");
+ 		bankFrom.appendChild(bankId);
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index 3ae7b31c..be2968c5 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -23,6 +23,7 @@
+ import java.util.UUID;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.data.Account.OfxAccountType;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.util.OfxFormatter;
+ import org.w3c.dom.Document;
+@@ -409,7 +410,8 @@ public Element toOfx(Document doc, String accountUID){
+ 			
+ 			Element accttype = doc.createElement("ACCTTYPE");			
+ 			AccountsDbAdapter acctDbAdapter = new AccountsDbAdapter(GnuCashApplication.getAppContext());
+-			accttype.appendChild(doc.createTextNode(acctDbAdapter.getAccountType(doubleAccountUID).toString()));
++			OfxAccountType ofxAccountType = Account.convertToOfxAccountType(acctDbAdapter.getAccountType(doubleAccountUID));
++			accttype.appendChild(doc.createTextNode(ofxAccountType.toString()));
+ 			acctDbAdapter.close();
+ 			
+ 			Element bankAccountTo = doc.createElement("BANKACCTTO");
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index dc1f4db3..ea4ac62d 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -78,7 +78,8 @@ public long addAccount(Account account){
+ 		if ((rowId = getAccountID(account.getUID())) > 0){
+ 			//if account already exists, then just update
+ 			Log.d(TAG, "Updating existing account");
+-			mDb.update(DatabaseHelper.ACCOUNTS_TABLE_NAME, contentValues, DatabaseHelper.KEY_ROW_ID + " = " + rowId, null);
++			mDb.update(DatabaseHelper.ACCOUNTS_TABLE_NAME, contentValues, 
++					DatabaseHelper.KEY_ROW_ID + " = " + rowId, null);
+ 		} else {
+ 			Log.d(TAG, "Adding new account to db");
+ 			rowId = mDb.insert(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, contentValues);
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+index 2eb49d39..20ee6629 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -16,6 +16,9 @@
+ 
+ package org.gnucash.android.db;
+ 
++import org.gnucash.android.data.Account.AccountType;
++
++import android.content.ContentValues;
+ import android.content.Context;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteOpenHelper;
+@@ -176,8 +179,7 @@ public void onCreate(SQLiteDatabase db) {
+ 	@Override
+ 	public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 		Log.i(TAG, "Upgrading database from version " 
+-				+ oldVersion + " to " + newVersion
+-				+ " which will destroy all old data");
++				+ oldVersion + " to " + newVersion);
+ 		
+ 		if (oldVersion < newVersion){
+ 			//introducing double entry accounting
+@@ -187,6 +189,8 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 				String addColumnSql = "ALTER TABLE " + TRANSACTIONS_TABLE_NAME + 
+ 									" ADD COLUMN " + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " varchar(255)";
+ 				
++				//introducing sub accounts
++				Log.i(TAG, "Adding column for parent accounts");
+ 				String addParentAccountSql = "ALTER TABLE " + ACCOUNTS_TABLE_NAME + 
+ 						" ADD COLUMN " + KEY_PARENT_ACCOUNT_UID + " varchar(255)";
+ 	
+@@ -194,13 +198,15 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 				db.execSQL(addParentAccountSql);
+ 			}
+ 			
++			//update account types to GnuCash account types
++			//since all were previously CHECKING, now all will be CASH
++			Log.i(TAG, "Converting account types to GnuCash compatible types");
++			ContentValues cv = new ContentValues();
++			cv.put(KEY_TYPE, AccountType.CASH.toString());
++			db.update(ACCOUNTS_TABLE_NAME, cv, null, null);
++				
+ 		} else {
+ 			Log.i(TAG, "Cannot downgrade database.");
+-			/*
+-			db.execSQL("DROP TABLE IF EXISTS " + TRANSACTIONS_TABLE_NAME);
+-			db.execSQL("DROP TABLE IF EXISTS " + ACCOUNTS_TABLE_NAME);
+-			onCreate(db);
+-			*/
+ 		}
+ 	}
+ 

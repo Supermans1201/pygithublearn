@@ -1,0 +1,2752 @@
+From ad62cec2ac198bc2951e306ca05f754b51f9c357 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Mon, 22 Sep 2014 23:29:33 +0800
+Subject: [PATCH 01/30] Disable editing for multi-currency transactions
+
+---
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  3 ++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 18 +++++++++++++++++
+ .../ui/transaction/TransactionFormFragment.java    | 23 ++++++++++++++++++++++
+ 3 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index 24bf926d..f6d756fe 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -141,7 +141,8 @@ private void createTempView() {
+         //          ) ,
+         //          2
+         //      ) as trans_acct_a_uid ,
+-        //   TOTAL ( CASE WHEN splits_type = 'DEBIT' THEN splits_amount ELSE - splits_amount END ) AS trans_acct_balance
++        //   TOTAL ( CASE WHEN splits_type = 'DEBIT' THEN splits_amount ELSE - splits_amount END ) AS trans_acct_balance,
++        //   COUNT ( DISTINCT accounts_currency ) as trans_currency_count
+         //   FROM trans_split_acct GROUP BY transactions_uid
+         //
+         // This temporary view would pick one Account_UID for each
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index e27d7269..69675d11 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -597,4 +597,22 @@ public void scheduleTransaction(Transaction recurringTransaction) {
+     public Transaction getTransaction(String transactionUID) {
+         return getTransaction(getID(transactionUID));
+     }
++
++    public int getNumCurrencies(String transactionUID) {
++        Cursor cursor = mDb.query("trans_extra_info",
++                new String[]{"trans_currency_count"},
++                "trans_acct_t_uid=?",
++                new String[]{transactionUID},
++                null, null, null);
++        int numCurrencies = 0;
++        try {
++            if (cursor.moveToFirst()) {
++                numCurrencies = cursor.getInt(0);
++            }
++        }
++        finally {
++            cursor.close();
++        }
++        return numCurrencies;
++    }
+ }
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index e8b9b1b3..7240f414 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -160,6 +160,11 @@
+ 	private boolean mUseDoubleEntry;
+ 
+     /**
++     * Flag to not if the transaction involves multiple currency
++     */
++    private boolean mMultiCurrency;
++
++    /**
+      * The AccountType of the account to which this transaction belongs.
+      * Used for determining the accounting rules for credits and debits
+      */
+@@ -323,6 +328,7 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+ 	 * This method is called if the fragment is used for editing a transaction
+ 	 */
+ 	private void initializeViewsWithTransaction(){
++        mMultiCurrency = mTransactionsDbAdapter.getNumCurrencies(mTransaction.getUID()) > 1;
+ 		mDescriptionEditText.setText(mTransaction.getDescription());
+ 
+         mTransactionTypeButton.setAccountType(mAccountType);
+@@ -360,6 +366,23 @@ private void initializeViewsWithTransaction(){
+ 		mCurrencyTextView.setText(accountCurrency.getSymbol());
+ 
+         setSelectedRecurrenceOption();
++        if (mMultiCurrency) {
++            enableControls(false);
++        }
++    }
++
++    private void enableControls(boolean b) {
++        mDescriptionEditText.setEnabled(b);
++        mNotesEditText.setEnabled(b);
++        mDateTextView.setEnabled(b);
++        mTimeTextView.setEnabled(b);
++        mAmountEditText.setEnabled(b);
++        mCurrencyTextView.setEnabled(b);
++        mTransactionTypeButton.setEnabled(b);
++        mDoubleAccountSpinner.setEnabled(b);
++        // the next is always enabled, so the user can check the detailed info of splits
++        // mOpenSplitsButton;
++        mRecurringTransactionSpinner.setEnabled(b);
+     }
+ 
+     private void setAmountEditViewVisible(int visibility) {
+
+From 218de7536e12da81ab373055e5116f775a843c8e Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Mon, 22 Sep 2014 23:36:25 +0800
+Subject: [PATCH 02/30] refuse to modify when saving
+
+---
+ .../org/gnucash/android/ui/transaction/TransactionFormFragment.java | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 7240f414..5782c6ca 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -722,7 +722,11 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 			return true;
+ 
+ 		case R.id.menu_save:
+-            if (mAmountEditText.getText().length() == 0){
++            if (mMultiCurrency) {
++                Toast.makeText(getActivity(), "Multi-currency transactions cannot be modified", Toast.LENGTH_LONG).show();
++                finish();
++            }
++            else if (mAmountEditText.getText().length() == 0) {
+                 Toast.makeText(getActivity(), R.string.toast_transanction_amount_required, Toast.LENGTH_SHORT).show();
+             } else
+ 			    saveNewTransaction();
+
+From fcc72cd06fe1356c254c74e8b9db2c19a279d665 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 23 Sep 2014 21:48:53 +0800
+Subject: [PATCH 03/30] Put toast string to resource
+
+---
+ app/res/values/strings.xml                                              | 1 +
+ app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 2c5b8ed5..d6d0c394 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -325,6 +325,7 @@
+ 	</string>
+ 	<string name="label_dismiss">Dismiss</string>
+     <string name="toast_transanction_amount_required">Enter an amount to save the transaction</string>
++    <string name="toast_error_edit_multi_currency_transaction">Multi-currency transactions cannot be modified</string>
+     <string name="menu_import_accounts">Import GnuCash Accounts</string>
+     <string name="btn_import_accounts">Import Accounts</string>
+     <string name="toast_error_importing_accounts">An error occurred while importing the GnuCash accounts</string>
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 5782c6ca..533f705c 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -723,7 +723,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 
+ 		case R.id.menu_save:
+             if (mMultiCurrency) {
+-                Toast.makeText(getActivity(), "Multi-currency transactions cannot be modified", Toast.LENGTH_LONG).show();
++                Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
+                 finish();
+             }
+             else if (mAmountEditText.getText().length() == 0) {
+
+From 85976982dc2a21568e66704fef7f744eac6cdbb0 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 23 Sep 2014 21:51:53 +0800
+Subject: [PATCH 04/30] Refuse to change account multi-currency transaction
+
+---
+ .../ui/transaction/TransactionFormFragment.java        | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 533f705c..11a7bc7a 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -567,19 +567,23 @@ public void run() {
+      * Callback when the account in the navigation bar is changed by the user
+      * @param newAccountId Database record ID of the newly selected account
+      */
+-	public void onAccountChanged(long newAccountId){
+-		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		String currencyCode = accountsDbAdapter.getCurrencyCode(newAccountId);
+-		Currency currency = Currency.getInstance(currencyCode);
+-		mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
++    public void onAccountChanged(long newAccountId) {
++        if (mMultiCurrency) {
++            Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
++            return;
++        }
++        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
++        String currencyCode = accountsDbAdapter.getCurrencyCode(newAccountId);
++        Currency currency = Currency.getInstance(currencyCode);
++        mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
+ 
+         mAccountType = accountsDbAdapter.getAccountType(newAccountId);
+         mTransactionTypeButton.setAccountType(mAccountType);
+ 
+-		updateTransferAccountsList();
++        updateTransferAccountsList();
+ 
+         accountsDbAdapter.close();
+-	}
++    }
+ 
+ 	/**
+ 	 * Collects information from the fragment views and uses it to create
+
+From 53e3522a91ce5415bc9bf163b138d1ea0600db60 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 23 Sep 2014 23:31:19 +0800
+Subject: [PATCH 05/30] Try to disable split edition for multi-currency
+ transactions
+
+---
+ .../dialog/SplitEditorDialogFragment.java          | 57 +++++++++++++++++-----
+ 1 file changed, 46 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 02e1e780..36aba2db 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -69,6 +69,8 @@
+     private BigDecimal mBaseAmount = BigDecimal.ZERO;
+ 
+     private List<String> mRemovedSplitUIDs = new ArrayList<String>();
++
++    private boolean mMultiCurrency = false;
+     /**
+      * Create and return a new instance of the fragment with the appropriate paramenters
+      * @param baseAmountString String with base amount which is being split
+@@ -129,8 +131,37 @@ public void onActivityCreated(Bundle savedInstanceState) {
+     }
+ 
+     private void loadSplitViews(List<Split> splitList) {
++        Currency currency = null;
+         for (Split split : splitList) {
+             addSplitView(split);
++            if (currency == null) {
++                currency = split.getAmount().getCurrency();
++            }
++            else if (currency != split.getAmount().getCurrency()) {
++                mMultiCurrency = true;
++            }
++        }
++        if (mMultiCurrency) {
++            enableAllControls(false);
++        }
++    }
++
++    private void enableAllControls(boolean b) {
++        for (View splitView : mSplitItemViewList) {
++            EditText splitMemoEditText = (EditText) splitView.findViewById(R.id.input_split_memo);
++            final EditText splitAmountEditText = (EditText) splitView.findViewById(R.id.input_split_amount);
++            ImageButton removeSplitButton = (ImageButton) splitView.findViewById(R.id.btn_remove_split);
++            Spinner accountsSpinner = (Spinner) splitView.findViewById(R.id.input_accounts_spinner);
++            final TextView splitCurrencyTextView = (TextView) splitView.findViewById(R.id.split_currency_symbol);
++            final TextView splitUidTextView = (TextView) splitView.findViewById(R.id.split_uid);
++            final TransactionTypeToggleButton splitTypeButton = (TransactionTypeToggleButton) splitView.findViewById(R.id.btn_split_type);
++            splitMemoEditText.setEnabled(b);
++            splitAmountEditText.setEnabled(b);
++            removeSplitButton.setEnabled(b);
++            accountsSpinner.setEnabled(b);
++            splitCurrencyTextView.setEnabled(b);
++            splitUidTextView.setEnabled(b);
++            splitTypeButton.setEnabled(b);
+         }
+     }
+ 
+@@ -260,9 +291,13 @@ public void onClick(View view) {
+         mSaveButton.setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View view) {
+-                List<Split> splitList = extractSplitsFromView();
+-                ((TransactionFormFragment) getTargetFragment()).setSplitList(splitList, mRemovedSplitUIDs);
+-
++                if (mMultiCurrency) {
++                    Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
++                }
++                else {
++                    List<Split> splitList = extractSplitsFromView();
++                    ((TransactionFormFragment) getTargetFragment()).setSplitList(splitList, mRemovedSplitUIDs);
++                }
+                 dismiss();
+             }
+         });
+@@ -309,15 +344,15 @@ private void updateTotal(){
+         List<Split> splitList   = extractSplitsFromView();
+         String currencyCode     = mAccountsDbAdapter.getCurrencyCode(mAccountId);
+         Money splitSum          = Money.createZeroInstance(currencyCode);
+-
+-        for (Split split : splitList) {
+-            Money amount = split.getAmount().absolute();
+-            if (split.getType() == TransactionType.DEBIT)
+-                splitSum = splitSum.subtract(amount);
+-            else
+-                splitSum = splitSum.add(amount);
++        if (!mMultiCurrency) {
++            for (Split split : splitList) {
++                Money amount = split.getAmount().absolute();
++                if (split.getType() == TransactionType.DEBIT)
++                    splitSum = splitSum.subtract(amount);
++                else
++                    splitSum = splitSum.add(amount);
++            }
+         }
+-
+         TransactionsActivity.displayBalance(mImbalanceTextView, splitSum);
+     }
+ 
+
+From 0eee34e369600457b6a6bbddde7ee5162e74bf2e Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 20:44:37 +0800
+Subject: [PATCH 06/30] Show correct transfer account
+
+---
+ .../android/ui/transaction/TransactionFormFragment.java   | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 11a7bc7a..48f3f559 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -224,9 +224,6 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+         mAccountType = mAccountsDbAdapter.getAccountType(mAccountUID);
+ 
+-        //updateTransferAccountsList must only be called after initializing mAccountsDbAdapter
+-		updateTransferAccountsList();
+-
+         ArrayAdapter<CharSequence> recurrenceAdapter = ArrayAdapter.createFromResource(getActivity(),
+                 R.array.recurrence_period_strings, android.R.layout.simple_spinner_item);
+         recurrenceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+@@ -235,6 +232,13 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         String transactionUID = getArguments().getString(UxArgument.SELECTED_TRANSACTION_UID);
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+ 		mTransaction = mTransactionsDbAdapter.getTransaction(transactionUID);
++        if (mTransaction != null) {
++            mMultiCurrency = mTransactionsDbAdapter.getNumCurrencies(mTransaction.getUID()) > 1;
++        }
++
++        //updateTransferAccountsList must only be called after initializing mAccountsDbAdapter
++        // it needs mMultiCurrency to be properly initialized
++        updateTransferAccountsList();
+ 
+         mDoubleAccountSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+             @Override
+@@ -328,7 +332,6 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+ 	 * This method is called if the fragment is used for editing a transaction
+ 	 */
+ 	private void initializeViewsWithTransaction(){
+-        mMultiCurrency = mTransactionsDbAdapter.getNumCurrencies(mTransaction.getUID()) > 1;
+ 		mDescriptionEditText.setText(mTransaction.getDescription());
+ 
+         mTransactionTypeButton.setAccountType(mAccountType);
+@@ -448,8 +451,8 @@ private void updateTransferAccountsList(){
+ 		String accountUID = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
+ 
+ 		String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + accountUID
+-                            + "' AND " + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(accountUID)
+-                            + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
++                            + "' AND " + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(accountUID)
++                            + "' AND ")) + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                             + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                             + ")";
+ 
+
+From 9a68423b5c8b0a3242c5d6ea7bd45c655521d16b Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 21:40:28 +0800
+Subject: [PATCH 07/30] Keep currency for transaction splits
+
+---
+ app/src/org/gnucash/android/model/Transaction.java                   | 5 +----
+ .../org/gnucash/android/ui/transaction/TransactionFormFragment.java  | 2 +-
+ 2 files changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index ecdfe1ae..8e1cddc3 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -185,10 +185,7 @@ private void initDefaults(){
+      * @param splitList List of splits for this transaction
+      */
+     public void setSplits(List<Split> splitList){
+-        mSplitList.clear();
+-        for (Split split : splitList) {
+-            addSplit(split);
+-        }
++        mSplitList = splitList;
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 48f3f559..5eda9bac 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -484,7 +484,7 @@ private void openSplitEditor(){
+         } else {
+             Money biggestAmount = Money.createZeroInstance(mTransaction.getCurrencyCode());
+             for (Split split : mTransaction.getSplits()) {
+-                if (split.getAmount().compareTo(biggestAmount) > 0)
++                if (split.getAmount().asBigDecimal().compareTo(biggestAmount.asBigDecimal()) > 0)
+                     biggestAmount = split.getAmount();
+             }
+             baseAmountString = biggestAmount.toPlainString();
+
+From 4745dea1afd48f298f1aaaab7740d11cf468ce87 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 21:49:25 +0800
+Subject: [PATCH 08/30] reject add split; show splits own currency
+
+---
+ .../android/ui/transaction/dialog/SplitEditorDialogFragment.java | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 36aba2db..89e9f395 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -227,7 +227,7 @@ public void onClick(View view) {
+         updateTransferAccountsList(accountsSpinner);
+         accountsSpinner.setOnItemSelectedListener(new TypeButtonLabelUpdater(splitTypeButton));
+ 
+-        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountId));
++        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(split.getAccountUID()));
+         splitCurrencyTextView.setText(accountCurrency.getSymbol());
+         splitTypeButton.setAmountFormattingListener(splitAmountEditText, splitCurrencyTextView);
+         splitTypeButton.setChecked(mBaseAmount.signum() > 0);
+@@ -305,7 +305,12 @@ public void onClick(View view) {
+         mAddSplit.setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View view) {
+-                addSplitView(null);
++                if (mMultiCurrency) {
++                    Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
++                }
++                else {
++                    addSplitView(null);
++                }
+             }
+         });
+     }
+
+From a90349e356a79d5df64be56695e8a4f715e46798 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 22:20:59 +0800
+Subject: [PATCH 09/30] show correct split account
+
+---
+ .../dialog/SplitEditorDialogFragment.java          | 24 +++++++++++++---------
+ 1 file changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 89e9f395..75bde556 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -105,13 +105,24 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 
+         getDialog().setTitle("Transaction splits");
+ 
+-        initArgs();
+         mSplitItemViewList = new ArrayList<View>();
+         mSplitsDbAdapter = new SplitsDbAdapter(getActivity());
+ 
+         //we are editing splits for a new transaction.
+         // But the user may have already created some splits before. Let's check
+         List<Split> splitList = ((TransactionFormFragment) getTargetFragment()).getSplitList();
++        {
++            Currency currency = null;
++            for (Split split : splitList) {
++                if (currency == null) {
++                    currency = split.getAmount().getCurrency();
++                } else if (currency != split.getAmount().getCurrency()) {
++                    mMultiCurrency = true;
++                }
++            }
++        }
++
++        initArgs();
+         if (!splitList.isEmpty()) {
+             //aha! there are some splits. Let's load those instead
+             loadSplitViews(splitList);
+@@ -131,15 +142,8 @@ public void onActivityCreated(Bundle savedInstanceState) {
+     }
+ 
+     private void loadSplitViews(List<Split> splitList) {
+-        Currency currency = null;
+         for (Split split : splitList) {
+             addSplitView(split);
+-            if (currency == null) {
+-                currency = split.getAmount().getCurrency();
+-            }
+-            else if (currency != split.getAmount().getCurrency()) {
+-                mMultiCurrency = true;
+-            }
+         }
+         if (mMultiCurrency) {
+             enableAllControls(false);
+@@ -191,8 +195,8 @@ private void initArgs() {
+         mBaseAmount     = new BigDecimal(args.getString(UxArgument.AMOUNT_STRING));
+ 
+         String conditions = "(" //+ AccountEntry._ID + " != " + mAccountId + " AND "
+-                + DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountId)
+-                + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
++                + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountId)
++                + "' AND ")) + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                 + ")";
+         mCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions);
+
+From 2ce1769312dc173595b1d7d7b6d4e71790d03d33 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 24 Sep 2014 23:38:24 +0800
+Subject: [PATCH 10/30] Account Currency edit restriction
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 23 ++++++++++++++++++++++
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  2 +-
+ .../android/ui/account/AccountFormFragment.java    |  7 +++++++
+ 3 files changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 33fcf484..3ce9583d 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -25,6 +25,7 @@
+ import android.text.TextUtils;
+ 
+ import android.util.Log;
++import android.support.annotation.NonNull;
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.*;
+@@ -1322,4 +1323,26 @@ public int deleteAllRecords(){
+         return mDb.delete(AccountEntry.TABLE_NAME, null, null);
+ 	}
+ 
++    public int getTransactionMaxSplitNum(@NonNull String accountUID) {
++        Cursor cursor = mDb.query("trans_extra_info",
++                new String[]{"MAX(trans_split_count)"},
++                "trans_acct_t_uid IN ( SELECT DISTINCT " + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID +
++                        " FROM trans_split_acct WHERE " + AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID +
++                        " = ? )",
++                new String[]{accountUID},
++                null,
++                null,
++                null
++                );
++        try {
++            if (cursor.moveToFirst()) {
++                return (int)cursor.getLong(0);
++            } else {
++                return 0;
++            }
++        }
++        finally {
++            cursor.close();
++        }
++    }
+ }
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index 24bf926d..b5965a6b 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -164,7 +164,7 @@ private void createTempView() {
+                 SplitEntry.COLUMN_AMOUNT + " ELSE - " + SplitEntry.TABLE_NAME + "_" +
+                 SplitEntry.COLUMN_AMOUNT + " END ) AS trans_acct_balance , COUNT ( DISTINCT " +
+                 AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_CURRENCY +
+-                " ) AS trans_currency_count FROM trans_split_acct " +
++                " ) AS trans_currency_count , COUNT (*) AS trans_split_count FROM trans_split_acct " +
+                 " GROUP BY " + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID
+         );
+     }
+diff --git a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+index 91d5136a..1d8b6573 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -27,6 +27,8 @@
+ import android.graphics.Color;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
++import android.support.annotation.NonNull;
++import android.support.annotation.Nullable;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.text.TextUtils;
+@@ -351,6 +353,11 @@ private void initializeViewsWithAccount(Account account){
+         String currencyCode = account.getCurrency().getCurrencyCode();
+         setSelectedCurrency(currencyCode);
+ 
++        if (mAccountsDbAdapter.getTransactionMaxSplitNum(mAccount.getUID()) > 1)
++        {
++            mCurrencySpinner.setEnabled(false);
++        }
++
+         mNameEditText.setText(account.getName());
+ 
+         if (mUseDoubleEntry) {
+
+From a33798a0bdf6268b41997bd678ca925fec8fc44e Mon Sep 17 00:00:00 2001
+From: Oleg Kosmakov <kosmakoff@gmail.com>
+Date: Wed, 24 Sep 2014 19:19:56 +0300
+Subject: [PATCH 11/30] Extracted string resources from split transaction
+ dialog
+
+---
+ app/res/layout/dialog_split_editor.xml                                | 4 ++--
+ app/res/values/strings.xml                                            | 3 +++
+ .../android/ui/transaction/dialog/SplitEditorDialogFragment.java      | 2 +-
+ 3 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/app/res/layout/dialog_split_editor.xml b/app/res/layout/dialog_split_editor.xml
+index 772b86e5..3b46a1a3 100644
+--- a/app/res/layout/dialog_split_editor.xml
++++ b/app/res/layout/dialog_split_editor.xml
+@@ -55,7 +55,7 @@ limitations under the License.
+                     android:layout_height="match_parent"
+                     android:textAppearance="?android:attr/textAppearanceSmall"
+                     android:gravity="center_vertical"
+-                    android:text="Imbalance:"/>
++                    android:text="@string/label_imbalance"/>
+ 
+             <TextView android:id="@+id/imbalance_textview"
+                       android:layout_width="0dp"
+@@ -69,7 +69,7 @@ limitations under the License.
+                 android:layout_width="wrap_content"
+                 android:layout_height="wrap_content"
+                 android:drawableLeft="@drawable/content_new_holo_light"
+-                android:text="Add split"/>
++                android:text="@string/btn_add_split"/>
+ 
+     </TableLayout>
+ </RelativeLayout>
+\ No newline at end of file
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 3318d317..4cb565ba 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -653,4 +653,7 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 59875cd2..b21b1e4d 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -101,7 +101,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         getDialog().getWindow().setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+                 WindowManager.LayoutParams.MATCH_PARENT);
+ 
+-        getDialog().setTitle("Transaction splits");
++        getDialog().setTitle(R.string.title_transaction_splits);
+ 
+         initArgs();
+         mSplitItemViewList = new ArrayList<View>();
+
+From 78844265fc02509926a262e701731f45aff22e56 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 24 Sep 2014 21:10:04 +0200
+Subject: [PATCH 12/30] Added newly extracted strings to all supported locales
+
+---
+ app/res/values-de/strings.xml     | 3 +++
+ app/res/values-el/strings.xml     | 3 +++
+ app/res/values-es-rMX/strings.xml | 3 +++
+ app/res/values-es/strings.xml     | 3 +++
+ app/res/values-fr/strings.xml     | 3 +++
+ app/res/values-hu/strings.xml     | 3 +++
+ app/res/values-it/strings.xml     | 3 +++
+ app/res/values-nb/strings.xml     | 3 +++
+ app/res/values-nl/strings.xml     | 3 +++
+ app/res/values-pt-rBR/strings.xml | 3 +++
+ app/res/values-ru/strings.xml     | 3 +++
+ app/res/values-zh/strings.xml     | 3 +++
+ 12 files changed, 36 insertions(+)
+
+diff --git a/app/res/values-de/strings.xml b/app/res/values-de/strings.xml
+index 7d7519ac..236533fa 100644
+--- a/app/res/values-de/strings.xml
++++ b/app/res/values-de/strings.xml
+@@ -416,4 +416,7 @@
+     <string name="summary_save_opening_balances">Mglichkeit aktivieren, den aktuellen Saldo als neuen Anfangsbestand nach dem Lschen der Buchungen zu bernehmen
+     </string>
+     <string name="title_save_opening_balances">Saldo als neuen Anfangsbestand bernehmen</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-el/strings.xml b/app/res/values-el/strings.xml
+index fd98866d..488a07c2 100644
+--- a/app/res/values-el/strings.xml
++++ b/app/res/values-el/strings.xml
+@@ -434,4 +434,7 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-es-rMX/strings.xml b/app/res/values-es-rMX/strings.xml
+index 26833c09..396f21d0 100644
+--- a/app/res/values-es-rMX/strings.xml
++++ b/app/res/values-es-rMX/strings.xml
+@@ -419,4 +419,7 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-es/strings.xml b/app/res/values-es/strings.xml
+index 73ccf00e..abd64690 100644
+--- a/app/res/values-es/strings.xml
++++ b/app/res/values-es/strings.xml
+@@ -416,4 +416,7 @@
+     <string name="summary_save_opening_balances">Seleccionar para guardar el saldo actual (antes de borrar las transacciones) como nuevo saldo de apertura despues de borrar las transacciones
+     </string>
+     <string name="title_save_opening_balances">Guardar saldos de apertura</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-fr/strings.xml b/app/res/values-fr/strings.xml
+index f5a2d5f8..c9e281ca 100644
+--- a/app/res/values-fr/strings.xml
++++ b/app/res/values-fr/strings.xml
+@@ -416,4 +416,7 @@
+     <string name="summary_save_opening_balances">Permet d\'enregistrer le solde du compte courant (avant la suppression des transactions) comme le nouveau solde d\'ouverture aprs la suppression des transactions
+     </string>
+     <string name="title_save_opening_balances">Enregistrer les soldes des comptes d\'ouverture</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-hu/strings.xml b/app/res/values-hu/strings.xml
+index 2314ab77..17698a97 100644
+--- a/app/res/values-hu/strings.xml
++++ b/app/res/values-hu/strings.xml
+@@ -420,4 +420,7 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/res/values-it/strings.xml b/app/res/values-it/strings.xml
+index b4882656..95a6a3c4 100644
+--- a/app/res/values-it/strings.xml
++++ b/app/res/values-it/strings.xml
+@@ -420,4 +420,7 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-nb/strings.xml b/app/res/values-nb/strings.xml
+index a0e40336..c38b7740 100644
+--- a/app/res/values-nb/strings.xml
++++ b/app/res/values-nb/strings.xml
+@@ -416,4 +416,7 @@
+     <string name="account_name_equity">Egenkapital</string>
+     <string name="summary_save_opening_balances">Merk for  lagre gjeldende konto balanse (fr sletting) som ny inngende balanse (etter sletting av transaksjoner).</string>
+     <string name="title_save_opening_balances">Lagre inngende balanser</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-nl/strings.xml b/app/res/values-nl/strings.xml
+index ddc904d0..4b1cf26c 100644
+--- a/app/res/values-nl/strings.xml
++++ b/app/res/values-nl/strings.xml
+@@ -421,4 +421,7 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-pt-rBR/strings.xml b/app/res/values-pt-rBR/strings.xml
+index 89c6a37b..1d3842c1 100644
+--- a/app/res/values-pt-rBR/strings.xml
++++ b/app/res/values-pt-rBR/strings.xml
+@@ -419,4 +419,7 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-ru/strings.xml b/app/res/values-ru/strings.xml
+index 60783748..868f147d 100644
+--- a/app/res/values-ru/strings.xml
++++ b/app/res/values-ru/strings.xml
+@@ -420,4 +420,7 @@
+     <string name="summary_save_opening_balances">     (  )       
+     </string>
+     <string name="title_save_opening_balances">   </string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+diff --git a/app/res/values-zh/strings.xml b/app/res/values-zh/strings.xml
+index fc21bbbd..48c6158e 100644
+--- a/app/res/values-zh/strings.xml
++++ b/app/res/values-zh/strings.xml
+@@ -414,4 +414,7 @@
+     <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
++    <string name="title_transaction_splits">Transaction splits</string>
++    <string name="label_imbalance">Imbalance:</string>
++    <string name="btn_add_split">Add split</string>
+ </resources>
+
+From 79b8890dd2f12026d80f6285bf4b0aac8867b34b Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Thu, 2 Oct 2014 15:35:22 +0800
+Subject: [PATCH 13/30] Rewrite upgrade db versin 6 to 7
+
+---
+ app/src/org/gnucash/android/db/DatabaseHelper.java | 108 +++++++++++++++++----
+ 1 file changed, 89 insertions(+), 19 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index 7a95bd6c..c9c6c00a 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -24,6 +24,7 @@
+ import android.util.Log;
+ import android.widget.Toast;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Transaction;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.*;
+ 
+@@ -33,6 +34,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  *
+  */
++@SuppressWarnings("deprecation")
+ public class DatabaseHelper extends SQLiteOpenHelper {
+ 
+     /**
+@@ -222,27 +224,95 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 6 && newVersion >= DatabaseSchema.SPLITS_DB_VERSION){
+                 Log.i(LOG_TAG, "Upgrading database to version 7");
+-
+-                //for users who do not have double-entry activated, we create imbalance accounts for their splits
+-                //TODO: Enable when we can hide imbalance accounts from user
+-//                List<Currency> currencies = MigrationHelper.getCurrencies(db);
+-//                AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(db);
+-//                for (Currency currency : currencies) {
+-//                    accountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
+-//                }
+-
++                db.beginTransaction();
+                 try {
+-                    String filepath = MigrationHelper.exportGnucashXML(db);
+-
+-                    dropAllDatabaseTables(db);
+-                    createDatabaseTables(db);
+-
+-                    MigrationHelper.importGnucashXML(db, filepath);
+-                } catch (Exception e){
+-                    Toast.makeText(mContext, "Error upgrading database.\n" + e.getMessage(), Toast.LENGTH_LONG).show();
+-                    throw new RuntimeException(e);
++                    // backup transaction table
++                    db.execSQL("ALTER TABLE " + TransactionEntry.TABLE_NAME + " RENAME TO " + TransactionEntry.TABLE_NAME + "_bak");
++                    // create new transaction table
++                    db.execSQL("create table " + TransactionEntry.TABLE_NAME + " ("
++                            + TransactionEntry._ID + " integer primary key autoincrement, "
++                            + TransactionEntry.COLUMN_UID + " varchar(255) not null, "
++                            + TransactionEntry.COLUMN_DESCRIPTION + " varchar(255), "
++                            + TransactionEntry.COLUMN_NOTES + " text, "
++                            + TransactionEntry.COLUMN_TIMESTAMP + " integer not null, "
++                            + TransactionEntry.COLUMN_EXPORTED + " tinyint default 0, "
++                            + TransactionEntry.COLUMN_CURRENCY + " varchar(255) not null, "
++                            + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " integer default 0, "
++                            + "UNIQUE (" + TransactionEntry.COLUMN_UID + ") "
++                            + ");");
++                    // initialize new transaction table wiht data from old table
++                    db.execSQL("INSERT INTO " + TransactionEntry.TABLE_NAME + " ( "
++                                    + TransactionEntry._ID + " , "
++                                    + TransactionEntry.COLUMN_UID + " , "
++                                    + TransactionEntry.COLUMN_DESCRIPTION + " , "
++                                    + TransactionEntry.COLUMN_NOTES + " , "
++                                    + TransactionEntry.COLUMN_TIMESTAMP + " , "
++                                    + TransactionEntry.COLUMN_EXPORTED + " , "
++                                    + TransactionEntry.COLUMN_CURRENCY + " , "
++                                    + TransactionEntry.COLUMN_RECURRENCE_PERIOD + " )  SELECT "
++                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry._ID + " , "
++                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_UID + " , "
++                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_DESCRIPTION + " , "
++                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_NOTES + " , "
++                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_TIMESTAMP + " , "
++                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_EXPORTED + " , "
++                                    + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_CURRENCY + " , "
++                                    + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_RECURRENCE_PERIOD
++                                    + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
++                                    + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid == " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
++                    );
++                    // create split table
++                    db.execSQL("CREATE TABLE " + SplitEntry.TABLE_NAME + " ("
++                            + SplitEntry._ID + " integer primary key autoincrement, "
++                            + SplitEntry.COLUMN_UID + " varchar(255) not null, "
++                            + SplitEntry.COLUMN_MEMO + " text, "
++                            + SplitEntry.COLUMN_TYPE + " varchar(255) not null, "
++                            + SplitEntry.COLUMN_AMOUNT + " varchar(255) not null, "
++                            + SplitEntry.COLUMN_ACCOUNT_UID + " varchar(255) not null, "
++                            + SplitEntry.COLUMN_TRANSACTION_UID + " varchar(255) not null, "
++                            + "FOREIGN KEY (" + SplitEntry.COLUMN_ACCOUNT_UID + ") REFERENCES " + AccountEntry.TABLE_NAME + " (" + AccountEntry.COLUMN_UID + "), "
++                            + "FOREIGN KEY (" + SplitEntry.COLUMN_TRANSACTION_UID + ") REFERENCES " + TransactionEntry.TABLE_NAME + " (" + TransactionEntry.COLUMN_UID + "), "
++                            + "UNIQUE (" + SplitEntry.COLUMN_UID + ") "
++                            + ");");
++                    // Initialize split table with data from backup transaction table
++                    // New split table is initialized after the new transaction table as the
++                    // foreign key constraint will stop any data from being inserted
++                    // If new split table is created before the backup is made, the foreign key
++                    // constraint will be rewritten to refer to the backup transaction table
++                    db.execSQL("INSERT INTO " + SplitEntry.TABLE_NAME + " ( "
++                            + SplitEntry.COLUMN_UID + " , "
++                            + SplitEntry.COLUMN_TYPE + " , "
++                            + SplitEntry.COLUMN_AMOUNT + " , "
++                            + SplitEntry.COLUMN_ACCOUNT_UID + " , "
++                            + SplitEntry.COLUMN_TRANSACTION_UID + " ) SELECT "
++                            // _ID, autogenerated
++                            + "LOWER(HEX(RANDOMBLOB(16))) , "
++                            // COLUMN_MEMO, empty
++                            + "CASE WHEN " + TransactionEntry.TABLE_NAME + "_bak.type IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
++                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END ELSE CASE WHEN "
++                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END END , "
++                            + "ABS ( " + TransactionEntry.TABLE_NAME + "_bak.amount ) , "
++                            + TransactionEntry.TABLE_NAME + "_bak.account_uid , "
++                            + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_UID
++                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak UNION SELECT "
++                            // _ID, autogenerated
++                            + "LOWER(HEX(RANDOMBLOB(16))) AS " + SplitEntry.COLUMN_UID + " , "
++                            // COLUMN_MEMO, empty
++                            + "CASE WHEN " + TransactionEntry.TABLE_NAME + "_bak.type IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
++                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END ELSE CASE WHEN "
++                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END END , "
++                            + "ABS ( " + TransactionEntry.TABLE_NAME + "_bak.amount ) , "
++                            + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " , "
++                            + TransactionEntry.TABLE_NAME + "_baK." + TransactionEntry.COLUMN_UID
++                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak WHERE " + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " IS NOT NULL"
++                    );
++                    // drop backup transaction table
++                    db.execSQL("DROP TABLE " + TransactionEntry.TABLE_NAME + "_bak");
++                    db.setTransactionSuccessful();
++                    oldVersion = DatabaseSchema.SPLITS_DB_VERSION;
++                } finally {
++                    db.endTransaction();
+                 }
+-                oldVersion = DatabaseSchema.SPLITS_DB_VERSION;
+             }
+ 		}
+ 
+
+From 84859f24d7d602f2d5381c5c6daa97585cbc284b Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Thu, 9 Oct 2014 23:13:54 +0800
+Subject: [PATCH 14/30] fix split type
+
+---
+ app/src/org/gnucash/android/db/DatabaseHelper.java | 24 +++++++++++-----------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index c9c6c00a..f6107f1f 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -285,26 +285,26 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+                             + SplitEntry.COLUMN_AMOUNT + " , "
+                             + SplitEntry.COLUMN_ACCOUNT_UID + " , "
+                             + SplitEntry.COLUMN_TRANSACTION_UID + " ) SELECT "
+-                            // _ID, autogenerated
+                             + "LOWER(HEX(RANDOMBLOB(16))) , "
+-                            // COLUMN_MEMO, empty
+-                            + "CASE WHEN " + TransactionEntry.TABLE_NAME + "_bak.type IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
+-                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END ELSE CASE WHEN "
+-                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END END , "
++                            + "CASE WHEN " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_TYPE + " IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
++                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END ELSE CASE WHEN "
++                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END END , "
+                             + "ABS ( " + TransactionEntry.TABLE_NAME + "_bak.amount ) , "
+                             + TransactionEntry.TABLE_NAME + "_bak.account_uid , "
+                             + TransactionEntry.TABLE_NAME + "_bak." + TransactionEntry.COLUMN_UID
+-                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak UNION SELECT "
+-                            // _ID, autogenerated
++                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
++                            + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
++                            + " UNION SELECT "
+                             + "LOWER(HEX(RANDOMBLOB(16))) AS " + SplitEntry.COLUMN_UID + " , "
+-                            // COLUMN_MEMO, empty
+-                            + "CASE WHEN " + TransactionEntry.TABLE_NAME + "_bak.type IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
+-                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END ELSE CASE WHEN "
+-                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END END , "
++                            + "CASE WHEN " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_TYPE + " IN ( 'CASH' , 'BANK', 'ASSET', 'EXPENSE', 'RECEIVABLE', 'STOCK', 'MUTUAL' ) THEN CASE WHEN "
++                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'DEBIT' ELSE 'CREDIT' END ELSE CASE WHEN "
++                                    + SplitEntry.COLUMN_AMOUNT + " < 0 THEN 'CREDIT' ELSE 'DEBIT' END END , "
+                             + "ABS ( " + TransactionEntry.TABLE_NAME + "_bak.amount ) , "
+                             + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " , "
+                             + TransactionEntry.TABLE_NAME + "_baK." + TransactionEntry.COLUMN_UID
+-                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak WHERE " + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " IS NOT NULL"
++                            + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
++                            + " ON " + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
++                            + " WHERE " + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " IS NOT NULL"
+                     );
+                     // drop backup transaction table
+                     db.execSQL("DROP TABLE " + TransactionEntry.TABLE_NAME + "_bak");
+
+From 3f2a1d1b0a04ec9d6afea332834dee53fe868b6e Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Fri, 10 Oct 2014 00:03:58 +0800
+Subject: [PATCH 15/30] fix split type
+
+---
+ app/src/org/gnucash/android/db/DatabaseHelper.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index f6107f1f..90ebb7f4 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -303,7 +303,7 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+                             + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " , "
+                             + TransactionEntry.TABLE_NAME + "_baK." + TransactionEntry.COLUMN_UID
+                             + " FROM " + TransactionEntry.TABLE_NAME + "_bak , " + AccountEntry.TABLE_NAME
+-                            + " ON " + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
++                            + " ON " + TransactionEntry.TABLE_NAME + "_bak.account_uid = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID
+                             + " WHERE " + TransactionEntry.TABLE_NAME + "_bak." + KEY_DOUBLE_ENTRY_ACCOUNT_UID + " IS NOT NULL"
+                     );
+                     // drop backup transaction table
+
+From 032b9b79d7ca66a3d5f4141ebf744b378c05705c Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Fri, 10 Oct 2014 21:25:15 +0800
+Subject: [PATCH 16/30] delete all splits of a transaction
+
+---
+ app/src/org/gnucash/android/db/AccountsDbAdapter.java | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 3ce9583d..a93a9f57 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -281,7 +281,11 @@ public boolean destructiveDeleteAccount(long rowId){
+             }
+             //delete splits in this account
+             mDb.delete(SplitEntry.TABLE_NAME,
+-                    SplitEntry.COLUMN_ACCOUNT_UID + "=?",
++                    SplitEntry.COLUMN_TRANSACTION_UID  + " IN ( SELECT DISTINCT "
++                    + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID
++                    + " FROM trans_split_acct WHERE "
++                    + AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID
++                    + " = ? )",
+                     new String[]{getAccountUID(rowId)});
+             deleteRecord(AccountEntry.TABLE_NAME, rowId);
+             mDb.setTransactionSuccessful();
+
+From db4c848519b42830699bfdf070e3c1205f896274 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 11 Oct 2014 08:30:29 +0800
+Subject: [PATCH 17/30] delete empty transactions
+
+---
+ app/src/org/gnucash/android/db/AccountsDbAdapter.java | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index a93a9f57..4d1d9043 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -279,6 +279,9 @@ public boolean destructiveDeleteAccount(long rowId){
+                     }
+                 }
+             }
++            // TODO: with "ON DELETE CASCADE", the first two delete will not be necessary.
++            //       deleteRecord(AccountEntry.TABLE_NAME, rowId); will delete related
++            //       transactions and splits
+             //delete splits in this account
+             mDb.delete(SplitEntry.TABLE_NAME,
+                     SplitEntry.COLUMN_TRANSACTION_UID  + " IN ( SELECT DISTINCT "
+@@ -287,6 +290,14 @@ public boolean destructiveDeleteAccount(long rowId){
+                     + AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID
+                     + " = ? )",
+                     new String[]{getAccountUID(rowId)});
++            // delete empty transactions
++            // trans_split_acct is an inner joint, empty transactions will
++            // not be selected in this view
++            mDb.delete(TransactionEntry.TABLE_NAME,
++                    TransactionEntry.COLUMN_UID  + " NOT IN ( SELECT DISTINCT "
++                            + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID
++                            + " FROM trans_split_acct",
++                    null);
+             deleteRecord(AccountEntry.TABLE_NAME, rowId);
+             mDb.setTransactionSuccessful();
+             return true;
+
+From dc5a365ef654933696b2054c8cb3187a4943e544 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 11 Oct 2014 21:07:30 +0800
+Subject: [PATCH 18/30] delete all splits and transaction
+
+---
+ app/src/org/gnucash/android/db/AccountsDbAdapter.java  |  2 +-
+ app/src/org/gnucash/android/db/SplitsDbAdapter.java    | 18 ++++++++++++------
+ .../org/gnucash/android/db/TransactionsDbAdapter.java  |  3 +--
+ .../ui/transaction/TransactionsListFragment.java       |  4 +---
+ 4 files changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 4d1d9043..98a79da0 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -296,7 +296,7 @@ public boolean destructiveDeleteAccount(long rowId){
+             mDb.delete(TransactionEntry.TABLE_NAME,
+                     TransactionEntry.COLUMN_UID  + " NOT IN ( SELECT DISTINCT "
+                             + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID
+-                            + " FROM trans_split_acct",
++                            + " FROM trans_split_acct )",
+                     null);
+             deleteRecord(AccountEntry.TABLE_NAME, rowId);
+             mDb.setTransactionSuccessful();
+diff --git a/app/src/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+index e01a93fb..aa333f0d 100644
+--- a/app/src/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -515,13 +515,19 @@ public long getTransactionID(String transactionUID){
+      * @param transactionId Database record ID of the transaction
+      * @return <code>true</code> if at least one split was deleted, <code>false</code> otherwise.
+      */
+-    public boolean deleteSplitsForTransaction(long transactionId){
++    public boolean deleteSplitsForTransaction(long transactionId) {
+         String trxUID = getTransactionUID(transactionId);
+-        boolean result = mDb.delete(SplitEntry.TABLE_NAME,
+-                SplitEntry.COLUMN_TRANSACTION_UID + "=?",
+-                new String[]{trxUID}) > 0;
+-        result &= deleteTransaction(transactionId);
+-        return result;
++        mDb.beginTransaction();
++        try {
++            mDb.delete(SplitEntry.TABLE_NAME,
++                    SplitEntry.COLUMN_TRANSACTION_UID + "=?",
++                    new String[]{trxUID});
++            boolean result = deleteTransaction(transactionId);
++            mDb.setTransactionSuccessful();
++            return result;
++        } finally {
++            mDb.endTransaction();
++        }
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 69675d11..abfc0eb6 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -439,8 +439,7 @@ public String getUID(long transactionId){
+     @Override
+ 	public boolean deleteRecord(long rowId){
+ 		Log.d(TAG, "Delete transaction with record Id: " + rowId);
+-		return mSplitsDbAdapter.deleteSplitsForTransaction(rowId) &&
+-                deleteRecord(TransactionEntry.TABLE_NAME, rowId);
++		return mSplitsDbAdapter.deleteSplitsForTransaction(rowId);
+ 	}
+ 	
+ 	/**
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 337262b8..3b0620ef 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -117,11 +117,9 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+ 				return true;
+ 
+ 			case R.id.context_menu_delete:
+-                SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
+ 				for (long id : getListView().getCheckedItemIds()) {
+-                    splitsDbAdapter.deleteSplitsForTransactionAndAccount(mTransactionsDbAdapter.getUID(id), mAccountUID);
++                    mTransactionsDbAdapter.deleteRecord(id);
+ 				}
+-                splitsDbAdapter.close();
+ 				refresh();
+ 				mode.finish();
+ 				WidgetConfigurationActivity.updateAllWidgets(getActivity());
+
+From 40d759d595cd33d11dd8d6eca1bc447ec1290b60 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 11 Oct 2014 22:08:58 +0800
+Subject: [PATCH 19/30] FIX: add split will throw NPE
+
+---
+ .../android/ui/transaction/dialog/SplitEditorDialogFragment.java       | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index a150ca79..52ac40ed 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -229,7 +229,8 @@ public void onClick(View view) {
+         updateTransferAccountsList(accountsSpinner);
+         accountsSpinner.setOnItemSelectedListener(new TypeButtonLabelUpdater(splitTypeButton));
+ 
+-        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(split.getAccountUID()));
++        Currency accountCurrency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(
++                split == null ? mAccountUID : split.getAccountUID()));
+         splitCurrencyTextView.setText(accountCurrency.getSymbol());
+         splitTypeButton.setAmountFormattingListener(splitAmountEditText, splitCurrencyTextView);
+         splitTypeButton.setChecked(mBaseAmount.signum() > 0);
+
+From cb860bc3cbb4eb96a44552bf18b8fcccea035345 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sun, 12 Oct 2014 12:14:53 +0800
+Subject: [PATCH 20/30] Set Transaction UID when set splitList
+
+---
+ app/src/org/gnucash/android/model/Transaction.java | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index 8e1cddc3..e993c955 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -186,6 +186,9 @@ private void initDefaults(){
+      */
+     public void setSplits(List<Split> splitList){
+         mSplitList = splitList;
++        for (Split split : splitList) {
++            split.setTransactionUID(mUID);
++        }
+     }
+ 
+     /**
+
+From beaf5875fe4f48cb8d292409249e2459fa231f47 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 15 Oct 2014 20:36:28 +0800
+Subject: [PATCH 21/30] delete splits when transaction is saved.
+
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 34 +++++++++++++++++++---
+ .../ui/transaction/TransactionFormFragment.java    | 16 ++++++----
+ 2 files changed, 41 insertions(+), 9 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index abfc0eb6..be24ba89 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -22,9 +22,11 @@
+ import android.content.ContentValues;
+ import android.content.Context;
+ import android.database.Cursor;
++import android.database.SQLException;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
++import android.text.TextUtils;
+ import android.util.Log;
+ 
+ import org.gnucash.android.model.*;
+@@ -86,16 +88,40 @@ public long addTransaction(Transaction transaction){
+         contentValues.put(TransactionEntry.COLUMN_RECURRENCE_PERIOD, transaction.getRecurrencePeriod());
+ 
+         Log.d(TAG, "Replacing transaction in db");
+-        long rowId = mDb.replace(TransactionEntry.TABLE_NAME, null, contentValues);
++        long rowId = -1;
++        mDb.beginTransaction();
++        try {
++            rowId = mDb.replaceOrThrow(TransactionEntry.TABLE_NAME, null, contentValues);
+ 
+-        if (rowId > 0){
+             Log.d(TAG, "Adding splits for transaction");
++            ArrayList<String> splitUIDs = new ArrayList<String>(transaction.getSplits().size());
+             for (Split split : transaction.getSplits()) {
+-                mSplitsDbAdapter.addSplit(split);
++                contentValues.clear();
++                contentValues.put(SplitEntry.COLUMN_UID,        split.getUID());
++                contentValues.put(SplitEntry.COLUMN_AMOUNT,     split.getAmount().absolute().toPlainString());
++                contentValues.put(SplitEntry.COLUMN_TYPE,       split.getType().name());
++                contentValues.put(SplitEntry.COLUMN_MEMO,       split.getMemo());
++                contentValues.put(SplitEntry.COLUMN_ACCOUNT_UID, split.getAccountUID());
++                contentValues.put(SplitEntry.COLUMN_TRANSACTION_UID, split.getTransactionUID());
++                splitUIDs.add(split.getUID());
++
++                Log.d(TAG, "Replace transaction split in db");
++                mDb.replaceOrThrow(SplitEntry.TABLE_NAME, null, contentValues);
+             }
+             Log.d(TAG, transaction.getSplits().size() + " splits added");
++
++            long deleted = mDb.delete(SplitEntry.TABLE_NAME,
++                    SplitEntry.COLUMN_TRANSACTION_UID + " = ? AND "
++                            + SplitEntry.COLUMN_UID + " NOT IN ('" + TextUtils.join("' , '", splitUIDs) + "')",
++                    new String[]{transaction.getUID()});
++            Log.d(TAG, deleted + " splits deleted");
++            mDb.setTransactionSuccessful();
++        } catch (SQLException sqle) {
++            sqle.printStackTrace();
++        } finally {
++            mDb.endTransaction();
+         }
+-		return rowId;
++        return rowId;
+ 	}
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index abb5d813..723bd989 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -182,6 +182,11 @@
+     private String mAccountUID;
+ 
+     private List<Split> mSplitsList = new ArrayList<Split>();
++    /**
++     * list to hold deleted splits. This split should only be deleted from
++     * DB when the transaction is saved.
++     */
++    private List<String> mDeletedSplitUIDList = new ArrayList<String>();
+ 
+     /**
+ 	 * Create the view and retrieve references to the UI elements
+@@ -671,6 +676,8 @@ private void saveNewTransaction() {
+ 		mTransaction.setTime(cal.getTimeInMillis());
+ 		mTransaction.setNote(notes);
+ 
++        // set as not exported.
++        mTransaction.setExported(false);
+         //save the normal transaction first
+         mTransactionsDbAdapter.addTransaction(mTransaction);
+         scheduleRecurringTransaction();
+@@ -761,11 +768,10 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+             setAmountEditViewVisible(View.GONE);
+         }
+ 
+-        SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
+-        for (String removedSplitUID : removedSplitUIDs) {
+-            splitsDbAdapter.deleteRecord(splitsDbAdapter.getID(removedSplitUID));
+-        }
+-        splitsDbAdapter.close();
++        // save the deleted UID list. Use add instead of assign in case this
++        // is called multiple times
++        // The splits will be actually deleted when the transaction is saved.
++        mDeletedSplitUIDList.addAll(removedSplitUIDs);
+     }
+ 
+     /**
+
+From 163be8d7d4bd5e74dcc37645a71673abaa4469a6 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 15 Oct 2014 20:45:05 +0800
+Subject: [PATCH 22/30] remove unused local variable
+
+---
+ .../android/ui/transaction/TransactionFormFragment.java        | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 723bd989..5fde6aa0 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -182,11 +182,6 @@
+     private String mAccountUID;
+ 
+     private List<Split> mSplitsList = new ArrayList<Split>();
+-    /**
+-     * list to hold deleted splits. This split should only be deleted from
+-     * DB when the transaction is saved.
+-     */
+-    private List<String> mDeletedSplitUIDList = new ArrayList<String>();
+ 
+     /**
+ 	 * Create the view and retrieve references to the UI elements
+@@ -767,11 +762,6 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+             mAmountEditText.setEnabled(false);
+             setAmountEditViewVisible(View.GONE);
+         }
+-
+-        // save the deleted UID list. Use add instead of assign in case this
+-        // is called multiple times
+-        // The splits will be actually deleted when the transaction is saved.
+-        mDeletedSplitUIDList.addAll(removedSplitUIDs);
+     }
+ 
+     /**
+
+From f4f2a818bd18b23fbe545688b2aaf7af8fa8265f Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Sat, 15 Nov 2014 19:23:14 +0300
+Subject: [PATCH 23/30] Redesigned passcode lock screen
+
+---
+ app/res/layout/fragment_numeric_keyboard.xml | 417 ++++++++++++++-------------
+ 1 file changed, 215 insertions(+), 202 deletions(-)
+
+diff --git a/app/res/layout/fragment_numeric_keyboard.xml b/app/res/layout/fragment_numeric_keyboard.xml
+index e4a007df..bff9f93a 100644
+--- a/app/res/layout/fragment_numeric_keyboard.xml
++++ b/app/res/layout/fragment_numeric_keyboard.xml
+@@ -16,216 +16,229 @@
+  limitations under the License.
+ -->
+ 
+-<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+-                android:layout_width="match_parent"
+-                android:layout_height="wrap_content"
+-                android:layout_alignParentBottom="true"
+-                android:layout_centerHorizontal="true">
+-
+-    <LinearLayout
+-        android:id="@+id/zero"
+-        android:layout_width="match_parent"
+-        android:layout_height="55dp"
+-        android:layout_alignParentBottom="true"
+-        android:orientation="horizontal"
+-        android:weightSum="3" >
+-
+-        <Button
+-            android:id="@+id/empty_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text=""
+-            android:textSize="25sp"
+-            android:enabled="false" />
+-
+-        <Button
+-            android:id="@+id/zero_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="0"
+-            android:textSize="25sp"/>
+-
+-        <ImageButton
+-            android:id="@+id/delete_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:src="@drawable/clear_btn" />
+-
+-    </LinearLayout>
+-
+-    <LinearLayout
+-        android:id="@+id/seven_to_nine"
+-        android:layout_width="match_parent"
+-        android:layout_height="55dp"
+-        android:layout_above="@+id/zero"
+-        android:orientation="horizontal"
+-        android:weightSum="3" >
+-
+-        <Button
+-            android:id="@+id/seven_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="7"
+-            android:textSize="25sp" />
+-
+-        <Button
+-            android:id="@+id/eight_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="8"
+-            android:textSize="25sp" />
+-
+-        <Button
+-            android:id="@+id/nine_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="9"
+-            android:textSize="25sp" />
+-    </LinearLayout>
+-
+-    <LinearLayout
+-        android:id="@+id/four_to_six"
+-        android:layout_width="match_parent"
+-        android:layout_height="55dp"
+-        android:layout_above="@+id/seven_to_nine"
+-        android:orientation="horizontal"
+-        android:weightSum="3" >
+-
+-        <Button
+-            android:id="@+id/four_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="4"
+-            android:textSize="25sp" />
+-
+-        <Button
+-            android:id="@+id/five_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="5"
+-            android:textSize="25sp" />
+-
+-        <Button
+-            android:id="@+id/six_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="6"
+-            android:textSize="25sp" />
+-    </LinearLayout>
+-
+-    <LinearLayout
+-        android:id="@+id/one_to_three"
+-        android:layout_width="match_parent"
+-        android:layout_height="55dp"
+-        android:layout_above="@+id/four_to_six"
+-        android:orientation="horizontal"
+-        android:weightSum="3" >
+-
+-        <Button
+-            android:id="@+id/one_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="1"
+-            android:textSize="25sp" />
+-
+-        <Button
+-            android:id="@+id/two_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="2"
+-            android:textSize="25sp" />
+-
+-        <Button
+-            android:id="@+id/three_btn"
+-            android:layout_width="0dp"
+-            android:layout_height="match_parent"
+-            android:layout_weight="1"
+-            android:text="3"
+-            android:textSize="25sp" />
+-    </LinearLayout>
+-
+-    <LinearLayout
+-        android:id="@+id/pass_label"
+-        android:layout_width="match_parent"
+-        android:layout_height="100dp"
+-        android:orientation="horizontal" >
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++              android:layout_width="fill_parent"
++              android:layout_height="fill_parent"
++              android:orientation="vertical"
++              android:weightSum="2">
++
++    <LinearLayout android:layout_width="fill_parent"
++                  android:layout_height="fill_parent"
++                  android:orientation="vertical"
++                  android:gravity="center"
++                  android:layout_weight="0.8"
++                  android:weightSum="1">
++
++        <ImageView
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:src="@drawable/ic_launcher"
++            android:layout_weight="0.1" />
+ 
+         <TextView
+             android:id="@+id/passcode_label"
+-            android:layout_width="match_parent"
+-            android:layout_height="match_parent"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
+             android:gravity="center"
+             android:text="Enter passcode"
+-            android:textSize="25sp" />
++            android:textSize="25sp"
++            android:layout_weight="0.1" />
+ 
+-    </LinearLayout>
++        <LinearLayout
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:orientation="horizontal"
++            android:gravity="center"
++            android:layout_weight="0.1" >
++
++            <EditText
++                android:id="@+id/passcode1"
++                android:layout_width="wrap_content"
++                android:layout_height="match_parent"
++                android:cursorVisible="false"
++                android:focusableInTouchMode="false"
++                android:hint="*"
++                android:inputType="textPassword|number"
++                android:password="true"
++                android:maxLength="1"
++                android:textSize="33sp" />
++
++            <EditText
++                android:id="@+id/passcode2"
++                android:layout_width="wrap_content"
++                android:layout_height="match_parent"
++                android:cursorVisible="false"
++                android:focusableInTouchMode="false"
++                android:hint="*"
++                android:inputType="textPassword|number"
++                android:password="true"
++                android:maxLength="1"
++                android:textSize="33sp" />
++
++            <EditText
++                android:id="@+id/passcode3"
++                android:layout_width="wrap_content"
++                android:layout_height="match_parent"
++                android:cursorVisible="false"
++                android:focusableInTouchMode="false"
++                android:hint="*"
++                android:inputType="textPassword|number"
++                android:password="true"
++                android:maxLength="1"
++                android:textSize="33sp" />
++
++            <EditText
++                android:id="@+id/passcode4"
++                android:layout_width="wrap_content"
++                android:layout_height="match_parent"
++                android:cursorVisible="false"
++                android:focusableInTouchMode="false"
++                android:hint="*"
++                android:inputType="textPassword|number"
++                android:password="true"
++                android:maxLength="1"
++                android:textSize="33sp" />
++
++        </LinearLayout>
+ 
+-    <LinearLayout
+-        android:layout_width="match_parent"
+-        android:layout_height="70dp"
+-        android:layout_below="@+id/pass_label"
+-        android:orientation="horizontal"
+-        android:gravity="center" >
++    </LinearLayout>
+ 
+-        <EditText
+-            android:id="@+id/passcode1"
+-            android:layout_width="wrap_content"
+-            android:layout_height="match_parent"
+-            android:cursorVisible="false"
+-            android:focusableInTouchMode="false"
+-            android:hint="*"
+-            android:inputType="textPassword|number"
+-            android:password="true"
+-            android:maxLength="1"
+-            android:textSize="33sp" />
+-
+-        <EditText
+-            android:id="@+id/passcode2"
+-            android:layout_width="wrap_content"
+-            android:layout_height="match_parent"
+-            android:cursorVisible="false"
+-            android:focusableInTouchMode="false"
+-            android:hint="*"
+-            android:inputType="textPassword|number"
+-            android:password="true"
+-            android:maxLength="1"
+-            android:textSize="33sp" />
+-
+-        <EditText
+-            android:id="@+id/passcode3"
+-            android:layout_width="wrap_content"
+-            android:layout_height="match_parent"
+-            android:cursorVisible="false"
+-            android:focusableInTouchMode="false"
+-            android:hint="*"
+-            android:inputType="textPassword|number"
+-            android:password="true"
+-            android:maxLength="1"
+-            android:textSize="33sp" />
+-
+-        <EditText
+-            android:id="@+id/passcode4"
+-            android:layout_width="wrap_content"
+-            android:layout_height="match_parent"
+-            android:cursorVisible="false"
+-            android:focusableInTouchMode="false"
+-            android:hint="*"
+-            android:inputType="textPassword|number"
+-            android:password="true"
+-            android:maxLength="1"
+-            android:textSize="33sp" />
++    <LinearLayout android:id="@+id/keypad"
++                  android:layout_width="fill_parent"
++                  android:layout_height="fill_parent"
++                  android:orientation="vertical"
++                  android:layout_weight="1.2"
++                  android:weightSum="4">
++
++        <LinearLayout android:id="@+id/one_to_three"
++                      android:layout_width="match_parent"
++                      android:layout_height="fill_parent"
++                      android:orientation="horizontal"
++                      android:weightSum="3"
++                      android:layout_weight="1">
++
++            <Button
++                android:id="@+id/one_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="1"
++                android:textSize="25sp" />
++
++            <Button
++                android:id="@+id/two_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="2"
++                android:textSize="25sp" />
++
++            <Button
++                android:id="@+id/three_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="3"
++                android:textSize="25sp" />
++        </LinearLayout>
++
++        <LinearLayout android:id="@+id/four_to_six"
++                      android:layout_width="match_parent"
++                      android:layout_height="fill_parent"
++                      android:orientation="horizontal"
++                      android:weightSum="3"
++                      android:layout_weight="1">
++
++            <Button
++                android:id="@+id/four_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="4"
++                android:textSize="25sp" />
++
++            <Button
++                android:id="@+id/five_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="5"
++                android:textSize="25sp" />
++
++            <Button
++                android:id="@+id/six_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="6"
++                android:textSize="25sp" />
++        </LinearLayout>
++
++        <LinearLayout android:id="@+id/seven_to_nine"
++                      android:layout_width="match_parent"
++                      android:layout_height="fill_parent"
++                      android:orientation="horizontal"
++                      android:weightSum="3"
++                      android:layout_weight="1">
++
++            <Button
++                android:id="@+id/seven_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="7"
++                android:textSize="25sp" />
++
++            <Button
++                android:id="@+id/eight_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="8"
++                android:textSize="25sp" />
++
++            <Button
++                android:id="@+id/nine_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="9"
++                android:textSize="25sp" />
++        </LinearLayout>
++
++        <LinearLayout
++            android:id="@+id/zero"
++            android:layout_width="match_parent"
++            android:layout_height="fill_parent"
++            android:orientation="horizontal"
++            android:weightSum="3"
++            android:layout_weight="1">
++
++            <Button
++                android:id="@+id/empty_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text=""
++                android:textSize="25sp"
++                android:enabled="false" />
++
++            <Button
++                android:id="@+id/zero_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:text="0"
++                android:textSize="25sp"/>
++
++            <ImageButton
++                android:id="@+id/delete_btn"
++                android:layout_width="0dp"
++                android:layout_height="match_parent"
++                android:layout_weight="1"
++                android:src="@drawable/clear_btn" />
++        </LinearLayout>
+ 
+     </LinearLayout>
+ 
+-</RelativeLayout>
++</LinearLayout>
+
+From 4b075c8f880b19dc6d8f2ef803a552344518d1b8 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Sun, 16 Nov 2014 20:17:15 +0300
+Subject: [PATCH 24/30] Changed style of numeric button
+
+---
+ app/res/drawable/numeric_button.xml          |  35 ++++++++
+ app/res/layout/fragment_numeric_keyboard.xml | 119 ++++++---------------------
+ app/res/values/styles.xml                    |  21 +++++
+ 3 files changed, 81 insertions(+), 94 deletions(-)
+ create mode 100644 app/res/drawable/numeric_button.xml
+
+diff --git a/app/res/drawable/numeric_button.xml b/app/res/drawable/numeric_button.xml
+new file mode 100644
+index 00000000..a6a09668
+--- /dev/null
++++ b/app/res/drawable/numeric_button.xml
+@@ -0,0 +1,35 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_pressed="true" >
++        <shape>
++            <solid
++                android:color="@color/default_line_indicator_selected_color" />
++            <corners
++                android:radius="200dp" />
++            <stroke
++                android:width="1dp"
++                android:color="@color/abs__bright_foreground_disabled_holo_light" />
++        </shape>
++    </item>
++    <item android:state_enabled="false" >
++        <shape>
++            <solid
++                android:color="@color/abs__primary_text_disable_only_holo_dark" />
++            <corners
++                android:radius="200dp" />
++            <stroke
++                android:width="1dp"
++                android:color="@color/abs__bright_foreground_disabled_holo_light" />
++        </shape>
++    </item>
++    <item>
++        <shape>
++            <solid android:color="@android:color/transparent" />
++            <corners
++                android:radius="200dp" />
++            <stroke
++                android:width="1dp"
++                android:color="@color/abs__bright_foreground_disabled_holo_light" />
++        </shape>
++    </item>
++</selector>
+diff --git a/app/res/layout/fragment_numeric_keyboard.xml b/app/res/layout/fragment_numeric_keyboard.xml
+index bff9f93a..7319f335 100644
+--- a/app/res/layout/fragment_numeric_keyboard.xml
++++ b/app/res/layout/fragment_numeric_keyboard.xml
+@@ -53,58 +53,25 @@
+ 
+             <EditText
+                 android:id="@+id/passcode1"
+-                android:layout_width="wrap_content"
+-                android:layout_height="match_parent"
+-                android:cursorVisible="false"
+-                android:focusableInTouchMode="false"
+-                android:hint="*"
+-                android:inputType="textPassword|number"
+-                android:password="true"
+-                android:maxLength="1"
+-                android:textSize="33sp" />
++                style="@style/PasscodeEditText" />
+ 
+             <EditText
+                 android:id="@+id/passcode2"
+-                android:layout_width="wrap_content"
+-                android:layout_height="match_parent"
+-                android:cursorVisible="false"
+-                android:focusableInTouchMode="false"
+-                android:hint="*"
+-                android:inputType="textPassword|number"
+-                android:password="true"
+-                android:maxLength="1"
+-                android:textSize="33sp" />
++                style="@style/PasscodeEditText" />
+ 
+             <EditText
+                 android:id="@+id/passcode3"
+-                android:layout_width="wrap_content"
+-                android:layout_height="match_parent"
+-                android:cursorVisible="false"
+-                android:focusableInTouchMode="false"
+-                android:hint="*"
+-                android:inputType="textPassword|number"
+-                android:password="true"
+-                android:maxLength="1"
+-                android:textSize="33sp" />
++                style="@style/PasscodeEditText" />
+ 
+             <EditText
+                 android:id="@+id/passcode4"
+-                android:layout_width="wrap_content"
+-                android:layout_height="match_parent"
+-                android:cursorVisible="false"
+-                android:focusableInTouchMode="false"
+-                android:hint="*"
+-                android:inputType="textPassword|number"
+-                android:password="true"
+-                android:maxLength="1"
+-                android:textSize="33sp" />
++                style="@style/PasscodeEditText" />
+ 
+         </LinearLayout>
+ 
+     </LinearLayout>
+ 
+-    <LinearLayout android:id="@+id/keypad"
+-                  android:layout_width="fill_parent"
++    <LinearLayout android:layout_width="fill_parent"
+                   android:layout_height="fill_parent"
+                   android:orientation="vertical"
+                   android:layout_weight="1.2"
+@@ -119,27 +86,18 @@
+ 
+             <Button
+                 android:id="@+id/one_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="1"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+ 
+             <Button
+                 android:id="@+id/two_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="2"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+ 
+             <Button
+                 android:id="@+id/three_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="3"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+         </LinearLayout>
+ 
+         <LinearLayout android:id="@+id/four_to_six"
+@@ -151,27 +109,18 @@
+ 
+             <Button
+                 android:id="@+id/four_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="4"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+ 
+             <Button
+                 android:id="@+id/five_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="5"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+ 
+             <Button
+                 android:id="@+id/six_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="6"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+         </LinearLayout>
+ 
+         <LinearLayout android:id="@+id/seven_to_nine"
+@@ -183,60 +132,42 @@
+ 
+             <Button
+                 android:id="@+id/seven_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="7"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+ 
+             <Button
+                 android:id="@+id/eight_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="8"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+ 
+             <Button
+                 android:id="@+id/nine_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="9"
+-                android:textSize="25sp" />
++                style="@style/NumericButton" />
+         </LinearLayout>
+ 
+-        <LinearLayout
+-            android:id="@+id/zero"
+-            android:layout_width="match_parent"
+-            android:layout_height="fill_parent"
+-            android:orientation="horizontal"
+-            android:weightSum="3"
+-            android:layout_weight="1">
++        <LinearLayout android:id="@+id/zero"
++                      android:layout_width="match_parent"
++                      android:layout_height="fill_parent"
++                      android:orientation="horizontal"
++                      android:weightSum="3"
++                      android:layout_weight="1">
+ 
+             <Button
+                 android:id="@+id/empty_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text=""
+-                android:textSize="25sp"
+-                android:enabled="false" />
++                android:enabled="false"
++                style="@style/NumericButton" />
+ 
+             <Button
+                 android:id="@+id/zero_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+                 android:text="0"
+-                android:textSize="25sp"/>
++                style="@style/NumericButton" />
+ 
+             <ImageButton
+                 android:id="@+id/delete_btn"
+-                android:layout_width="0dp"
+-                android:layout_height="match_parent"
+-                android:layout_weight="1"
+-                android:src="@drawable/clear_btn" />
++                android:src="@drawable/clear_btn"
++                style="@style/NumericButton" />
+         </LinearLayout>
+ 
+     </LinearLayout>
+diff --git a/app/res/values/styles.xml b/app/res/values/styles.xml
+index 19b863a2..4a528ce7 100644
+--- a/app/res/values/styles.xml
++++ b/app/res/values/styles.xml
+@@ -90,4 +90,25 @@
+         <item name="android:orientation">vertical</item>
+         <item name="android:layout_marginBottom">@dimen/form_row_bottom_margin</item>
+     </style>
++
++    <style name="NumericButton" parent="@android:style/Widget.Button">
++        <item name="android:layout_width">0dp</item>
++        <item name="android:layout_height">match_parent</item>
++        <item name="android:layout_weight">1</item>
++        <item name="android:layout_margin">1dp</item>
++        <item name="android:textSize">25sp</item>
++        <item name="android:background">@drawable/numeric_button</item>
++    </style>
++
++    <style name="PasscodeEditText" parent="@android:style/Widget.EditText">
++        <item name="android:layout_width">wrap_content</item>
++        <item name="android:layout_height">match_parent</item>
++        <item name="android:cursorVisible">false</item>
++        <item name="android:focusableInTouchMode">false</item>
++        <item name="android:inputType">textPassword|number</item>
++        <item name="android:password">true</item>
++        <item name="android:maxLength">1</item>
++        <item name="android:hint">*</item>
++        <item name="android:textSize">33sp</item>
++    </style>
+ </resources>
+\ No newline at end of file
+
+From a89c91f4d7871acbee1703ffea50eddbfbfcc19c Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Mon, 17 Nov 2014 20:33:17 +0300
+Subject: [PATCH 25/30] Fixed delete_button icon
+
+---
+ app/res/drawable-ldpi/clear_btn.png | Bin 0 -> 4281 bytes
+ app/res/drawable-mdpi/clear_btn.png | Bin 1650 -> 4895 bytes
+ 2 files changed, 0 insertions(+), 0 deletions(-)
+ create mode 100644 app/res/drawable-ldpi/clear_btn.png
+
+diff --git a/app/res/drawable-ldpi/clear_btn.png b/app/res/drawable-ldpi/clear_btn.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..2bdcc84df5617ee12241a77e5a260375b15e20d7
+GIT binary patch
+literal 4281
+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
+z1!#=7dzIRrP-KwF>_D<3dqH%}?PVto%0A9aFxAM{G1H^GyxhD2QF#gCcC|v@D$jeG
+z$4H_&2~)!fKr?O1P6)Xr9F%=C9DNV9)7JvV4DXi5x^<atoU$?GXX!8=N4*=~#hAV(
+zK|ni^F<C9y$;n9*8F;107qZ@Gngo+whl8=N&l5(*5K`yaC89bFi|SBi@wslNY$T-D
+zk$VPS4?fD_6z5~ewMnnCveJB=(Ah}|%HBjlLBa3h;gqXTxOy|MjSVX?aAXh660ejV
+zL8+Hg2@8<7yaB-8=H})YGKZ<*3-BCeJ#<LzRnjAipTJJ7>@h|f8yi&x2G7Lbe>0M4
+zK%XbP*Vm#!(g@x|u@NxrCclGJ3E%{DlNhXT!RsZ&7Ma>HJw5%k^mz9}(6-RY?sDuG
+z%^wC7MU$cW0OMVsn5+%Z)x6c#zT~`@o9>5Z%7Qh{H2R1fp`7*?7Z-P`uIar>xWkGJ
+zqaV33MU&NBd-*}(5JK#lp1OhKH@wBOgiZ<YCdsB=Y6gnBVY(~;%JJ&i81yo{AN?Yt
+z_C2x{=-gwb|3uQDvgm*J5O@->5fsZ&RGpn+_Cg<*+-gH_sF1=t!e?zgdSmR>Fn;pw
+z`g&QQA|j-0SUPdy#8bTGX8`X|GN^eIjX|8b%6bz~|IeY6^G@isdP9ZOyJ58eeS5O)
+zj}@R|_=5Vv@K*XB9>n{oS|Dd7%nUR|AVkI%;+V?FB5CeG`-s_%4TaQPfOFPZ6;u+L
+zA<_4c&>etW#oWTJ3R#2PP@U#J>jdW!rb!ysEPb6b$3sCSgt4suUiDUzW^>X>76;rw
+zE`V`v_{XMAn<i9;(vh<&L2hXhOSJzqFyP48TFR2qTua91t$9;lC}UM0UZDfcw95>+
+bHMf5QbB2bGuTWZe00000NkvXXu0mjfDez4D
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/res/drawable-mdpi/clear_btn.png b/app/res/drawable-mdpi/clear_btn.png
+index bc3b9850767f7639000c4b33320a0ba96af90a9d..c25ead0007b173e214da1f116b675413d10b7d4b 100644
+GIT binary patch
+literal 4895
+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
+R#F_vA002ovPDHLkV1jaAgOmUO
+
+delta 1649
+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
+
+
+From b8d95a2da5b4737cbdfdf03aa2464b71a315797b Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Mon, 17 Nov 2014 20:36:19 +0300
+Subject: [PATCH 26/30] Added missed header
+
+---
+ app/res/drawable/numeric_button.xml | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/app/res/drawable/numeric_button.xml b/app/res/drawable/numeric_button.xml
+index a6a09668..610ad349 100644
+--- a/app/res/drawable/numeric_button.xml
++++ b/app/res/drawable/numeric_button.xml
+@@ -1,4 +1,21 @@
+ <?xml version="1.0" encoding="utf-8"?>
++
++<!--
++ Copyright (c) 2014 Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
++
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++
+ <selector xmlns:android="http://schemas.android.com/apk/res/android">
+     <item android:state_pressed="true" >
+         <shape>
+
+From 324ce56e79524323a6e8d4ed93b473d1cc5f55b6 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Tue, 18 Nov 2014 20:23:21 +0300
+Subject: [PATCH 27/30] Improved turning on/off passcode in preferences
+
+---
+ app/res/values/strings.xml                                         | 3 ++-
+ app/res/xml/fragment_passcode_preferences.xml                      | 3 +--
+ .../gnucash/android/ui/settings/PasscodePreferenceFragment.java    | 6 ++++++
+ app/src/org/gnucash/android/ui/settings/SettingsActivity.java      | 7 ++++++-
+ 4 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index d7cffbd0..7184e798 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -278,7 +278,8 @@
+ 	<string name="toast_no_transactions_to_export">There are no transactions available to export</string>
+     <string name="header_passcode_settings">Passcode</string>
+     <string name="title_passcode_preferences">Passcode Preferences</string>
+-    <string name="title_enable_passcode">Turn On/Off Passcode</string>
++    <string name="title_passcode_enabled">Passcode Turned On</string>
++    <string name="title_passcode_disabled">Passcode Turned Off</string>
+     <string name="title_change_passcode">Change Passcode</string>
+ 	<string name="title_about_gnucash">About GnuCash</string>
+ 	<string name="summary_about_gnucash">Gnucash is a mobile finance expense tracker application for Android.\n
+diff --git a/app/res/xml/fragment_passcode_preferences.xml b/app/res/xml/fragment_passcode_preferences.xml
+index 027aa088..e81d9a1d 100755
+--- a/app/res/xml/fragment_passcode_preferences.xml
++++ b/app/res/xml/fragment_passcode_preferences.xml
+@@ -17,8 +17,7 @@
+ 
+ <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" >
+     <PreferenceCategory android:title="@string/title_passcode_preferences"/>
+-    <CheckBoxPreference android:title="@string/title_enable_passcode"
+-                        android:key="@string/key_enable_passcode" />
++    <CheckBoxPreference android:key="@string/key_enable_passcode" />
+     <Preference android:key="@string/key_change_passcode"
+                 android:title="@string/title_change_passcode"
+                 android:dependency="@string/key_enable_passcode" />
+diff --git a/app/src/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java b/app/src/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+index 52744e07..e4ccc7db 100644
+--- a/app/src/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
++++ b/app/src/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+@@ -67,11 +67,16 @@ public void onResume() {
+         final Intent intent = new Intent(getActivity(), PasscodePreferenceActivity.class);
+ 
+         checkBoxPreference = (CheckBoxPreference) findPreference(getString(R.string.key_enable_passcode));
++        final String passcodeEnabled = getString(R.string.title_passcode_enabled);
++        final String passcodeDisabled = getString(R.string.title_passcode_disabled);
++        checkBoxPreference.setTitle(checkBoxPreference.isChecked() ? passcodeEnabled : passcodeDisabled);
+         checkBoxPreference.setOnPreferenceChangeListener(new OnPreferenceChangeListener() {
+                     @Override
+                     public boolean onPreferenceChange(Preference preference, Object newValue) {
+                         if ((Boolean) newValue) {
+                             startActivityForResult(intent, PASSCODE_REQUEST_CODE);
++                        } else {
++                            checkBoxPreference.setTitle(passcodeDisabled);
+                         }
+                         editor.putBoolean(UxArgument.ENABLED_PASSCODE, (Boolean) newValue);
+                         editor.commit();
+@@ -95,6 +100,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+         if (resultCode == Activity.RESULT_OK && requestCode == PASSCODE_REQUEST_CODE && data!= null) {
+             editor.putString(UxArgument.PASSCODE, data.getStringExtra(UxArgument.PASSCODE));
+             Toast.makeText(getActivity(), R.string.toast_passcode_set, Toast.LENGTH_SHORT).show();
++            checkBoxPreference.setTitle(getString(R.string.title_passcode_enabled));
+         } else {
+             editor.putBoolean(UxArgument.ENABLED_PASSCODE, false);
+             checkBoxPreference.setChecked(false);
+diff --git a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+index 596d71df..2749caec 100644
+--- a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -149,7 +149,9 @@ protected void onCreate(Bundle savedInstanceState) {
+ 
+             pref = findPreference(getString(R.string.key_enable_passcode));
+             pref.setOnPreferenceChangeListener(this);
+-		}
++            pref.setTitle(((CheckBoxPreference) pref).isChecked() ?
++                    getString(R.string.title_passcode_enabled) : getString(R.string.title_passcode_disabled));
++        }
+ 	}
+ 
+     @Override
+@@ -195,6 +197,8 @@ public boolean onPreferenceChange(Preference preference, Object newValue) {
+             if ((Boolean) newValue) {
+                 startActivityForResult(new Intent(this, PasscodePreferenceActivity.class),
+                         PasscodePreferenceFragment.PASSCODE_REQUEST_CODE);
++            } else {
++                preference.setTitle(getString(R.string.title_passcode_disabled));
+             }
+             PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
+                     .edit()
+@@ -357,6 +361,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+                             .putString(UxArgument.PASSCODE, data.getStringExtra(UxArgument.PASSCODE))
+                             .commit();
+                     Toast.makeText(getApplicationContext(), R.string.toast_passcode_set, Toast.LENGTH_SHORT).show();
++                    findPreference(getString(R.string.key_enable_passcode)).setTitle(getString(R.string.title_passcode_enabled));
+                 }
+                 break;
+         }
+
+From 13dd6683a9ecc2a3ac7ceca7d9108e017b0ecafd Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 26 Jan 2015 22:56:26 +0100
+Subject: [PATCH 28/30] Removed @non-null annotations
+
+Can't use them with maven at the moment, will re-introduce later
+---
+ app/src/org/gnucash/android/db/AccountsDbAdapter.java           | 3 +--
+ app/src/org/gnucash/android/ui/account/AccountFormFragment.java | 2 --
+ 2 files changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 98a79da0..c9cb59f0 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -25,7 +25,6 @@
+ import android.text.TextUtils;
+ 
+ import android.util.Log;
+-import android.support.annotation.NonNull;
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.*;
+@@ -1338,7 +1337,7 @@ public int deleteAllRecords(){
+         return mDb.delete(AccountEntry.TABLE_NAME, null, null);
+ 	}
+ 
+-    public int getTransactionMaxSplitNum(@NonNull String accountUID) {
++    public int getTransactionMaxSplitNum(String accountUID) {
+         Cursor cursor = mDb.query("trans_extra_info",
+                 new String[]{"MAX(trans_split_count)"},
+                 "trans_acct_t_uid IN ( SELECT DISTINCT " + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID +
+diff --git a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+index ece7854b..2fb095f7 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -27,8 +27,6 @@
+ import android.graphics.Color;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+-import android.support.annotation.NonNull;
+-import android.support.annotation.Nullable;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.text.TextUtils;
+
+From ccf6cb83c98f0c23427262861406c95afa27cc40 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 29 Jan 2015 19:33:31 +0100
+Subject: [PATCH 29/30] Fixed: unable to edit transactions in double entry mode
+
+Improved: Long press on transactions now triggers context menu
+---
+ .../ui/transaction/TransactionFormFragment.java      |  6 ++++--
+ .../ui/transaction/TransactionsListFragment.java     | 20 +++++++++++++-------
+ 2 files changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 5c9a6a44..f2d28c3a 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -350,6 +350,10 @@ private void initializeViewsWithTransaction(){
+ 		cal.setTimeInMillis(mTransaction.getTimeMillis());
+ 		mDate = mTime = cal;
+ 
++        //TODO: deep copy the split list. We need a copy so we can modify with impunity
++        mSplitsList = new ArrayList<Split>(mTransaction.getSplits());
++        mAmountEditText.setEnabled(mSplitsList.size() <= 2);
++
+         //if there are more than two splits (which is the default for one entry), then
+         //disable editing of the transfer account. User should open editor
+         if (mSplitsList.size() == 2 && mSplitsList.get(0).isPairOf(mSplitsList.get(1))) {
+@@ -364,8 +368,6 @@ private void initializeViewsWithTransaction(){
+                 setAmountEditViewVisible(View.GONE);
+             }
+         }
+-        mSplitsList = new ArrayList<Split>(mTransaction.getSplits()); //we need a copy so we can modify with impunity
+-        mAmountEditText.setEnabled(mSplitsList.size() <= 2);
+ 
+ 		String currencyCode = mTransactionsDbAdapter.getCurrencyCode(mAccountUID);
+ 		Currency accountCurrency = Currency.getInstance(currencyCode);
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 8cf642f8..6ab2b6ff 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -35,11 +35,8 @@
+ import android.view.TouchDelegate;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import android.widget.CheckBox;
+-import android.widget.CompoundButton;
++import android.widget.*;
+ import android.widget.CompoundButton.OnCheckedChangeListener;
+-import android.widget.ListView;
+-import android.widget.TextView;
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockListFragment;
+ import com.actionbarsherlock.view.ActionMode;
+@@ -65,7 +62,7 @@
+  *
+  */
+ public class TransactionsListFragment extends SherlockListFragment implements
+-        Refreshable, LoaderCallbacks<Cursor> {
++        Refreshable, LoaderCallbacks<Cursor>, AdapterView.OnItemLongClickListener{
+ 
+ 	/**
+ 	 * Logging tag
+@@ -76,7 +73,6 @@
+ 	private SimpleCursorAdapter mCursorAdapter;
+ 	private ActionMode mActionMode = null;
+ 	private boolean mInEditMode = false;
+-//	private long mAccountID;
+     private String mAccountUID;
+ 
+ 	/**
+@@ -162,6 +158,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		aBar.setDisplayHomeAsUpEnabled(true);
+ 
+         getListView().setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
++		getListView().setOnItemLongClickListener(this);
+ 		setHasOptionsMenu(true);		
+ 	}
+ 
+@@ -223,7 +220,16 @@ public void onListItemClick(ListView l, View v, int position, long id) {
+ 		}
+ 		mTransactionEditListener.editTransaction(mTransactionsDbAdapter.getUID(id));
+ 	}
+-	
++
++	@Override
++	public boolean onItemLongClick(AdapterView<?> adapterView, View view, int position, long id) {
++		getListView().setItemChecked(position, true);
++		CheckBox checkbox = (CheckBox) view.findViewById(R.id.checkbox_parent_account);
++		checkbox.setChecked(true);
++		startActionMode();
++		return true;
++	}
++
+ 	@Override
+ 	public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {		
+ 		inflater.inflate(R.menu.transactions_list_actions, menu);	
+
+From d9361cf76ed372a93f2ae3aa43f74ec3a392a4fa Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 29 Jan 2015 19:51:24 +0100
+Subject: [PATCH 30/30] Updated version and strings for v1.5.3 release
+
+---
+ CHANGELOG.md               | 7 +++++++
+ app/AndroidManifest.xml    | 2 +-
+ app/pom.xml                | 2 +-
+ app/res/values/strings.xml | 2 +-
+ integration-tests/pom.xml  | 2 +-
+ pom.xml                    | 2 +-
+ 6 files changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c2247b57..37a96c68 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,12 @@
+ Change Log
+ ===============================================================================
++Version 1.5.3 *(2015-02-02)*
++----------------------------
++* Fixed: Unable to edit double-entry transactions
++* Fixed: Edited transactions not flagged unexported
++* Fixed: Random crashes when editing transaction splits
++* Improved: Long press on transactions triggers context menu
++
+ Version 1.5.2 *(2015-01-26)*
+ ----------------------------
+ * Fixed: Crash when importing XML with TRADING accounts
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index e8b95b82..e99eed7b 100644
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -17,7 +17,7 @@
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+-    android:versionCode="45"
++    android:versionCode="46"
+     android:versionName="@string/app_version_name" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="16"/>
+diff --git a/app/pom.xml b/app/pom.xml
+index 943109fb..c9721db5 100644
+--- a/app/pom.xml
++++ b/app/pom.xml
+@@ -22,7 +22,7 @@
+     <description>Gnucash Android companion application</description>
+ 
+     <parent>
+-        <version>1.5.2-SNAPSHOT</version>
++        <version>1.5.3-SNAPSHOT</version>
+         <groupId>org.gnucash.android</groupId>
+         <artifactId>gnucash-android-parent</artifactId>
+     </parent>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 4bd8e5b9..66baf61c 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -17,7 +17,7 @@
+ 
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="app_name">GnuCash</string>
+-    <string name="app_version_name">1.5.2</string>
++    <string name="app_version_name">1.5.3</string>
+     <string name="title_add_account">Create Account</string>
+     <string name="title_edit_account">Edit Account</string>
+     <string name="info_details">Info</string>
+diff --git a/integration-tests/pom.xml b/integration-tests/pom.xml
+index 8c766e7a..372650d2 100644
+--- a/integration-tests/pom.xml
++++ b/integration-tests/pom.xml
+@@ -17,7 +17,7 @@
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+     <parent>
+-		<version>1.5.2-SNAPSHOT</version>
++		<version>1.5.3-SNAPSHOT</version>
+ 		<groupId>org.gnucash.android</groupId>
+ 		<artifactId>gnucash-android-parent</artifactId>
+ 	</parent>
+diff --git a/pom.xml b/pom.xml
+index b6600005..5fc8a0a8 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -17,7 +17,7 @@
+ 
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+-	<version>1.5.2-SNAPSHOT</version>
++	<version>1.5.3-SNAPSHOT</version>
+     <groupId>org.gnucash.android</groupId>
+     <artifactId>gnucash-android-parent</artifactId>
+     <name>GnuCash Android parent</name>

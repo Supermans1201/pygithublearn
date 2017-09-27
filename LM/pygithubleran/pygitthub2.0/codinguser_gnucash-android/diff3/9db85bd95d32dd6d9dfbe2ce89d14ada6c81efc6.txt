@@ -1,0 +1,347 @@
+From 9db85bd95d32dd6d9dfbe2ce89d14ada6c81efc6 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 6 Jun 2016 13:41:36 +0200
+Subject: [PATCH] Display notification if there are no backups to restore
+
+Rename BookListFragment to BookManagerFragment
+Use of double-entry defaults to true
+Create main db at the same time as creating book db
+---
+ .../gnucash/android/app/GnuCashApplication.java    |  2 +-
+ .../java/org/gnucash/android/db/BookDbHelper.java  | 64 ++++++++++++++--------
+ .../org/gnucash/android/db/DatabaseHelper.java     |  1 +
+ .../gnucash/android/importer/GncXmlHandler.java    |  4 +-
+ .../gnucash/android/importer/ImportAsyncTask.java  |  1 -
+ .../ui/settings/BackupPreferenceFragment.java      | 15 ++++-
+ ...kListFragment.java => BookManagerFragment.java} | 17 +++---
+ .../android/ui/settings/PreferenceActivity.java    |  6 +-
+ .../res/xml/fragment_transaction_preferences.xml   |  1 +
+ .../main/res/xml/preference_fragment_headers.xml   |  2 +-
+ .../android/test/unit/db/BooksDbAdapterTest.java   |  1 -
+ 11 files changed, 67 insertions(+), 47 deletions(-)
+ rename app/src/main/java/org/gnucash/android/ui/settings/{BookListFragment.java => BookManagerFragment.java} (93%)
+
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 5dc0b6c0..3ebda503 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -244,7 +244,7 @@ public static boolean isCrashlyticsEnabled(){
+      */
+     public static boolean isDoubleEntryEnabled(){
+         SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences(context);
+-        return sharedPrefs.getBoolean(context.getString(R.string.key_use_double_entry), false);
++        return sharedPrefs.getBoolean(context.getString(R.string.key_use_double_entry), true);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+index 9d12f376..87adc17d 100644
+--- a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+@@ -47,6 +47,9 @@
+ public class BookDbHelper extends SQLiteOpenHelper {
+ 
+     public static final String LOG_TAG = "BookDbHelper";
++
++    private Context mContext;
++
+     /**
+      * Create the books table
+      */
+@@ -65,26 +68,15 @@
+ 
+     public BookDbHelper(Context context) {
+         super(context, DatabaseSchema.BOOK_DATABASE_NAME, null, DatabaseSchema.BOOK_DATABASE_VERSION);
++        mContext = context;
+     }
+ 
+     @Override
+     public void onCreate(SQLiteDatabase db) {
+         db.execSQL(BOOKS_TABLE_CREATE);
+-    }
+-
+-    @Override
+-    public void onOpen(SQLiteDatabase db) {
+-        super.onOpen(db);
+-
+-        if (db.isReadOnly()) {
+-            Log.w(LOG_TAG, "Database was opened in read-only mode");
+-            return;
+-        }
+ 
+-        String sql = "SELECT COUNT(*) FROM " + BookEntry.TABLE_NAME;
+-        SQLiteStatement statement = db.compileStatement(sql);
+-        long count = statement.simpleQueryForLong();
+-        if (count == 0) { //there is currently no book in the database, should only be true once, during migration
++        if (mContext.getDatabasePath(DatabaseSchema.LEGACY_DATABASE_NAME).exists()){
++            Log.d(LOG_TAG, "Legacy database found. Migrating to multibook format");
+             DatabaseHelper helper = new DatabaseHelper(GnuCashApplication.getAppContext(),
+                     DatabaseSchema.LEGACY_DATABASE_NAME);
+             SQLiteDatabase mainDb = helper.getWritableDatabase();
+@@ -94,14 +86,8 @@ public void onOpen(SQLiteDatabase db) {
+             String rootAccountUID = accountsDbAdapter.getOrCreateGnuCashRootAccountUID();
+ 
+             Book book = new Book(rootAccountUID);
+-            ContentValues contentValues = new ContentValues();
+-            contentValues.put(BookEntry.COLUMN_UID, book.getUID());
+-            contentValues.put(BookEntry.COLUMN_ROOT_GUID, rootAccountUID);
+-            contentValues.put(BookEntry.COLUMN_TEMPLATE_GUID, Book.generateUID());
+-            contentValues.put(BookEntry.COLUMN_DISPLAY_NAME, new BooksDbAdapter(db).generateDefaultBookName());
+-            contentValues.put(BookEntry.COLUMN_ACTIVE, 1);
+-
+-            db.insert(BookEntry.TABLE_NAME, null, contentValues);
++            book.setActive(true);
++            insertBook(db, book);
+ 
+             String mainDbPath = mainDb.getPath();
+             helper.close();
+@@ -118,6 +104,40 @@ public void onOpen(SQLiteDatabase db) {
+ 
+             migrateBackupFiles(book.getUID());
+         }
++
++        String sql = "SELECT COUNT(*) FROM " + BookEntry.TABLE_NAME;
++        SQLiteStatement statement = db.compileStatement(sql);
++        long count = statement.simpleQueryForLong();
++        if (count == 0) { //no book in the database, create a default one
++            Log.i(LOG_TAG, "No books found in database, creating default book");
++            Book book = new Book();
++            DatabaseHelper helper = new DatabaseHelper(GnuCashApplication.getAppContext(), book.getUID());
++            SQLiteDatabase mainDb = helper.getWritableDatabase(); //actually create the db
++            AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(mainDb,
++                    new TransactionsDbAdapter(mainDb, new SplitsDbAdapter(mainDb)));
++
++            String rootAccountUID = accountsDbAdapter.getOrCreateGnuCashRootAccountUID();
++            book.setRootAccountUID(rootAccountUID);
++            book.setActive(true);
++            insertBook(db, book);
++        }
++
++    }
++
++    /**
++     * Inserts the book into the database
++     * @param db Book database
++     * @param book Book to insert
++     */
++    private void insertBook(SQLiteDatabase db, Book book) {
++        ContentValues contentValues = new ContentValues();
++        contentValues.put(BookEntry.COLUMN_UID, book.getUID());
++        contentValues.put(BookEntry.COLUMN_ROOT_GUID, book.getRootAccountUID());
++        contentValues.put(BookEntry.COLUMN_TEMPLATE_GUID, Book.generateUID());
++        contentValues.put(BookEntry.COLUMN_DISPLAY_NAME, new BooksDbAdapter(db).generateDefaultBookName());
++        contentValues.put(BookEntry.COLUMN_ACTIVE, book.isActive() ? 1 : 0);
++
++        db.insert(BookEntry.TABLE_NAME, null, contentValues);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index df43c5a2..ac7dbabd 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -250,6 +250,7 @@ static String createUpdatedAtTrigger(String tableName){
+ 	@Override
+ 	public void onCreate(SQLiteDatabase db) {
+ 		createDatabaseTables(db);
++
+ 	}
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 7166b400..227adfa1 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -19,13 +19,11 @@
+ 
+ import android.database.sqlite.SQLiteDatabase;
+ import android.support.annotation.NonNull;
+-import android.support.annotation.Nullable;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.BookDbHelper;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+@@ -43,9 +41,9 @@
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.BaseModel;
+ import org.gnucash.android.model.Book;
+-import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Budget;
+ import org.gnucash.android.model.BudgetAmount;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.Price;
+diff --git a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+index ca698ded..b6b2231d 100644
+--- a/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -84,7 +84,6 @@ protected Boolean doInBackground(Uri... uris) {
+             InputStream accountInputStream = mContext.getContentResolver().openInputStream(uris[0]);
+             bookUID = GncXmlImporter.parse(accountInputStream);
+ 
+-            //// TODO: 08.12.2015 update book name in database table - get name from Uri
+         } catch (Exception exception){
+             Log.e(ImportAsyncTask.class.getName(), "" + exception.getMessage());
+             Crashlytics.log("Could not open: " + uris[0].toString());
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index c8ea6d28..f1017b55 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -354,9 +354,18 @@ public void onConnectionFailed(ConnectionResult connectionResult) {
+ 	private void restoreBackup() {
+ 		Log.i("Settings", "Opening GnuCash XML backups for restore");
+ 		File[] backupFiles = new File(Exporter.getBackupFolderPath()).listFiles();
+-		if (backupFiles == null){
+-			Toast.makeText(getActivity(), R.string.toast_backup_folder_not_found, Toast.LENGTH_LONG).show();
+-			new File(Exporter.getBackupFolderPath());
++		if (backupFiles == null || backupFiles.length == 0){
++			android.support.v7.app.AlertDialog.Builder builder = new android.support.v7.app.AlertDialog.Builder(getActivity())
++					.setTitle("No backups found")
++					.setMessage("There are no existing backup files to restore from")
++					.setNegativeButton(R.string.label_dismiss, new DialogInterface.OnClickListener() {
++						@Override
++						public void onClick(DialogInterface dialog, int which) {
++							dialog.dismiss();
++						}
++					});
++			builder.create().show();
++			Exporter.getBackupFolderPath(); //creates the directory
+ 			return;
+ 		}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+similarity index 93%
+rename from app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java
+rename to app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+index 7954e90b..ec488e61 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+@@ -53,15 +53,16 @@
+ import org.gnucash.android.db.DatabaseSchema.BookEntry;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.common.Refreshable;
++import org.gnucash.android.util.PreferencesHelper;
+ import org.w3c.dom.Text;
+ 
+ /**
+  * Fragment for managing the books in the database
+  */
+-public class BookListFragment extends ListFragment implements
++public class BookManagerFragment extends ListFragment implements
+         LoaderManager.LoaderCallbacks<Cursor>, Refreshable{
+ 
+-    private static String LOG_TAG = "BookListFragment";
++    private static String LOG_TAG = "BookManagerFragment";
+ 
+     SimpleCursorAdapter mCursorAdapter;
+ 
+@@ -160,16 +161,11 @@ public void bindView(View view, final Context context, Cursor cursor) {
+ 
+             final String bookUID = cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_UID));
+ 
+-            DateFormat dateFormat = DateFormat.getDateTimeInstance();
+-            //// TODO: 18.05.2016 Add last export time to the database
+-            long lastSyncMillis = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.BookEntry.COLUMN_CREATED_AT));
+-
+             TextView lastSyncText = (TextView) view.findViewById(R.id.last_sync_time);
+-            String lastSyncTime = dateFormat.format(new Date(lastSyncMillis));
+-            lastSyncText.setText(lastSyncTime);
++            lastSyncText.setText(PreferencesHelper.getLastExportTime().toString());
+ 
+             TextView labelLastSync = (TextView) view.findViewById(R.id.label_last_sync);
+-            labelLastSync.setText("Last Sync:");
++            labelLastSync.setText("Last Export:");
+             ImageView optionsMenu = (ImageView) view.findViewById(R.id.options_menu);
+ 
+             optionsMenu.setOnClickListener(new View.OnClickListener() {
+@@ -221,9 +217,10 @@ public void onClick(DialogInterface dialog, int which) {
+                             }
+                         });
+                         AlertDialog dialog = dialogBuilder.create();
++                        dialog.show(); //must be called before you can access buttons
+                         dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                                 .setTextColor(getResources().getColor(R.color.account_red));
+-                        dialog.show();
++
+ 
+                     }
+                 });
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
+index 544ef8fc..a5016ece 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
+@@ -18,7 +18,6 @@
+ 
+ import android.annotation.TargetApi;
+ import android.content.Context;
+-import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.os.Build;
+ import android.os.Bundle;
+@@ -28,14 +27,11 @@
+ import android.support.v4.app.FragmentTransaction;
+ import android.support.v4.widget.SlidingPaneLayout;
+ import android.support.v7.app.ActionBar;
+-import android.support.v7.app.AppCompatActivity;
+ import android.support.v7.preference.Preference;
+ import android.support.v7.preference.PreferenceFragmentCompat;
+ import android.support.v7.preference.PreferenceManager;
+ import android.view.MenuItem;
+ import android.view.View;
+-import android.widget.FrameLayout;
+-import android.widget.Toast;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+@@ -82,7 +78,7 @@ public void onPanelClosed(View panel) {
+ 
+         String action = getIntent().getAction();
+         if (action != null && action.equals(ACTION_MANAGE_BOOKS)){
+-            loadFragment(new BookListFragment());
++            loadFragment(new BookManagerFragment());
+             mSlidingPaneLayout.closePane();
+         } else {
+             mSlidingPaneLayout.openPane();
+diff --git a/app/src/main/res/xml/fragment_transaction_preferences.xml b/app/src/main/res/xml/fragment_transaction_preferences.xml
+index d92db4dc..35d70f1b 100644
+--- a/app/src/main/res/xml/fragment_transaction_preferences.xml
++++ b/app/src/main/res/xml/fragment_transaction_preferences.xml
+@@ -28,6 +28,7 @@
+ 
+     <android.support.v7.preference.SwitchPreferenceCompat android:summary="@string/summary_use_double_entry"
+         android:key="@string/key_use_double_entry"
++        android:defaultValue="true"
+         android:title="@string/title_use_double_entry"/>
+     <android.support.v7.preference.SwitchPreferenceCompat android:summary="@string/summary_save_opening_balances"
+         android:key="@string/key_save_opening_balances"
+diff --git a/app/src/main/res/xml/preference_fragment_headers.xml b/app/src/main/res/xml/preference_fragment_headers.xml
+index fb5ecb30..d13e5d6d 100644
+--- a/app/src/main/res/xml/preference_fragment_headers.xml
++++ b/app/src/main/res/xml/preference_fragment_headers.xml
+@@ -21,7 +21,7 @@
+         android:title="@string/header_general_settings"
+         app:fragment="org.gnucash.android.ui.settings.GeneralPreferenceFragment"/>
+     <Preference android:title="@string/header_manage_books"
+-                app:fragment="org.gnucash.android.ui.settings.BookListFragment" />
++                app:fragment="org.gnucash.android.ui.settings.BookManagerFragment" />
+     <Preference app:fragment="org.gnucash.android.ui.settings.AccountPreferencesFragment"
+         android:title="@string/header_account_settings" />
+     <Preference app:fragment="org.gnucash.android.ui.settings.TransactionsPreferenceFragment"
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/BooksDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/BooksDbAdapterTest.java
+index 13ecbe7d..fffdaecc 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/BooksDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/BooksDbAdapterTest.java
+@@ -56,7 +56,6 @@ public void addBook(){
+ 
+         assertThat(mBooksDbAdapter.getRecordsCount()).isEqualTo(1);
+         assertThat(mBooksDbAdapter.getRecord(book.getUID()).getDisplayName()).isEqualTo("Book 1");
+-        assertThat(mBooksDbAdapter.getActiveBookUID()).isNotEqualTo(book.getUID());
+     }
+ 
+     @Test(expected = IllegalArgumentException.class)

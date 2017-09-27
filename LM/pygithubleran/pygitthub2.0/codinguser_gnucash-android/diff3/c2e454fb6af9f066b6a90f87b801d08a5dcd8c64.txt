@@ -1,0 +1,190 @@
+From c2e454fb6af9f066b6a90f87b801d08a5dcd8c64 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 13 Sep 2014 09:15:58 +0800
+Subject: [PATCH] Remove all descendant sccounts from parent account candidate.
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 54 ++++++++++++++--------
+ .../gnucash/android/importer/GncXmlHandler.java    | 11 +++--
+ .../android/ui/account/AccountFormFragment.java    | 24 +++++-----
+ 3 files changed, 56 insertions(+), 33 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index b98d815a..ce82e18e 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -694,27 +694,50 @@ public Money getAccountBalance(String accountUID){
+         currencyCode = currencyCode == null ? Money.DEFAULT_CURRENCY_CODE : currencyCode;
+         Money balance = Money.createZeroInstance(currencyCode);
+ 
+-        // retrieve all descendant accounts of the accountUID
++        List<String> accountsList = getDescendantAccountUIDs(accountUID,
++                AccountEntry.COLUMN_CURRENCY + " = ? ",
++                new String[]{currencyCode});
++
++        accountsList.add(0, accountUID);
++
++        SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getContext());
++        Log.d(TAG, "all account list : " + accountsList.size());
++        Money splitSum = splitsDbAdapter.computeSplitBalance(accountsList, currencyCode, hasDebitNormalBalance);
++        splitsDbAdapter.close();
++        return balance.add(splitSum);
++    }
++
++    /**
++     * Retrieve all descendant accounts of an account
++     * Note, in filtering, once an account is filtered out, all its descendants
++     * will also be filtered out, even they don't meet the filter condition
++     * @param accountUID The account to retrieve descendant accounts
++     * @param where      Condition to filter accounts
++     * @param whereArgs  Condition args to filter accounts
++     * @return The descendant accounts list.
++     */
++    public List<String> getDescendantAccountUIDs(String accountUID, String where, String[] whereArgs) {
+         // accountsList will hold accountUID with all descendant accounts.
+-        // accountsList level will hold descendant accounts of the same level
+-        // only accounts have the same currency with accountUID will be retrieved
++        // accountsListLevel will hold descendant accounts of the same level
+         ArrayList<String> accountsList = new ArrayList<String>();
+-        accountsList.add(accountUID);
+         ArrayList<String> accountsListLevel = new ArrayList<String>();
+         accountsListLevel.add(accountUID);
+         for (;;) {
+             Cursor cursor = mDb.query(AccountEntry.TABLE_NAME,
+                     new String[]{AccountEntry.COLUMN_UID},
+-                    AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IN ( '" + TextUtils.join("' , '", accountsListLevel) + "' ) AND " +
+-                            AccountEntry.COLUMN_CURRENCY + " = ? ",
+-                    new String[]{currencyCode}, null, null, null);
++                    AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IN ( '" + TextUtils.join("' , '", accountsListLevel) + "' )" +
++                            (where == null ? "" : " AND " + where),
++                    whereArgs, null, null, null);
+             accountsListLevel.clear();
+-            if (cursor != null){
+-                int columnIndex = cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_UID);
+-                while(cursor.moveToNext()){
+-                    accountsListLevel.add(cursor.getString(columnIndex));
++            if (cursor != null) {
++                try {
++                    int columnIndex = cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_UID);
++                    while (cursor.moveToNext()) {
++                        accountsListLevel.add(cursor.getString(columnIndex));
++                    }
++                } finally {
++                    cursor.close();
+                 }
+-                cursor.close();
+             }
+             if (accountsListLevel.size() > 0) {
+                 accountsList.addAll(accountsListLevel);
+@@ -723,12 +746,7 @@ public Money getAccountBalance(String accountUID){
+                 break;
+             }
+         }
+-
+-        SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getContext());
+-        Log.d(TAG, "all account list : " + accountsList.size());
+-        Money splitSum = splitsDbAdapter.computeSplitBalance(accountsList, currencyCode, hasDebitNormalBalance);
+-        splitsDbAdapter.close();
+-        return balance.add(splitSum);
++        return accountsList;
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/importer/GncXmlHandler.java b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+index 3f203c98..076b32aa 100644
+--- a/app/src/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+@@ -361,13 +361,14 @@ public void endDocument() throws SAXException {
+                     continue;
+                 }
+                 stack.push(account);
+-                String parentAccountFullName = null;
++                String parentAccountFullName;
++                String rootAccountUID = null;
+                 while (!stack.isEmpty()) {
+                     Account acc = stack.peek();
+-                    if (acc.getAccountType().name().equals("ROOT")) {
++                    if (acc.getAccountType() == AccountType.ROOT) {
+                         mapFullName.put(acc.getUID(), "");
++                        rootAccountUID = acc.getUID();
+                         stack.pop();
+-                        parentAccountFullName = "";
+                         continue;
+                     }
+                     if (mapFullName.get(acc.getParentUID()) == null) {
+@@ -384,6 +385,10 @@ public void endDocument() throws SAXException {
+                         stack.pop();
+                     }
+                 }
++                if (rootAccountUID != null)
++                {
++                    mapFullName.put(rootAccountUID, map.get(rootAccountUID).getName());
++                }
+             }
+             for (Account account:mAccountList){
+                 account.setFullName(mapFullName.get(account.getUID()));
+diff --git a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+index 2a013e74..8078047f 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -28,6 +28,7 @@
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
++import android.text.TextUtils;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+@@ -117,6 +118,11 @@
+ 	private Cursor mParentAccountCursor;
+ 
+     /**
++     * List of all descendant Account UIDs, if we are modifying an account
++     */
++    private List<String> mDescendantAccountUIDs;
++
++    /**
+      * SimpleCursorAdapter for the parent account spinner
+      * @see QualifiedAccountNameCursorAdapter
+      */
+@@ -537,12 +543,11 @@ private void loadParentAccountList(AccountType accountType){
+                 + getAllowedParentAccountTypes(accountType) + ") ";
+ 
+         if (mAccount != null){  //if editing an account
+-            // limit cyclic account hierarchies. Still technically possible since we don't forbid descendant accounts
++            mDescendantAccountUIDs = mAccountsDbAdapter.getDescendantAccountUIDs(mAccount.getUID(), null, null);
++            // limit cyclic account hierarchies.
+             condition += " AND (" + DatabaseSchema.AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IS NULL "
+-                    + " OR " + DatabaseSchema.AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " != '" + mAccount.getUID() + "')"
++                    + " OR " + DatabaseSchema.AccountEntry.COLUMN_UID + " NOT IN ( '" + TextUtils.join("','", mDescendantAccountUIDs) + "' ) )"
+                     + " AND " + DatabaseSchema.AccountEntry._ID + " != " + mSelectedAccountId;
+-
+-            //TODO: Limit all descendants of the account to eliminate the possibility of cyclic hierarchy
+         }
+ 
+         //if we are reloading the list, close the previous cursor first
+@@ -574,7 +579,8 @@ private String getAllowedParentAccountTypes(AccountType type){
+ 
+         switch (type){
+             case EQUITY:
+-                return "'" + AccountType.EQUITY.name() + "'";
++                return "'" + AccountType.EQUITY.name()+ "', '"
++                        + AccountType.ROOT + "'";
+ 
+             case INCOME:
+             case EXPENSE:
+@@ -597,13 +603,7 @@ private String getAllowedParentAccountTypes(AccountType type){
+                 accountTypeStrings.remove(AccountType.EXPENSE.name());
+                 accountTypeStrings.remove(AccountType.INCOME.name());
+ 
+-                String result = "";
+-                for (String accountTypeString : accountTypeStrings) {
+-                    result += "'" + accountTypeString + "',";
+-                }
+-
+-                //remove the last comma
+-                return result.substring(0, result.length() - 1);
++                return "'" + TextUtils.join("','", accountTypeStrings) + "'";
+ 
+             }
+ 

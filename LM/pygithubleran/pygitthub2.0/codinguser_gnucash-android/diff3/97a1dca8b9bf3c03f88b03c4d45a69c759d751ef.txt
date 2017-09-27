@@ -1,0 +1,165 @@
+From 97a1dca8b9bf3c03f88b03c4d45a69c759d751ef Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 4 Feb 2016 14:28:49 +0100
+Subject: [PATCH] Fix: saving is slow when a homescreen widget is in use and
+ the db is large
+
+Widgets are now updated in a background thread
+fixes #202
+---
+ CHANGELOG.md                                       |  5 +++
+ .../ui/homescreen/WidgetConfigurationActivity.java | 50 ++++++++++++++--------
+ .../android/ui/util/AccountBalanceTask.java        |  4 --
+ 3 files changed, 36 insertions(+), 23 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8acd01ee..b25d65d9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,10 @@
+ Change Log
+ ===============================================================================
++Version 2.0.6 *(2016-02-29)*
++----------------------------
++* Fixed: Saving transaction gets slower with increase in size of database
++* Fixed: Crash when creating a new transaction with no transfer account
++
+ Version 2.0.5 *(2015-12-12)*
+ ----------------------------
+ * Fixed: Wrong decimal formatting in multi-currency transactions
+diff --git a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+index 99f55eab..e11229d7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2012 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -25,6 +25,7 @@
+ import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
+ import android.database.Cursor;
++import android.os.AsyncTask;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
+@@ -47,6 +48,8 @@
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ import java.util.Locale;
++import java.util.concurrent.Executor;
++import java.util.concurrent.Executors;
+ 
+ /**
+  * Activity for configuration which account to display on a widget.
+@@ -138,12 +141,12 @@ public void onClick(View v) {
+      * @param appWidgetId ID of the widget to be updated
+      * @param accountUID GUID of the account tied to the widget
+ 	 */
+-	public static void updateWidget(Context context, int appWidgetId, String accountUID) {
++	public static void updateWidget(final Context context, int appWidgetId, String accountUID) {
+ 		Log.i("WidgetConfiguration", "Updating widget: " + appWidgetId);
+ 		AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
+ 
+ 		AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
+-		Account account;
++		final Account account;
+         try {
+             account = accountsDbAdapter.getRecord(accountUID);
+         } catch (IllegalArgumentException e) {
+@@ -165,18 +168,18 @@ public static void updateWidget(Context context, int appWidgetId, String account
+ 			return;
+ 		}
+ 		
+-		RemoteViews views = new RemoteViews(context.getPackageName(),
++		final RemoteViews views = new RemoteViews(context.getPackageName(),
+ 				R.layout.widget_4x1);
+ 		views.setTextViewText(R.id.account_name, account.getName());
+-        Money accountBalance = accountsDbAdapter.getAccountBalance(accountUID, -1, System.currentTimeMillis());
+ 
+-        views.setTextViewText(R.id.transactions_summary,
++		Money accountBalance = accountsDbAdapter.getAccountBalance(accountUID, -1, System.currentTimeMillis());
++
++		views.setTextViewText(R.id.transactions_summary,
+ 				accountBalance.formattedString(Locale.getDefault()));
+ 		int color = account.getBalance().isNegative() ? R.color.debit_red : R.color.credit_green;
+ 		views.setTextColor(R.id.transactions_summary, context.getResources().getColor(color));
+ 
+ 
+-
+ 		Intent accountViewIntent = new Intent(context, TransactionsActivity.class);
+ 		accountViewIntent.setAction(Intent.ACTION_VIEW);
+ 		accountViewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+@@ -201,20 +204,29 @@ public static void updateWidget(Context context, int appWidgetId, String account
+ 	 * Updates all widgets belonging to the application
+ 	 * @param context Application context
+ 	 */
+-	public static void updateAllWidgets(Context context){
++	public static void updateAllWidgets(final Context context){
+ 		Log.i("WidgetConfiguration", "Updating all widgets");
+ 		AppWidgetManager widgetManager = AppWidgetManager.getInstance(context);
+ 		ComponentName componentName = new ComponentName(context, TransactionAppWidgetProvider.class);
+-		int[] appWidgetIds = widgetManager.getAppWidgetIds(componentName);
+-
+-        SharedPreferences defaultSharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
+-		for (int widgetId : appWidgetIds) {
+-			String accountUID = defaultSharedPrefs
+-            		.getString(UxArgument.SELECTED_ACCOUNT_UID + widgetId, null);
+-            
+-			if (accountUID == null)
+-				continue;
+-			updateWidget(context, widgetId, accountUID);
+-		}
++		final int[] appWidgetIds = widgetManager.getAppWidgetIds(componentName);
++
++		//update widgets asynchronously so as not to block method which called the update
++		//inside the computation of the account balance
++		new Thread(new Runnable() {
++			SharedPreferences defaultSharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
++
++			@Override
++			public void run() {
++				for (final int widgetId : appWidgetIds) {
++					final String accountUID = defaultSharedPrefs
++							.getString(UxArgument.SELECTED_ACCOUNT_UID + widgetId, null);
++
++					if (accountUID == null)
++						continue;
++
++					updateWidget(context, widgetId, accountUID);
++				}
++			}
++		}).start();
+ 	}
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java b/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
+index 9dbcb6a5..ab1dccf0 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
+@@ -17,15 +17,12 @@
+ 
+ package org.gnucash.android.ui.util;
+ 
+-import android.content.Context;
+ import android.os.AsyncTask;
+ import android.util.Log;
+ import android.widget.TextView;
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
+-import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+@@ -69,7 +66,6 @@ protected Money doInBackground(String... params) {
+     @Override
+     protected void onPostExecute(Money balance) {
+         if (accountBalanceTextViewReference.get() != null && balance != null){
+-            final Context context = GnuCashApplication.getAppContext();
+             final TextView balanceTextView = accountBalanceTextViewReference.get();
+             if (balanceTextView != null){
+                 TransactionsActivity.displayBalance(balanceTextView, balance);

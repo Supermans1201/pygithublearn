@@ -1,0 +1,708 @@
+From a4a348665094084e8ea7fce9530548cf1032ec0b Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewi.fet@uni-due.de>
+Date: Mon, 6 Aug 2012 19:38:14 +0200
+Subject: [PATCH] Added tests for bulk transaction moving Added tests for
+ Money.java Improved accounts tests to include currency testing Improved and
+ expanded OFX export tests
+
+---
+ GnucashMobile/res/values/strings.xml               |   1 +
+ .../src/org/gnucash/android/data/Money.java        |   6 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  17 ++
+ .../src/org/gnucash/android/util/OfxFormatter.java |   1 -
+ .../org/gnucash/android/test/OfxExportTest.java    |  98 -----------
+ .../test/{ => ui}/AccountsActivityTest.java        |  31 +++-
+ .../org/gnucash/android/test/ui/OfxExportTest.java | 195 +++++++++++++++++++++
+ .../test/{ => ui}/TransactionsActivityTest.java    |  38 +++-
+ .../org/gnucash/android/test/unit/MoneyTest.java   | 148 ++++++++++++++++
+ 9 files changed, 429 insertions(+), 106 deletions(-)
+ delete mode 100644 GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+ rename GnucashMobileTest/src/org/gnucash/android/test/{ => ui}/AccountsActivityTest.java (82%)
+ create mode 100644 GnucashMobileTest/src/org/gnucash/android/test/ui/OfxExportTest.java
+ rename GnucashMobileTest/src/org/gnucash/android/test/{ => ui}/TransactionsActivityTest.java (85%)
+ create mode 100644 GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+
+diff --git a/GnucashMobile/res/values/strings.xml b/GnucashMobile/res/values/strings.xml
+index 6301bf35..98ff12c9 100644
+--- a/GnucashMobile/res/values/strings.xml
++++ b/GnucashMobile/res/values/strings.xml
+@@ -463,6 +463,7 @@
+ 	<string name="summary_licence_details">Details to the application license</string>
+ 	<string name="key_license">app_license</string>
+ 	<string name="label_widget_configuration">Select Account</string>
++	<string name="toast_no_transactions_to_export">There are no transactions available to export</string>
+ 	
+   	
+ </resources>
+\ No newline at end of file
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Money.java b/GnucashMobile/src/org/gnucash/android/data/Money.java
+index 7bc6bd91..dc1942bc 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Money.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Money.java
+@@ -122,8 +122,12 @@ public double asDouble(){
+ 		return mAmount.doubleValue();
+ 	}
+ 	
++	/**
++	 * An alias for {@link #toPlainString()}
++	 * @return Money formatted as a string (excludes the currency)
++	 */
+ 	public String asString(){
+-		return mAmount.toPlainString();
++		return toPlainString();
+ 	}
+ 	
+ 	public String formattedString(Locale locale){
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 16cdbe0b..7368f61a 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -273,6 +273,23 @@ public int getTransactionsCount(long accountId){
+ 	}
+ 	
+ 	/**
++	 * Returns the total number of transactions in the database
++	 * regardless of what account they belong to
++	 * @return Number of transaction in the database
++	 */
++	public int getAllTransactionsCount(){
++		Cursor cursor = fetchAllRecords(DatabaseHelper.TRANSACTIONS_TABLE_NAME);
++		int count = 0;
++		if (cursor == null)
++			return count;
++		else {
++			count = cursor.getCount();
++			cursor.close();
++		}
++		return count;
++	}
++	
++	/**
+ 	 * Returns the sum of transactions belonging to the account with id <code>accountId</code>
+ 	 * @param accountId Record ID of the account
+ 	 * @return Sum of transactions belonging to the account
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+index 3599a62c..bc137d22 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+@@ -100,7 +100,6 @@ public static String getFormattedCurrentTime(long milliseconds){
+ 	 * @param parent Parent node for all expenses in report
+ 	 */
+ 	public void toXml(Document doc, Element parent){
+-		
+ 		Element transactionUid = doc.createElement("TRNUID");		
+ 		//unsolicited because the data exported is not as a result of a request
+ 		transactionUid.appendChild(doc.createTextNode(UNSOLICITED_TRANSACTION_ID));
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java b/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+deleted file mode 100644
+index 6b50c264..00000000
+--- a/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
++++ /dev/null
+@@ -1,98 +0,0 @@
+-/*
+- * Written By: Ngewi Fet <ngewif@gmail.com>
+- * Copyright (c) 2012 Ngewi Fet
+- *
+- * This file is part of Gnucash for Android
+- * 
+- * Gnucash for Android is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU General Public License as
+- * published by the Free Software Foundation; either version 2 of
+- * the License, or (at your option) any later version.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, contact:
+- *
+- * Free Software Foundation           Voice:  +1-617-542-5942
+- * 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
+- * Boston, MA  02110-1301,  USA       gnu@gnu.org
+- */
+-
+-package org.gnucash.android.test;
+-
+-import java.io.File;
+-
+-import org.gnucash.android.R;
+-import org.gnucash.android.data.Account;
+-import org.gnucash.android.data.Transaction;
+-import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.ui.accounts.AccountsActivity;
+-import org.gnucash.android.ui.accounts.ExportDialogFragment;
+-
+-import android.os.Environment;
+-import android.test.ActivityInstrumentationTestCase2;
+-import android.widget.Spinner;
+-
+-import com.jayway.android.robotium.solo.Solo;
+-
+-public class OfxExportTest extends
+-		ActivityInstrumentationTestCase2<AccountsActivity> {
+-
+-	private Solo mSolo;
+-	
+-	public OfxExportTest() {
+-		super(AccountsActivity.class);
+-	}
+-	
+-	@Override
+-	protected void setUp() throws Exception {
+-		super.setUp();
+-		mSolo = new Solo(getInstrumentation(), getActivity());	
+-		
+-		Account account = new Account("Exportable");		
+-		Transaction transaction = new Transaction(9.99, "Pizza");		
+-		transaction.setDescription("What up?");
+-		transaction.setTime(System.currentTimeMillis());
+-		
+-		account.addTransaction(transaction);
+-		
+-		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.addAccount(account);
+-		adapter.close();		
+-	}
+-	
+-	public void testOfxExport(){
+-		mSolo.clickOnActionBarItem(R.id.menu_export);
+-		
+-		mSolo.waitForText("Export OFX");
+-		Spinner spinner = mSolo.getCurrentSpinners().get(0);
+-		mSolo.clickOnView(spinner);
+-		String[] options = getActivity().getResources().getStringArray(R.array.export_destinations);	
+-		mSolo.clickOnText(options[1]);
+-		mSolo.clickOnButton(3);
+-		mSolo.waitForDialogToClose(10000);
+-		
+-		String filename = ExportDialogFragment.buildExportFilename();
+-		
+-		File file = new File(Environment.getExternalStorageDirectory() + "/gnucash/" + filename);
+-		assertNotNull(file);
+-		assertTrue(file.exists());
+-	}	
+-	
+-	public void testValidityOfExport(){
+-		//TODO: Validate with an XML schema if possible
+-	}
+-	
+-	@Override
+-	protected void tearDown() throws Exception {
+-		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.deleteAllAccounts();
+-		adapter.close();
+-		mSolo.finishOpenedActivities();
+-		super.tearDown();
+-	}
+-}
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+similarity index 82%
+rename from GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
+rename to GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 49deac36..3096a2b0 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -22,8 +22,9 @@
+  * Boston, MA  02110-1301,  USA       gnu@gnu.org
+  */
+ 
+-package org.gnucash.android.test;
++package org.gnucash.android.test.ui;
+ 
++import java.util.Currency;
+ import java.util.List;
+ 
+ import org.gnucash.android.R;
+@@ -65,6 +66,7 @@ protected void setUp() throws Exception {
+ 		
+ 		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
++		account.setCurrency(Currency.getInstance("USD"));
+ 		adapter.addAccount(account);
+ 		adapter.close();
+ 	}
+@@ -87,6 +89,10 @@ public void testCreateAccount(){
+ 		mSolo.waitForText("Create");
+ 		mSolo.enterText(0, "New Account");
+ 		
++		//this depends on the strings resource for currencies
++		//the euro is on position 48. If list changes, fix this test
++		int position = mSolo.getCurrentSpinners().get(0).getSelectedItemPosition();
++		mSolo.pressSpinnerItem(0, 48 - position);
+ 		mSolo.clickOnButton(1);
+ 		
+ 		mSolo.waitForDialogToClose(1000);
+@@ -96,6 +102,15 @@ public void testCreateAccount(){
+ 				.findViewById(R.id.account_name);
+ 		
+ 		assertEquals(v.getText().toString(), "New Account");
++		AccountsDbAdapter accAdapter = new AccountsDbAdapter(getActivity());
++		
++		List<Account> accounts = accAdapter.getAllAccounts();
++		Account newestAccount = accounts.get(accounts.size()-1);
++		
++		assertEquals(newestAccount.getName(), "New Account");
++		assertEquals(newestAccount.getCurrency().getCurrencyCode(), "EUR");	
++		
++		accAdapter.close();		
+ 	}
+ 	
+ 	public void testEditAccount(){
+@@ -115,6 +130,11 @@ public void testEditAccount(){
+ 		mSolo.clearEditText(0);
+ 		mSolo.enterText(0, editedAccountName);
+ 		
++		//this depends on the strings resource for currencies
++		//the Euro is on position 48. If list changes, fix this test
++		int position = mSolo.getCurrentSpinners().get(0).getSelectedItemPosition();
++		mSolo.pressSpinnerItem(0, 48 - position);
++		
+ 		mSolo.clickOnButton(1);
+ 		
+ 		mSolo.waitForDialogToClose(1000);
+@@ -123,6 +143,15 @@ public void testEditAccount(){
+ 		TextView tv = (TextView) lv.getChildAt(lv.getCount() - 1)
+ 				.findViewById(R.id.account_name);		
+ 		assertEquals(editedAccountName, tv.getText().toString());
++		
++		AccountsDbAdapter accAdapter = new AccountsDbAdapter(getActivity());
++		
++		List<Account> accounts = accAdapter.getAllAccounts();
++		Account latest = accounts.get(accounts.size()-1);
++		
++		assertEquals(latest.getName(), "Edited Account");
++		assertEquals(latest.getCurrency().getCurrencyCode(), "EUR");	
++		accAdapter.close();
+ 	}
+ 	
+ 	public void testDisplayTransactionsList(){	
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/ui/OfxExportTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/OfxExportTest.java
+new file mode 100644
+index 00000000..6ce86b2f
+--- /dev/null
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/OfxExportTest.java
+@@ -0,0 +1,195 @@
++/*
++ * Written By: Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 Ngewi Fet
++ *
++ * This file is part of Gnucash for Android
++ * 
++ * Gnucash for Android is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, contact:
++ *
++ * Free Software Foundation           Voice:  +1-617-542-5942
++ * 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
++ * Boston, MA  02110-1301,  USA       gnu@gnu.org
++ */
++
++package org.gnucash.android.test.ui;
++
++import java.io.File;
++
++import org.gnucash.android.R;
++import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Transaction;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.ui.accounts.AccountsActivity;
++import org.gnucash.android.ui.accounts.ExportDialogFragment;
++
++import android.os.Environment;
++import android.test.ActivityInstrumentationTestCase2;
++import android.widget.Spinner;
++
++import com.jayway.android.robotium.solo.Solo;
++
++public class OfxExportTest extends
++		ActivityInstrumentationTestCase2<AccountsActivity> {
++
++	private Solo mSolo;
++	
++	/**
++	 * For these tests, this is the expected file size for a normal OFX export
++	 */
++	private long EXPECTED_FILE_SIZE = 990;
++	
++	public OfxExportTest() {
++		super(AccountsActivity.class);
++	}
++	
++	@Override
++	protected void setUp() throws Exception {
++		super.setUp();
++		mSolo = new Solo(getInstrumentation(), getActivity());	
++		
++		Account account = new Account("Exportable");		
++		Transaction transaction = new Transaction(9.99, "Pizza");		
++		transaction.setDescription("What up?");
++		transaction.setTime(System.currentTimeMillis());
++		
++		account.addTransaction(transaction);
++		
++		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
++		adapter.addAccount(account);
++		adapter.close();	
++		
++		//need atleast 60 seconds between tests becuase the exported file names 
++		//differ only in the timestamp. So to verify that each file is really
++		//created from independent stamps, we make sure the timestamp is different
++		synchronized (this) {
++			wait(60000);
++		}		
++	}
++	
++	/**
++	 * Tests the export of an OFX file with account information.
++	 * The exported file name contains a timestamp with minute precision.
++	 * If this test fails, it may be due to the file being created and tested in different minutes of the clock
++	 * Just try rerunning it again.
++	 */
++	public void testOfxExport(){
++		mSolo.clickOnActionBarItem(R.id.menu_export);
++		
++		mSolo.waitForText("Export OFX");
++		Spinner spinner = mSolo.getCurrentSpinners().get(0);
++		mSolo.clickOnView(spinner);
++		String[] options = getActivity().getResources().getStringArray(R.array.export_destinations);	
++		mSolo.clickOnText(options[1]);
++		mSolo.clickOnButton(3);
++		
++		//the file name is time-based (down to the minute), so we cache it here, 
++		//as close as possible to the export itself to minimize difference
++		String filename = ExportDialogFragment.buildExportFilename();
++		
++		mSolo.waitForDialogToClose(10000);
++		
++		
++		File file = new File(Environment.getExternalStorageDirectory() + "/gnucash/" + filename);
++		assertNotNull(file);
++		assertTrue(file.exists());
++		assertEquals(EXPECTED_FILE_SIZE, file.length());
++	}	
++	
++	public void testDeleteTransactionsAfterExport(){
++		mSolo.clickOnActionBarItem(R.id.menu_export);
++		
++		mSolo.waitForText("Export OFX");
++		Spinner spinner = mSolo.getCurrentSpinners().get(0);
++		mSolo.clickOnView(spinner);
++		String[] options = getActivity().getResources().getStringArray(R.array.export_destinations);	
++		mSolo.clickOnText(options[1]);
++		
++		//check to delete after export
++		mSolo.clickOnCheckBox(1);
++		
++		mSolo.clickOnButton(3);
++		mSolo.waitForDialogToClose(10000);
++		
++		TransactionsDbAdapter transAdapter = new TransactionsDbAdapter(getActivity());
++		assertEquals(0, transAdapter.getAllTransactionsCount());
++		
++		transAdapter.close();
++	}
++	
++	public void testShouldIgnoreExportedTransactions(){
++		testOfxExport();
++		mSolo.clickOnActionBarItem(R.id.menu_export);
++		
++		mSolo.waitForText("Export OFX");
++		Spinner spinner = mSolo.getCurrentSpinners().get(0);
++		mSolo.clickOnView(spinner);
++		String[] options = getActivity().getResources().getStringArray(R.array.export_destinations);	
++		mSolo.clickOnText(options[1]);
++		mSolo.clickOnButton(3);
++		
++		//the file name is time-based (down to the minute), so we cache it here, 
++		//as close as possible to the export itself to minimize chance of a different name 
++		//due to a different minute
++		String filename = ExportDialogFragment.buildExportFilename();
++		
++		mSolo.waitForDialogToClose(10000);
++				
++		File file = new File(Environment.getExternalStorageDirectory() + "/gnucash/" + filename);
++		assertNotNull(file);
++		assertTrue(file.exists());
++		assertTrue(file.length() < EXPECTED_FILE_SIZE);
++		assertTrue(file.length() > 0);
++	}
++	
++	public void testExportAlreadyExportedTransactions(){
++		testOfxExport();
++		
++		mSolo.clickOnActionBarItem(R.id.menu_export);
++		
++		mSolo.waitForText("Export OFX");
++		Spinner spinner = mSolo.getCurrentSpinners().get(0);
++		mSolo.clickOnView(spinner);
++		String[] options = getActivity().getResources().getStringArray(R.array.export_destinations);	
++		mSolo.clickOnText(options[1]);
++		mSolo.clickOnCheckBox(0);
++		mSolo.clickOnButton(3);
++		
++		//the file name is time-based (down to the minute), so we cache it here, 
++		//as close as possible to the export itself to minimize chance of a different name 
++		//due to a different minute
++		String filename = ExportDialogFragment.buildExportFilename();
++		
++		mSolo.waitForDialogToClose(10000);		
++		
++		File file = new File(Environment.getExternalStorageDirectory() + "/gnucash/" + filename);
++		assertNotNull(file);
++		//the file will exist but not contain any account information
++		assertTrue(file.exists());
++		assertEquals(EXPECTED_FILE_SIZE, file.length());
++	}
++	
++	public void testValidityOfExport(){
++		//TODO: Validate with an XML schema if possible
++	}
++	
++	@Override
++	protected void tearDown() throws Exception {
++		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
++		adapter.deleteAllAccounts();
++		adapter.close();
++		mSolo.finishOpenedActivities();
++		super.tearDown();
++	}
++}
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/TransactionsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+similarity index 85%
+rename from GnucashMobileTest/src/org/gnucash/android/test/TransactionsActivityTest.java
+rename to GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 8230cb02..921ec68a 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/TransactionsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -22,7 +22,7 @@
+  * Boston, MA  02110-1301,  USA       gnu@gnu.org
+  */
+ 
+-package org.gnucash.android.test;
++package org.gnucash.android.test.ui;
+ 
+ import java.util.Date;
+ import java.util.List;
+@@ -117,8 +117,8 @@ public void testAddTransaction(){
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		validateTransactionListDisplayed();
+ 		
+-//		mSolo.clickOnActionBarItem(R.id.menu_add_transaction);
+-		mSolo.clickOnImage(2);
++		mSolo.clickOnActionBarItem(R.id.menu_add_transaction);
++//		mSolo.clickOnImage(2);
+ 		mSolo.waitForText("Description");
+ 		
+ 		validateNewTransactionFields();
+@@ -133,8 +133,8 @@ public void testAddTransaction(){
+ 		
+ 		int transactionsCount = getTranscationCount();
+ 		
+-//		mSolo.clickOnActionBarItem(R.id.menu_save);	
+-		mSolo.clickOnImage(3);
++		mSolo.clickOnActionBarItem(R.id.menu_save);	
++//		mSolo.clickOnImage(3);
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		validateTransactionListDisplayed();
+ 		
+@@ -200,6 +200,34 @@ public void testDeleteTransaction(){
+ 		
+ 	}
+ 	
++	public void testBulkMoveTransactions(){
++		Account account = new Account("Target");
++		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
++		accountsDbAdapter.addAccount(account);
++		
++		int beforeOriginCount = accountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
++		
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
++		
++		validateTransactionListDisplayed();
++		
++		mSolo.clickOnCheckBox(0);
++		mSolo.clickOnImage(1);
++		
++		mSolo.pressSpinnerItem(0, 1);
++		mSolo.clickOnButton(1);
++//		mSolo.clickOnText(getActivity().getString(R.string.menu_move));
++		
++		int targetCount = accountsDbAdapter.getAccount(account.getUID()).getTransactionCount();		
++		assertEquals(1, targetCount);
++		
++		int afterOriginCount = accountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
++		assertEquals(beforeOriginCount-1, afterOriginCount);
++		
++		accountsDbAdapter.close();
++		
++	}
++	
+ 	public void testIntentTransactionRecording(){
+ 		TransactionsDbAdapter trxnAdapter = new TransactionsDbAdapter(getActivity());
+ 		int beforeCount = trxnAdapter.getTransactionsCount(trxnAdapter.getAccountID(DUMMY_ACCOUNT_UID));
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java b/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+new file mode 100644
+index 00000000..5d134758
+--- /dev/null
++++ b/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+@@ -0,0 +1,148 @@
++package org.gnucash.android.test.unit;
++
++import java.math.BigDecimal;
++import java.util.Currency;
++import java.util.Locale;
++
++import junit.framework.TestCase;
++
++import org.gnucash.android.data.Money;
++
++public class MoneyTest extends TestCase {
++
++	private static final String CURRENCY_CODE = "EUR";
++	private Money 	money; 
++	private int 	mHashcode;
++	private double 	amount = 15.75;
++	
++	public MoneyTest(String name) {
++		super(name);
++	}
++
++	protected void setUp() throws Exception {
++		super.setUp();
++		money = new Money(new BigDecimal(amount), Currency.getInstance(CURRENCY_CODE));
++		mHashcode = money.hashCode();
++	}
++
++	public void testCreation(){
++		Money temp = new Money("12.25");
++		assertEquals(12.25, temp.asDouble());
++		
++		temp = new Money(9.95);
++		assertEquals(9.95, temp.asDouble());
++		
++		BigDecimal decimal = new BigDecimal(8);
++		Currency currency = Currency.getInstance(CURRENCY_CODE);
++		temp = new Money(decimal, currency);
++		
++		assertEquals(decimal, temp.asBigDecimal());
++		assertEquals(currency, temp.getCurrency());
++	
++		temp = new Money("15.50","USD");
++		assertEquals(15.50, temp.asDouble());
++		assertEquals(temp.getCurrency().getCurrencyCode(), "USD");		
++	}
++	
++	public void testAddition(){		
++		Money result = money.add(new Money("5", CURRENCY_CODE));
++		assertEquals(amount + 5, result.asDouble());
++		assertNotSame(result, money);
++		validateImmutability();				
++	}
++	
++	public void testAdditionWithIncompatibleCurrency(){
++		Money addend = new Money("4", "USD");
++		Exception expectedException = null;
++		try{
++			money.add(addend);
++		} catch (Exception e) {
++			expectedException = e;
++		}
++		assertNotNull(expectedException);
++		assertTrue(expectedException instanceof IllegalArgumentException);		
++	}
++	
++	public void testSubtraction(){
++		Money result = money.subtract(new Money("2", CURRENCY_CODE));
++		assertEquals(amount-2, result.asDouble());
++		assertNotSame(result, money);
++		validateImmutability();		
++	}
++	
++	public void testSubtractionWithDifferentCurrency(){
++		Money addend = new Money("4", "USD");
++		Exception expectedException = null;
++		try{
++			money.subtract(addend);
++		} catch (Exception e) {
++			expectedException = e;
++		}
++		assertNotNull(expectedException);
++		assertTrue(expectedException instanceof IllegalArgumentException);		
++	}
++	
++	public void testMultiplication(){
++		Money result = money.multiply(new Money("3", CURRENCY_CODE));
++		assertEquals(amount*3, result.asDouble());
++		assertNotSame(result, money);
++		validateImmutability();
++	}
++	
++	public void testMultiplicationWithDifferentCurrencies(){
++		Money addend = new Money("4", "USD");
++		Exception expectedException = null;
++		try{
++			money.multiply(addend);
++		} catch (Exception e) {
++			expectedException = e;
++		}
++		assertNotNull(expectedException);
++		assertTrue(expectedException instanceof IllegalArgumentException);		
++	}
++	
++	public void testDivision(){
++		Money result = money.divide(2);
++		assertEquals(amount/2, result.asDouble());		
++		assertNotSame(result, money);
++		validateImmutability();
++	}
++			
++	public void testDivisionWithDifferentCurrency(){
++		Money addend = new Money("4", "USD");
++		Exception expectedException = null;
++		try{
++			money.divide(addend);
++		} catch (Exception e) {
++			expectedException = e;
++		}
++		assertNotNull(expectedException);
++		assertTrue(expectedException instanceof IllegalArgumentException);		
++	}
++		
++	public void testNegation(){
++		Money result = money.negate();
++		assertEquals(amount*-1, result.asDouble());
++		
++		validateImmutability();
++	}
++	
++	public void testPrinting(){
++		assertEquals(money.asString(), money.toPlainString());
++		assertEquals("15.75", money.asString());
++		
++		assertEquals("15,75 ", money.formattedString(Locale.GERMAN));		
++		assertEquals("15.75 ", money.formattedString(Locale.US));
++		
++		//always prints with 2 decimal places only
++		Money some = new Money(9.7469);
++		assertEquals("9.75", some.asString());
++	}
++	
++	public void validateImmutability(){
++		assertEquals(mHashcode, money.hashCode());
++		assertEquals(amount, money.asDouble());
++		assertEquals(CURRENCY_CODE, money.getCurrency().getCurrencyCode());
++	}
++	
++}

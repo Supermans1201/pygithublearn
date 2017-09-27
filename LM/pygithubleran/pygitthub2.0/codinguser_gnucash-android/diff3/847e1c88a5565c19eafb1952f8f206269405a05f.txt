@@ -1,0 +1,285 @@
+From 847e1c88a5565c19eafb1952f8f206269405a05f Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 21 Jun 2013 20:16:13 +0200
+Subject: [PATCH] Compute account balances asynchronously to improve UI
+ responsiveness
+
+---
+ app/src/org/gnucash/android/data/Money.java        | 26 +++++++++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 11 ++++-
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 18 ++++++-
+ .../android/ui/accounts/AccountsListFragment.java  | 56 ++++++++++++++++++----
+ .../ui/transactions/TransactionsListFragment.java  | 40 +++++++---------
+ 5 files changed, 116 insertions(+), 35 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/data/Money.java b/app/src/org/gnucash/android/data/Money.java
+index 0aae2528..ce9622ec 100644
+--- a/app/src/org/gnucash/android/data/Money.java
++++ b/app/src/org/gnucash/android/data/Money.java
+@@ -80,7 +80,21 @@
+ 	 * otherwise US dollars are used
+ 	 */
+ 	public static String DEFAULT_CURRENCY_CODE 	= "USD";
+-	
++
++    /**
++     * A zero instance with the currency of the default locale.
++     * This can be used anywhere where a starting amount is required without having to create a new object
++     */
++    public static final Money sDefaultZero = Money.createInstance(Currency.getInstance(Locale.getDefault()).getCurrencyCode());
++
++    /**
++     * Returns a Money instance initialized to the local currency and value 0
++     * @return Money instance of value 0 in locale currency
++     */
++    public static Money getZeroInstance(){
++        return sDefaultZero;
++    }
++
+ 	/**
+ 	 * Default constructor
+ 	 * Initializes the object with an amount of 0 and currency set to the device default locale
+@@ -229,7 +243,15 @@ public String formattedString(Locale locale){
+ 		formatter.setMaximumFractionDigits(DECIMAL_PLACES);
+ 		return formatter.format(asDouble()) + " " + mCurrency.getSymbol(locale);
+ 	}
+-	
++
++    /**
++     * Equivalent to calling formattedString(Locale.getDefault())
++     * @return String formatted Money representation in default locale
++     */
++    public String formattedString(){
++        return formattedString(Locale.getDefault());
++    }
++
+ 	/**
+ 	 * Returns a new Money object whose amount is the negated value of this object amount.
+ 	 * The original <code>Money</code> object remains unchanged.
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 5e77bfcc..10727926 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -453,7 +453,15 @@ public String getGnuCashRootAccountUID(){
+      * @return Number of sub accounts
+      */
+     public int getSubAccountCount(long accountId){
+-        return getSubAccountIds(accountId).size();
++        //TODO: at some point when API level 11 and above only is supported, use DatabaseUtils.queryNumEntries
++
++        String queryCount = "SELECT COUNT(*) FROM " + DatabaseHelper.ACCOUNTS_TABLE_NAME + " WHERE "
++                + DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " = ?";
++        Cursor cursor = mDb.rawQuery(queryCount, new String[]{getAccountUID(accountId)});
++        cursor.moveToFirst();
++        int count = cursor.getInt(0);
++        cursor.close();
++        return count;
+     }
+ 
+ 	/**
+@@ -524,5 +532,4 @@ public int deleteAllRecords(){
+         return mDb.delete(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, null);
+ 	}
+ 
+-
+ }
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index f943645d..7fa6b42f 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -101,7 +101,23 @@ public void close(){
+ 		mDbHelper.close();
+ 		mDb.close();
+ 	}
+-	
++
++    /**
++     * Checks if the database is open
++     * @return <code>true</code> if the database is open, <code>false</code> otherwise
++     */
++    public boolean isOpen(){
++        return mDb.isOpen();
++    }
++
++    /**
++     * Returns the context used to create this adapter
++     * @return Android application context
++     */
++    public Context getContext(){
++        return mContext.getApplicationContext();
++    }
++
+ 	/**
+ 	 * Retrieves record with id <code>rowId</code> from table <code>tableName</code>
+ 	 * @param tableName Name of table where record is found
+diff --git a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 062a31c7..41474bfb 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -23,6 +23,7 @@
+ import android.content.DialogInterface;
+ import android.content.Intent;
+ import android.database.Cursor;
++import android.os.AsyncTask;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+ import android.support.v4.app.Fragment;
+@@ -55,6 +56,7 @@
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ import org.gnucash.android.util.OnAccountClickedListener;
+ 
++import java.lang.ref.WeakReference;
+ import java.util.Locale;
+ 
+ /**
+@@ -589,9 +591,6 @@ public void bindView(View v, Context context, Cursor cursor) {
+             // perform the default binding
+             super.bindView(v, context, cursor);
+ 
+-            // add a summary of transactions to the account view
+-            TextView summary = (TextView) v
+-                    .findViewById(R.id.transactions_summary);
+             final long accountId = cursor.getLong(DatabaseAdapter.COLUMN_ROW_ID);
+ 
+             TextView subAccountTextView = (TextView) v.findViewById(R.id.secondary_text);
+@@ -603,11 +602,10 @@ public void bindView(View v, Context context, Cursor cursor) {
+             } else
+                 subAccountTextView.setVisibility(View.GONE);
+ 
+-            Money balance = mAccountsDbAdapter.getAccountBalance(accountId);
+-            summary.setText(balance.formattedString(Locale.getDefault()));
+-            int fontColor = balance.isNegative() ? getResources().getColor(R.color.debit_red) :
+-                    getResources().getColor(R.color.credit_green);
+-            summary.setTextColor(fontColor);
++            // add a summary of transactions to the account view
++            TextView summary = (TextView) v
++                    .findViewById(R.id.transactions_summary);
++            new AccountBalanceTask(summary, getActivity()).execute(accountId);
+ 
+             ImageView newTransactionButton = (ImageView) v.findViewById(R.id.btn_new_transaction);
+             if (inSubAcccount()){
+@@ -628,4 +626,46 @@ public void onClick(View v) {
+         }
+     }
+ 
++    /**
++     * An asynchronous task for computing the account balance of an account.
++     * This is done asynchronously because in cases of deeply nested accounts,
++     * it can take some time and would block the UI thread otherwise.
++     */
++    public static class AccountBalanceTask extends AsyncTask<Long, Void, Money> {
++        private final WeakReference<TextView> accountBalanceTextViewReference;
++        private final AccountsDbAdapter accountsDbAdapter;
++
++        public AccountBalanceTask(TextView balanceTextView, Context context){
++            accountBalanceTextViewReference = new WeakReference<TextView>(balanceTextView);
++            accountsDbAdapter = new AccountsDbAdapter(context);
++        }
++
++        @Override
++        protected Money doInBackground(Long... params) {
++            //if the view for which we are doing this job is dead, kill the job as well
++            if (accountBalanceTextViewReference == null || accountBalanceTextViewReference.get() == null){
++                cancel(true);
++                accountsDbAdapter.close();
++                return Money.getZeroInstance();
++            }
++            Money balance = accountsDbAdapter.getAccountBalance(params[0]);
++            accountsDbAdapter.close();
++            return balance;
++        }
++
++        @Override
++        protected void onPostExecute(Money balance) {
++            if (accountBalanceTextViewReference != null && balance != null){
++                final Context context = accountsDbAdapter.getContext();
++                final TextView balanceTextView = accountBalanceTextViewReference.get();
++                if (balanceTextView != null){
++                    balanceTextView.setText(balance.formattedString());
++                    int fontColor = balance.isNegative() ? context.getResources().getColor(R.color.debit_red) :
++                            context.getResources().getColor(R.color.credit_green);
++                    balanceTextView.setTextColor(fontColor);
++                }
++            }
++        }
++    }
++
+ }
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java b/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+index 70ddbe95..592331f8 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+@@ -16,17 +16,6 @@
+ 
+ package org.gnucash.android.ui.transactions;
+ 
+-import java.text.SimpleDateFormat;
+-import java.util.Date;
+-import java.util.HashMap;
+-import java.util.Locale;
+-
+-import org.gnucash.android.R;
+-import org.gnucash.android.data.Money;
+-import org.gnucash.android.db.*;
+-import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+-import org.gnucash.android.util.OnTransactionClickedListener;
+-
+ import android.app.Activity;
+ import android.content.Context;
+ import android.database.Cursor;
+@@ -48,13 +37,26 @@
+ import android.widget.CompoundButton.OnCheckedChangeListener;
+ import android.widget.ListView;
+ import android.widget.TextView;
+-
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockListFragment;
+ import com.actionbarsherlock.view.ActionMode;
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
++import org.gnucash.android.R;
++import org.gnucash.android.data.Money;
++import org.gnucash.android.db.DatabaseAdapter;
++import org.gnucash.android.db.DatabaseCursorLoader;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.ui.accounts.AccountsListFragment;
++import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
++import org.gnucash.android.util.OnTransactionClickedListener;
++
++import java.text.SimpleDateFormat;
++import java.util.Date;
++import java.util.HashMap;
++import java.util.Locale;
+ 
+ /**
+  * List Fragment for displaying list of transactions for an account
+@@ -213,15 +215,9 @@ public void refreshList(long accountId){
+ 	public void refreshList(){
+ 		getLoaderManager().restartLoader(0, null, this);
+ 
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		Money sum = accountsDbAdapter.getAccountBalance(mAccountID);// mTransactionsDbAdapter.getTransactionsSum(mAccountID);
+-        accountsDbAdapter.close();
+-		mSumTextView = (TextView) getView().findViewById(R.id.transactions_sum);
+-		mSumTextView.setText(sum.formattedString(Locale.getDefault()));
+-		if (sum.isNegative())
+-			mSumTextView.setTextColor(getResources().getColor(R.color.debit_red));
+-		else
+-			mSumTextView.setTextColor(getResources().getColor(R.color.credit_green));			
++        mSumTextView = (TextView) getView().findViewById(R.id.transactions_sum);
++        new AccountsListFragment.AccountBalanceTask(mSumTextView, getActivity()).execute(mAccountID);
++
+ 	}
+ 			
+ 	@Override
+@@ -481,7 +477,7 @@ public void bindView(View view, Context context, Cursor cursor) {
+ 			long transactionTime = cursor.getLong(DatabaseAdapter.COLUMN_TIMESTAMP);
+ 			int position = cursor.getPosition();
+ 						
+-			boolean hasSectionHeader = false;
++			boolean hasSectionHeader;
+ 			if (position == 0){
+ 				hasSectionHeader = true;
+ 			} else {

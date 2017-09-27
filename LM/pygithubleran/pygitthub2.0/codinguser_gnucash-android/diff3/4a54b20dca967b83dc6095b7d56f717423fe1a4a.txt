@@ -1,0 +1,241 @@
+From 4a54b20dca967b83dc6095b7d56f717423fe1a4a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 7 Apr 2017 01:07:05 +0200
+Subject: [PATCH] Move book delete button into options menu of book card
+
+Make it harder to inadvertently delete book
+---
+ .../org/gnucash/android/test/ui/MultiBookTest.java | 26 +++++++++
+ .../android/ui/settings/BookManagerFragment.java   | 68 ++++++++++------------
+ app/src/main/res/layout/cardview_account.xml       |  2 +-
+ app/src/main/res/layout/cardview_book.xml          | 20 +------
+ app/src/main/res/menu/book_context_menu.xml        |  5 ++
+ 5 files changed, 64 insertions(+), 57 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
+index 02809a01..b5aeef59 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
+@@ -21,6 +21,7 @@
+ import android.support.test.runner.AndroidJUnit4;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.db.BookDbHelper;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.model.Book;
+ import org.gnucash.android.test.ui.util.DisableAnimationsRule;
+@@ -37,10 +38,13 @@
+ import static android.support.test.espresso.action.ViewActions.swipeUp;
+ import static android.support.test.espresso.assertion.ViewAssertions.matches;
+ import static android.support.test.espresso.intent.matcher.IntentMatchers.hasComponent;
++import static android.support.test.espresso.matcher.ViewMatchers.hasDescendant;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
+ import static android.support.test.espresso.matcher.ViewMatchers.withId;
++import static android.support.test.espresso.matcher.ViewMatchers.withParent;
+ import static android.support.test.espresso.matcher.ViewMatchers.withText;
+ import static org.assertj.core.api.Assertions.assertThat;
++import static org.hamcrest.Matchers.allOf;
+ 
+ /**
+  * Test support for multiple books in the application
+@@ -119,6 +123,28 @@ public void testCreateNewBook(){
+         assertThat(mBooksDbAdapter.getRecordsCount()).isEqualTo(bookCount+1);
+     }
+ 
++    //TODO: Finish implementation of this test
++    public void testDeleteBook(){
++        long bookCount = mBooksDbAdapter.getRecordsCount();
++
++        Book book = new Book();
++        String displayName = "To Be Deleted";
++        book.setDisplayName(displayName);
++        mBooksDbAdapter.addRecord(book);
++
++        assertThat(mBooksDbAdapter.getRecordsCount()).isEqualTo(bookCount + 1);
++
++        shouldOpenBookManager();
++
++        onView(allOf(withParent(hasDescendant(withText(displayName))),
++                withId(R.id.options_menu))).perform(click());
++
++        onView(withText(R.string.menu_delete)).perform(click());
++        onView(withText(R.string.btn_delete_book)).perform(click());
++
++        assertThat(mBooksDbAdapter.getRecordsCount()).isEqualTo(bookCount);
++    }
++
+     private static void sleep(long millis){
+         try {
+             Thread.sleep(millis);
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+index 6bbaa192..ec5c556f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+@@ -166,7 +166,6 @@ public void bindView(View view, final Context context, Cursor cursor) {
+             setLastExportedText(view, bookUID);
+             setStatisticsText(view, bookUID);
+             setUpMenu(view, context, cursor, bookUID);
+-            setUpDeleteButton(view, context, bookUID);
+ 
+             view.setOnClickListener(new View.OnClickListener() {
+                 @Override
+@@ -179,41 +178,6 @@ public void onClick(View v) {
+             });
+         }
+ 
+-        private void setUpDeleteButton(View view, final Context context, final String bookUID) {
+-            ImageView deleteBookBtn = (ImageView) view.findViewById(R.id.delete_book);
+-            String activeBookUID = BooksDbAdapter.getInstance().getActiveBookUID();
+-            if (activeBookUID.equals(bookUID)) //we cannot delete the active book
+-                deleteBookBtn.setVisibility(View.GONE);
+-            else {
+-                deleteBookBtn.setOnClickListener(new View.OnClickListener() {
+-                    @Override
+-                    public void onClick(View v) {
+-                        AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(getActivity());
+-                        dialogBuilder.setTitle(getString(R.string.title_confirm_delete_book))
+-                                .setIcon(R.drawable.ic_close_black_24dp)
+-                                .setMessage(getString(R.string.msg_all_book_data_will_be_deleted));
+-                        dialogBuilder.setPositiveButton(getString(R.string.btn_delete_book), new DialogInterface.OnClickListener() {
+-                            @Override
+-                            public void onClick(DialogInterface dialog, int which) {
+-                                BooksDbAdapter.getInstance().deleteBook(bookUID);
+-                                refresh();
+-                            }
+-                        });
+-                        dialogBuilder.setNegativeButton(R.string.btn_cancel, new DialogInterface.OnClickListener() {
+-                            @Override
+-                            public void onClick(DialogInterface dialog, int which) {
+-                                dialog.dismiss();
+-                            }
+-                        });
+-                        AlertDialog dialog = dialogBuilder.create();
+-                        dialog.show(); //must be called before you can access buttons
+-                        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+-                                .setTextColor(ContextCompat.getColor(context, R.color.account_red));
+-                    }
+-                });
+-            }
+-        }
+-
+         private void setUpMenu(View view, final Context context, Cursor cursor, final String bookUID) {
+             final String bookName = cursor.getString(
+                     cursor.getColumnIndexOrThrow(BookEntry.COLUMN_DISPLAY_NAME));
+@@ -224,20 +188,50 @@ public void onClick(View v) {
+                     PopupMenu popupMenu = new PopupMenu(context, v);
+                     MenuInflater menuInflater = popupMenu.getMenuInflater();
+                     menuInflater.inflate(R.menu.book_context_menu, popupMenu.getMenu());
++
+                     popupMenu.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
+                         @Override
+                         public boolean onMenuItemClick(MenuItem item) {
+-                            switch (item.getItemId()){
++                            switch (item.getItemId()) {
+                                 case R.id.ctx_menu_rename_book:
+                                     return handleMenuRenameBook(context, bookName, bookUID);
+                                 case R.id.ctx_menu_sync_book:
+                                     //TODO implement sync
+                                     return false;
++                                case R.id.ctx_menu_delete_book: {
++                                    AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(getActivity());
++                                    dialogBuilder.setTitle(getString(R.string.title_confirm_delete_book))
++                                            .setIcon(R.drawable.ic_close_black_24dp)
++                                            .setMessage(getString(R.string.msg_all_book_data_will_be_deleted));
++                                    dialogBuilder.setPositiveButton(getString(R.string.btn_delete_book), new DialogInterface.OnClickListener() {
++                                        @Override
++                                        public void onClick(DialogInterface dialog, int which) {
++                                            BooksDbAdapter.getInstance().deleteBook(bookUID);
++                                            refresh();
++                                        }
++                                    });
++                                    dialogBuilder.setNegativeButton(R.string.btn_cancel, new DialogInterface.OnClickListener() {
++                                        @Override
++                                        public void onClick(DialogInterface dialog, int which) {
++                                            dialog.dismiss();
++                                        }
++                                    });
++                                    AlertDialog dialog = dialogBuilder.create();
++                                    dialog.show(); //must be called before you can access buttons
++                                    dialog.getButton(AlertDialog.BUTTON_POSITIVE)
++                                            .setTextColor(ContextCompat.getColor(context, R.color.account_red));
++                                }
++                                return true;
+                                 default:
+                                     return true;
+                             }
+                         }
+                     });
++
++                    String activeBookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++                    if (activeBookUID.equals(bookUID)) {//we cannot delete the active book
++                        popupMenu.getMenu().findItem(R.id.ctx_menu_delete_book).setEnabled(false);
++                    }
+                     popupMenu.show();
+                 }
+             });
+diff --git a/app/src/main/res/layout/cardview_account.xml b/app/src/main/res/layout/cardview_account.xml
+index 7eb1ae8e..cfae3733 100644
+--- a/app/src/main/res/layout/cardview_account.xml
++++ b/app/src/main/res/layout/cardview_account.xml
+@@ -95,7 +95,7 @@
+             android:id="@+id/account_balance"
+             android:layout_width="wrap_content"
+             android:layout_height="wrap_content"
+-            android:singleLine="true"
++            android:maxLines="1"
+             android:layout_alignParentBottom="true"
+             android:paddingBottom="4dp"
+             android:textSize="18sp"
+diff --git a/app/src/main/res/layout/cardview_book.xml b/app/src/main/res/layout/cardview_book.xml
+index f4b021e0..e431019f 100644
+--- a/app/src/main/res/layout/cardview_book.xml
++++ b/app/src/main/res/layout/cardview_book.xml
+@@ -52,32 +52,14 @@
+             android:layout_height="48dp"
+             android:layout_alignParentBottom="true"
+             android:layout_alignParentRight="true"
+-            android:layout_alignParentEnd="true"
+             android:background="?attr/selectableItemBackgroundBorderless"
+             android:paddingTop="20dp"
+-            android:layout_marginBottom="4dp"
++            android:paddingBottom="4dp"
+             android:paddingLeft="24dp"
+-            android:paddingStart="24dp"
+             android:scaleType="centerInside"
+             android:src="@drawable/ic_more_vert_black_24dp"
+             tools:ignore="ContentDescription" />
+ 
+-        <ImageView
+-            android:id="@+id/delete_book"
+-            android:layout_width="48dp"
+-            android:layout_height="48dp"
+-            android:layout_alignParentRight="true"
+-            android:layout_alignParentEnd="true"
+-            android:background="?attr/selectableItemBackgroundBorderless"
+-            android:paddingTop="6dp"
+-            android:paddingRight="6dp"
+-            android:paddingEnd="6dp"
+-            android:paddingLeft="22dp"
+-            android:paddingStart="22dp"
+-            android:paddingBottom="22dp"
+-            android:src="@drawable/ic_clear_black_24dp"
+-            tools:ignore="ContentDescription" />
+-
+         <TextView
+             android:id="@+id/label_last_sync"
+             android:layout_width="wrap_content"
+diff --git a/app/src/main/res/menu/book_context_menu.xml b/app/src/main/res/menu/book_context_menu.xml
+index fc5ac59f..9c25740e 100644
+--- a/app/src/main/res/menu/book_context_menu.xml
++++ b/app/src/main/res/menu/book_context_menu.xml
+@@ -30,4 +30,9 @@
+           android:title="@string/menu_title_enable_sync"
+           app:showAsAction="ifRoom"
+           android:orderInCategory="2" />
++
++    <item android:id="@+id/ctx_menu_delete_book"
++        android:title="@string/menu_delete"
++        app:showAsAction="ifRoom"
++        android:orderInCategory="3" />
+ </menu>
+\ No newline at end of file

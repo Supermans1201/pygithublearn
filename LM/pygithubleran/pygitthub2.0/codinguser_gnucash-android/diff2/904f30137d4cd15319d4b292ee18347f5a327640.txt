@@ -1,0 +1,1343 @@
+From 904f30137d4cd15319d4b292ee18347f5a327640 Mon Sep 17 00:00:00 2001
+From: alceurneto <alceurneto@gmail.com>
+Date: Sat, 6 Feb 2016 00:04:09 -0200
+Subject: [PATCH] Fixes #467 and fixes #464.
+
+---
+ app/build.gradle                                   |  1 +
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  5 +-
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  8 +-
+ .../org/gnucash/android/db/DatabaseSchema.java     |  2 +-
+ .../org/gnucash/android/db/MigrationHelper.java    | 56 +++++++++---
+ .../org/gnucash/android/db/PricesDbAdapter.java    |  9 +-
+ .../android/db/ScheduledActionDbAdapter.java       |  3 +-
+ .../org/gnucash/android/db/SplitsDbAdapter.java    |  8 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  7 +-
+ .../org/gnucash/android/export/ExportParams.java   | 14 ++-
+ .../java/org/gnucash/android/export/Exporter.java  |  7 --
+ .../gnucash/android/export/ofx/OfxExporter.java    |  7 +-
+ .../gnucash/android/export/qif/QifExporter.java    |  9 +-
+ .../gnucash/android/export/xml/GncXmlExporter.java |  7 +-
+ .../gnucash/android/importer/GncXmlImporter.java   | 13 +--
+ .../java/org/gnucash/android/model/BaseModel.java  |  6 +-
+ .../main/java/org/gnucash/android/model/Price.java |  6 +-
+ .../android/ui/export/ExportFormFragment.java      | 12 +--
+ .../gnucash/android/util/PreferencesHelper.java    | 71 ++++++++++++++++
+ .../org/gnucash/android/util/TimestampHelper.java  | 99 ++++++++++++++++++++++
+ .../test/unit/db/AccountsDbAdapterTest.java        |  6 +-
+ .../android/test/unit/db/MigrationHelperTest.java  | 64 ++++++++++++++
+ .../android/test/unit/db/SplitsDbAdapterTest.java  |  6 +-
+ .../test/unit/db/TransactionsDbAdapterTest.java    |  6 +-
+ .../android/test/unit/export/BackupTest.java       |  6 +-
+ .../android/test/unit/model/AccountTest.java       |  6 +-
+ .../gnucash/android/test/unit/model/MoneyTest.java |  6 +-
+ .../gnucash/android/test/unit/model/SplitTest.java |  7 +-
+ .../android/test/unit/model/TransactionTest.java   |  6 +-
+ .../unit/{util => testutil}/GnucashTestRunner.java |  2 +-
+ .../unit/{util => testutil}/ShadowCrashlytics.java |  2 +-
+ .../unit/{util => testutil}/ShadowUserVoice.java   |  2 +-
+ .../test/unit/util/PreferencesHelperTest.java      | 50 +++++++++++
+ .../test/unit/util/TimestampHelperTest.java        | 91 ++++++++++++++++++++
+ 34 files changed, 501 insertions(+), 109 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+ create mode 100644 app/src/main/java/org/gnucash/android/util/TimestampHelper.java
+ create mode 100644 app/src/test/java/org/gnucash/android/test/unit/db/MigrationHelperTest.java
+ rename app/src/test/java/org/gnucash/android/test/unit/{util => testutil}/GnucashTestRunner.java (94%)
+ rename app/src/test/java/org/gnucash/android/test/unit/{util => testutil}/ShadowCrashlytics.java (91%)
+ rename app/src/test/java/org/gnucash/android/test/unit/{util => testutil}/ShadowUserVoice.java (90%)
+ create mode 100644 app/src/test/java/org/gnucash/android/test/unit/util/PreferencesHelperTest.java
+ create mode 100644 app/src/test/java/org/gnucash/android/test/unit/util/TimestampHelperTest.java
+
+diff --git a/app/build.gradle b/app/build.gradle
+index b5fac63f..43650a56 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -212,6 +212,7 @@ dependencies {
+ 
+     testCompile('org.robolectric:robolectric:3.0',
+             'junit:junit:4.12',
++            'joda-time:joda-time:2.7',
+             'org.assertj:assertj-core:1.7.1'
+     )
+     androidTestCompile ('com.android.support:support-annotations:'  + androidSupportVersion,
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 3298281c..1d913177 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -37,6 +37,7 @@
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ import java.math.BigDecimal;
+ import java.sql.Timestamp;
+@@ -182,7 +183,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Account account
+         mReplaceStatement.bindLong(7, account.isFavorite() ? 1 : 0);
+         mReplaceStatement.bindString(8, account.getFullName());
+         mReplaceStatement.bindLong(9, account.isPlaceholderAccount() ? 1 : 0);
+-        mReplaceStatement.bindString(10, account.getCreatedTimestamp().toString());
++        mReplaceStatement.bindString(10, TimestampHelper.getUtcStringForTimestamp(account.getCreatedTimestamp()));
+         mReplaceStatement.bindLong(11, account.isHidden() ? 1 : 0);
+         Commodity commodity = account.getCommodity();
+         if (commodity == null)
+@@ -529,7 +530,7 @@ public AccountType getAccountType(long accountId){
+                         SplitEntry.COLUMN_ACCOUNT_UID,
+                 new String[]{AccountEntry.TABLE_NAME + ".*"},
+                 TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_MODIFIED_AT + " > ?",
+-                new String[]{lastExportTimeStamp.toString()},
++                new String[]{TimestampHelper.getUtcStringForTimestamp(lastExportTimeStamp)},
+                 AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID,
+                 null,
+                 null
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 2e810b56..2f0aa62f 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -29,8 +29,8 @@
+ import org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.BaseModel;
++import org.gnucash.android.util.TimestampHelper;
+ 
+-import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -301,7 +301,7 @@ public Model getRecord(long id){
+      */
+     protected ContentValues populateBaseModelAttributes(@NonNull ContentValues contentValues, @NonNull Model model){
+         contentValues.put(CommonColumns.COLUMN_UID, model.getUID());
+-        contentValues.put(CommonColumns.COLUMN_CREATED_AT, model.getCreatedTimestamp().toString());
++        contentValues.put(CommonColumns.COLUMN_CREATED_AT, TimestampHelper.getUtcStringForTimestamp(model.getCreatedTimestamp()));
+         //there is a trigger in the database for updated the modified_at column
+         /* Due to the use of SQL REPLACE syntax, we insert the created_at values each time
+         * (maintain the original creation time and not the time of creation of the replacement)
+@@ -321,8 +321,8 @@ protected void populateBaseModelAttributes(Cursor cursor, BaseModel model){
+         String modified= cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_MODIFIED_AT));
+ 
+         model.setUID(uid);
+-        model.setCreatedTimestamp(Timestamp.valueOf(created));
+-        model.setModifiedTimestamp(Timestamp.valueOf(modified));
++        model.setCreatedTimestamp(TimestampHelper.getTimestampForUtcString(created));
++        model.setModifiedTimestamp(TimestampHelper.getTimestampForUtcString(modified));
+     }
+ 
+ 	/**
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 15d7870c..7d833a84 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -28,7 +28,7 @@
+      * Database version.
+      * With any change to the database schema, this number must increase
+      */
+-    public static final int DATABASE_VERSION = 11;
++    public static final int DATABASE_VERSION = 12;
+ 
+     /**
+      * Database version where Splits were introduced
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index f8d91f08..87debbeb 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -24,7 +24,6 @@
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.Environment;
+-import android.preference.PreferenceManager;
+ import android.text.TextUtils;
+ import android.util.Log;
+ 
+@@ -42,6 +41,8 @@
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.util.PreferencesHelper;
++import org.gnucash.android.util.TimestampHelper;
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+ import org.xml.sax.XMLReader;
+@@ -59,6 +60,7 @@
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.TimeZone;
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.parsers.SAXParser;
+@@ -645,7 +647,7 @@ static int upgradeDbToVersion8(SQLiteDatabase db) {
+             //================================ END TABLE MIGRATIONS ================================
+ 
+             // String timestamp to be used for all new created entities in migration
+-            String timestamp = (new Timestamp(System.currentTimeMillis())).toString();
++            String timestamp = TimestampHelper.getUtcStringForTimestamp(TimestampHelper.getTimestampForNow());
+ 
+             //ScheduledActionDbAdapter scheduledActionDbAdapter = new ScheduledActionDbAdapter(db);
+             //SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(db);
+@@ -696,7 +698,7 @@ static int upgradeDbToVersion8(SQLiteDatabase db) {
+             while (cursor.moveToNext()){
+                 contentValues.clear();
+                 Timestamp timestampT = new Timestamp(cursor.getLong(cursor.getColumnIndexOrThrow(TransactionEntry.COLUMN_TIMESTAMP)));
+-                contentValues.put(TransactionEntry.COLUMN_CREATED_AT, timestampT.toString());
++                contentValues.put(TransactionEntry.COLUMN_CREATED_AT, TimestampHelper.getUtcStringForTimestamp(timestampT));
+                 long transactionId = cursor.getLong(cursor.getColumnIndexOrThrow(TransactionEntry._ID));
+                 db.update(TransactionEntry.TABLE_NAME, contentValues, TransactionEntry._ID + "=" + transactionId, null);
+ 
+@@ -1094,11 +1096,9 @@ static int upgradeDbToVersion10(SQLiteDatabase db){
+ 
+                 boolean exportAll = Boolean.parseBoolean(tokens[2]);
+                 if (exportAll){
+-                    params.setExportStartTime(Timestamp.valueOf(Exporter.TIMESTAMP_ZERO));
++                    params.setExportStartTime(TimestampHelper.getTimestampForEpochZero());
+                 } else {
+-                    String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
+-                            .getString(Exporter.PREF_LAST_EXPORT_TIME, Exporter.TIMESTAMP_ZERO);
+-                    Timestamp timestamp = Timestamp.valueOf(lastExportTimeStamp);
++                    Timestamp timestamp = PreferencesHelper.getLastExportTime();
+                     params.setExportStartTime(timestamp);
+                 }
+ 
+@@ -1143,10 +1143,9 @@ static int upgradeDbToVersion11(SQLiteDatabase db){
+                 String tag = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TAG));
+                 String[] tokens = tag.split(";");
+                 try {
+-                    Timestamp timestamp = Timestamp.valueOf(tokens[2]);
++                    Timestamp timestamp = TimestampHelper.getTimestampForUtcString(tokens[2]);
+                 } catch (IllegalArgumentException ex) {
+-                    tokens[2] = PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
+-                            .getString(Exporter.PREF_LAST_EXPORT_TIME, Exporter.TIMESTAMP_ZERO);
++                    tokens[2] = TimestampHelper.getUtcStringForTimestamp(PreferencesHelper.getLastExportTime());
+                 } finally {
+                     tag = TextUtils.join(";", tokens);
+                 }
+@@ -1170,4 +1169,41 @@ static int upgradeDbToVersion11(SQLiteDatabase db){
+         }
+         return oldVersion;
+     }
++
++    public static Timestamp subtractTimeZoneOffset(Timestamp timestamp, TimeZone timeZone) {
++        final long millisecondsToSubtract = Math.abs(timeZone.getOffset(timestamp.getTime()));
++        return new Timestamp(timestamp.getTime() - millisecondsToSubtract);
++    }
++
++    /**
++     * Upgrade database to version 12
++     * <p>
++     *     Change last_export_time Android preference to current value - N
++     *     where N is the absolute timezone offset for current user time zone.
++     *     For details see #467.
++     * </p>
++     * @param db SQLite database
++     * @return 12 if upgrade was successful, 11 otherwise
++     */
++    static int upgradeDbToVersion12(SQLiteDatabase db){
++        Log.i(MigrationHelper.LOG_TAG, "Upgrading database to version 12");
++
++        int oldVersion = 11;
++
++        try {
++
++            final Timestamp currentLastExportTime = PreferencesHelper.getLastExportTime();
++
++            final Timestamp updatedLastExportTime = subtractTimeZoneOffset(
++                    currentLastExportTime, TimeZone.getDefault());
++            PreferencesHelper.setLastExportTime(updatedLastExportTime);
++
++            oldVersion = 12;
++
++        } catch (Exception ignored){
++            // Do nothing: here oldVersion = 11.
++        }
++
++        return oldVersion;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+index 83645f4f..c4a230f0 100644
+--- a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+@@ -1,17 +1,14 @@
+ package org.gnucash.android.db;
+ 
+-import android.content.ContentValues;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
+ import android.support.annotation.NonNull;
+-import android.util.Log;
+ import android.util.Pair;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Price;
+-
+-import java.sql.Timestamp;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.PriceEntry;
+ 
+@@ -49,7 +46,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Price price) {
+         mReplaceStatement.bindString(1, price.getUID());
+         mReplaceStatement.bindString(2, price.getCommodityUID());
+         mReplaceStatement.bindString(3, price.getCurrencyUID());
+-        mReplaceStatement.bindString(4, price.getDate().toString());
++        mReplaceStatement.bindString(4, TimestampHelper.getUtcStringForTimestamp(price.getDate()));
+         if (price.getSource() != null) {
+             mReplaceStatement.bindString(5, price.getSource());
+         }
+@@ -73,7 +70,7 @@ public Price buildModelInstance(@NonNull final Cursor cursor) {
+         long valueDenom   = cursor.getLong(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_DENOM));
+ 
+         Price price = new Price(commodityUID, currencyUID);
+-        price.setDate(Timestamp.valueOf(dateString));
++        price.setDate(TimestampHelper.getTimestampForUtcString(dateString));
+         price.setSource(source);
+         price.setType(type);
+         price.setValueNum(valueNum);
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index 8a98500d..cecf5ea0 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -24,6 +24,7 @@
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ import java.util.ArrayList;
+ import java.util.List;
+@@ -102,7 +103,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final ScheduledAction
+         mReplaceStatement.bindLong(6,   schedxAction.getLastRun());
+         mReplaceStatement.bindLong(7,   schedxAction.getPeriod());
+         mReplaceStatement.bindLong(8,   schedxAction.isEnabled() ? 1 : 0);
+-        mReplaceStatement.bindString(9, schedxAction.getCreatedTimestamp().toString());
++        mReplaceStatement.bindString(9, TimestampHelper.getUtcStringForTimestamp(schedxAction.getCreatedTimestamp()));
+         if (schedxAction.getTag() == null)
+             mReplaceStatement.bindNull(10);
+         else
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index 84215fc8..727db62c 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -27,16 +27,14 @@
+ import android.util.Pair;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ import java.math.BigDecimal;
+-import java.sql.Timestamp;
+ import java.util.ArrayList;
+-import java.util.Currency;
+ import java.util.List;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
+@@ -80,7 +78,7 @@ public void addRecord(@NonNull final Split split){
+ 
+         //modifying a split means modifying the accompanying transaction as well
+         updateRecord(TransactionEntry.TABLE_NAME, transactionId,
+-                TransactionEntry.COLUMN_MODIFIED_AT, new Timestamp(System.currentTimeMillis()).toString());
++                TransactionEntry.COLUMN_MODIFIED_AT, TimestampHelper.getUtcStringForTimestamp(TimestampHelper.getTimestampForNow()));
+     }
+ 
+     @Override
+@@ -109,7 +107,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Split split) {
+         mReplaceStatement.bindLong(5,   split.getValue().getDenominator());
+         mReplaceStatement.bindLong(6,   split.getQuantity().getNumerator());
+         mReplaceStatement.bindLong(7,   split.getQuantity().getDenominator());
+-        mReplaceStatement.bindString(8, split.getCreatedTimestamp().toString());
++        mReplaceStatement.bindString(8, TimestampHelper.getUtcStringForTimestamp(split.getCreatedTimestamp()));
+         mReplaceStatement.bindString(9, split.getAccountUID());
+         mReplaceStatement.bindString(10, split.getTransactionUID());
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 0f9b4bfa..b4f68434 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -36,6 +36,7 @@
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ import java.sql.Timestamp;
+ import java.util.ArrayList;
+@@ -187,7 +188,7 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Transaction tra
+             commodity = CommoditiesDbAdapter.getInstance().getCommodity(transaction.getCurrencyCode());
+ 
+         mReplaceStatement.bindString(7, commodity.getUID());
+-        mReplaceStatement.bindString(8, transaction.getCreatedTimestamp().toString());
++        mReplaceStatement.bindString(8, TimestampHelper.getUtcStringForTimestamp(transaction.getCreatedTimestamp()));
+ 
+         if (transaction.getScheduledActionUID() == null)
+             mReplaceStatement.bindNull(9);
+@@ -643,11 +644,11 @@ public Timestamp getTimestampOfLastModification(){
+                 new String[]{"MAX(" + TransactionEntry.COLUMN_MODIFIED_AT + ")"},
+                 null, null, null, null, null);
+ 
+-        Timestamp timestamp = new Timestamp(System.currentTimeMillis());
++        Timestamp timestamp = TimestampHelper.getTimestampForNow();
+         if (cursor.moveToFirst()){
+             String timeString = cursor.getString(0);
+             if (timeString != null){ //in case there were no transactions in the XML file (account structure only)
+-                timestamp = Timestamp.valueOf(timeString);
++                timestamp = TimestampHelper.getTimestampForUtcString(timeString);
+             }
+         }
+         cursor.close();
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index 97232940..71002ed2 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -16,12 +16,8 @@
+ 
+ package org.gnucash.android.export;
+ 
+-import android.preference.PreferenceManager;
+-
+-import org.gnucash.android.BuildConfig;
+-import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.ui.export.ExportFormFragment;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ import java.sql.Timestamp;
+ 
+@@ -50,7 +46,7 @@
+     /**
+      * All transactions created after this date will be exported
+      */
+-    private Timestamp mExportStartTime = Timestamp.valueOf(Exporter.TIMESTAMP_ZERO);
++    private Timestamp mExportStartTime = TimestampHelper.getTimestampForEpochZero();
+ 
+     /**
+      * Flag to determine if all transactions should be deleted after exporting is complete
+@@ -138,7 +134,7 @@ public void setExportTarget(ExportTarget mExportTarget) {
+ 
+     @Override
+     public String toString() {
+-        return "Export all transactions created since " + mExportStartTime.toString()
++        return "Export all transactions created since " + TimestampHelper.getUtcStringForTimestamp(mExportStartTime) + " UTC"
+                 + " as "+ mExportFormat.name() + " to " + mExportTarget.name();
+     }
+ 
+@@ -151,7 +147,7 @@ public String toCsv(){
+         String separator = ";";
+ 
+         return mExportFormat.name() + separator + mExportTarget.name() + separator
+-                + mExportStartTime.toString() + separator
++                + TimestampHelper.getUtcStringForTimestamp(mExportStartTime) + separator
+                 + Boolean.toString(mDeleteTransactionsAfterExport);
+     }
+ 
+@@ -164,7 +160,7 @@ public static ExportParams parseCsv(String csvParams){
+         String[] tokens = csvParams.split(";");
+         ExportParams params = new ExportParams(ExportFormat.valueOf(tokens[0]));
+         params.setExportTarget(ExportTarget.valueOf(tokens[1]));
+-        params.setExportStartTime(Timestamp.valueOf(tokens[2]));
++        params.setExportStartTime(TimestampHelper.getTimestampForUtcString(tokens[2]));
+         params.setDeleteTransactionsAfterExport(Boolean.parseBoolean(tokens[3]));
+ 
+         return params;
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index dc956fd9..8d585531 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -35,7 +35,6 @@
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ 
+ import java.io.File;
+-import java.sql.Timestamp;
+ import java.text.ParseException;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+@@ -87,12 +86,6 @@
+     private static final SimpleDateFormat EXPORT_FILENAME_DATE_FORMAT = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US);
+ 
+     /**
+-     * last export time in preferences
+-     */
+-    public static final String PREF_LAST_EXPORT_TIME = "last_export_time";
+-
+-    public static final String TIMESTAMP_ZERO = new Timestamp(0).toString();
+-    /**
+      * Adapter for retrieving accounts to export
+      * Subclasses should close this object when they are done with exporting
+      */
+diff --git a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+index c29e426b..ca71d1db 100644
+--- a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -29,6 +29,8 @@
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.util.PreferencesHelper;
++import org.gnucash.android.util.TimestampHelper;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+@@ -41,7 +43,6 @@
+ import java.io.OutputStreamWriter;
+ import java.io.StringWriter;
+ import java.io.Writer;
+-import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -137,18 +138,16 @@ private String generateOfxExport() throws ExporterException {
+         boolean useXmlHeader = PreferenceManager.getDefaultSharedPreferences(mContext)
+                 .getBoolean(mContext.getString(R.string.key_xml_ofx_header), false);
+ 
+-        String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
++        PreferencesHelper.setLastExportTime(TimestampHelper.getTimestampForNow());
+ 
+         StringWriter stringWriter = new StringWriter();
+         //if we want SGML OFX headers, write first to string and then prepend header
+         if (useXmlHeader){
+             write(document, stringWriter, false);
+-            PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+             return stringWriter.toString();
+         } else {
+             Node ofxNode = document.getElementsByTagName("OFX").item(0);
+             write(ofxNode, stringWriter, true);
+-            PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+             return OfxHelper.OFX_SGML_HEADER + '\n' + stringWriter.toString();
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index 6c1fcfde..69946d1c 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -18,12 +18,13 @@
+ 
+ import android.content.ContentValues;
+ import android.database.Cursor;
+-import android.preference.PreferenceManager;
+ 
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
++import org.gnucash.android.util.PreferencesHelper;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ import java.io.BufferedReader;
+ import java.io.BufferedWriter;
+@@ -34,7 +35,6 @@
+ import java.io.IOException;
+ import java.io.OutputStreamWriter;
+ import java.math.BigDecimal;
+-import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.List;
+@@ -60,7 +60,7 @@ public QifExporter(ExportParams params){
+         final String newLine = "\n";
+         TransactionsDbAdapter transactionsDbAdapter = mTransactionsDbAdapter;
+         try {
+-            String lastExportTimeStamp = mExportParams.getExportStartTime().toString();
++            String lastExportTimeStamp = TimestampHelper.getUtcStringForTimestamp(mExportParams.getExportStartTime());
+             Cursor cursor = transactionsDbAdapter.fetchTransactionsWithSplitsWithTransactionAccount(
+                     new String[]{
+                             TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID + " AS trans_uid",
+@@ -216,8 +216,7 @@ public QifExporter(ExportParams params){
+             transactionsDbAdapter.updateTransaction(contentValues, null, null);
+ 
+             /// export successful
+-            String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
+-            PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
++            PreferencesHelper.setLastExportTime(TimestampHelper.getTimestampForNow());
+             return splitQIF(file);
+         } catch (IOException e) {
+             throw new ExporterException(mExportParams, e);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index eecaeafb..f41aa127 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -37,6 +37,7 @@
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.util.TimestampHelper;
+ import org.xmlpull.v1.XmlPullParserFactory;
+ import org.xmlpull.v1.XmlSerializer;
+ 
+@@ -341,7 +342,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_DATE_POSTED);
+ 
+                 // date entered, time when the transaction was actually created
+-                Timestamp timeEntered = Timestamp.valueOf(cursor.getString(cursor.getColumnIndexOrThrow("trans_date_posted")));
++                Timestamp timeEntered = TimestampHelper.getTimestampForUtcString(cursor.getString(cursor.getColumnIndexOrThrow("trans_date_posted")));
+                 String dateEntered = GncXmlHelper.formatDate(timeEntered.getTime());
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_DATE_ENTERED);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_TS_DATE);
+@@ -538,7 +539,7 @@ private void exportScheduledTransactions(XmlSerializer xmlSerializer) throws IOE
+ 
+             //start date
+             String createdTimestamp = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_CREATED_AT));
+-            long scheduleStartTime = Timestamp.valueOf(createdTimestamp).getTime();
++            long scheduleStartTime = TimestampHelper.getTimestampForUtcString(createdTimestamp).getTime();
+             serializeDate(xmlSerializer, GncXmlHelper.TAG_SX_START, scheduleStartTime);
+ 
+             long lastRunTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_LAST_RUN));
+@@ -658,7 +659,7 @@ private void exportPrices(XmlSerializer xmlSerializer) throws IOException {
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_CURRENCY);
+                 // time
+-                String strDate = GncXmlHelper.formatDate(Timestamp.valueOf(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_DATE))).getTime());
++                String strDate = GncXmlHelper.formatDate(TimestampHelper.getTimestampForUtcString(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_DATE))).getTime());
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_TIME);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_TS_DATE);
+                 xmlSerializer.text(strDate);
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index eb9eea9a..a256ab8c 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -17,12 +17,10 @@
+ package org.gnucash.android.importer;
+ 
+ import android.database.sqlite.SQLiteDatabase;
+-import android.preference.PreferenceManager;
+ import android.util.Log;
+ 
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+-import org.gnucash.android.export.Exporter;
++import org.gnucash.android.util.PreferencesHelper;
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+ import org.xml.sax.XMLReader;
+@@ -31,7 +29,6 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.PushbackInputStream;
+-import java.sql.Timestamp;
+ import java.util.zip.GZIPInputStream;
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+@@ -94,11 +91,9 @@ public static void parse(InputStream gncXmlInputStream) throws ParserConfigurati
+         xr.parse(new InputSource(bos));
+         long endTime = System.nanoTime();
+ 
+-        Timestamp timeStamp = TransactionsDbAdapter.getInstance().getTimestampOfLastModification();
+-        PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
+-                .edit()
+-                .putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp.toString())
+-                .apply();
++        PreferencesHelper.setLastExportTime(
++                TransactionsDbAdapter.getInstance().getTimestampOfLastModification()
++        );
+ 
+         Log.d(GncXmlImporter.class.getSimpleName(), String.format("%d ns spent on importing the file", endTime-startTime));
+     }
+diff --git a/app/src/main/java/org/gnucash/android/model/BaseModel.java b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+index cf741495..38c68802 100644
+--- a/app/src/main/java/org/gnucash/android/model/BaseModel.java
++++ b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+@@ -16,6 +16,8 @@
+ 
+ package org.gnucash.android.model;
+ 
++import org.gnucash.android.util.TimestampHelper;
++
+ import java.sql.Timestamp;
+ import java.util.UUID;
+ 
+@@ -40,8 +42,8 @@
+      * A unique ID will be generated on demand with a call to {@link #getUID()}</p>
+      */
+     public BaseModel(){
+-        mCreatedTimestamp = new Timestamp(System.currentTimeMillis());
+-        mModifiedTimestamp = new Timestamp(System.currentTimeMillis());
++        mCreatedTimestamp = TimestampHelper.getTimestampForNow();
++        mModifiedTimestamp = TimestampHelper.getTimestampForNow();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/model/Price.java b/app/src/main/java/org/gnucash/android/model/Price.java
+index 084da550..b0c2f0cc 100644
+--- a/app/src/main/java/org/gnucash/android/model/Price.java
++++ b/app/src/main/java/org/gnucash/android/model/Price.java
+@@ -1,5 +1,7 @@
+ package org.gnucash.android.model;
+ 
++import org.gnucash.android.util.TimestampHelper;
++
+ import java.sql.Timestamp;
+ 
+ /**
+@@ -21,7 +23,7 @@
+     public static final String SOURCE_USER = "user:xfer-dialog";
+ 
+     public Price(){
+-        mDate = new Timestamp(System.currentTimeMillis());
++        mDate = TimestampHelper.getTimestampForNow();
+     }
+ 
+     /**
+@@ -32,7 +34,7 @@ public Price(){
+     public Price(String commodityUID, String currencyUID){
+         this.mCommodityUID = commodityUID;
+         this.mCurrencyUID = currencyUID;
+-        mDate = new Timestamp(System.currentTimeMillis());
++        mDate = TimestampHelper.getTimestampForNow();
+     }
+ 
+     public String getCommodityUID() {
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+index 410b48a7..180e4b3f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+@@ -21,7 +21,6 @@
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.content.pm.PackageManager;
+-import android.content.res.Resources;
+ import android.os.Build;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+@@ -52,7 +51,6 @@
+ import com.codetroopers.betterpickers.recurrencepicker.EventRecurrence;
+ import com.codetroopers.betterpickers.recurrencepicker.EventRecurrenceFormatter;
+ import com.codetroopers.betterpickers.recurrencepicker.RecurrencePickerDialog;
+-import com.crashlytics.android.Crashlytics;
+ import com.dropbox.sync.android.DbxAccountManager;
+ 
+ import org.gnucash.android.R;
+@@ -61,7 +59,6 @@
+ import org.gnucash.android.export.ExportAsyncTask;
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+-import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.BaseModel;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.ui.account.AccountsActivity;
+@@ -69,9 +66,10 @@
+ import org.gnucash.android.ui.settings.SettingsActivity;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ import org.gnucash.android.ui.util.RecurrenceParser;
++import org.gnucash.android.util.PreferencesHelper;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ import java.sql.Timestamp;
+-import java.text.DateFormat;
+ import java.text.ParseException;
+ import java.util.Calendar;
+ import java.util.Date;
+@@ -267,7 +265,7 @@ private void startExport(){
+ 		ExportParams exportParameters = new ExportParams(mExportFormat);
+ 
+ 		if (mExportAllSwitch.isChecked()){
+-			exportParameters.setExportStartTime(Timestamp.valueOf(Exporter.TIMESTAMP_ZERO));
++			exportParameters.setExportStartTime(TimestampHelper.getTimestampForEpochZero());
+ 		} else {
+ 			exportParameters.setExportStartTime(new Timestamp(mExportStartCalendar.getTimeInMillis()));
+ 		}
+@@ -350,9 +348,7 @@ public void onNothingSelected(AdapterView<?> parent) {
+ 		mDestinationSpinner.setSelection(position);
+ 
+ 		//**************** export start time bindings ******************
+-		String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(getActivity())
+-				.getString(Exporter.PREF_LAST_EXPORT_TIME, Exporter.TIMESTAMP_ZERO);
+-		Timestamp timestamp = Timestamp.valueOf(lastExportTimeStamp);
++		Timestamp timestamp = PreferencesHelper.getLastExportTime();
+ 		mExportStartCalendar.setTimeInMillis(timestamp.getTime());
+ 
+ 		Date date = new Date(timestamp.getTime());
+diff --git a/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java b/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+new file mode 100644
+index 00000000..b48ef746
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+@@ -0,0 +1,71 @@
++/*
++ * Copyright (c) 2015 Alceu Rodrigues Neto <alceurneto@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.util;
++
++import android.preference.PreferenceManager;
++import android.util.Log;
++
++import org.gnucash.android.app.GnuCashApplication;
++
++import java.sql.Timestamp;
++
++/**
++ * A utility class to deal with Android Preferences in a centralized way.
++ */
++public final class PreferencesHelper {
++
++    /**
++     * Should be not instantiated.
++     */
++    private PreferencesHelper() {}
++
++    /**
++     * Tag for logging
++     */
++    protected static final String LOG_TAG = "PreferencesHelper";
++
++
++    private static final String PREFERENCE_LAST_EXPORT_TIME_DEFAULT_VALUE = "PREFERENCE_LAST_EXPORT_TIME_DEFAULT_VALUE";
++    private static final String PREFERENCE_LAST_EXPORT_TIME_KEY = "last_export_time";
++
++    /**
++     * Set the last export time in UTC time zone.
++     * A new export operations will fetch transactions based on this value.
++     *
++     * @param lastExportTime the last export time to set.
++     */
++    public static void setLastExportTime(Timestamp lastExportTime) {
++        final String utcString = TimestampHelper.getUtcStringForTimestamp(lastExportTime);
++        Log.d(LOG_TAG, "Storing '" + utcString + "' as lastExportTime in Android Preferences.");
++        PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
++                .edit()
++                .putString(PREFERENCE_LAST_EXPORT_TIME_KEY, utcString)
++                .apply();
++    }
++
++    /**
++     * Get the time for the last export operation.
++     *
++     * @return A {@link Timestamp} with the time.
++     */
++    public static Timestamp getLastExportTime() {
++        final String utcString = PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
++                .getString(PREFERENCE_LAST_EXPORT_TIME_KEY, PREFERENCE_LAST_EXPORT_TIME_DEFAULT_VALUE);
++        Log.d(LOG_TAG, "Retrieving '" + utcString + "' as lastExportTime from Android Preferences.");
++        return PREFERENCE_LAST_EXPORT_TIME_DEFAULT_VALUE.equals(utcString) ?
++                TimestampHelper.getTimestampForEpochZero() : TimestampHelper.getTimestampForUtcString(utcString);
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/main/java/org/gnucash/android/util/TimestampHelper.java b/app/src/main/java/org/gnucash/android/util/TimestampHelper.java
+new file mode 100644
+index 00000000..ca021ca6
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/util/TimestampHelper.java
+@@ -0,0 +1,99 @@
++/*
++ * Copyright (c) 2016 Alceu Rodrigues Neto <alceurneto@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.util;
++
++import org.joda.time.DateTime;
++import org.joda.time.DateTimeZone;
++import org.joda.time.format.DateTimeFormat;
++import org.joda.time.format.DateTimeFormatter;
++
++import java.sql.Timestamp;
++
++/**
++ * A utility class to deal with {@link Timestamp} operations in a centralized way.
++ */
++public final class TimestampHelper {
++
++    /**
++     * Should be not instantiated.
++     */
++    private TimestampHelper() {}
++
++    /**
++     * We are using Joda Time classes because they are thread-safe.
++     */
++    private static final DateTimeZone UTC_TIME_ZONE = DateTimeZone.forID("UTC");
++    private static final DateTimeFormatter UTC_DATE_FORMAT =
++            DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss");
++    private static final DateTimeFormatter UTC_DATE_WITH_MILLISECONDS_FORMAT =
++            DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss.SSS");
++
++    /**
++     * Get a {@link String} representing the {@link Timestamp}
++     * in UTC time zone and 'yyyy-MM-dd HH:mm:ss.SSS' format.
++     *
++     * @param timestamp The {@link Timestamp} to format.
++     * @return The formatted {@link String}.
++     */
++    public static String getUtcStringForTimestamp(Timestamp timestamp) {
++        return UTC_DATE_WITH_MILLISECONDS_FORMAT.withZone(UTC_TIME_ZONE).print(timestamp.getTime());
++    }
++
++    /**
++     * @return A {@link Timestamp} with time in milliseconds equals to zero.
++     */
++    public static Timestamp getTimestampForEpochZero() {
++        return new Timestamp(0);
++    }
++
++    /**
++     * Get the {@link Timestamp} with the value of given UTC {@link String}.
++     * The {@link String} should be a representation in UTC time zone with the following format
++     * 'yyyy-MM-dd HH:mm:ss.SSS' OR 'yyyy-MM-dd HH:mm:ss' otherwise an IllegalArgumentException
++     * will be throw.
++     *
++     * @param utcString A {@link String} in UTC.
++     * @return A {@link Timestamp} for given utcString.
++     */
++    public static Timestamp getTimestampForUtcString(String utcString) {
++        DateTime dateTime;
++        try {
++
++            dateTime = UTC_DATE_WITH_MILLISECONDS_FORMAT.withZone(UTC_TIME_ZONE).parseDateTime(utcString);
++            return new Timestamp(dateTime.getMillis());
++
++        } catch (IllegalArgumentException firstException) {
++            try {
++                // In case of parsing of string without milliseconds.
++                dateTime = UTC_DATE_FORMAT.withZone(UTC_TIME_ZONE).parseDateTime(utcString);
++                return new Timestamp(dateTime.getMillis());
++
++            } catch (IllegalArgumentException secondException) {
++                // If we are here:
++                // - The utcString has an invalid format OR
++                // - We are missing some relevant pattern.
++                throw new IllegalArgumentException("Unknown utcString = '" + utcString + "'.", secondException);
++            }
++        }
++    }
++
++    /**
++     * @return A {@link Timestamp} initialized with the system current time.
++     */
++    public static Timestamp getTimestampForNow() {
++        return new Timestamp(System.currentTimeMillis());
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index afb7f1c5..06a8d021 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -18,9 +18,9 @@
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+-import org.gnucash.android.test.unit.util.GnucashTestRunner;
+-import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+-import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.junit.After;
+ import org.junit.Assert;
+ import org.junit.Before;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/MigrationHelperTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/MigrationHelperTest.java
+new file mode 100644
+index 00000000..517b4c47
+--- /dev/null
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/MigrationHelperTest.java
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (c) 2016 Alceu Rodrigues Neto <alceurneto@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.test.unit.db;
++
++import org.gnucash.android.BuildConfig;
++import org.gnucash.android.db.MigrationHelper;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
++import org.gnucash.android.util.TimestampHelper;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
++
++import java.sql.Timestamp;
++import java.util.TimeZone;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++@RunWith(GnucashTestRunner.class)
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
++public class MigrationHelperTest {
++    @Test
++    public void shouldSubtractTimeZoneOffset() {
++        /**
++         * The values used here are well known.
++         * See https://en.wikipedia.org/wiki/Unix_time#Notable_events_in_Unix_time
++         * for details.
++         */
++
++        final long unixBillennium = 1_000_000_000 * 1000L;
++        final Timestamp unixBillenniumTimestamp = new Timestamp(unixBillennium);
++        final String unixBillenniumUtcString = "2001-09-09 01:46:40.000";
++        final String unixBillenniumUtcStringAfterSubtract = "2001-09-09 00:46:40.000";
++
++        TimeZone timeZone = TimeZone.getTimeZone("GMT-1:00");
++        Timestamp result = MigrationHelper.subtractTimeZoneOffset(unixBillenniumTimestamp, timeZone);
++        assertThat(TimestampHelper.getUtcStringForTimestamp(result))
++                .isEqualTo(unixBillenniumUtcStringAfterSubtract);
++
++        timeZone = TimeZone.getTimeZone("GMT+1:00");
++        result = MigrationHelper.subtractTimeZoneOffset(unixBillenniumTimestamp, timeZone);
++        assertThat(TimestampHelper.getUtcStringForTimestamp(result))
++                .isEqualTo(unixBillenniumUtcStringAfterSubtract);
++
++        timeZone = TimeZone.getTimeZone("GMT+0:00");
++        result = MigrationHelper.subtractTimeZoneOffset(unixBillenniumTimestamp, timeZone);
++        assertThat(TimestampHelper.getUtcStringForTimestamp(result))
++                .isEqualTo(unixBillenniumUtcString);
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
+index 1685ee24..9f2f1c20 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/SplitsDbAdapterTest.java
+@@ -11,9 +11,9 @@
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+-import org.gnucash.android.test.unit.util.GnucashTestRunner;
+-import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+-import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.junit.After;
+ import org.junit.Before;
+ import org.junit.Test;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+index 6b5432c7..caf0fa3b 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/TransactionsDbAdapterTest.java
+@@ -10,9 +10,9 @@
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+-import org.gnucash.android.test.unit.util.GnucashTestRunner;
+-import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+-import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.junit.After;
+ import org.junit.Before;
+ import org.junit.Test;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java b/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+index 411299b5..67418f77 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+@@ -21,9 +21,9 @@
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.test.unit.db.AccountsDbAdapterTest;
+-import org.gnucash.android.test.unit.util.GnucashTestRunner;
+-import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+-import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.junit.Before;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+index adbbbb11..1c378c78 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+@@ -20,9 +20,9 @@
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Transaction;
+-import org.gnucash.android.test.unit.util.GnucashTestRunner;
+-import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+-import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.robolectric.annotation.Config;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
+index fd5eb6a8..02408af7 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/MoneyTest.java
+@@ -19,9 +19,9 @@
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.test.unit.util.GnucashTestRunner;
+-import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+-import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.junit.Before;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+index 35a0af48..262c6cda 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+@@ -6,15 +6,14 @@
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+-import org.gnucash.android.test.unit.util.GnucashTestRunner;
+-import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+-import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.robolectric.annotation.Config;
+ 
+ import java.math.BigDecimal;
+-import java.util.Currency;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+index 486f1793..fa2e9b09 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+@@ -5,9 +5,9 @@
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+-import org.gnucash.android.test.unit.util.GnucashTestRunner;
+-import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+-import org.gnucash.android.test.unit.util.ShadowUserVoice;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.robolectric.annotation.Config;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/util/GnucashTestRunner.java b/app/src/test/java/org/gnucash/android/test/unit/testutil/GnucashTestRunner.java
+similarity index 94%
+rename from app/src/test/java/org/gnucash/android/test/unit/util/GnucashTestRunner.java
+rename to app/src/test/java/org/gnucash/android/test/unit/testutil/GnucashTestRunner.java
+index 48c75462..635d3ce2 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/util/GnucashTestRunner.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/testutil/GnucashTestRunner.java
+@@ -1,4 +1,4 @@
+-package org.gnucash.android.test.unit.util;
++package org.gnucash.android.test.unit.testutil;
+ 
+ import com.crashlytics.android.Crashlytics;
+ import com.uservoice.uservoicesdk.UserVoice;
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/util/ShadowCrashlytics.java b/app/src/test/java/org/gnucash/android/test/unit/testutil/ShadowCrashlytics.java
+similarity index 91%
+rename from app/src/test/java/org/gnucash/android/test/unit/util/ShadowCrashlytics.java
+rename to app/src/test/java/org/gnucash/android/test/unit/testutil/ShadowCrashlytics.java
+index 5d8dcfaf..44a12c35 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/util/ShadowCrashlytics.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/testutil/ShadowCrashlytics.java
+@@ -1,4 +1,4 @@
+-package org.gnucash.android.test.unit.util;
++package org.gnucash.android.test.unit.testutil;
+ 
+ import android.content.Context;
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/util/ShadowUserVoice.java b/app/src/test/java/org/gnucash/android/test/unit/testutil/ShadowUserVoice.java
+similarity index 90%
+rename from app/src/test/java/org/gnucash/android/test/unit/util/ShadowUserVoice.java
+rename to app/src/test/java/org/gnucash/android/test/unit/testutil/ShadowUserVoice.java
+index 31f3f476..b655e0c4 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/util/ShadowUserVoice.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/testutil/ShadowUserVoice.java
+@@ -1,4 +1,4 @@
+-package org.gnucash.android.test.unit.util;
++package org.gnucash.android.test.unit.testutil;
+ 
+ import android.content.Context;
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/util/PreferencesHelperTest.java b/app/src/test/java/org/gnucash/android/test/unit/util/PreferencesHelperTest.java
+new file mode 100644
+index 00000000..ceb7d0ae
+--- /dev/null
++++ b/app/src/test/java/org/gnucash/android/test/unit/util/PreferencesHelperTest.java
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (c) 2016 Alceu Rodrigues Neto <alceurneto@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.test.unit.util;
++
++import org.gnucash.android.BuildConfig;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
++import org.gnucash.android.util.PreferencesHelper;
++import org.gnucash.android.util.TimestampHelper;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
++
++import java.sql.Timestamp;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++@RunWith(GnucashTestRunner.class)
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
++public class PreferencesHelperTest {
++
++    @Test
++    public void shouldGetLastExportTimeDefaultValue() {
++        final Timestamp lastExportTime = PreferencesHelper.getLastExportTime();
++        assertThat(lastExportTime).isEqualTo(TimestampHelper.getTimestampForEpochZero());
++    }
++
++    @Test
++    public void shouldGetLastExportTimeCurrentValue() {
++        final long goldenBoyBirthday = 1190136000L * 1000;
++        final Timestamp goldenBoyBirthdayTimestamp = new Timestamp(goldenBoyBirthday);
++        PreferencesHelper.setLastExportTime(goldenBoyBirthdayTimestamp);
++        assertThat(PreferencesHelper.getLastExportTime())
++                .isEqualTo(goldenBoyBirthdayTimestamp);
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/util/TimestampHelperTest.java b/app/src/test/java/org/gnucash/android/test/unit/util/TimestampHelperTest.java
+new file mode 100644
+index 00000000..2c9d1091
+--- /dev/null
++++ b/app/src/test/java/org/gnucash/android/test/unit/util/TimestampHelperTest.java
+@@ -0,0 +1,91 @@
++/*
++ * Copyright (c) 2016 Alceu Rodrigues Neto <alceurneto@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.test.unit.util;
++
++import org.gnucash.android.BuildConfig;
++import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
++import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
++import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
++import org.gnucash.android.util.TimestampHelper;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.annotation.Config;
++
++import java.sql.Timestamp;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++@RunWith(GnucashTestRunner.class)
++@Config(constants = BuildConfig.class, sdk = 21, packageName = "org.gnucash.android", shadows = {ShadowCrashlytics.class, ShadowUserVoice.class})
++public class TimestampHelperTest {
++
++    @Test
++    public void shouldGetUtcStringForTimestamp() {
++        /**
++         * The values used here are well known.
++         * See https://en.wikipedia.org/wiki/Unix_time#Notable_events_in_Unix_time
++         * for details.
++         */
++
++        final long unixBillennium = 1_000_000_000 * 1000L;
++        final String unixBillenniumUtcString = "2001-09-09 01:46:40.000";
++        final Timestamp unixBillenniumTimestamp = new Timestamp(unixBillennium);
++        assertThat(TimestampHelper.getUtcStringForTimestamp(unixBillenniumTimestamp))
++                .isEqualTo(unixBillenniumUtcString);
++
++        final long the1234567890thSecond = 1234567890 * 1000L;
++        final String the1234567890thSecondUtcString = "2009-02-13 23:31:30.000";
++        final Timestamp the1234567890thSecondTimestamp = new Timestamp(the1234567890thSecond);
++        assertThat(TimestampHelper.getUtcStringForTimestamp(the1234567890thSecondTimestamp))
++                .isEqualTo(the1234567890thSecondUtcString);
++    }
++
++    @Test
++    public void shouldGetTimestampForEpochZero() {
++        Timestamp epochZero = TimestampHelper.getTimestampForEpochZero();
++        assertThat(epochZero.getTime()).isZero();
++    }
++
++    @Test
++    public void shouldGetTimestampForUtcString() {
++        final long unixBillennium = 1_000_000_000 * 1000L;
++        final String unixBillenniumUtcString = "2001-09-09 01:46:40";
++        final String unixBillenniumWithMillisecondsUtcString = "2001-09-09 01:46:40.000";
++        final Timestamp unixBillenniumTimestamp = new Timestamp(unixBillennium);
++        assertThat(TimestampHelper.getTimestampForUtcString(unixBillenniumUtcString))
++                .isEqualTo(unixBillenniumTimestamp);
++        assertThat(TimestampHelper.getTimestampForUtcString(unixBillenniumWithMillisecondsUtcString))
++                .isEqualTo(unixBillenniumTimestamp);
++
++        final long the1234567890thSecond = 1234567890 * 1000L;
++        final String the1234567890thSecondUtcString = "2009-02-13 23:31:30";
++        final String the1234567890thSecondWithMillisecondsUtcString = "2009-02-13 23:31:30.000";
++        final Timestamp the1234567890thSecondTimestamp = new Timestamp(the1234567890thSecond);
++        assertThat(TimestampHelper.getTimestampForUtcString(the1234567890thSecondUtcString))
++                .isEqualTo(the1234567890thSecondTimestamp);
++        assertThat(TimestampHelper.getTimestampForUtcString(the1234567890thSecondWithMillisecondsUtcString))
++                .isEqualTo(the1234567890thSecondTimestamp);
++    }
++
++    @Test
++    public void shouldGetTimestampForNow() {
++        final long before = System.currentTimeMillis();
++        final long now = TimestampHelper.getTimestampForNow().getTime();
++        final long after = System.currentTimeMillis();
++        assertThat(now).isGreaterThanOrEqualTo(before)
++                       .isLessThanOrEqualTo(after);
++    }
++}
+\ No newline at end of file

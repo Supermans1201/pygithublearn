@@ -1,0 +1,3322 @@
+From c13a94c2b3c10893452200bbb630e15821281725 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Tue, 25 Oct 2016 18:24:39 +0200
+Subject: [PATCH 01/25] Don't set an scheduled action's last run unless it's
+ been executed.
+
+Every time the scheduled action service checked for scheduled actions to
+execute, it set the last run, even when the action hadn't been executed.
+As the service runs twice a day, the period would never pass.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/604
+---
+ .../android/service/ScheduledActionService.java    | 34 ++++++++++++----------
+ .../unit/service/ScheduledActionServiceTest.java   |  9 ++++--
+ 2 files changed, 25 insertions(+), 18 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index 58770873..9fa8f0de 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -127,7 +127,7 @@ public static void processScheduledActions(List<ScheduledAction> scheduledAction
+      */
+     private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDatabase db){
+         Log.i(LOG_TAG, "Executing scheduled action: " + scheduledAction.toString());
+-        int executionCount = scheduledAction.getExecutionCount();
++        int executionCount = 0;
+ 
+         switch (scheduledAction.getActionType()){
+             case TRANSACTION:
+@@ -139,20 +139,21 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+                 break;
+         }
+ 
+-        //the last run time is computed instead of just using "now" so that if the more than
+-        // one period has been skipped, all intermediate transactions can be created
+-
+-        scheduledAction.setLastRun(System.currentTimeMillis());
+-        //set the execution count in the object because it will be checked for the next iteration in the calling loop
+-        scheduledAction.setExecutionCount(executionCount); //this call is important, do not remove!!
+-        //update the last run time and execution count
+-        ContentValues contentValues = new ContentValues();
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN,
+-                          scheduledAction.getLastRunTime());
+-        contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT,
+-                          scheduledAction.getExecutionCount());
+-        db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
+-                DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
++        if (executionCount > 0) {
++            scheduledAction.setLastRun(System.currentTimeMillis());
++            // Set the execution count in the object because it will be checked
++            // for the next iteration in the calling loop.
++            // This call is important, do not remove!!
++            scheduledAction.setExecutionCount(scheduledAction.getExecutionCount() + executionCount);
++            // Update the last run time and execution count
++            ContentValues contentValues = new ContentValues();
++            contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN,
++                    scheduledAction.getLastRunTime());
++            contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT,
++                    scheduledAction.getExecutionCount());
++            db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
++                    DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
++        }
+     }
+ 
+     /**
+@@ -219,6 +220,7 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+         int totalPlannedExecutions = scheduledAction.getTotalPlannedExecutionCount();
+         List<Transaction> transactions = new ArrayList<>();
+ 
++        int previousExecutionCount = scheduledAction.getExecutionCount(); // We'll modify it
+         //we may be executing scheduled action significantly after scheduled time (depending on when Android fires the alarm)
+         //so compute the actual transaction time from pre-known values
+         long transactionTime = scheduledAction.computeNextCountBasedScheduledExecutionTime();
+@@ -235,6 +237,8 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+         }
+ 
+         transactionsDbAdapter.bulkAddRecords(transactions, DatabaseAdapter.UpdateMethod.insert);
++        // Be nice and restore the parameter's original state to avoid confusing the callers
++        scheduledAction.setExecutionCount(previousExecutionCount);
+         return executionCount;
+     }
+ }
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 4b8dfda7..83f57c61 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -290,9 +290,6 @@ public void recurringTransactions_shouldHaveScheduledActionUID(){
+      * was done on Monday and it's Thursday, two backups have been
+      * missed. Doing the two missed backups plus today's wouldn't be
+      * useful, so just one should be done.</p>
+-     *
+-     * <p><i>Note</i>: the execution count will include the missed runs
+-     * as computeNextCountBasedScheduledExecutionTime depends on it.</p>
+      */
+     @Test
+     public void scheduledBackups_shouldRunOnlyOnce(){
+@@ -302,6 +299,7 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+         scheduledBackup.setRecurrence(PeriodType.MONTH, 1);
+         scheduledBackup.setExecutionCount(2);
+         scheduledBackup.setLastRun(LocalDateTime.now().minusMonths(2).toDate().getTime());
++        long previousLastRun = scheduledBackup.getLastRunTime();
+ 
+         ExportParams backupParams = new ExportParams(ExportFormat.XML);
+         backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
+@@ -317,13 +315,16 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+         // Check there's not a backup for each missed run
+         ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(scheduledBackup.getExecutionCount()).isEqualTo(3);
++        assertThat(scheduledBackup.getLastRunTime()).isGreaterThan(previousLastRun);
+         File[] backupFiles = backupFolder.listFiles();
+         assertThat(backupFiles).hasSize(1);
+         assertThat(backupFiles[0]).exists().hasExtension("gnca");
+ 
+         // Check also across service runs
++        previousLastRun = scheduledBackup.getLastRunTime();
+         ScheduledActionService.processScheduledActions(actions, mDb);
+         assertThat(scheduledBackup.getExecutionCount()).isEqualTo(3);
++        assertThat(scheduledBackup.getLastRunTime()).isEqualTo(previousLastRun);
+         backupFiles = backupFolder.listFiles();
+         assertThat(backupFiles).hasSize(1);
+         assertThat(backupFiles[0]).exists().hasExtension("gnca");
+@@ -340,6 +341,7 @@ public void scheduledBackups_shouldNotRunBeforeNextScheduledExecution(){
+         ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
+         scheduledBackup.setStartTime(LocalDateTime.now().minusDays(2).toDate().getTime());
+         scheduledBackup.setLastRun(scheduledBackup.getStartTime());
++        long previousLastRun = scheduledBackup.getLastRunTime();
+         scheduledBackup.setExecutionCount(1);
+         scheduledBackup.setRecurrence(PeriodType.WEEK, 1);
+ 
+@@ -357,6 +359,7 @@ public void scheduledBackups_shouldNotRunBeforeNextScheduledExecution(){
+         ScheduledActionService.processScheduledActions(actions, mDb);
+ 
+         assertThat(scheduledBackup.getExecutionCount()).isEqualTo(1);
++        assertThat(scheduledBackup.getLastRunTime()).isEqualTo(previousLastRun);
+         assertThat(backupFolder.listFiles()).hasSize(0);
+     }
+ 
+
+From 837210242c015b86734bb314090e4bc4e22a54e2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Sun, 30 Oct 2016 20:26:27 +0100
+Subject: [PATCH 02/25] Export only transactions since the last run of the
+ scheduled export.
+
+We were getting transactions since the creation of the scheduled export.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/609
+---
+ .../android/service/ScheduledActionService.java    |   3 +
+ .../unit/service/ScheduledActionServiceTest.java   | 109 ++++++++++++++++++++-
+ 2 files changed, 108 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index 9fa8f0de..e792fc22 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -41,6 +41,7 @@
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
+ 
++import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.Date;
+ import java.util.List;
+@@ -168,6 +169,8 @@ private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase
+             return 0;
+ 
+         ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
++        // HACK: the tag isn't updated with the new date, so set the correct by hand
++        params.setExportStartTime(new Timestamp(scheduledAction.getLastRunTime()));
+         try {
+             //wait for async task to finish before we proceed (we are holding a wake lock)
+             new ExportAsyncTask(GnuCashApplication.getAppContext(), db).execute(params).get();
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 83f57c61..ac1db752 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -15,12 +15,13 @@
+  */
+ package org.gnucash.android.test.unit.service;
+ 
++import android.content.ContentValues;
+ import android.database.sqlite.SQLiteDatabase;
+-import android.support.annotation.NonNull;
+ 
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+@@ -39,10 +40,12 @@
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
+ import org.gnucash.android.service.ScheduledActionService;
+ import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
+ import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
+ import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
++import org.gnucash.android.util.TimestampHelper;
+ import org.joda.time.DateTime;
+ import org.joda.time.LocalDateTime;
+ import org.joda.time.Weeks;
+@@ -57,6 +60,7 @@
+ import java.io.File;
+ import java.io.IOException;
+ import java.math.BigDecimal;
++import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -79,6 +83,7 @@
+     private static Account mTransferAccount = new Account("Transfer Account");
+ 
+     private static Transaction mTemplateTransaction;
++    private TransactionsDbAdapter mTransactionsDbAdapter;
+ 
+     public void createAccounts(){
+         try {
+@@ -117,9 +122,8 @@ public void setUp(){
+         accountsDbAdapter.addRecord(mBaseAccount);
+         accountsDbAdapter.addRecord(mTransferAccount);
+ 
+-        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+-        transactionsDbAdapter.addRecord(mTemplateTransaction, DatabaseAdapter.UpdateMethod.insert);
+-
++        mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        mTransactionsDbAdapter.addRecord(mTemplateTransaction, DatabaseAdapter.UpdateMethod.insert);
+     }
+ 
+     @Test
+@@ -363,6 +367,103 @@ public void scheduledBackups_shouldNotRunBeforeNextScheduledExecution(){
+         assertThat(backupFolder.listFiles()).hasSize(0);
+     }
+ 
++    /**
++     * Tests that an scheduled backup doesn't include transactions added or modified
++     * previous to the last run.
++     */
++    @Test
++    public void scheduledBackups_shouldNotIncludeTransactionsPreviousToTheLastRun() {
++        ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
++        scheduledBackup.setStartTime(LocalDateTime.now().minusDays(15).toDate().getTime());
++        scheduledBackup.setLastRun(LocalDateTime.now().minusDays(8).toDate().getTime());
++        long previousLastRun = scheduledBackup.getLastRunTime();
++        scheduledBackup.setExecutionCount(1);
++        scheduledBackup.setRecurrence(PeriodType.WEEK, 1);
++        ExportParams backupParams = new ExportParams(ExportFormat.QIF);
++        backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
++        backupParams.setExportStartTime(new Timestamp(scheduledBackup.getStartTime()));
++        scheduledBackup.setTag(backupParams.toCsv());
++
++        // Create a transaction with a modified date previous to the last run
++        Transaction transaction = new Transaction("Tandoori express");
++        Split split = new Split(new Money("10", Commodity.DEFAULT_COMMODITY.getCurrencyCode()),
++                                mBaseAccount.getUID());
++        split.setType(TransactionType.DEBIT);
++        transaction.addSplit(split);
++        transaction.addSplit(split.createPair(mTransferAccount.getUID()));
++        mTransactionsDbAdapter.addRecord(transaction);
++        // We set the date directly in the database as the corresponding field
++        // is ignored when the object is stored. It's set through a trigger instead.
++        setTransactionInDbModifiedTimestamp(transaction.getUID(),
++                new Timestamp(LocalDateTime.now().minusDays(9).toDate().getTime()));
++
++        File backupFolder = new File(
++                Exporter.getExportFolderPath(BooksDbAdapter.getInstance().getActiveBookUID()));
++        assertThat(backupFolder).exists();
++        assertThat(backupFolder.listFiles()).isEmpty();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledBackup);
++        ScheduledActionService.processScheduledActions(actions, mDb);
++
++        assertThat(scheduledBackup.getExecutionCount()).isEqualTo(2);
++        assertThat(scheduledBackup.getLastRunTime()).isGreaterThan(previousLastRun);
++        assertThat(backupFolder.listFiles()).hasSize(0);
++    }
++
++    /**
++     * Sets the transaction modified timestamp directly in the database.
++     *
++     * @param transactionUID UID of the transaction to set the modified timestamp.
++     * @param timestamp new modified timestamp.
++     */
++    private void setTransactionInDbModifiedTimestamp(String transactionUID, Timestamp timestamp) {
++        ContentValues values = new ContentValues();
++        values.put(DatabaseSchema.TransactionEntry.COLUMN_MODIFIED_AT,
++                   TimestampHelper.getUtcStringFromTimestamp(timestamp));
++        mTransactionsDbAdapter.updateTransaction(values, "uid = ?",
++                                                 new String[]{transactionUID});
++    }
++
++    /**
++     * Tests that an scheduled backup includes transactions added or modified
++     * after the last run.
++     */
++    @Test
++    public void scheduledBackups_shouldIncludeTransactionsAfterTheLastRun() {
++        ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
++        scheduledBackup.setStartTime(LocalDateTime.now().minusDays(15).toDate().getTime());
++        scheduledBackup.setLastRun(LocalDateTime.now().minusDays(8).toDate().getTime());
++        long previousLastRun = scheduledBackup.getLastRunTime();
++        scheduledBackup.setExecutionCount(1);
++        scheduledBackup.setRecurrence(PeriodType.WEEK, 1);
++        ExportParams backupParams = new ExportParams(ExportFormat.QIF);
++        backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
++        backupParams.setExportStartTime(new Timestamp(scheduledBackup.getStartTime()));
++        scheduledBackup.setTag(backupParams.toCsv());
++
++        Transaction transaction = new Transaction("Orient palace");
++        Split split = new Split(new Money("10", Commodity.DEFAULT_COMMODITY.getCurrencyCode()),
++                mBaseAccount.getUID());
++        split.setType(TransactionType.DEBIT);
++        transaction.addSplit(split);
++        transaction.addSplit(split.createPair(mTransferAccount.getUID()));
++        mTransactionsDbAdapter.addRecord(transaction);
++
++        File backupFolder = new File(
++                Exporter.getExportFolderPath(BooksDbAdapter.getInstance().getActiveBookUID()));
++        assertThat(backupFolder).exists();
++        assertThat(backupFolder.listFiles()).isEmpty();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledBackup);
++        ScheduledActionService.processScheduledActions(actions, mDb);
++
++        assertThat(scheduledBackup.getExecutionCount()).isEqualTo(2);
++        assertThat(scheduledBackup.getLastRunTime()).isGreaterThan(previousLastRun);
++        assertThat(backupFolder.listFiles()).hasSize(1);
++    }
++
+     @After
+     public void tearDown(){
+         TransactionsDbAdapter.getInstance().deleteAllRecords();
+
+From f9b3a301af6b1a10e146a6a412efdb9f295db152 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Thu, 10 Nov 2016 20:06:29 +0100
+Subject: [PATCH 03/25] Export transactions with multiple currencies when using
+ QIF.
+
+As QIF doesn't support currencies, they were excluded. See related
+issue:
+
+https://github.com/codinguser/gnucash-android/issues/218
+
+Fixes https://github.com/codinguser/gnucash-android/issues/571
+---
+ app/src/main/java/org/gnucash/android/export/qif/QifExporter.java | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index 7b25d0cb..0e64df8d 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -95,8 +95,6 @@ public QifExporter(ExportParams params, SQLiteDatabase db){
+                     },
+                     // no recurrence transactions
+                     TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_TEMPLATE + " == 0 AND " +
+-                            // exclude transactions involving multiple currencies
+-                            "trans_extra_info.trans_currency_count = 1 AND " +
+                             // in qif, split from the one account entry is not recorded (will be auto balanced)
+                             "( " + AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID + " != account1." + AccountEntry.COLUMN_UID + " OR " +
+                             // or if the transaction has only one split (the whole transaction would be lost if it is not selected)
+
+From 1c5f928c73b4649efdf9016fa76afeac84c38c73 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Sat, 19 Nov 2016 09:45:02 +0100
+Subject: [PATCH 04/25] Show book last export date as "never" when it has never
+ been exported.
+
+The epoch date was shown instead.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/615
+---
+ .../java/org/gnucash/android/ui/settings/BookManagerFragment.java | 8 +++++++-
+ app/src/main/res/values/strings.xml                               | 1 +
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+index ff7fa0e6..723bc0d8 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+@@ -54,6 +54,8 @@
+ import org.gnucash.android.ui.common.Refreshable;
+ import org.gnucash.android.util.PreferencesHelper;
+ 
++import java.sql.Timestamp;
++
+ /**
+  * Fragment for managing the books in the database
+  */
+@@ -159,8 +161,12 @@ public void bindView(View view, final Context context, Cursor cursor) {
+ 
+             final String bookUID = cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_UID));
+ 
++            Timestamp lastSyncTime = PreferencesHelper.getLastExportTime(bookUID);
+             TextView lastSyncText = (TextView) view.findViewById(R.id.last_sync_time);
+-            lastSyncText.setText(PreferencesHelper.getLastExportTime(bookUID).toString());
++            if (lastSyncTime.equals(new Timestamp(0)))
++                lastSyncText.setText(R.string.last_export_time_never);
++            else
++                lastSyncText.setText(lastSyncTime.toString());
+ 
+             TextView labelLastSync = (TextView) view.findViewById(R.id.label_last_sync);
+             labelLastSync.setText(R.string.label_last_export_time);
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 206a9685..058c5613 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -486,4 +486,5 @@
+     <string name="repeat_x_times">for %1$s times</string>
+     <string name="menu_show_compact_view">Compact View</string>
+     <string name="book_default_name">Book %1$d</string>
++    <string name="last_export_time_never">never</string>
+ </resources>
+
+From d95b5ae310217b6c2c723c4f22fb1eaa2cb16026 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Sat, 19 Nov 2016 11:30:58 +0100
+Subject: [PATCH 05/25] Extract code from BooksCursorAdapter.bindView into new
+ methods.
+
+---
+ .../android/ui/settings/BookManagerFragment.java   | 52 ++++++++++++----------
+ 1 file changed, 29 insertions(+), 23 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+index 723bc0d8..718b8602 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookManagerFragment.java
+@@ -161,29 +161,8 @@ public void bindView(View view, final Context context, Cursor cursor) {
+ 
+             final String bookUID = cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_UID));
+ 
+-            Timestamp lastSyncTime = PreferencesHelper.getLastExportTime(bookUID);
+-            TextView lastSyncText = (TextView) view.findViewById(R.id.last_sync_time);
+-            if (lastSyncTime.equals(new Timestamp(0)))
+-                lastSyncText.setText(R.string.last_export_time_never);
+-            else
+-                lastSyncText.setText(lastSyncTime.toString());
+-
+-            TextView labelLastSync = (TextView) view.findViewById(R.id.label_last_sync);
+-            labelLastSync.setText(R.string.label_last_export_time);
+-
+-            //retrieve some book statistics
+-            DatabaseHelper dbHelper = new DatabaseHelper(GnuCashApplication.getAppContext(), bookUID);
+-            SQLiteDatabase db = dbHelper.getReadableDatabase();
+-            TransactionsDbAdapter trnAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
+-            int transactionCount = (int) trnAdapter.getRecordsCount();
+-            String transactionStats = getResources().getQuantityString(R.plurals.book_transaction_stats, transactionCount, transactionCount);
+-
+-            AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(db, trnAdapter);
+-            int accountsCount = (int) accountsDbAdapter.getRecordsCount();
+-            String accountStats = getResources().getQuantityString(R.plurals.book_account_stats, accountsCount, accountsCount);
+-            String stats = accountStats + ", " + transactionStats;
+-            TextView statsText = (TextView) view.findViewById(R.id.secondary_text);
+-            statsText.setText(stats);
++            setLastExportedText(view, bookUID);
++            setStatisticsText(view, bookUID);
+ 
+             ImageView optionsMenu = (ImageView) view.findViewById(R.id.options_menu);
+             optionsMenu.setOnClickListener(new View.OnClickListener() {
+@@ -254,6 +233,33 @@ public void onClick(View v) {
+                 }
+             });
+         }
++
++        private void setLastExportedText(View view, String bookUID) {
++            TextView labelLastSync = (TextView) view.findViewById(R.id.label_last_sync);
++            labelLastSync.setText(R.string.label_last_export_time);
++
++            Timestamp lastSyncTime = PreferencesHelper.getLastExportTime(bookUID);
++            TextView lastSyncText = (TextView) view.findViewById(R.id.last_sync_time);
++            if (lastSyncTime.equals(new Timestamp(0)))
++                lastSyncText.setText(R.string.last_export_time_never);
++            else
++                lastSyncText.setText(lastSyncTime.toString());
++        }
++
++        private void setStatisticsText(View view, String bookUID) {
++            DatabaseHelper dbHelper = new DatabaseHelper(GnuCashApplication.getAppContext(), bookUID);
++            SQLiteDatabase db = dbHelper.getReadableDatabase();
++            TransactionsDbAdapter trnAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
++            int transactionCount = (int) trnAdapter.getRecordsCount();
++            String transactionStats = getResources().getQuantityString(R.plurals.book_transaction_stats, transactionCount, transactionCount);
++
++            AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(db, trnAdapter);
++            int accountsCount = (int) accountsDbAdapter.getRecordsCount();
++            String accountStats = getResources().getQuantityString(R.plurals.book_account_stats, accountsCount, accountsCount);
++            String stats = accountStats + ", " + transactionStats;
++            TextView statsText = (TextView) view.findViewById(R.id.secondary_text);
++            statsText.setText(stats);
++        }
+     }
+ 
+     /**
+
+From 5911aa6dba047b29cef535bc401002da2512171b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Thu, 24 Nov 2016 19:21:45 +0100
+Subject: [PATCH 06/25] List scheduled actions with the correct days of week.
+
+We were showing the day of the week from the date the scheduled action
+was created instead.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/617
+---
+ .../android/db/adapter/RecurrenceDbAdapter.java    |  96 ++++++++++++++++++-
+ .../java/org/gnucash/android/model/Recurrence.java |  60 +++++++++---
+ .../gnucash/android/ui/util/RecurrenceParser.java  | 103 +++++----------------
+ 3 files changed, 158 insertions(+), 101 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
+index 90ca5dcf..0783e58b 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/RecurrenceDbAdapter.java
+@@ -20,12 +20,17 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
+ import android.support.annotation.NonNull;
++import android.support.annotation.Nullable;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.Recurrence;
+ 
+ import java.sql.Timestamp;
++import java.util.ArrayList;
++import java.util.Calendar;
++import java.util.Collections;
++import java.util.List;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.RecurrenceEntry;
+ 
+@@ -58,7 +63,7 @@ public Recurrence buildModelInstance(@NonNull Cursor cursor) {
+         long multiplier = cursor.getLong(cursor.getColumnIndexOrThrow(RecurrenceEntry.COLUMN_MULTIPLIER));
+         String periodStart = cursor.getString(cursor.getColumnIndexOrThrow(RecurrenceEntry.COLUMN_PERIOD_START));
+         String periodEnd = cursor.getString(cursor.getColumnIndexOrThrow(RecurrenceEntry.COLUMN_PERIOD_END));
+-        String byDay = cursor.getString(cursor.getColumnIndexOrThrow(RecurrenceEntry.COLUMN_BYDAY));
++        String byDays = cursor.getString(cursor.getColumnIndexOrThrow(RecurrenceEntry.COLUMN_BYDAY));
+ 
+         PeriodType periodType = PeriodType.valueOf(type);
+         periodType.setMultiplier((int) multiplier);
+@@ -67,7 +72,7 @@ public Recurrence buildModelInstance(@NonNull Cursor cursor) {
+         recurrence.setPeriodStart(Timestamp.valueOf(periodStart));
+         if (periodEnd != null)
+             recurrence.setPeriodEnd(Timestamp.valueOf(periodEnd));
+-        recurrence.setByDay(byDay);
++        recurrence.setByDays(stringToByDays(byDays));
+ 
+         populateBaseModelAttributes(cursor, recurrence);
+ 
+@@ -79,8 +84,8 @@ public Recurrence buildModelInstance(@NonNull Cursor cursor) {
+         stmt.clearBindings();
+         stmt.bindLong(1, recurrence.getPeriodType().getMultiplier());
+         stmt.bindString(2, recurrence.getPeriodType().name());
+-        if (recurrence.getByDay() != null)
+-            stmt.bindString(3, recurrence.getByDay());
++        if (!recurrence.getByDays().isEmpty())
++            stmt.bindString(3, byDaysToString(recurrence.getByDays()));
+         //recurrence should always have a start date
+         stmt.bindString(4, recurrence.getPeriodStart().toString());
+ 
+@@ -90,4 +95,87 @@ public Recurrence buildModelInstance(@NonNull Cursor cursor) {
+ 
+         return stmt;
+     }
++
++    /**
++     * Converts a list of days of week as Calendar constants to an String for
++     * storing in the database.
++     *
++     * @param byDays list of days of week constants from Calendar
++     * @return String of days of the week or null if {@code byDays} was empty
++     */
++    private static @NonNull String byDaysToString(@NonNull List<Integer> byDays) {
++        StringBuilder builder = new StringBuilder();
++        for (int day : byDays) {
++            switch (day) {
++                case Calendar.MONDAY:
++                    builder.append("MO");
++                    break;
++                case Calendar.TUESDAY:
++                    builder.append("TU");
++                    break;
++                case Calendar.WEDNESDAY:
++                    builder.append("WE");
++                    break;
++                case Calendar.THURSDAY:
++                    builder.append("TH");
++                    break;
++                case Calendar.FRIDAY:
++                    builder.append("FR");
++                    break;
++                case Calendar.SATURDAY:
++                    builder.append("SA");
++                    break;
++                case Calendar.SUNDAY:
++                    builder.append("SU");
++                    break;
++                default:
++                    throw new RuntimeException("bad day of week: " + day);
++            }
++            builder.append(",");
++        }
++        builder.deleteCharAt(builder.length()-1);
++        return builder.toString();
++    }
++
++    /**
++     * Converts a String with the comma-separated days of the week into a
++     * list of Calendar constants.
++     *
++     * @param byDaysString String with comma-separated days fo the week
++     * @return list of days of the week as Calendar constants.
++     */
++    private static @NonNull List<Integer> stringToByDays(@Nullable String byDaysString) {
++        if (byDaysString == null)
++            return Collections.emptyList();
++
++        List<Integer> byDaysList = new ArrayList<>();
++        for (String day : byDaysString.split(",")) {
++            switch (day) {
++                case "MO":
++                    byDaysList.add(Calendar.MONDAY);
++                    break;
++                case "TU":
++                    byDaysList.add(Calendar.TUESDAY);
++                    break;
++                case "WE":
++                    byDaysList.add(Calendar.WEDNESDAY);
++                    break;
++                case "TH":
++                    byDaysList.add(Calendar.THURSDAY);
++                    break;
++                case "FR":
++                    byDaysList.add(Calendar.FRIDAY);
++                    break;
++                case "SA":
++                    byDaysList.add(Calendar.SATURDAY);
++                    break;
++                case "SU":
++                    byDaysList.add(Calendar.SUNDAY);
++                    break;
++                default:
++                    throw new RuntimeException("bad day of week: " + day);
++            }
++        }
++        return byDaysList;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index 48db0af9..830bb052 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -22,7 +22,6 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+-import org.joda.time.DateTime;
+ import org.joda.time.Days;
+ import org.joda.time.LocalDate;
+ import org.joda.time.LocalDateTime;
+@@ -32,8 +31,13 @@
+ import org.joda.time.Years;
+ 
+ import java.sql.Timestamp;
++import java.text.DateFormat;
+ import java.text.SimpleDateFormat;
++import java.util.ArrayList;
++import java.util.Calendar;
++import java.util.Collections;
+ import java.util.Date;
++import java.util.List;
+ 
+ /**
+  * Model for recurrences in the database
+@@ -55,9 +59,9 @@
+     private Timestamp mPeriodEnd;
+ 
+     /**
+-     * Describes which day on which to run the recurrence
++     * Days of week on which to run the recurrence
+      */
+-    private String mByDay;
++    private List<Integer> mByDays = Collections.emptyList();
+ 
+     public Recurrence(@NonNull PeriodType periodType){
+         setPeriodType(periodType);
+@@ -131,10 +135,9 @@ public String getRepeatString(){
+         StringBuilder repeatBuilder = new StringBuilder(mPeriodType.getFrequencyRepeatString());
+         Context context = GnuCashApplication.getAppContext();
+ 
+-        String dayOfWeek = new SimpleDateFormat("EEEE", GnuCashApplication.getDefaultLocale())
+-                .format(new Date(mPeriodStart.getTime()));
+         if (mPeriodType == PeriodType.WEEK) {
+-            repeatBuilder.append(" ").append(context.getString(R.string.repeat_on_weekday, dayOfWeek));
++            repeatBuilder.append(" ").
++                    append(context.getString(R.string.repeat_on_weekday, getDaysOfWeekString()));
+         }
+ 
+         if (mPeriodEnd != null){
+@@ -144,7 +147,26 @@ public String getRepeatString(){
+         return repeatBuilder.toString();
+     }
+ 
+-        /**
++    /**
++     * Returns a string with the days of the week set in the recurrence separated by commas.
++     * @return string with the days of the week set in the recurrence separated by commas.
++     */
++    private @NonNull String getDaysOfWeekString() {
++        // XXX: mByDays should never be empty with PeriodType.WEEK, but we don't enforce it yet
++        if (mByDays.isEmpty())
++            return "";
++        StringBuilder daysOfWeekString = new StringBuilder();
++        Calendar calendar = Calendar.getInstance();
++        DateFormat dayOfWeekFormatter =
++                new SimpleDateFormat("EEEE", GnuCashApplication.getDefaultLocale());
++        for (int day : mByDays) {
++            calendar.set(Calendar.DAY_OF_WEEK, day);
++            daysOfWeekString.append(dayOfWeekFormatter.format(calendar.getTime())).append(", ");
++        }
++        return daysOfWeekString.substring(0, daysOfWeekString.length()-2);
++    }
++
++    /**
+          * Creates an RFC 2445 string which describes this recurring event.
+          * <p>See http://recurrance.sourceforge.net/</p>
+          * <p>The output of this method is not meant for human consumption</p>
+@@ -251,19 +273,27 @@ public String getTextOfCurrentPeriod(int periodNum){
+     }
+ 
+     /**
+-     * Sets the string which determines on which day the recurrence will be run
+-     * @param byDay Byday string of recurrence rule (RFC 2445)
++     * Return the days of week on which to run the recurrence.
++     *
++     * <p>Days are expressed as defined in {@link java.util.Calendar}.
++     * For example, Calendar.MONDAY</p>
++     *
++     * @return list of days of week on which to run the recurrence.
+      */
+-    public void setByDay(String byDay){
+-        this.mByDay = byDay;
++    public @NonNull List<Integer> getByDays(){
++        return Collections.unmodifiableList(mByDays);
+     }
+ 
+     /**
+-     * Return the byDay string of recurrence rule (RFC 2445)
+-     * @return String with by day specification
++     * Sets the days on which to run the recurrence.
++     *
++     * <p>Days must be expressed as defined in {@link java.util.Calendar}.
++     * For example, Calendar.MONDAY</p>
++     *
++     * @param byDays list of days of week on which to run the recurrence.
+      */
+-    public String getByDay(){
+-        return mByDay;
++    public void setByDays(@NonNull List<Integer> byDays){
++        mByDays = new ArrayList<>(byDays);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index 6309db40..379dd60f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -16,6 +16,8 @@
+ 
+ package org.gnucash.android.ui.util;
+ 
++import android.support.annotation.NonNull;
++import android.support.annotation.Nullable;
+ import android.text.format.Time;
+ 
+ import com.codetroopers.betterpickers.recurrencepicker.EventRecurrence;
+@@ -24,7 +26,10 @@
+ import org.gnucash.android.model.Recurrence;
+ 
+ import java.sql.Timestamp;
++import java.util.ArrayList;
+ import java.util.Calendar;
++import java.util.Collections;
++import java.util.List;
+ 
+ /**
+  * Parses {@link EventRecurrence}s to generate
+@@ -76,7 +81,7 @@ public static Recurrence parse(EventRecurrence eventRecurrence){
+         periodType.setMultiplier(interval);
+         Recurrence recurrence = new Recurrence(periodType);
+         parseEndTime(eventRecurrence, recurrence);
+-        recurrence.setByDay(parseByDay(eventRecurrence.byday));
++        recurrence.setByDays(parseByDay(eventRecurrence.byday));
+         if (eventRecurrence.startDate != null)
+             recurrence.setPeriodStart(new Timestamp(eventRecurrence.startDate.toMillis(false)));
+ 
+@@ -85,7 +90,7 @@ public static Recurrence parse(EventRecurrence eventRecurrence){
+ 
+     /**
+      * Parses the end time from an EventRecurrence object and sets it to the <code>scheduledEvent</code>.
+-     * The end time is specified in the dialog either by number of occurences or a date.
++     * The end time is specified in the dialog either by number of occurrences or a date.
+      * @param eventRecurrence Event recurrence pattern obtained from dialog
+      * @param recurrence Recurrence event to set the end period to
+      */
+@@ -100,90 +105,24 @@ private static void parseEndTime(EventRecurrence eventRecurrence, Recurrence rec
+     }
+ 
+     /**
+-     * Returns the date for the next day of the week
+-     * @param dow Day of the week (Calendar constants)
+-     * @return Calendar instance with the next day of the week
++     * Parses an array of byDay values to return a list of days of week
++     * constants from {@link Calendar}.
++     *
++     * <p>Currently only supports byDay values for weeks.</p>
++     *
++     * @param byDay Array of byDay values
++     * @return list of days of week constants from Calendar.
+      */
+-    private static Calendar nextDayOfWeek(int dow) {
+-        Calendar date = Calendar.getInstance();
+-        int diff = dow - date.get(Calendar.DAY_OF_WEEK);
+-        if (!(diff > 0)) {
+-            diff += 7;
++    private static @NonNull List<Integer> parseByDay(@Nullable int[] byDay) {
++        if (byDay == null) {
++            return Collections.emptyList();
+         }
+-        date.add(Calendar.DAY_OF_MONTH, diff);
+-        return date;
+-    }
+ 
+-    /**
+-     * Parses an array of byday values to return the string concatenation of days of the week.
+-     * <p>Currently only supports byDay values for weeks</p>
+-     * @param byday Array of byday values
+-     * @return String concat of days of the week or null if {@code byday} was empty
+-     */
+-    private static String parseByDay(int[] byday){
+-        if (byday == null || byday.length == 0){
+-            return null;
+-        }
+-        //todo: parse for month and year as well, when our dialog supports those
+-        StringBuilder builder = new StringBuilder();
+-        for (int day : byday) {
+-            switch (day)
+-            {
+-                case EventRecurrence.SU:
+-                    builder.append("SU");
+-                    break;
+-                case EventRecurrence.MO:
+-                    builder.append("MO");
+-                    break;
+-                case EventRecurrence.TU:
+-                    builder.append("TU");
+-                    break;
+-                case EventRecurrence.WE:
+-                    builder.append("WE");
+-                    break;
+-                case EventRecurrence.TH:
+-                    builder.append("TH");
+-                    break;
+-                case EventRecurrence.FR:
+-                    builder.append("FR");
+-                    break;
+-                case EventRecurrence.SA:
+-                    builder.append("SA");
+-                    break;
+-                default:
+-                    throw new RuntimeException("bad day of week: " + day);
+-            }
+-            builder.append(",");
++        List<Integer> byDaysList = new ArrayList<>(byDay.length);
++        for (int day : byDay) {
++            byDaysList.add(EventRecurrence.day2CalendarDay(day));
+         }
+-        builder.deleteCharAt(builder.length()-1);
+-        return builder.toString();
+-    }
+ 
+-    /**
+-     * Converts one of the SU, MO, etc. constants to the Calendar.SUNDAY
+-     * constants.  btw, I think we should switch to those here too, to
+-     * get rid of this function, if possible.
+-     */
+-    public static int day2CalendarDay(int day)
+-    {
+-        switch (day)
+-        {
+-            case EventRecurrence.SU:
+-                return Calendar.SUNDAY;
+-            case EventRecurrence.MO:
+-                return Calendar.MONDAY;
+-            case EventRecurrence.TU:
+-                return Calendar.TUESDAY;
+-            case EventRecurrence.WE:
+-                return Calendar.WEDNESDAY;
+-            case EventRecurrence.TH:
+-                return Calendar.THURSDAY;
+-            case EventRecurrence.FR:
+-                return Calendar.FRIDAY;
+-            case EventRecurrence.SA:
+-                return Calendar.SATURDAY;
+-            default:
+-                throw new RuntimeException("bad day of week: " + day);
+-        }
++        return byDaysList;
+     }
+ }
+
+From 6d7ce0a4b146e11981e59cedeb69b1f51517c351 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Thu, 1 Dec 2016 17:32:59 +0100
+Subject: [PATCH 07/25] Fix having the account color reset when editing an
+ account.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/620
+---
+ .../main/java/org/gnucash/android/ui/account/AccountFormFragment.java    | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 066e68d1..8fd13bb3 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -408,6 +408,7 @@ private void initializeViewsWithAccount(Account account){
+         }
+ 
+         mPlaceholderCheckBox.setChecked(account.isPlaceholderAccount());
++        mSelectedColor = account.getColor();
+         mColorSquare.setBackgroundColor(account.getColor());
+ 
+         setAccountTypeSelection(account.getAccountType());
+
+From 3784e029c18d98d36563a1bb9fa53955cc3b9fda Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Thu, 1 Dec 2016 18:21:32 +0100
+Subject: [PATCH 08/25] Fix code inspector issues in AccountFormFragment.
+
+---
+ .../android/ui/account/AccountFormFragment.java    | 40 ++++++++++++----------
+ 1 file changed, 21 insertions(+), 19 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 8fd13bb3..44c7746e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -87,7 +87,7 @@
+     /**
+      * Tag for the color picker dialog fragment
+      */
+-    public static final String COLOR_PICKER_DIALOG_TAG = "color_picker_dialog";
++    private static final String COLOR_PICKER_DIALOG_TAG = "color_picker_dialog";
+ 
+     /**
+ 	 * EditText for the name of the account to be created/edited
+@@ -176,7 +176,7 @@
+     /**
+      * Spinner for selecting the default transfer account
+      */
+-    @Bind(R.id.input_default_transfer_account) Spinner mDefaulTransferAccountSpinner;
++    @Bind(R.id.input_default_transfer_account) Spinner mDefaultTransferAccountSpinner;
+ 
+     /**
+      * Account description input text view
+@@ -205,13 +205,14 @@
+      */
+     @Bind(R.id.input_color_picker) ColorSquare mColorSquare;
+ 
+-    private ColorPickerSwatch.OnColorSelectedListener mColorSelectedListener = new ColorPickerSwatch.OnColorSelectedListener() {
+-        @Override
+-        public void onColorSelected(int color) {
+-            mColorSquare.setBackgroundColor(color);
+-            mSelectedColor = color;
+-        }
+-    };
++    private final ColorPickerSwatch.OnColorSelectedListener mColorSelectedListener =
++            new ColorPickerSwatch.OnColorSelectedListener() {
++                @Override
++                public void onColorSelected(int color) {
++                    mColorSquare.setBackgroundColor(color);
++                    mSelectedColor = color;
++                }
++            };
+ 
+ 
+     /**
+@@ -294,11 +295,11 @@ public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+             }
+         });
+ 
+-        mDefaulTransferAccountSpinner.setEnabled(false);
++        mDefaultTransferAccountSpinner.setEnabled(false);
+         mDefaultTransferAccountCheckBox.setOnCheckedChangeListener(new OnCheckedChangeListener() {
+             @Override
+             public void onCheckedChanged(CompoundButton compoundButton, boolean isChecked) {
+-                mDefaulTransferAccountSpinner.setEnabled(isChecked);
++                mDefaultTransferAccountSpinner.setEnabled(isChecked);
+             }
+         });
+ 
+@@ -496,13 +497,13 @@ private void setParentAccountSelection(long parentAccountId){
+     private void setDefaultTransferAccountSelection(long defaultTransferAccountId, boolean enableTransferAccount) {
+         if (defaultTransferAccountId > 0) {
+             mDefaultTransferAccountCheckBox.setChecked(enableTransferAccount);
+-            mDefaulTransferAccountSpinner.setEnabled(enableTransferAccount);
++            mDefaultTransferAccountSpinner.setEnabled(enableTransferAccount);
+         } else
+             return;
+ 
+         for (int pos = 0; pos < mDefaultTransferAccountCursorAdapter.getCount(); pos++) {
+             if (mDefaultTransferAccountCursorAdapter.getItemId(pos) == defaultTransferAccountId) {
+-                mDefaulTransferAccountSpinner.setSelection(pos);
++                mDefaultTransferAccountSpinner.setSelection(pos);
+                 break;
+             }
+         }
+@@ -521,6 +522,7 @@ private void setDefaultTransferAccountSelection(long defaultTransferAccountId, b
+              int color = colorTypedArray.getColor(i, getResources().getColor(R.color.title_green));
+              colorOptions[i] = color;
+         }
++        colorTypedArray.recycle();
+         return colorOptions;
+     }
+     /**
+@@ -574,13 +576,13 @@ private void loadDefaultTransferAccountList(){
+         Cursor defaultTransferAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(condition,
+                 new String[]{AccountType.ROOT.name()});
+ 
+-        if (mDefaulTransferAccountSpinner.getCount() <= 0) {
++        if (mDefaultTransferAccountSpinner.getCount() <= 0) {
+             setDefaultTransferAccountInputsVisible(false);
+         }
+ 
+         mDefaultTransferAccountCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+                 defaultTransferAccountCursor);
+-        mDefaulTransferAccountSpinner.setAdapter(mDefaultTransferAccountCursorAdapter);
++        mDefaultTransferAccountSpinner.setAdapter(mDefaultTransferAccountCursorAdapter);
+     }
+ 
+     /**
+@@ -733,7 +735,7 @@ private void saveAccount() {
+         boolean nameChanged = false;
+ 		if (mAccount == null){
+ 			String name = getEnteredName();
+-			if (name == null || name.length() == 0){
++			if (name.length() == 0){
+                 mTextInputLayout.setErrorEnabled(true);
+                 mTextInputLayout.setError(getString(R.string.toast_no_account_name_entered));
+ 				return;				
+@@ -771,8 +773,8 @@ private void saveAccount() {
+         mAccount.setParentUID(newParentAccountUID);
+ 
+         if (mDefaultTransferAccountCheckBox.isChecked()
+-                && mDefaulTransferAccountSpinner.getSelectedItemId() != Spinner.INVALID_ROW_ID){
+-            long id = mDefaulTransferAccountSpinner.getSelectedItemId();
++                && mDefaultTransferAccountSpinner.getSelectedItemId() != Spinner.INVALID_ROW_ID){
++            long id = mDefaultTransferAccountSpinner.getSelectedItemId();
+             mAccount.setDefaultTransferAccountUID(mAccountsDbAdapter.getUID(id));
+         } else {
+             //explicitly set in case of removal of default account
+@@ -842,7 +844,7 @@ private AccountType getSelectedAccountType() {
+ 	 * Retrieves the name of the account which has been entered in the EditText
+ 	 * @return Name of the account which has been entered in the EditText
+ 	 */
+-	public String getEnteredName(){
++    private String getEnteredName(){
+ 		return mNameEditText.getText().toString().trim();
+ 	}
+ 
+
+From bfb771844890f22875d147cc45b988de5e83dc5f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Wed, 23 Nov 2016 09:09:15 +0100
+Subject: [PATCH 09/25] Make ExportAsyncTask.moveExportToGoogleDrive()
+ synchronous as expected by its caller.
+
+Otherwise we might end up reporting the export as successful when it's
+not even finished yet.
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 91 ++++++++++------------
+ 1 file changed, 40 insertions(+), 51 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index cf762681..2e8ef6c7 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -80,6 +80,7 @@
+ import java.util.ArrayList;
+ import java.util.Date;
+ import java.util.List;
++import java.util.concurrent.TimeUnit;
+ 
+ /**
+  * Asynchronous task for exporting transactions.
+@@ -276,62 +277,50 @@ protected void onPostExecute(Boolean exportResult) {
+ 
+     private void moveExportToGoogleDrive(){
+         Log.i(TAG, "Moving exported file to Google Drive");
++        final long TIMEOUT = 5; // seconds
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+         googleApiClient.blockingConnect();
+-        final ResultCallback<DriveFolder.DriveFileResult> fileCallback = new
+-                ResultCallback<DriveFolder.DriveFileResult>() {
+-                    @Override
+-                    public void onResult(DriveFolder.DriveFileResult result) {
+-                        if (!result.getStatus().isSuccess())
+-                            Log.e(TAG, "Error while trying to sync to Google Drive");
+-                        else
+-                            Log.i(TAG, "Created a file with content: " + result.getDriveFile().getDriveId());
+-                    }
+-                };
+-
+-        Drive.DriveApi.newDriveContents(googleApiClient).setResultCallback(new ResultCallback<DriveApi.DriveContentsResult>() {
+-            @Override
+-            public void onResult(DriveApi.DriveContentsResult result) {
+-                if (!result.getStatus().isSuccess()) {
+-                    Log.e(TAG, "Error while trying to create new file contents");
+-                    return;
+-                }
+-                final DriveContents driveContents = result.getDriveContents();
+-                try {
+-                    // write content to DriveContents
+-                    OutputStream outputStream = driveContents.getOutputStream();
+-                    for (String exportedFilePath : mExportedFiles) {
+-                        File exportedFile = new File(exportedFilePath);
+-                        FileInputStream fileInputStream = new FileInputStream(exportedFile);
+-                        byte[] buffer = new byte[1024];
+-                        int count;
+-
+-                        while ((count = fileInputStream.read(buffer)) >= 0) {
+-                            outputStream.write(buffer, 0, count);
+-                        }
+-                        fileInputStream.close();
+-                        outputStream.flush();
+-                        exportedFile.delete();
+-
+-                        MetadataChangeSet changeSet = new MetadataChangeSet.Builder()
+-                                .setTitle(exportedFile.getName())
+-                                .setMimeType(mExporter.getExportMimeType())
+-                                .build();
+-
+-                        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
+-                        String folderId = sharedPreferences.getString(mContext.getString(R.string.key_google_drive_app_folder_id), "");
+-                        DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
+-                        // create a file on root folder
+-                        folder.createFile(googleApiClient, changeSet, driveContents)
+-                                .setResultCallback(fileCallback);
+-                    }
+ 
+-                } catch (IOException e) {
+-                    Crashlytics.logException(e);
+-                    Log.e(TAG, e.getMessage());
++        DriveApi.DriveContentsResult driveContentsResult =
++                Drive.DriveApi.newDriveContents(googleApiClient).await(TIMEOUT, TimeUnit.SECONDS);
++        if (!driveContentsResult.getStatus().isSuccess()) {
++            Log.e(TAG, "Error while trying to create new file contents");
++            return;
++        }
++        final DriveContents driveContents = driveContentsResult.getDriveContents();
++        DriveFolder.DriveFileResult driveFileResult = null;
++        try {
++            // write content to DriveContents
++            OutputStream outputStream = driveContents.getOutputStream();
++            for (String exportedFilePath : mExportedFiles) {
++                File exportedFile = new File(exportedFilePath);
++                FileInputStream fileInputStream = new FileInputStream(exportedFile);
++                byte[] buffer = new byte[1024];
++                int count;
++
++                while ((count = fileInputStream.read(buffer)) >= 0) {
++                    outputStream.write(buffer, 0, count);
+                 }
++                fileInputStream.close();
++                outputStream.flush();
++                exportedFile.delete();
++
++                MetadataChangeSet changeSet = new MetadataChangeSet.Builder()
++                        .setTitle(exportedFile.getName())
++                        .setMimeType(mExporter.getExportMimeType())
++                        .build();
++
++                SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
++                String folderId = sharedPreferences.getString(mContext.getString(R.string.key_google_drive_app_folder_id), "");
++                DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
++                // create a file on root folder
++                driveFileResult = folder.createFile(googleApiClient, changeSet, driveContents)
++                                                .await(TIMEOUT, TimeUnit.SECONDS);
+             }
+-        });
++        } catch (IOException e) {
++            Crashlytics.logException(e);
++            Log.e(TAG, e.getMessage());
++        }
+     }
+ 
+     private void moveExportToDropbox() {
+
+From a082531763c310186d7f0ee69a5aed29474ce293 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Thu, 8 Dec 2016 19:53:18 +0100
+Subject: [PATCH 10/25] Show an error message if there's an error exporting to
+ Google Drive.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/616
+---
+ .../org/gnucash/android/export/ExportAsyncTask.java | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 2e8ef6c7..9f392c80 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -40,7 +40,6 @@
+ import com.dropbox.sync.android.DbxFileSystem;
+ import com.dropbox.sync.android.DbxPath;
+ import com.google.android.gms.common.api.GoogleApiClient;
+-import com.google.android.gms.common.api.ResultCallback;
+ import com.google.android.gms.drive.Drive;
+ import com.google.android.gms.drive.DriveApi;
+ import com.google.android.gms.drive.DriveContents;
+@@ -321,6 +320,16 @@ private void moveExportToGoogleDrive(){
+             Crashlytics.logException(e);
+             Log.e(TAG, e.getMessage());
+         }
++
++        if (driveFileResult == null)
++            return;
++
++        if (!driveFileResult.getStatus().isSuccess()) {
++            Log.e(TAG, "Error creating file in Google Drive");
++            showToastFromNonUiThread("Couldn't create the file in Google Drive", Toast.LENGTH_LONG);
++        } else {
++            Log.i(TAG, "Created file with id: " + driveFileResult.getDriveFile().getDriveId());
++        }
+     }
+ 
+     private void moveExportToDropbox() {
+@@ -525,4 +534,14 @@ public void moveFile(String src, String dst) throws IOException {
+         srcFile.delete();
+     }
+ 
++    private void showToastFromNonUiThread(final String message, final int duration) {
++        if (mContext instanceof Activity) {
++            ((Activity) mContext).runOnUiThread(new Runnable() {
++                @Override
++                public void run() {
++                    Toast.makeText(mContext, message, duration).show();
++                }
++            });
++        }
++    }
+ }
+
+From 48d67e30fb03913b9f2bc266bdf47240e873b6c3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 9 Dec 2016 09:18:05 +0100
+Subject: [PATCH 11/25] Use more realistic timeouts for Google Drive.
+
+They are still arbitrary, though. To be fixed in the future.
+---
+ app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 9f392c80..c098131c 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -276,12 +276,11 @@ protected void onPostExecute(Boolean exportResult) {
+ 
+     private void moveExportToGoogleDrive(){
+         Log.i(TAG, "Moving exported file to Google Drive");
+-        final long TIMEOUT = 5; // seconds
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+         googleApiClient.blockingConnect();
+ 
+         DriveApi.DriveContentsResult driveContentsResult =
+-                Drive.DriveApi.newDriveContents(googleApiClient).await(TIMEOUT, TimeUnit.SECONDS);
++                Drive.DriveApi.newDriveContents(googleApiClient).await(1, TimeUnit.MINUTES);
+         if (!driveContentsResult.getStatus().isSuccess()) {
+             Log.e(TAG, "Error while trying to create new file contents");
+             return;
+@@ -314,7 +313,7 @@ private void moveExportToGoogleDrive(){
+                 DriveFolder folder = Drive.DriveApi.getFolder(googleApiClient, DriveId.decodeFromString(folderId));
+                 // create a file on root folder
+                 driveFileResult = folder.createFile(googleApiClient, changeSet, driveContents)
+-                                                .await(TIMEOUT, TimeUnit.SECONDS);
++                                                .await(1, TimeUnit.MINUTES);
+             }
+         } catch (IOException e) {
+             Crashlytics.logException(e);
+
+From 4761eae374f6f0650cffc258ae850cee2c6fcf93 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 9 Dec 2016 11:53:52 +0100
+Subject: [PATCH 12/25] Extract the creation of the Exporter into a new method
+
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 30 +++++++++++-----------
+ 1 file changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index c098131c..fd784158 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -142,21 +142,7 @@ protected void onPreExecute() {
+     @Override
+     protected Boolean doInBackground(ExportParams... params) {
+         mExportParams = params[0];
+-
+-        switch (mExportParams.getExportFormat()) {
+-                case QIF:
+-                    mExporter = new QifExporter(mExportParams, mDb);
+-                    break;
+-
+-                case OFX:
+-                    mExporter = new OfxExporter(mExportParams, mDb);
+-                    break;
+-
+-                case XML:
+-                default:
+-                    mExporter = new GncXmlExporter(mExportParams, mDb);
+-                    break;
+-        }
++        mExporter = getExporter();
+ 
+         try {
+             // FIXME: detect if there aren't transactions to export and inform the user
+@@ -274,6 +260,20 @@ protected void onPostExecute(Boolean exportResult) {
+         }
+     }
+ 
++    private Exporter getExporter() {
++        switch (mExportParams.getExportFormat()) {
++            case QIF:
++                return new QifExporter(mExportParams, mDb);
++
++            case OFX:
++                return new OfxExporter(mExportParams, mDb);
++
++            case XML:
++            default:
++                return new GncXmlExporter(mExportParams, mDb);
++        }
++    }
++
+     private void moveExportToGoogleDrive(){
+         Log.i(TAG, "Moving exported file to Google Drive");
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+
+From ebff23413f342505b471353d8840d384d6766b5a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Thu, 29 Dec 2016 10:08:55 +0100
+Subject: [PATCH 13/25] Extract code to move to the export target into a new
+ method
+
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 48 ++++++++++++----------
+ 1 file changed, 26 insertions(+), 22 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index fd784158..086104c5 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -165,28 +165,7 @@ public void run() {
+             return false;
+         }
+ 
+-        switch (mExportParams.getExportTarget()) {
+-            case SHARING:
+-                List<String> sdCardExportedFiles = moveExportToSDCard();
+-                shareFiles(sdCardExportedFiles);
+-                return true;
+-
+-            case DROPBOX:
+-                moveExportToDropbox();
+-                return true;
+-
+-            case GOOGLE_DRIVE:
+-                moveExportToGoogleDrive();
+-                return true;
+-
+-            case OWNCLOUD:
+-                moveExportToOwnCloud();
+-                return true;
+-
+-            case SD_CARD:
+-                moveExportToSDCard();
+-                return true;
+-        }
++        moveToTarget();
+ 
+         return false;
+     }
+@@ -274,6 +253,31 @@ private Exporter getExporter() {
+         }
+     }
+ 
++    private void moveToTarget() {
++        switch (mExportParams.getExportTarget()) {
++            case SHARING:
++                List<String> sdCardExportedFiles = moveExportToSDCard();
++                shareFiles(sdCardExportedFiles);
++                break;
++
++            case DROPBOX:
++                moveExportToDropbox();
++                break;
++
++            case GOOGLE_DRIVE:
++                moveExportToGoogleDrive();
++                break;
++
++            case OWNCLOUD:
++                moveExportToOwnCloud();
++                break;
++
++            case SD_CARD:
++                moveExportToSDCard();
++                break;
++        }
++    }
++
+     private void moveExportToGoogleDrive(){
+         Log.i(TAG, "Moving exported file to Google Drive");
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+
+From e344246f6f77ad8067300719ef1cad2f6c46f26f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Thu, 29 Dec 2016 17:24:28 +0100
+Subject: [PATCH 14/25] Always inform the user if sending to the export target
+ fails
+
+Errors were logged to Logcat, but the process always ended as succesful.
+
+Also fixes https://github.com/codinguser/gnucash-android/issues/616
+(There were some cases that 1a76361 didn't fix)
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 77 +++++++++-------------
+ .../java/org/gnucash/android/export/Exporter.java  |  2 +-
+ .../android/test/unit/export/BackupTest.java       |  2 +-
+ 3 files changed, 32 insertions(+), 49 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 086104c5..fc809afb 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -35,7 +35,6 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ import com.dropbox.sync.android.DbxAccountManager;
+-import com.dropbox.sync.android.DbxException;
+ import com.dropbox.sync.android.DbxFile;
+ import com.dropbox.sync.android.DbxFileSystem;
+ import com.dropbox.sync.android.DbxPath;
+@@ -165,9 +164,13 @@ public void run() {
+             return false;
+         }
+ 
+-        moveToTarget();
+-
+-        return false;
++        try {
++            moveToTarget();
++        } catch (Exporter.ExporterException e) {
++            Crashlytics.log(Log.ERROR, TAG, "Error sending exported files to target: " + e.getMessage());
++            return false;
++        }
++        return true;
+     }
+ 
+     /**
+@@ -253,7 +256,7 @@ private Exporter getExporter() {
+         }
+     }
+ 
+-    private void moveToTarget() {
++    private void moveToTarget() throws Exporter.ExporterException {
+         switch (mExportParams.getExportTarget()) {
+             case SHARING:
+                 List<String> sdCardExportedFiles = moveExportToSDCard();
+@@ -275,10 +278,13 @@ private void moveToTarget() {
+             case SD_CARD:
+                 moveExportToSDCard();
+                 break;
++
++            default:
++                throw new Exporter.ExporterException(mExportParams, "Invalid target");
+         }
+     }
+ 
+-    private void moveExportToGoogleDrive(){
++    private void moveExportToGoogleDrive() throws Exporter.ExporterException {
+         Log.i(TAG, "Moving exported file to Google Drive");
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+         googleApiClient.blockingConnect();
+@@ -286,8 +292,8 @@ private void moveExportToGoogleDrive(){
+         DriveApi.DriveContentsResult driveContentsResult =
+                 Drive.DriveApi.newDriveContents(googleApiClient).await(1, TimeUnit.MINUTES);
+         if (!driveContentsResult.getStatus().isSuccess()) {
+-            Log.e(TAG, "Error while trying to create new file contents");
+-            return;
++            throw new Exporter.ExporterException(mExportParams,
++                    "Error while trying to create new file contents");
+         }
+         final DriveContents driveContents = driveContentsResult.getDriveContents();
+         DriveFolder.DriveFileResult driveFileResult = null;
+@@ -320,22 +326,19 @@ private void moveExportToGoogleDrive(){
+                                                 .await(1, TimeUnit.MINUTES);
+             }
+         } catch (IOException e) {
+-            Crashlytics.logException(e);
+-            Log.e(TAG, e.getMessage());
++            throw new Exporter.ExporterException(mExportParams, e);
+         }
+ 
+         if (driveFileResult == null)
+-            return;
++            throw new Exporter.ExporterException(mExportParams, "No result received");
+ 
+-        if (!driveFileResult.getStatus().isSuccess()) {
+-            Log.e(TAG, "Error creating file in Google Drive");
+-            showToastFromNonUiThread("Couldn't create the file in Google Drive", Toast.LENGTH_LONG);
+-        } else {
+-            Log.i(TAG, "Created file with id: " + driveFileResult.getDriveFile().getDriveId());
+-        }
++        if (!driveFileResult.getStatus().isSuccess())
++            throw new Exporter.ExporterException(mExportParams, "Error creating file in Google Drive");
++
++        Log.i(TAG, "Created file with id: " + driveFileResult.getDriveFile().getDriveId());
+     }
+ 
+-    private void moveExportToDropbox() {
++    private void moveExportToDropbox() throws Exporter.ExporterException {
+         Log.i(TAG, "Copying exported file to DropBox");
+         String dropboxAppKey = mContext.getString(R.string.dropbox_app_key, BackupPreferenceFragment.DROPBOX_APP_KEY);
+         String dropboxAppSecret = mContext.getString(R.string.dropbox_app_secret, BackupPreferenceFragment.DROPBOX_APP_SECRET);
+@@ -350,13 +353,8 @@ private void moveExportToDropbox() {
+                 dbExportFile.writeFromExistingFile(exportedFile, false);
+                 exportedFile.delete();
+             }
+-        } catch (DbxException.Unauthorized unauthorized) {
+-            Crashlytics.logException(unauthorized);
+-            Log.e(TAG, unauthorized.getMessage());
+-            throw new Exporter.ExporterException(mExportParams);
+         } catch (IOException e) {
+-            Crashlytics.logException(e);
+-            Log.e(TAG, e.getMessage());
++            throw new Exporter.ExporterException(mExportParams);
+         } finally {
+             if (dbExportFile != null) {
+                 dbExportFile.close();
+@@ -364,16 +362,15 @@ private void moveExportToDropbox() {
+         }
+     }
+ 
+-    private void moveExportToOwnCloud() {
++    private void moveExportToOwnCloud() throws Exporter.ExporterException {
+         Log.i(TAG, "Copying exported file to ownCloud");
+ 
+         SharedPreferences mPrefs = mContext.getSharedPreferences(mContext.getString(R.string.owncloud_pref), Context.MODE_PRIVATE);
+ 
+         Boolean mOC_sync = mPrefs.getBoolean(mContext.getString(R.string.owncloud_sync), false);
+ 
+-        if(!mOC_sync){
+-            Log.e(TAG, "ownCloud not enabled.");
+-            return;
++        if (!mOC_sync) {
++            throw new Exporter.ExporterException(mExportParams, "ownCloud not enabled.");
+         }
+ 
+         String mOC_server = mPrefs.getString(mContext.getString(R.string.key_owncloud_server), null);
+@@ -391,7 +388,7 @@ private void moveExportToOwnCloud() {
+             RemoteOperationResult dirResult = new CreateRemoteFolderOperation(
+                     mOC_dir, true).execute(mClient);
+             if (!dirResult.isSuccess())
+-                Log.e(TAG, dirResult.getLogMessage(), dirResult.getException());
++                throw new Exporter.ExporterException(mExportParams, dirResult.getLogMessage());
+         }
+         for (String exportedFilePath : mExportedFiles) {
+             String remotePath = mOC_dir + FileUtils.PATH_SEPARATOR + stripPathPart(exportedFilePath);
+@@ -401,10 +398,9 @@ private void moveExportToOwnCloud() {
+                     exportedFilePath, remotePath, mimeType).execute(mClient);
+ 
+             if (!result.isSuccess())
+-                Log.e(TAG, result.getLogMessage(), result.getException());
+-            else {
+-                new File(exportedFilePath).delete();
+-            }
++                throw new Exporter.ExporterException(mExportParams, result.getLogMessage());
++
++            new File(exportedFilePath).delete();
+         }
+     }
+ 
+@@ -413,7 +409,7 @@ private void moveExportToOwnCloud() {
+      * external storage, which is accessible to the user.
+      * @return The list of files moved to the SD card.
+      */
+-    private List<String> moveExportToSDCard() {
++    private List<String> moveExportToSDCard() throws Exporter.ExporterException {
+         Log.i(TAG, "Moving exported file to external storage");
+         new File(Exporter.getExportFolderPath(mExporter.mBookUID));
+         List<String> dstFiles = new ArrayList<>();
+@@ -424,8 +420,6 @@ private void moveExportToOwnCloud() {
+                 moveFile(src, dst);
+                 dstFiles.add(dst);
+             } catch (IOException e) {
+-                Crashlytics.logException(e);
+-                Log.e(TAG, e.getMessage());
+                 throw new Exporter.ExporterException(mExportParams, e);
+             }
+         }
+@@ -536,15 +530,4 @@ public void moveFile(String src, String dst) throws IOException {
+         }
+         srcFile.delete();
+     }
+-
+-    private void showToastFromNonUiThread(final String message, final int duration) {
+-        if (mContext instanceof Activity) {
+-            ((Activity) mContext).runOnUiThread(new Runnable() {
+-                @Override
+-                public void run() {
+-                    Toast.makeText(mContext, message, duration).show();
+-                }
+-            });
+-        }
+-    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 88afbaba..c79c9b42 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -254,7 +254,7 @@ public String getExportMimeType(){
+         return "text/plain";
+     }
+ 
+-    public static class ExporterException extends RuntimeException{
++    public static class ExporterException extends Exception {
+ 
+         public ExporterException(ExportParams params){
+             super("Failed to generate export with parameters:  " + params.toString());
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java b/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+index 712d515c..7c837a40 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+@@ -62,7 +62,7 @@ public void shouldCreateBackup(){
+     }
+ 
+     @Test
+-    public void shouldCreateBackupFileName(){
++    public void shouldCreateBackupFileName() throws Exporter.ExporterException {
+         Exporter exporter = new GncXmlExporter(new ExportParams(ExportFormat.XML));
+         List<String> xmlFiles = exporter.generateExport();
+ 
+
+From 9d04947479f7f9c74a6079a80ad9600003d1fddb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 30 Dec 2016 19:27:22 +0100
+Subject: [PATCH 15/25] Continue uploading the files to OwnCloud if the folder
+ creation fails
+
+OwnCloud seems to report an error, if we try to create a folder that
+already exists. We don't care, so we just go ahead uploading the files
+instead of throwing an exception.
+---
+ app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index fc809afb..17b3498c 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -387,8 +387,10 @@ private void moveExportToOwnCloud() throws Exporter.ExporterException {
+         if (mOC_dir.length() != 0) {
+             RemoteOperationResult dirResult = new CreateRemoteFolderOperation(
+                     mOC_dir, true).execute(mClient);
+-            if (!dirResult.isSuccess())
+-                throw new Exporter.ExporterException(mExportParams, dirResult.getLogMessage());
++            if (!dirResult.isSuccess()) {
++                Log.w(TAG, "Error creating folder (it may happen if it already exists): "
++                           + dirResult.getLogMessage());
++            }
+         }
+         for (String exportedFilePath : mExportedFiles) {
+             String remotePath = mOC_dir + FileUtils.PATH_SEPARATOR + stripPathPart(exportedFilePath);
+
+From ebf273885d8567c3fe4fc8375174c5b9e6efc920 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 30 Dec 2016 09:19:47 +0100
+Subject: [PATCH 16/25] Extract code to report success to the user into a new
+ method
+
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 64 ++++++++++++----------
+ 1 file changed, 34 insertions(+), 30 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 17b3498c..5f0cd919 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -187,36 +187,7 @@ protected void onPostExecute(Boolean exportResult) {
+                         Toast.LENGTH_LONG).show();
+                 return;
+             } else {
+-                String targetLocation;
+-                switch (mExportParams.getExportTarget()){
+-                    case SD_CARD:
+-                        targetLocation = "SD card";
+-                        break;
+-                    case DROPBOX:
+-                        targetLocation = "DropBox -> Apps -> GnuCash";
+-                        break;
+-                    case GOOGLE_DRIVE:
+-                        targetLocation = "Google Drive -> " + mContext.getString(R.string.app_name);
+-                        break;
+-                    case OWNCLOUD:
+-                        targetLocation = mContext.getSharedPreferences(
+-                                mContext.getString(R.string.owncloud_pref),
+-                                Context.MODE_PRIVATE).getBoolean(
+-                                mContext.getString(R.string.owncloud_sync), false) ?
+-
+-                                "ownCloud -> " +
+-                                mContext.getSharedPreferences(
+-                                        mContext.getString(R.string.owncloud_pref),
+-                                        Context.MODE_PRIVATE).getString(
+-                                        mContext.getString(R.string.key_owncloud_dir), null) :
+-                                "ownCloud sync not enabled";
+-                        break;
+-                    default:
+-                        targetLocation = mContext.getString(R.string.label_export_target_external_service);
+-                }
+-                Toast.makeText(mContext,
+-                        String.format(mContext.getString(R.string.toast_exported_to), targetLocation),
+-                        Toast.LENGTH_LONG).show();
++                reportSuccess();
+             }
+         }
+ 
+@@ -532,4 +503,37 @@ public void moveFile(String src, String dst) throws IOException {
+         }
+         srcFile.delete();
+     }
++
++    private void reportSuccess() {
++        String targetLocation;
++        switch (mExportParams.getExportTarget()){
++            case SD_CARD:
++                targetLocation = "SD card";
++                break;
++            case DROPBOX:
++                targetLocation = "DropBox -> Apps -> GnuCash";
++                break;
++            case GOOGLE_DRIVE:
++                targetLocation = "Google Drive -> " + mContext.getString(R.string.app_name);
++                break;
++            case OWNCLOUD:
++                targetLocation = mContext.getSharedPreferences(
++                        mContext.getString(R.string.owncloud_pref),
++                        Context.MODE_PRIVATE).getBoolean(
++                        mContext.getString(R.string.owncloud_sync), false) ?
++
++                        "ownCloud -> " +
++                                mContext.getSharedPreferences(
++                                        mContext.getString(R.string.owncloud_pref),
++                                        Context.MODE_PRIVATE).getString(
++                                        mContext.getString(R.string.key_owncloud_dir), null) :
++                        "ownCloud sync not enabled";
++                break;
++            default:
++                targetLocation = mContext.getString(R.string.label_export_target_external_service);
++        }
++        Toast.makeText(mContext,
++                String.format(mContext.getString(R.string.toast_exported_to), targetLocation),
++                Toast.LENGTH_LONG).show();
++    }
+ }
+
+From 66a48e6ad0492c415af36ea0943888ccee361602 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 30 Dec 2016 10:02:47 +0100
+Subject: [PATCH 17/25] Ensure the progress dialog is dismissed when the export
+ fails
+
+After the last commits, the dialog remained visible.
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 35 +++++++++++-----------
+ 1 file changed, 18 insertions(+), 17 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 5f0cd919..e0a8ee72 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -180,29 +180,30 @@ public void run() {
+      */
+     @Override
+     protected void onPostExecute(Boolean exportResult) {
+-        if (mContext instanceof Activity) {
+-            if (!exportResult) {
++        if (!exportResult) {
++            if (mContext instanceof Activity) {
+                 Toast.makeText(mContext,
+                         mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name()),
+                         Toast.LENGTH_LONG).show();
+-                return;
+-            } else {
+-                reportSuccess();
+             }
+-        }
++        } else {
++            if (mContext instanceof Activity)
++                reportSuccess();
+ 
+-        if (mExportParams.shouldDeleteTransactionsAfterExport()) {
+-            Log.i(TAG, "Backup and deleting transactions after export");
+-            backupAndDeleteTransactions();
++            if (mExportParams.shouldDeleteTransactionsAfterExport()) {
++                Log.i(TAG, "Backup and deleting transactions after export");
++                backupAndDeleteTransactions();
+ 
+-            //now refresh the respective views
+-            if (mContext instanceof AccountsActivity){
+-                AccountsListFragment fragment = ((AccountsActivity) mContext).getCurrentAccountListFragment();
+-                if (fragment != null)
+-                    fragment.refresh();
+-            }
+-            if (mContext instanceof TransactionsActivity){
+-                ((TransactionsActivity) mContext).refresh();
++                //now refresh the respective views
++                if (mContext instanceof AccountsActivity){
++                    AccountsListFragment fragment =
++                            ((AccountsActivity) mContext).getCurrentAccountListFragment();
++                    if (fragment != null)
++                        fragment.refresh();
++                }
++                if (mContext instanceof TransactionsActivity){
++                    ((TransactionsActivity) mContext).refresh();
++                }
+             }
+         }
+ 
+
+From 0a1dbceb1e0839f12aeb680726e053e78a4e344c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 30 Dec 2016 10:05:36 +0100
+Subject: [PATCH 18/25] Extract code to refresh views into a new method
+
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 24 ++++++++++++----------
+ 1 file changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index e0a8ee72..b241a80f 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -193,17 +193,7 @@ protected void onPostExecute(Boolean exportResult) {
+             if (mExportParams.shouldDeleteTransactionsAfterExport()) {
+                 Log.i(TAG, "Backup and deleting transactions after export");
+                 backupAndDeleteTransactions();
+-
+-                //now refresh the respective views
+-                if (mContext instanceof AccountsActivity){
+-                    AccountsListFragment fragment =
+-                            ((AccountsActivity) mContext).getCurrentAccountListFragment();
+-                    if (fragment != null)
+-                        fragment.refresh();
+-                }
+-                if (mContext instanceof TransactionsActivity){
+-                    ((TransactionsActivity) mContext).refresh();
+-                }
++                refreshViews();
+             }
+         }
+ 
+@@ -537,4 +527,16 @@ private void reportSuccess() {
+                 String.format(mContext.getString(R.string.toast_exported_to), targetLocation),
+                 Toast.LENGTH_LONG).show();
+     }
++
++    private void refreshViews() {
++        if (mContext instanceof AccountsActivity){
++            AccountsListFragment fragment =
++                    ((AccountsActivity) mContext).getCurrentAccountListFragment();
++            if (fragment != null)
++                fragment.refresh();
++        }
++        if (mContext instanceof TransactionsActivity){
++            ((TransactionsActivity) mContext).refresh();
++        }
++    }
+ }
+
+From da1e53a0dc1d6e7c25c910c62616f711974de91f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 30 Dec 2016 10:07:41 +0100
+Subject: [PATCH 19/25] Invert conditional to avoid negation
+
+---
+ .../java/org/gnucash/android/export/ExportAsyncTask.java   | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index b241a80f..ad9bc911 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -180,13 +180,7 @@ public void run() {
+      */
+     @Override
+     protected void onPostExecute(Boolean exportResult) {
+-        if (!exportResult) {
+-            if (mContext instanceof Activity) {
+-                Toast.makeText(mContext,
+-                        mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name()),
+-                        Toast.LENGTH_LONG).show();
+-            }
+-        } else {
++        if (exportResult) {
+             if (mContext instanceof Activity)
+                 reportSuccess();
+ 
+@@ -195,6 +189,12 @@ protected void onPostExecute(Boolean exportResult) {
+                 backupAndDeleteTransactions();
+                 refreshViews();
+             }
++        } else {
++            if (mContext instanceof Activity) {
++                Toast.makeText(mContext,
++                        mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name()),
++                        Toast.LENGTH_LONG).show();
++            }
+         }
+ 
+         if (mContext instanceof Activity) {
+
+From 6271e80004bbddcb0cc2c2fbc3f2d8278e055236 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 30 Dec 2016 10:09:06 +0100
+Subject: [PATCH 20/25] Rename parameter to make more clear its meaning
+
+---
+ app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index ad9bc911..921b0b3b 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -176,11 +176,11 @@ public void run() {
+     /**
+      * Transmits the exported transactions to the designated location, either SD card or third-party application
+      * Finishes the activity if the export was starting  in the context of an activity
+-     * @param exportResult Result of background export execution
++     * @param exportSuccessful Result of background export execution
+      */
+     @Override
+-    protected void onPostExecute(Boolean exportResult) {
+-        if (exportResult) {
++    protected void onPostExecute(Boolean exportSuccessful) {
++        if (exportSuccessful) {
+             if (mContext instanceof Activity)
+                 reportSuccess();
+ 
+
+From cdba3cbdcf3ca2c223111f173b352b2b382948fd Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Fri, 30 Dec 2016 10:10:32 +0100
+Subject: [PATCH 21/25] Move log call to the method it refers
+
+---
+ app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 921b0b3b..f1c0ffb3 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -185,7 +185,6 @@ protected void onPostExecute(Boolean exportSuccessful) {
+                 reportSuccess();
+ 
+             if (mExportParams.shouldDeleteTransactionsAfterExport()) {
+-                Log.i(TAG, "Backup and deleting transactions after export");
+                 backupAndDeleteTransactions();
+                 refreshViews();
+             }
+@@ -401,6 +400,7 @@ private String stripPathPart(String fullPathName) {
+      * and deletes all non-template transactions in the database.
+      */
+     private void backupAndDeleteTransactions(){
++        Log.i(TAG, "Backup and deleting transactions after export");
+         GncXmlExporter.createBackup(); //create backup before deleting everything
+         List<Transaction> openingBalances = new ArrayList<>();
+         boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
+
+From daaf416ff36081ac7f9592d9910bb9fce660a706 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 23 Jan 2017 10:07:26 +0100
+Subject: [PATCH 22/25] Update version strings in preparation for v2.1.4
+ release
+
+Update translations
+Update CHANGELOG
+---
+ CHANGELOG.md                               |  12 +
+ app/build.gradle                           |   2 +-
+ app/src/main/res/values-cs-rCZ/strings.xml |   2 +-
+ app/src/main/res/values-es-rMX/strings.xml |  97 +++---
+ app/src/main/res/values-fi-rFI/strings.xml |  74 ++---
+ app/src/main/res/values-in-rID/strings.xml | 474 +++++++++++++++++++++++++++++
+ app/src/main/res/values-pt-rBR/strings.xml |  32 +-
+ app/src/main/res/values-pt-rPT/strings.xml |  32 +-
+ app/src/main/res/values-ru/strings.xml     |   2 +-
+ app/src/main/res/values-sv-rSE/strings.xml |  72 ++---
+ app/src/main/res/values-zh-rCN/strings.xml |   6 +-
+ 11 files changed, 645 insertions(+), 160 deletions(-)
+ create mode 100644 app/src/main/res/values-in-rID/strings.xml
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d2e9a7e8..6d78f232 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,17 @@
+ Change Log
+ ===============================================================================
++Version 2.1.4 *(2017-01-30)*
++----------------------------
++* Fixed: Bugs in execution of some scheduled actions (#604, #609)
++* Fixed: Multi-currency transactions not exported when format is QIF (#571)
++* Fixed: Incorrect date of last export shown in book manager (#615, #617)
++* Fixed: Large exports may be reported as successful even if they didn't complete yet (#616)
++* Fixed: Account color reset when editing an account (#620)
++* Fixed: Export to OwnCloud fails if folder already exists
++* Fixed: User not notified if export to external target fails
++* Improved translations
++
++
+ Version 2.1.3 *(2016-10-20)*
+ ----------------------------
+ * Fixed: Scheduled exports execute too often or not at all in some cases
+diff --git a/app/build.gradle b/app/build.gradle
+index 6b520971..2da97e1d 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -7,7 +7,7 @@ apply plugin: 'io.fabric'
+ 
+ def versionMajor = 2
+ def versionMinor = 1
+-def versionPatch = 3
++def versionPatch = 4
+ def versionBuild = 1
+ 
+ def buildTime() {
+diff --git a/app/src/main/res/values-cs-rCZ/strings.xml b/app/src/main/res/values-cs-rCZ/strings.xml
+index 2603b4b9..a21786e4 100644
+--- a/app/src/main/res/values-cs-rCZ/strings.xml
++++ b/app/src/main/res/values-cs-rCZ/strings.xml
+@@ -18,7 +18,7 @@
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+   <string name="title_create_account">Create Account</string>
+   <string name="title_edit_account">Edit Account</string>
+-  <string name="info_details">Info</string>
++  <string name="info_details">estina</string>
+   <string name="menu_export">Export&#8230;</string>
+   <string name="description_add_transaction_icon">Add a new transaction to an account</string>
+   <string name="label_no_accounts">No accounts to display</string>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 46d68e91..68f76a3b 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -19,13 +19,13 @@
+   <string name="title_create_account">Crear Cuenta</string>
+   <string name="title_edit_account">Editar Cuenta</string>
+   <string name="info_details">Detalles</string>
+-  <string name="menu_export">Exportar OFX</string>
++  <string name="menu_export">Exportar&#8230;</string>
+   <string name="description_add_transaction_icon">Aadir una nueva transaccin a una cuenta</string>
+   <string name="label_no_accounts">No hay cuentas que mostrar</string>
+   <string name="label_account_name">Nombre de la cuenta</string>
+   <string name="btn_cancel">Cancelar</string>
+   <string name="btn_save">Guardar</string>
+-  <string name="btn_test">Test</string>
++  <string name="btn_test">Prueba</string>
+   <string name="label_passcode">Introducir contrasea</string>
+   <string name="toast_wrong_passcode">Contrasea incorrecta, intentar otra vez</string>
+   <string name="toast_passcode_set">Contrasea establecida</string>
+@@ -52,13 +52,13 @@
+   <string name="menu_move">MOVER</string>
+   <string name="title_selected">%1$d seleccionado</string>
+   <string name="label_account_balance">Saldo:</string>
+-  <string name="label_export_destination">Export To:</string>
+-  <string name="title_export_dialog">Export Transactions</string>
++  <string name="label_export_destination">Exportar A:</string>
++  <string name="title_export_dialog">Exportar Transacciones</string>
+   <string name="option_export_all_transactions">Exportar todas las transacciones</string>
+   <string name="hint_export_choice">Por defecto solo las nuevas transacciones desde la ltima exportacin sern exportadas. Seleccione esta opcin para exportar todas las transacciones</string>
+   <string name="toast_export_error">Error exportando datos %1$s</string>
+   <string name="btn_export">Exportar</string>
+-  <string name="option_delete_after_export">Delete transactions after export</string>
++  <string name="option_delete_after_export">Borrar transacciones despues de exportar</string>
+   <string name="hint_delete_after_export">Todas las transacciones exportadas sern borradas cuando la exportacin haya terminado</string>
+   <string name="title_settings">Ajustes</string>
+   <string-array name="export_destinations">
+@@ -66,7 +66,7 @@
+     <item>DropBox</item>
+     <item>Google Drive</item>
+     <item>ownCloud</item>
+-    <item>Send to&#8230;</item>
++    <item>Enviar a&#8230;</item>
+   </string-array>
+   <string name="btn_move">Mover</string>
+   <string name="title_move_transactions">Mover %1$d transaccin(es)</string>
+@@ -82,8 +82,8 @@
+   <string name="label_permission_create_accounts">Permite crear cuentas en Gnucash para Android</string>
+   <string name="label_permission_group">Sus datos GnuCash</string>
+   <string name="description_permission_group">Leer y modificar datos Gnucash</string>
+-  <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
+-  <string name="label_permission_create_account">Create accounts in GnuCash</string>
++  <string name="label_permission_record_transaction">Registrar transacciones en GnuCash</string>
++  <string name="label_permission_create_account">Crear cuentas en GnuCash</string>
+   <string name="label_display_account">Mostrar cuentas</string>
+   <string name="btn_create_accounts">Crear Cuentas</string>
+   <string name="title_default_accounts">Seleccionar cuentas a crear</string>
+@@ -132,13 +132,12 @@
+   <string name="summary_xml_ofx_header">Active esta opcin para exportar a otras aplicaciones distintas a GnuCash para escritorio</string>
+   <string name="title_whats_new">Novedades</string>
+   <string name="whats_new">
+-        - Support for multiple different books \n
+-        - Adds ownCloud as destination for exports\n
+-        - Compact view for transactions list\n
+-        - Re-design of passcode lock screen\n
+-        - Improved handling of scheduled transactions\n
+-        - Multiple bug fixes and improvements\n
+-	</string>
++        - Soporte de mltiples libros\n
++- Aade ownCloud como destino para exportaciones\n
++- Vista compacta para la lista de transacciones\n
++- Rediseo de la pantalla de bloqueo con contrasea\n
++- Mejora del manejo de transacciones programadas\n
++- Mltiples fallos solucionados y otras mejoras\n</string>
+   <string name="label_dismiss">Cerrar</string>
+   <string name="toast_transanction_amount_required">Introduzca un importe para guardar la transaccin</string>
+   <string name="toast_error_edit_multi_currency_transaction">Las transacciones multi-divisa so se pueden modificar</string>
+@@ -211,13 +210,13 @@
+   <string name="title_all_accounts">Todas</string>
+   <string name="summary_create_default_accounts">Crea una estructura por defecto de cuentas GnuCash comnmente usadas</string>
+   <string name="title_create_default_accounts">Crear cuentas por defecto</string>
+-  <string name="msg_confirm_create_default_accounts_setting">A new book will be opened with the default accounts\n\nYour current accounts and transactions will not be modified!</string>
++  <string name="msg_confirm_create_default_accounts_setting">Se abrir un nuevo libro con las cuentas por defecto\n\nSus cuentas y transacciones actuales no se modificarn!</string>
+   <string name="menu_scheduled_transactions">Transacciones Programadas</string>
+   <string name="msg_confirm_create_default_accounts_first_run">Bienvenido a GnuCash Android! \nPuede crear una jerarqua de cuentas comnmente usadas o importar su propia estructura de cuentas GnuCash. \n\nAmbas opciones estn disponibles en las opciones de la aplicaci por si quiere decidirlo ms tarde.
+     </string>
+   <string name="title_scheduled_transactions">Transacciones Programadas</string>
+   <string name="title_select_export_destination">Seleccionar destino para exportar</string>
+-  <string name="hint_split_memo">Memo</string>
++  <string name="hint_split_memo">Nota</string>
+   <string name="label_spend">Gastar</string>
+   <string name="label_receive">Recibir</string>
+   <string name="label_withdrawal">Sacar</string>
+@@ -252,7 +251,7 @@
+   <string name="title_pie_chart">Grfico de tarta</string>
+   <string name="title_line_chart">Grfico de lnea</string>
+   <string name="title_bar_chart">Grfico de barras</string>
+-  <string name="title_report_prefs">Report Preferences</string>
++  <string name="title_report_prefs">Preferencias de informe</string>
+   <string name="label_report_currency">Seleccionar divisa</string>
+   <string name="title_use_account_color">Color de la cuenta en los informes</string>
+   <string name="summary_use_account_color">Usar el color de la cuenta en las grficas de barra y tarta</string>
+@@ -277,11 +276,11 @@
+   <string name="label_tap_to_create_schedule">Toque para crear la programacin</string>
+   <string name="title_restore_backup">Restaurar copia de seguridad&#8230;</string>
+   <string name="header_backup_and_export_settings">Copia de seguridad y exportacin</string>
+-  <string name="title_dropbox_sync_preference">Enable DropBox</string>
+-  <string name="title_owncloud_sync_preference">Enable ownCloud </string>
++  <string name="title_dropbox_sync_preference">Habilitar DropBox</string>
++  <string name="title_owncloud_sync_preference">Habilitar ownCloud </string>
+   <string name="title_backup_preference_category">Copia de seguridad</string>
+-  <string name="summary_dropbox_sync">Enable exporting to DropBox</string>
+-  <string name="summary_owncloud_sync">Enable exporting to ownCloud</string>
++  <string name="summary_dropbox_sync">Habilitar exportar a DropBox</string>
++  <string name="summary_owncloud_sync">Habilitar exportar a ownCloud</string>
+   <string name="title_select_gnucash_xml_file">Seleccionar archivo XML GnuCash</string>
+   <string name="title_backup_prefs">Preferencias de copia de seguridad</string>
+   <string name="title_create_backup_pref">Crear copia de seguridad</string>
+@@ -290,8 +289,8 @@
+   <string name="toast_backup_successful">Copia de seguridad exitosa</string>
+   <string name="toast_backup_failed">Copia de seguridad fallida</string>
+   <string name="export_warning_xml">Exportar todas las cuentas y transacciones</string>
+-  <string name="title_google_drive_sync_pref">Enable Google Drive</string>
+-  <string name="summary_google_drive_sync">Enable exporting to Google Drive</string>
++  <string name="title_google_drive_sync_pref">Habilitar Google Drive</string>
++  <string name="summary_google_drive_sync">Habilitar exportar a Google Drive</string>
+   <string name="toast_install_file_manager">Instale un gestor de archivos para seleccionar archivos</string>
+   <string name="title_select_backup_to_restore">Seleccione la copia de seguridad a restaurar</string>
+   <string name="nav_menu_favorites">Favoritos</string>
+@@ -300,16 +299,16 @@
+   <string name="nav_menu_scheduled_transactions">Transacciones Programadas</string>
+   <string name="nav_menu_export">Exportar&#8230;</string>
+   <string name="nav_menu_settings">Ajustes</string>
+-  <string name="username">User Name</string>
+-  <string name="password">Password</string>
+-  <string name="owncloud_pref">owncloud</string>
++  <string name="username">Nombre de usuario</string>
++  <string name="password">Contrasea</string>
++  <string name="owncloud_pref">ownCloud</string>
+   <string name="owncloud_server">https://</string>
+-  <string name="owncloud_server_invalid">OC server not found</string>
+-  <string name="owncloud_user_invalid">OC username/password invalid</string>
+-  <string name="owncloud_dir_invalid">Invalid chars: \\ &lt; &gt; : \&quot; | * ? </string>
+-  <string name="owncloud_server_ok">OC server OK</string>
+-  <string name="owncloud_user_ok">OC username/password OK</string>
+-  <string name="owncloud_dir_ok">Dir name OK</string>
++  <string name="owncloud_server_invalid">Servidor OC no encontrado</string>
++  <string name="owncloud_user_invalid">Usuario/contrasea OC no vlidos</string>
++  <string name="owncloud_dir_invalid">Caracteres invlidos: \\ &lt; &gt; : \&quot; | * ? </string>
++  <string name="owncloud_server_ok">Servidor OC correcto</string>
++  <string name="owncloud_user_ok">Usuario/contrasea OC correctos</string>
++  <string name="owncloud_dir_ok">Nombre del directorio correcto</string>
+   <plurals name="label_every_x_days">
+     <item quantity="one">Diario</item>
+     <item quantity="other">Cada %d das</item>
+@@ -393,21 +392,21 @@ Este proceso solo recoge informacin que no permite identificar al usuario</str
+   <string name="menu_group_by_year">Ao</string>
+   <string name="title_balance_sheet_report">Hoja de Balance</string>
+   <string name="label_balance_sheet_total">Total:</string>
+-  <string name="title_google_plus_community">Google+ Community</string>
+-  <string name="title_translate_gnucash">Translate GnuCash</string>
+-  <string name="summary_google_plus">Share ideas, discuss changes or report problems</string>
+-  <string name="summary_translate_gnucash">Translate or proof-read on CrowdIn</string>
+-  <string name="toast_no_compatible_apps_to_receive_export">No compatible apps to receive the exported transactions!</string>
+-  <string name="menu_move_transaction">Move&#8230;</string>
+-  <string name="menu_duplicate_transaction">Duplicate</string>
+-  <string name="nav_menu_budgets">Budgets</string>
+-  <string name="title_cash_flow_report">Cash Flow</string>
+-  <string name="title_budgets">Budgets</string>
+-  <string name="title_use_compact_list">Enable compact view</string>
+-  <string name="summary_use_compact_list">Enable to always use compact view for transactions list</string>
+-  <string name="error_invalid_exchange_rate">Invalid exchange rate</string>
+-  <string name="sample_exchange_rate">e.g. 1 %1$s = x.xx %2$s</string>
+-  <string name="error_invalid_amount">Invalid amount</string>
++  <string name="title_google_plus_community">Comunidad Google+</string>
++  <string name="title_translate_gnucash">Traducir GnuCash</string>
++  <string name="summary_google_plus">Compartir ideas, discutir cambios o reportar problemas</string>
++  <string name="summary_translate_gnucash">Traducir o revisar en CrowdIn</string>
++  <string name="toast_no_compatible_apps_to_receive_export">No hay aplicaciones compatibles para recibir las transacciones exportadas!</string>
++  <string name="menu_move_transaction">Mover&#8230;</string>
++  <string name="menu_duplicate_transaction">Duplicar</string>
++  <string name="nav_menu_budgets">Presupuestos</string>
++  <string name="title_cash_flow_report">Flujo de efectivo</string>
++  <string name="title_budgets">Presupuestos</string>
++  <string name="title_use_compact_list">Activar la vista compacta</string>
++  <string name="summary_use_compact_list">Activar para usar siempre la vista compacta en la lista de transacciones</string>
++  <string name="error_invalid_exchange_rate">Tipo de cambio no vlido</string>
++  <string name="sample_exchange_rate">ej. 1 %1$s = x.xx %2$s</string>
++  <string name="error_invalid_amount">Cantidad invlida</string>
+   <string-array name="report_time_range">
+     <item>Mes actual</item>
+     <item>ltimos 3 meses</item>
+@@ -474,5 +473,5 @@ Este proceso solo recoge informacin que no permite identificar al usuario</str
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
+-  <string name="book_default_name">Book %1$d</string>
++  <string name="book_default_name">Libro %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-fi-rFI/strings.xml b/app/src/main/res/values-fi-rFI/strings.xml
+index 0c1a4909..07e296b4 100644
+--- a/app/src/main/res/values-fi-rFI/strings.xml
++++ b/app/src/main/res/values-fi-rFI/strings.xml
+@@ -16,45 +16,45 @@
+  limitations under the License.
+ -->
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+-  <string name="title_create_account">Create Account</string>
+-  <string name="title_edit_account">Edit Account</string>
+-  <string name="info_details">Info</string>
+-  <string name="menu_export">Export&#8230;</string>
+-  <string name="description_add_transaction_icon">Add a new transaction to an account</string>
+-  <string name="label_no_accounts">No accounts to display</string>
+-  <string name="label_account_name">Account name</string>
+-  <string name="btn_cancel">Cancel</string>
+-  <string name="btn_save">Save</string>
+-  <string name="btn_test">Test</string>
+-  <string name="label_passcode">Enter Passcode</string>
+-  <string name="toast_wrong_passcode">Wrong passcode, please try again</string>
+-  <string name="toast_passcode_set">Passcode set</string>
+-  <string name="label_confirm_passcode">Please confirm your passcode</string>
+-  <string name="toast_invalid_passcode_confirmation">Invalid passcode confirmation. Please try again</string>
+-  <string name="label_transaction_name">Description</string>
+-  <string name="label_transaction_amount">Amount</string>
+-  <string name="title_add_transaction">New transaction</string>
+-  <string name="label_no_transactions">No transactions to display</string>
++  <string name="title_create_account">Luo tili</string>
++  <string name="title_edit_account">Muokkaa tili</string>
++  <string name="info_details">Tiedot</string>
++  <string name="menu_export">Vie&#8230;</string>
++  <string name="description_add_transaction_icon">Lis uusi tapahtuma tilille</string>
++  <string name="label_no_accounts">Ei nytettviss olevia tilej</string>
++  <string name="label_account_name">Tilin nimi</string>
++  <string name="btn_cancel">Peruuta</string>
++  <string name="btn_save">Tallenna</string>
++  <string name="btn_test">Testaa</string>
++  <string name="label_passcode">Anna tunnuskoodi</string>
++  <string name="toast_wrong_passcode">Virheellinen tunnuskoodi, yrit uudelleen</string>
++  <string name="toast_passcode_set">Tunnuskoodi asetettu</string>
++  <string name="label_confirm_passcode">Vahvista tunnuskoodi</string>
++  <string name="toast_invalid_passcode_confirmation">Virheellinen tunnuskoodin vahvistus. Yrit uudelleen</string>
++  <string name="label_transaction_name">Kuvaus</string>
++  <string name="label_transaction_amount">Summa</string>
++  <string name="title_add_transaction">Uusi tapahtuma</string>
++  <string name="label_no_transactions">Ei nytettvi tapahtumia</string>
+   <string name="label_timeanddate">DATE &amp; TIME</string>
+-  <string name="label_account">Account</string>
+-  <string name="label_debit">DEBIT</string>
+-  <string name="label_credit">CREDIT</string>
+-  <string name="title_accounts">Accounts</string>
+-  <string name="title_transactions">Transactions</string>
+-  <string name="menu_delete">Delete</string>
+-  <string name="alert_dialog_ok_delete">Delete</string>
+-  <string name="alert_dialog_cancel">Cancel</string>
+-  <string name="toast_account_deleted">Account deleted</string>
+-  <string name="title_confirm_delete">Confirm delete</string>
+-  <string name="delete_account_confirmation_message">All transactions in this account will also be deleted</string>
+-  <string name="title_edit_transaction">Edit Transaction</string>
+-  <string name="label_transaction_description">Add note</string>
+-  <string name="menu_move">MOVE</string>
+-  <string name="title_selected">%1$d selected</string>
+-  <string name="label_account_balance">Balance:</string>
++  <string name="label_account">Tili</string>
++  <string name="label_debit">VELOITUS</string>
++  <string name="label_credit">HYVITYS</string>
++  <string name="title_accounts">Tilit</string>
++  <string name="title_transactions">Tapahtumat</string>
++  <string name="menu_delete">Poista</string>
++  <string name="alert_dialog_ok_delete">Poista</string>
++  <string name="alert_dialog_cancel">Peruuta</string>
++  <string name="toast_account_deleted">Tili poistettu</string>
++  <string name="title_confirm_delete">Vahvista poistaminen</string>
++  <string name="delete_account_confirmation_message">Kaikki tmn tilin tapahtumat tullaan mys poistamaan</string>
++  <string name="title_edit_transaction">Muokkaa tapahtumaa</string>
++  <string name="label_transaction_description">Lis huomautus</string>
++  <string name="menu_move">SIIRR</string>
++  <string name="title_selected">%1$d valittuna</string>
++  <string name="label_account_balance">Saldo:</string>
+   <string name="label_export_destination">Export To:</string>
+-  <string name="title_export_dialog">Export Transactions</string>
+-  <string name="option_export_all_transactions">Export all transactions</string>
++  <string name="title_export_dialog">Vie tapahtumat</string>
++  <string name="option_export_all_transactions">Vie kaikki tapahtumat</string>
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+diff --git a/app/src/main/res/values-in-rID/strings.xml b/app/src/main/res/values-in-rID/strings.xml
+new file mode 100644
+index 00000000..1df061e4
+--- /dev/null
++++ b/app/src/main/res/values-in-rID/strings.xml
+@@ -0,0 +1,474 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--Generated by crowdin.com-->
++<!--
++ Copyright (c) 2012 - 2014 Ngewi Fet <ngewif@gmail.com>
++ 
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++ 
++    http://www.apache.org/licenses/LICENSE-2.0
++ 
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
++  <string name="title_create_account">Create Account</string>
++  <string name="title_edit_account">Edit Account</string>
++  <string name="info_details">Info</string>
++  <string name="menu_export">Export&#8230;</string>
++  <string name="description_add_transaction_icon">Add a new transaction to an account</string>
++  <string name="label_no_accounts">No accounts to display</string>
++  <string name="label_account_name">Account name</string>
++  <string name="btn_cancel">Cancel</string>
++  <string name="btn_save">Save</string>
++  <string name="btn_test">Test</string>
++  <string name="label_passcode">Enter Passcode</string>
++  <string name="toast_wrong_passcode">Wrong passcode, please try again</string>
++  <string name="toast_passcode_set">Passcode set</string>
++  <string name="label_confirm_passcode">Please confirm your passcode</string>
++  <string name="toast_invalid_passcode_confirmation">Invalid passcode confirmation. Please try again</string>
++  <string name="label_transaction_name">Description</string>
++  <string name="label_transaction_amount">Amount</string>
++  <string name="title_add_transaction">New transaction</string>
++  <string name="label_no_transactions">No transactions to display</string>
++  <string name="label_timeanddate">DATE &amp; TIME</string>
++  <string name="label_account">Account</string>
++  <string name="label_debit">DEBIT</string>
++  <string name="label_credit">CREDIT</string>
++  <string name="title_accounts">Accounts</string>
++  <string name="title_transactions">Transactions</string>
++  <string name="menu_delete">Delete</string>
++  <string name="alert_dialog_ok_delete">Delete</string>
++  <string name="alert_dialog_cancel">Cancel</string>
++  <string name="toast_account_deleted">Account deleted</string>
++  <string name="title_confirm_delete">Confirm delete</string>
++  <string name="delete_account_confirmation_message">All transactions in this account will also be deleted</string>
++  <string name="title_edit_transaction">Edit Transaction</string>
++  <string name="label_transaction_description">Add note</string>
++  <string name="menu_move">MOVE</string>
++  <string name="title_selected">%1$d selected</string>
++  <string name="label_account_balance">Balance:</string>
++  <string name="label_export_destination">Export To:</string>
++  <string name="title_export_dialog">Export Transactions</string>
++  <string name="option_export_all_transactions">Export all transactions</string>
++  <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
++  <string name="toast_export_error">Error exporting %1$s file</string>
++  <string name="btn_export">Export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
++  <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
++  <string name="title_settings">Settings</string>
++  <string-array name="export_destinations">
++    <item>SD Card</item>
++    <item>DropBox</item>
++    <item>Google Drive</item>
++    <item>ownCloud</item>
++    <item>Send to&#8230;</item>
++  </string-array>
++  <string name="btn_move">Move</string>
++  <string name="title_move_transactions">Move %1$d transaction(s)</string>
++  <string name="label_move_destination">Destination Account</string>
++  <string name="permission_access_sdcard">Access SD Card</string>
++  <string name="toast_incompatible_currency">Cannot move transactions.\nThe destination account uses a different currency from origin account</string>
++  <string name="header_general_settings">General</string>
++  <string name="header_about_gnucash">About</string>
++  <string name="title_choose_currency">Choose default currency</string>
++  <string name="title_default_currency">Default currency</string>
++  <string name="summary_default_currency">Default currency to assign to new accounts</string>
++  <string name="label_permission_record_transactions">Enables recording transactions in GnuCash for Android</string>
++  <string name="label_permission_create_accounts">Enables creation of accounts in GnuCash for Android</string>
++  <string name="label_permission_group">Your GnuCash data</string>
++  <string name="description_permission_group">Read and modify GnuCash data</string>
++  <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
++  <string name="label_permission_create_account">Create accounts in GnuCash</string>
++  <string name="label_display_account">Display account</string>
++  <string name="btn_create_accounts">Create Accounts</string>
++  <string name="title_default_accounts">Select accounts to create</string>
++  <string name="error_no_accounts">No accounts exist in GnuCash.\nCreate an account before adding a widget</string>
++  <string name="title_build_version">Build version</string>
++  <string name="title_license">License</string>
++  <string name="summary_licence_details">Apache License v2.0. Click for details</string>
++  <string name="title_general_prefs">General Preferences</string>
++  <string name="label_widget_configuration">Select Account</string>
++  <string name="toast_no_transactions_to_export">There are no transactions available to export</string>
++  <string name="header_passcode_settings">Passcode</string>
++  <string name="title_passcode_preferences">Passcode Preferences</string>
++  <string name="title_passcode_enabled">Passcode Turned On</string>
++  <string name="title_passcode_disabled">Passcode Turned Off</string>
++  <string name="title_change_passcode">Change Passcode</string>
++  <string name="title_about_gnucash">About GnuCash</string>
++  <string name="summary_about_gnucash">A mobile finance management and expense-tracker designed for Android</string>
++  <string name="title_about">About</string>
++  <string name="toast_format_exported_to">%1$s file exported to:\n</string>
++  <string name="title_export_email">GnuCash Android %1$s export</string>
++  <string name="description_export_email">GnuCash Android Export from </string>
++  <string name="header_transaction_settings">Transactions</string>
++  <string name="title_transaction_preferences">Transaction Preferences</string>
++  <string name="title_account_preferences">Account Preferences</string>
++  <string name="title_default_transaction_type">Default Transaction Type</string>
++  <string name="summary_default_transaction_type">The type of transaction to use by default, CREDIT or DEBIT</string>
++  <string-array name="transaction_types">
++    <item>CREDIT</item>
++    <item>DEBIT</item>
++  </string-array>
++  <string name="msg_delete_all_transactions_confirmation">Are you sure you want to delete ALL transactions?</string>
++  <string name="msg_delete_transaction_confirmation">Are you sure you want to delete this transaction?</string>
++  <string name="title_export_preference_category">Export</string>
++  <string name="title_export_all_transactions">Export all transactions</string>
++  <string name="title_always_delete_exported_transactions">Delete exported transactions</string>
++  <string name="title_default_export_email">Default export email</string>
++  <string name="summary_default_export_email">The default email address to send exports to. You can still change this when you export.</string>
++  <string name="label_double_entry_account">Transfer Account</string>
++  <string name="summary_use_double_entry">All transactions will be a transfer from one account to another</string>
++  <string name="title_use_double_entry">Activate Double Entry</string>
++  <string name="account_balance">Balance</string>
++  <string name="toast_no_account_name_entered">Enter an account name to create an account</string>
++  <string name="label_account_currency">Currency</string>
++  <string name="label_parent_account">Parent account</string>
++  <string name="title_xml_ofx_header">Use XML OFX header</string>
++  <string name="summary_xml_ofx_header">Enable this option when exporting to third-party application other than GnuCash for desktop</string>
++  <string name="title_whats_new">What\'s New</string>
++  <string name="whats_new">
++        - Support for multiple different books \n
++        - Adds ownCloud as destination for exports\n
++        - Compact view for transactions list\n
++        - Re-design of passcode lock screen\n
++        - Improved handling of scheduled transactions\n
++        - Multiple bug fixes and improvements\n
++	</string>
++  <string name="label_dismiss">Dismiss</string>
++  <string name="toast_transanction_amount_required">Enter an amount to save the transaction</string>
++  <string name="toast_error_edit_multi_currency_transaction">Multi-currency transactions cannot be modified</string>
++  <string name="menu_import_accounts">Import GnuCash Accounts</string>
++  <string name="btn_import_accounts">Import Accounts</string>
++  <string name="toast_error_importing_accounts">An error occurred while importing the GnuCash accounts</string>
++  <string name="toast_success_importing_accounts">GnuCash Accounts successfully imported</string>
++  <string name="summary_import_accounts">Import account structure exported from GnuCash desktop</string>
++  <string name="title_import_accounts">Import GnuCash XML</string>
++  <string name="summary_delete_all_accounts">Delete all accounts in the database. All transactions will be deleted as
++        well.
++    </string>
++  <string name="title_delete_all_accounts">Delete all accounts</string>
++  <string name="header_account_settings">Accounts</string>
++  <string name="toast_all_accounts_deleted">All accounts have been successfully deleted</string>
++  <string name="confirm_delete_all_accounts">Are you sure you want to delete all accounts and transactions?\n\nThis
++        operation cannot be undone!
++    </string>
++  <string name="label_account_type">Account Type</string>
++  <string name="summary_delete_all_transactions">All transactions in all accounts will be deleted!</string>
++  <string name="title_delete_all_transactions">Delete all transactions</string>
++  <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
++  <string name="title_progress_importing_accounts">Importing accounts</string>
++  <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
++  <string name="section_header_transactions">Transactions</string>
++  <string name="section_header_subaccounts">Sub-Accounts</string>
++  <string name="menu_search_accounts">Search</string>
++  <string name="title_default_export_format">Default Export Format</string>
++  <string name="summary_default_export_format">File format to use by default when exporting transactions</string>
++  <string name="menu_export_transactions">Export transactions&#8230;</string>
++  <string name="label_recurring_transaction">Recurrence</string>
++  <!-- This should be the same name used by GnuCash desktop for imbalance accounts -->
++  <string name="imbalance_account_name">Imbalance</string>
++  <string name="title_progress_exporting_transactions">Exporting transactions</string>
++  <string name="label_no_recurring_transactions">No recurring transactions to display.</string>
++  <string name="toast_recurring_transaction_deleted">Successfully deleted recurring transaction</string>
++  <string name="label_placeholder_account">Placeholder account</string>
++  <string name="label_default_transfer_account">Default Transfer Account</string>
++  <plurals name="label_sub_accounts">
++    <item quantity="other">%d sub-accounts</item>
++  </plurals>
++  <string-array name="account_type_entry_values">
++    <item>CASH</item>
++    <item>BANK</item>
++    <item>CREDIT CARD</item>
++    <item>ASSET</item>
++    <item>LIABILITY</item>
++    <item>INCOME</item>
++    <item>EXPENSE</item>
++    <item>PAYABLE</item>
++    <item>RECEIVABLE</item>
++    <item>EQUITY</item>
++    <item>CURRENCY</item>
++    <item>STOCK</item>
++    <item>MUTUAL FUND</item>
++    <item>TRADING</item>
++  </string-array>
++  <string-array name="export_formats">
++    <item>QIF</item>
++    <item>OFX</item>
++    <item>XML</item>
++  </string-array>
++  <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
++  <string name="color_picker_default_title">Select a Color</string>
++  <!-- Content description for a color square. -->
++  <!-- Content description for a selected color square. -->
++  <string name="label_account_color_and_type">Account Color &amp; Type</string>
++  <string name="label_delete_sub_accounts">Delete sub-accounts</string>
++  <string name="title_recent_accounts">Recent</string>
++  <string name="title_favorite_accounts">Favorites</string>
++  <string name="title_all_accounts">All</string>
++  <string name="summary_create_default_accounts">Creates default GnuCash commonly-used account structure</string>
++  <string name="title_create_default_accounts">Create default accounts</string>
++  <string name="msg_confirm_create_default_accounts_setting">A new book will be opened with the default accounts\n\nYour current accounts and transactions will not be modified!</string>
++  <string name="menu_scheduled_transactions">Scheduled Transactions</string>
++  <string name="msg_confirm_create_default_accounts_first_run">Welcome to GnuCash Android! \nYou can either create
++        a hierarchy of commonly-used accounts, or import your own GnuCash account structure. \n\nBoth options are also
++        available in app Settings so you can decide later.
++    </string>
++  <string name="title_scheduled_transactions">Transactions</string>
++  <string name="title_select_export_destination">Select destination for export</string>
++  <string name="hint_split_memo">Memo</string>
++  <string name="label_spend">Spend</string>
++  <string name="label_receive">Receive</string>
++  <string name="label_withdrawal">Withdrawal</string>
++  <string name="label_deposit">Deposit</string>
++  <string name="label_payment">Payment</string>
++  <string name="label_charge">Charge</string>
++  <string name="label_decrease">Decrease</string>
++  <string name="label_increase">Increase</string>
++  <string name="label_income">Income</string>
++  <string name="label_rebate">Rebate</string>
++  <string name="label_expense">Expense</string>
++  <string name="label_bill">Bill</string>
++  <string name="label_invoice">Invoice</string>
++  <string name="label_buy">Buy</string>
++  <string name="label_sell">Sell</string>
++  <string name="label_repeats">Repeats</string>
++  <string name="toast_no_recent_backup">No recent backup found</string>
++  <string name="account_name_opening_balances">Opening Balances</string>
++  <string name="account_name_equity">Equity</string>
++  <string name="summary_save_opening_balances">Enable to save the current account balance (before deleting transactions) as new opening balance after deleting transactions
++    </string>
++  <string name="title_save_opening_balances">Save account opening balances</string>
++  <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
++  <string name="export_warning_qif">Generates separate QIF files per currency</string>
++  <string name="title_transaction_splits">Transaction splits</string>
++  <string name="label_imbalance">Imbalance:</string>
++  <string name="btn_add_split">Add split</string>
++  <string name="menu_title_favorite">Favorite</string>
++  <string name="drawer_open">Navigation drawer opened</string>
++  <string name="drawer_close">Navigation drawer closed</string>
++  <string name="title_reports">Reports</string>
++  <string name="title_pie_chart">Pie Chart</string>
++  <string name="title_line_chart">Line Chart</string>
++  <string name="title_bar_chart">Bar Chart</string>
++  <string name="title_report_prefs">Report Preferences</string>
++  <string name="label_report_currency">Select currency</string>
++  <string name="title_use_account_color">Account color in reports</string>
++  <string name="summary_use_account_color">Use account color in the bar/pie chart</string>
++  <string name="header_report_settings">Reports</string>
++  <string name="menu_order_by_size">Order by size</string>
++  <string name="menu_toggle_legend">Show legend</string>
++  <string name="menu_toggle_labels">Show labels</string>
++  <string name="menu_toggle_percentage_mode">Show percentage</string>
++  <string name="menu_toggle_average_lines">Show average lines</string>
++  <string name="menu_group_smaller_slices">Group Smaller Slices</string>
++  <string name="label_chart_no_data">No chart data available</string>
++  <string name="label_chart_overall">Overall</string>
++  <string name="label_chart_total">Total</string>
++  <string name="label_other_slice">Other</string>
++  <string name="toast_chart_percentage_mode_total">The percentage of selected value calculated from the total amount</string>
++  <string name="toast_chart_percentage_mode_current_bar">The percentage of selected value calculated from the current stacked bar amount</string>
++  <string name="label_save_template">Save as template</string>
++  <string name="label_delete_account_transactions_description">This account contains transactions. \nWhat would you like to do with these transactions</string>
++  <string name="label_delete_account_subaccounts_description">This account contains sub-accounts. \nWhat would you like to do with these sub-accounts</string>
++  <string name="label_delete_transactions">Delete transactions</string>
++  <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
++  <string name="label_tap_to_create_schedule">Tap to create schedule</string>
++  <string name="title_restore_backup">Restore Backup&#8230;</string>
++  <string name="header_backup_and_export_settings">Backup &amp; export</string>
++  <string name="title_dropbox_sync_preference">Enable DropBox</string>
++  <string name="title_owncloud_sync_preference">Enable ownCloud </string>
++  <string name="title_backup_preference_category">Backup</string>
++  <string name="summary_dropbox_sync">Enable exporting to DropBox</string>
++  <string name="summary_owncloud_sync">Enable exporting to ownCloud</string>
++  <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++  <string name="title_backup_prefs">Backup Preferences</string>
++  <string name="title_create_backup_pref">Create Backup</string>
++  <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++  <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++  <string name="toast_backup_successful">Backup successful</string>
++  <string name="toast_backup_failed">Backup failed</string>
++  <string name="export_warning_xml">Exports all accounts and transactions</string>
++  <string name="title_google_drive_sync_pref">Enable Google Drive</string>
++  <string name="summary_google_drive_sync">Enable exporting to Google Drive</string>
++  <string name="toast_install_file_manager">Install a file manager to select files</string>
++  <string name="title_select_backup_to_restore">Select backup to restore</string>
++  <string name="nav_menu_favorites">Favorites</string>
++  <string name="nav_menu_open">Open&#8230;</string>
++  <string name="nav_menu_reports">Reports</string>
++  <string name="nav_menu_scheduled_transactions">Scheduled Transactions</string>
++  <string name="nav_menu_export">Export&#8230;</string>
++  <string name="nav_menu_settings">Settings</string>
++  <string name="username">User Name</string>
++  <string name="password">Password</string>
++  <string name="owncloud_pref">owncloud</string>
++  <string name="owncloud_server">https://</string>
++  <string name="owncloud_server_invalid">OC server not found</string>
++  <string name="owncloud_user_invalid">OC username/password invalid</string>
++  <string name="owncloud_dir_invalid">Invalid chars: \\ &lt; &gt; : \&quot; | * ? </string>
++  <string name="owncloud_server_ok">OC server OK</string>
++  <string name="owncloud_user_ok">OC username/password OK</string>
++  <string name="owncloud_dir_ok">Dir name OK</string>
++  <plurals name="label_every_x_days">
++    <item quantity="other">Every %d days</item>
++  </plurals>
++  <plurals name="label_every_x_weeks">
++    <item quantity="other">Every %d weeks</item>
++  </plurals>
++  <plurals name="label_every_x_months">
++    <item quantity="other">Every %d months</item>
++  </plurals>
++  <plurals name="label_every_x_years">
++    <item quantity="other">Every %d years</item>
++  </plurals>
++  <string name="title_enable_crashlytics">Enable Crash Logging</string>
++  <string name="msg_enable_crashlytics">Automatically send information about app malfunction to the developers.</string>
++  <string name="label_export_format"> Format</string>
++  <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
++  <string name="label_old_passcode">Enter your old passcode</string>
++  <string name="label_new_passcode">Enter your new passcode</string>
++  <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++  <string name="title_scheduled_exports">Exports</string>
++  <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
++  <string name="title_create_export_schedule">Create export schedule</string>
++  <string name="toast_exported_to">Exported to: %1$s</string>
++  <string name="toast_legend_too_long">The legend is too long</string>
++  <string name="hint_account_description">Account description</string>
++  <string name="label_no_recent_accounts">No recent accounts</string>
++  <string name="label_no_favorite_accounts">No favorite accounts</string>
++  <string name="nav_menu_scheduled_actions">Scheduled Actions</string>
++  <string name="label_scheduled_action_ended">"Ended, last executed on %1$s"</string>
++  <string name="label_select_bar_to_view_details">Select a bar to view details</string>
++  <string name="btn_wizard_next">Next</string>
++  <string name="btn_wizard_finish">Done</string>
++  <string name="wizard_title_default_currency">Default Currency</string>
++  <string name="wizard_title_account_setup">Account Setup</string>
++  <string name="wizard_title_select_currency">Select Currency</string>
++  <string name="wizard_title_feedback_options">Feedback Options</string>
++  <string name="wizard_option_create_default_accounts">Create default accounts</string>
++  <string name="wizard_option_import_my_accounts">Import my accounts</string>
++  <string name="wizard_option_let_me_handle_it">Let me handle it</string>
++  <string name="wizard_option_currency_other">Other&#8230;</string>
++  <string name="wizard_option_auto_send_crash_reports">Automatically send crash reports</string>
++  <string name="wizard_option_disable_crash_reports">Disable crash reports</string>
++  <string name="wizard_btn_back">Back</string>
++  <string name="title_setup_gnucash">Setup GnuCash</string>
++  <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
++  <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
++  <string name="title_split_editor">Split Editor</string>
++  <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
++  <string name="label_error_invalid_expression">Invalid expression!</string>
++  <string name="toast_scheduled_recurring_transaction">Scheduled recurring transaction</string>
++  <string name="error_exchange_rate_required">An exchange rate is required</string>
++  <string name="error_converted_amount_required">The converted amount is required</string>
++  <string name="title_transfer_funds">Transfer Funds</string>
++  <string name="nav_menu_help"><![CDATA[Help & Feedback]]></string>
++  <string name="label_select_pie_slice_to_see_details">Select a slice to see details</string>
++  <string name="label_report_period">Period:</string>
++  <string name="label_convert_from">From:</string>
++  <string name="label_convert_to">To:</string>
++  <string name="msg_provide_exchange_rate">Provide either the converted amount or exchange rate in order to transfer funds</string>
++  <string name="hint_exchange_rate">Exchange rate</string>
++  <string name="btn_fetch_quote">Fetch quote</string>
++  <string name="hint_converted_amount">Converted Amount</string>
++  <string name="title_report_sheet">Sheet</string>
++  <string name="label_last_3_months_expenses">Expenses for last 3 months</string>
++  <string name="label_total_assets">Total Assets</string>
++  <string name="label_total_liabilities">Total Liabilities</string>
++  <string name="label_net_worth">Net Worth</string>
++  <string name="label_assets">Assets</string>
++  <string name="label_liabilities">Liabilities</string>
++  <string name="label_equity">Equity</string>
++  <string name="label_total_liabilities_and_equity"><![CDATA[Total Liabilites & Equity]]></string>
++  <string name="label_move_to">Move to:</string>
++  <string name="menu_group_by">Group By</string>
++  <string name="menu_group_by_month">Month</string>
++  <string name="menu_group_by_quarter">Quarter</string>
++  <string name="menu_group_by_year">Year</string>
++  <string name="title_balance_sheet_report">Balance Sheet</string>
++  <string name="label_balance_sheet_total">Total:</string>
++  <string name="title_google_plus_community">Google+ Community</string>
++  <string name="title_translate_gnucash">Translate GnuCash</string>
++  <string name="summary_google_plus">Share ideas, discuss changes or report problems</string>
++  <string name="summary_translate_gnucash">Translate or proof-read on CrowdIn</string>
++  <string name="toast_no_compatible_apps_to_receive_export">No compatible apps to receive the exported transactions!</string>
++  <string name="menu_move_transaction">Move&#8230;</string>
++  <string name="menu_duplicate_transaction">Duplicate</string>
++  <string name="nav_menu_budgets">Budgets</string>
++  <string name="title_cash_flow_report">Cash Flow</string>
++  <string name="title_budgets">Budgets</string>
++  <string name="title_use_compact_list">Enable compact view</string>
++  <string name="summary_use_compact_list">Enable to always use compact view for transactions list</string>
++  <string name="error_invalid_exchange_rate">Invalid exchange rate</string>
++  <string name="sample_exchange_rate">e.g. 1 %1$s = x.xx %2$s</string>
++  <string name="error_invalid_amount">Invalid amount</string>
++  <string-array name="report_time_range">
++    <item>Current month</item>
++    <item>Last 3 months</item>
++    <item>Last 6 months</item>
++    <item>Last 12 months</item>
++    <item>All time</item>
++    <item>Custom range&#8230;</item>
++  </string-array>
++  <!-- Passcode lock -->
++  <string name="digit_one">1</string>
++  <!-- In the English locale, digit 1 has no text on it. This is simply empty space. If your locale has text on digit 1, then translate-->
++  <string name="digit_one_text"></string>
++  <string name="digit_two">2</string>
++  <string name="digit_two_text">ABC</string>
++  <string name="digit_three">3</string>
++  <string name="digit_three_text">DEF</string>
++  <string name="digit_four">4</string>
++  <string name="digit_four_text">GHI</string>
++  <string name="digit_five">5</string>
++  <string name="digit_five_text">JKL</string>
++  <string name="digit_six">6</string>
++  <string name="digit_six_text">MNO</string>
++  <string name="digit_seven">7</string>
++  <string name="digit_seven_text">PQRS</string>
++  <string name="digit_eight">8</string>
++  <string name="digit_eight_text">TUV</string>
++  <string name="digit_nine">9</string>
++  <string name="digit_nine_text">WXYZ</string>
++  <string name="digit_zero">0</string>
++  <string name="digit_zero_text">+</string>
++  <string name="title_manage_books">Manage Books</string>
++  <string name="menu_manage_books">Manage Books&#8230;</string>
++  <string name="select_chart_to_view_details">Select any part of the chart to view details</string>
++  <string name="title_confirm_delete_book">Confirm delete Book</string>
++  <string name="msg_all_book_data_will_be_deleted">All accounts and transactions in this book will be deleted!</string>
++  <string name="btn_delete_book">Delete Book</string>
++  <string name="label_last_export_time">Last Exported:</string>
++  <string name="menu_title_enable_sync">Enable Sync</string>
++  <string name="menu_title_new_book">New Book</string>
++  <string name="toast_transaction_has_no_splits_and_cannot_open">The selected transaction has no splits and cannot be opened</string>
++  <string name="label_split_count">%1$d splits</string>
++  <string name="label_inside_account_with_name">in %1$s</string>
++  <plurals name="book_account_stats">
++    <item quantity="other">%d accounts</item>
++  </plurals>
++  <plurals name="book_transaction_stats">
++    <item quantity="other">%d transactions</item>
++  </plurals>
++  <string-array name="report_account_types">
++    <item>EXPENSE</item>
++    <item>INCOME</item>
++  </string-array>
++  <string name="toast_connected_to_google_drive">Connected to Google Drive</string>
++  <string name="toast_unable_to_connect_to_google_drive">Unable to connect to Google Drive</string>
++  <string name="toast_enter_amount_to_split">Please enter an amount to split</string>
++  <string name="label_export_target_external_service">external service</string>
++  <string name="toast_updated_transaction_recurring_schedule">Updated transaction recurring schedule</string>
++  <string name="label_export_transactions_since_date">Since</string>
++  <string name="switch_export_transactions_from_all_time">All time</string>
++  <string name="label_recommend_app">Recommend in Play Store</string>
++  <string name="repeat_until_date">until %1$s</string>
++  <string name="repeat_on_weekday">on %1$s</string>
++  <string name="repeat_x_times">for %1$s times</string>
++  <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
++</resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 404cbe75..f3b7b396 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -449,28 +449,28 @@ Neste processo no sero recolhidas informaes do utilizador!</string>
+   <string name="label_split_count">%1$d divises</string>
+   <string name="label_inside_account_with_name">em %1$s</string>
+   <plurals name="book_account_stats">
+-    <item quantity="one">%d account</item>
+-    <item quantity="other">%d accounts</item>
++    <item quantity="one">%d conta</item>
++    <item quantity="other">%d contas</item>
+   </plurals>
+   <plurals name="book_transaction_stats">
+-    <item quantity="one">%d transaction</item>
+-    <item quantity="other">%d transactions</item>
++    <item quantity="one">%d transao</item>
++    <item quantity="other">%d transaes</item>
+   </plurals>
+   <string-array name="report_account_types">
+-    <item>EXPENSE</item>
+-    <item>INCOME</item>
++    <item>DESPESA</item>
++    <item>RENDIMENTO</item>
+   </string-array>
+-  <string name="toast_connected_to_google_drive">Connected to Google Drive</string>
+-  <string name="toast_unable_to_connect_to_google_drive">Unable to connect to Google Drive</string>
++  <string name="toast_connected_to_google_drive">Conectado ao Google Drive</string>
++  <string name="toast_unable_to_connect_to_google_drive">Impossvel conectar ao Google Drive</string>
+   <string name="toast_enter_amount_to_split">Please enter an amount to split</string>
+-  <string name="label_export_target_external_service">external service</string>
+-  <string name="toast_updated_transaction_recurring_schedule">Updated transaction recurring schedule</string>
+-  <string name="label_export_transactions_since_date">Since</string>
+-  <string name="switch_export_transactions_from_all_time">All time</string>
+-  <string name="label_recommend_app">Recommend in Play Store</string>
+-  <string name="repeat_until_date">until %1$s</string>
++  <string name="label_export_target_external_service">servio externo</string>
++  <string name="toast_updated_transaction_recurring_schedule">Agenda recorrente de transao atualizada</string>
++  <string name="label_export_transactions_since_date">Desde</string>
++  <string name="switch_export_transactions_from_all_time">Desde o incio</string>
++  <string name="label_recommend_app">Recomendado na Play Store</string>
++  <string name="repeat_until_date">at %1$s</string>
+   <string name="repeat_on_weekday">on %1$s</string>
+-  <string name="repeat_x_times">for %1$s times</string>
+-  <string name="menu_show_compact_view">Compact View</string>
++  <string name="repeat_x_times">por %1$s vezes</string>
++  <string name="menu_show_compact_view">Visualizao compacta</string>
+   <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rPT/strings.xml b/app/src/main/res/values-pt-rPT/strings.xml
+index 329c7ff7..394812e6 100644
+--- a/app/src/main/res/values-pt-rPT/strings.xml
++++ b/app/src/main/res/values-pt-rPT/strings.xml
+@@ -20,9 +20,9 @@
+   <string name="title_edit_account">Editar Conta</string>
+   <string name="info_details">Informao</string>
+   <string name="menu_export">Exportar</string>
+-  <string name="description_add_transaction_icon">Adicionar nova transao a uma conta</string>
++  <string name="description_add_transaction_icon">Adicionar nova transaco a uma conta</string>
+   <string name="label_no_accounts">Sem contas para mostrar</string>
+-  <string name="label_account_name">Nome da Conta</string>
++  <string name="label_account_name">Nome da conta</string>
+   <string name="btn_cancel">Cancelar</string>
+   <string name="btn_save">Gravar</string>
+   <string name="btn_test">Testar</string>
+@@ -69,35 +69,35 @@
+     <item>Enviar para&#8230;</item>
+   </string-array>
+   <string name="btn_move">Mover</string>
+-  <string name="title_move_transactions">Move %1$d transao</string>
+-  <string name="label_move_destination">Conta Destino</string>
+-  <string name="permission_access_sdcard">Aceder ao SD Card</string>
+-  <string name="toast_incompatible_currency">Impossvel mover transao.\nA conta destino usa uma moeda diferente da conta de origem.</string>
++  <string name="title_move_transactions">Mover %1$d transaces</string>
++  <string name="label_move_destination">Conta destino</string>
++  <string name="permission_access_sdcard">Aceder ao carto SD</string>
++  <string name="toast_incompatible_currency">Impossvel mover transaco.\nA conta destino usa uma moeda diferente da conta origem</string>
+   <string name="header_general_settings">Geral</string>
+-  <string name="header_about_gnucash">Sobre</string>
+-  <string name="title_choose_currency">Escolhe a moeda padro</string>
++  <string name="header_about_gnucash">Acerca</string>
++  <string name="title_choose_currency">Escolher a moeda padro</string>
+   <string name="title_default_currency">Moeda padro</string>
+   <string name="summary_default_currency">Moeda padro para as novas contas</string>
+-  <string name="label_permission_record_transactions">Permite gravar transaes no GnuCash para Android</string>
++  <string name="label_permission_record_transactions">Permite gravar transaces no GnuCash para Android</string>
+   <string name="label_permission_create_accounts">Permite criar contas no GnuCash para Android</string>
+   <string name="label_permission_group">Os seus dados Gnucash</string>
+   <string name="description_permission_group">Ler e modificar dados do GnuCash</string>
+-  <string name="label_permission_record_transaction">Gravar transaes no GnuCash</string>
++  <string name="label_permission_record_transaction">Gravar transaces no GnuCash</string>
+   <string name="label_permission_create_account">Criar contas no GnuCash</string>
+   <string name="label_display_account">Mostrar conta</string>
+-  <string name="btn_create_accounts">Criar Contas</string>
++  <string name="btn_create_accounts">Criar contas</string>
+   <string name="title_default_accounts">Escolha as contas a criar</string>
+   <string name="error_no_accounts">No existem contas no GnuCash.\nCrie uma conta antes de adicionar um widget</string>
+   <string name="title_build_version">Verso</string>
+-  <string name="title_license">Licensa</string>
++  <string name="title_license">Licena</string>
+   <string name="summary_licence_details">Apache License v2.0. Clique para obter detalhes</string>
+   <string name="title_general_prefs">Preferncias</string>
+   <string name="label_widget_configuration">Escolha uma conta</string>
+   <string name="toast_no_transactions_to_export">No existem transaces para exportar</string>
+-  <string name="header_passcode_settings">Palavra passe</string>
+-  <string name="title_passcode_preferences">Preferncias de palavra passe</string>
+-  <string name="title_passcode_enabled">Palavra passe ligada</string>
+-  <string name="title_passcode_disabled">Palavra passe desligada</string>
++  <string name="header_passcode_settings">Senha</string>
++  <string name="title_passcode_preferences">Preferncias de senha</string>
++  <string name="title_passcode_enabled">Senha ligada</string>
++  <string name="title_passcode_disabled">Senha desligada</string>
+   <string name="title_change_passcode">Mudar Palavra Passe</string>
+   <string name="title_about_gnucash">Sobre o GnuCash</string>
+   <string name="summary_about_gnucash">Um programa de registo e gesto de finanas pessoais para Android</string>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 057c4271..1d76ac7a 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -418,7 +418,7 @@
+     <item> </item>
+     <item> </item>
+     <item> </item>
+-    <item> </item>
++    <item>  </item>
+     <item> &#8230;</item>
+   </string-array>
+   <!-- Passcode lock -->
+diff --git a/app/src/main/res/values-sv-rSE/strings.xml b/app/src/main/res/values-sv-rSE/strings.xml
+index 0c1a4909..892de105 100644
+--- a/app/src/main/res/values-sv-rSE/strings.xml
++++ b/app/src/main/res/values-sv-rSE/strings.xml
+@@ -16,44 +16,44 @@
+  limitations under the License.
+ -->
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+-  <string name="title_create_account">Create Account</string>
+-  <string name="title_edit_account">Edit Account</string>
+-  <string name="info_details">Info</string>
+-  <string name="menu_export">Export&#8230;</string>
+-  <string name="description_add_transaction_icon">Add a new transaction to an account</string>
+-  <string name="label_no_accounts">No accounts to display</string>
+-  <string name="label_account_name">Account name</string>
+-  <string name="btn_cancel">Cancel</string>
+-  <string name="btn_save">Save</string>
++  <string name="title_create_account">Skapa konto</string>
++  <string name="title_edit_account">Redigera konto</string>
++  <string name="info_details">Information</string>
++  <string name="menu_export">Exportera&#8230;</string>
++  <string name="description_add_transaction_icon">Lgg till en transaktion till ett konto</string>
++  <string name="label_no_accounts">Det finns inga konton att visa</string>
++  <string name="label_account_name">Kontonamn</string>
++  <string name="btn_cancel">Avbryt</string>
++  <string name="btn_save">Spara</string>
+   <string name="btn_test">Test</string>
+-  <string name="label_passcode">Enter Passcode</string>
+-  <string name="toast_wrong_passcode">Wrong passcode, please try again</string>
+-  <string name="toast_passcode_set">Passcode set</string>
+-  <string name="label_confirm_passcode">Please confirm your passcode</string>
+-  <string name="toast_invalid_passcode_confirmation">Invalid passcode confirmation. Please try again</string>
+-  <string name="label_transaction_name">Description</string>
+-  <string name="label_transaction_amount">Amount</string>
+-  <string name="title_add_transaction">New transaction</string>
+-  <string name="label_no_transactions">No transactions to display</string>
+-  <string name="label_timeanddate">DATE &amp; TIME</string>
+-  <string name="label_account">Account</string>
++  <string name="label_passcode">Ange pinkod</string>
++  <string name="toast_wrong_passcode">Fel pinkod, var god frsk igen</string>
++  <string name="toast_passcode_set">Pinkod sparad</string>
++  <string name="label_confirm_passcode">Var god bekrfta din pinkod</string>
++  <string name="toast_invalid_passcode_confirmation">Felaktig pinkod. Var god frsk igen</string>
++  <string name="label_transaction_name">Beskrivning</string>
++  <string name="label_transaction_amount">Belopp</string>
++  <string name="title_add_transaction">Lgg till transaktion</string>
++  <string name="label_no_transactions">Det finns inga transaktioner att visa</string>
++  <string name="label_timeanddate">DATUM &amp; TID</string>
++  <string name="label_account">Konto</string>
+   <string name="label_debit">DEBIT</string>
+-  <string name="label_credit">CREDIT</string>
+-  <string name="title_accounts">Accounts</string>
+-  <string name="title_transactions">Transactions</string>
+-  <string name="menu_delete">Delete</string>
+-  <string name="alert_dialog_ok_delete">Delete</string>
+-  <string name="alert_dialog_cancel">Cancel</string>
+-  <string name="toast_account_deleted">Account deleted</string>
+-  <string name="title_confirm_delete">Confirm delete</string>
+-  <string name="delete_account_confirmation_message">All transactions in this account will also be deleted</string>
+-  <string name="title_edit_transaction">Edit Transaction</string>
+-  <string name="label_transaction_description">Add note</string>
+-  <string name="menu_move">MOVE</string>
+-  <string name="title_selected">%1$d selected</string>
+-  <string name="label_account_balance">Balance:</string>
+-  <string name="label_export_destination">Export To:</string>
+-  <string name="title_export_dialog">Export Transactions</string>
++  <string name="label_credit">KREDIT</string>
++  <string name="title_accounts">Konton</string>
++  <string name="title_transactions">Transaktioner</string>
++  <string name="menu_delete">Ta bort</string>
++  <string name="alert_dialog_ok_delete">Ta bort</string>
++  <string name="alert_dialog_cancel">Avbryt</string>
++  <string name="toast_account_deleted">Kontot borttaget</string>
++  <string name="title_confirm_delete">Bekrfta radering</string>
++  <string name="delete_account_confirmation_message">Alla transaktioner i kontot kommer ocks raderas</string>
++  <string name="title_edit_transaction">Redigera transaktion</string>
++  <string name="label_transaction_description">Lgg till anteckning</string>
++  <string name="menu_move">FLYTTA</string>
++  <string name="title_selected">%1$d har markerats</string>
++  <string name="label_account_balance">Saldo:</string>
++  <string name="label_export_destination">Exportera till:</string>
++  <string name="title_export_dialog">Exportera transaktioner</string>
+   <string name="option_export_all_transactions">Export all transactions</string>
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index e2b73fd7..66b15cc7 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -63,7 +63,7 @@
+   <string name="title_settings"></string>
+   <string-array name="export_destinations">
+     <item>SD</item>
+-    <item>Dropbox</item>
++    <item>DropBox</item>
+     <item>Google </item>
+     <item>ownCloud</item>
+     <item>...</item>
+@@ -461,10 +461,10 @@
+   <string name="toast_updated_transaction_recurring_schedule"></string>
+   <string name="label_export_transactions_since_date"></string>
+   <string name="switch_export_transactions_from_all_time"></string>
+-  <string name="label_recommend_app">Paly Store</string>
++  <string name="label_recommend_app"> Play Store </string>
+   <string name="repeat_until_date">%1$s</string>
+   <string name="repeat_on_weekday">%1$s</string>
+   <string name="repeat_x_times">%1$s</string>
+   <string name="menu_show_compact_view"></string>
+-  <string name="book_default_name">Book %1$d</string>
++  <string name="book_default_name"> %1$d</string>
+ </resources>
+
+From a003d519d5647be31786f4e6b46d0399fc7bbf2a Mon Sep 17 00:00:00 2001
+From: HeinrichLohse <joerg.moeller@gmail.com>
+Date: Mon, 23 Jan 2017 21:29:58 +0100
+Subject: [PATCH 23/25] proper handling of custom date range selections - fixes
+ #611 (#639)
+
+---
+ .../android/ui/util/dialog/DateRangePickerDialogFragment.java      | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/dialog/DateRangePickerDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/util/dialog/DateRangePickerDialogFragment.java
+index 954c10f2..1447119d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/dialog/DateRangePickerDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/dialog/DateRangePickerDialogFragment.java
+@@ -52,6 +52,7 @@
+     private Date mStartRange = LocalDate.now().minusMonths(1).toDate();
+     private Date mEndRange = LocalDate.now().toDate();
+     private OnDateRangeSetListener mDateRangeSetListener;
++    private static final long ONE_DAY_IN_MILLIS = 24 * 60 * 60 * 1000;
+ 
+     public static DateRangePickerDialogFragment newInstance(OnDateRangeSetListener dateRangeSetListener){
+         DateRangePickerDialogFragment fragment = new DateRangePickerDialogFragment();
+@@ -89,7 +90,11 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle sa
+             public void onClick(View v) {
+                 List<Date> selectedDates = mCalendarPickerView.getSelectedDates();
+                 Date startDate = selectedDates.get(0);
+-                Date endDate = selectedDates.size() == 2 ? selectedDates.get(1) : new Date();
++                // If only one day is selected (no interval) start and end should be the same (the selected one)
++                Date endDate = selectedDates.size() > 1 ? selectedDates.get(selectedDates.size() - 1) : new Date(startDate.getTime());
++                // CaledarPicker returns the start of the selected day but we want all transactions of that day to be included.
++                // Therefore we have to add 24 hours to the endDate.
++                endDate.setTime(endDate.getTime() + ONE_DAY_IN_MILLIS);
+                 mDateRangeSetListener.onDateRangeSet(startDate, endDate);
+                 dismiss();
+             }
+
+From 83808b64d58ff8ffa89cc8a7fb89a7c6063b9294 Mon Sep 17 00:00:00 2001
+From: Juan Villa <juan64@gmail.com>
+Date: Sun, 22 Jan 2017 20:41:11 -0600
+Subject: [PATCH 24/25] Preserve report type accross rotation
+
+* fixes codinguser/gnucash-android#633
+---
+ .../java/org/gnucash/android/ui/report/ReportsActivity.java | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/ReportsActivity.java b/app/src/main/java/org/gnucash/android/ui/report/ReportsActivity.java
+index 1b72ed8f..5f8b47e9 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/ReportsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/ReportsActivity.java
+@@ -74,6 +74,7 @@
+             Color.parseColor("#ba037c"), Color.parseColor("#708809"), Color.parseColor("#32072c"),
+             Color.parseColor("#fddef8"), Color.parseColor("#fa0e6e"), Color.parseColor("#d9e7b5")
+     };
++    private static final String STATE_REPORT_TYPE = "STATE_REPORT_TYPE";
+ 
+     @Bind(R.id.time_range_spinner) Spinner mTimeRangeSpinner;
+     @Bind(R.id.report_account_type_spinner) Spinner mAccountTypeSpinner;
+@@ -123,8 +124,11 @@ public int getTitleRes() {
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+-        super.onCreate(savedInstanceState);
++        if (savedInstanceState != null) {
++            mReportType = (ReportType) savedInstanceState.getSerializable(STATE_REPORT_TYPE);
++        }
+ 
++        super.onCreate(savedInstanceState);
+         mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
+ 
+         ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(this, R.array.report_time_range,
+@@ -414,4 +418,11 @@ public void refresh() {
+     public void refresh(String uid) {
+         refresh();
+     }
++
++    @Override
++    protected void onSaveInstanceState(Bundle outState) {
++        super.onSaveInstanceState(outState);
++
++        outState.putSerializable(STATE_REPORT_TYPE, mReportType);
++    }
+ }
+
+From a9320cd2b645e6b227fb6e60678af401439f9d9e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 30 Jan 2017 14:19:34 +0100
+Subject: [PATCH 25/25] Update string for v2.1.4 release
+
+Update French translations, update CHANGELOG
+---
+ CHANGELOG.md                           |  1 +
+ CONTRIBUTORS.md                        |  1 +
+ app/build.gradle                       |  2 +-
+ app/src/main/res/values-fr/strings.xml | 36 +++++++++++++++++-----------------
+ 4 files changed, 21 insertions(+), 19 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6d78f232..46f29796 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,7 @@ Version 2.1.4 *(2017-01-30)*
+ * Fixed: Multi-currency transactions not exported when format is QIF (#571)
+ * Fixed: Incorrect date of last export shown in book manager (#615, #617)
+ * Fixed: Large exports may be reported as successful even if they didn't complete yet (#616)
++* Fixed: Custom date range (in reports) does not select correct ending date (#611)
+ * Fixed: Account color reset when editing an account (#620)
+ * Fixed: Export to OwnCloud fails if folder already exists
+ * Fixed: User not notified if export to external target fails
+diff --git a/CONTRIBUTORS.md b/CONTRIBUTORS.md
+index 48c117f6..b57d1bc4 100644
+--- a/CONTRIBUTORS.md
++++ b/CONTRIBUTORS.md
+@@ -36,5 +36,6 @@ The following (incomplete list of) people (in no particular order) contributed (
+ * Felipe Morato <me@fmorato.com>
+ * Alceu Rodrigues Neto <alceurneto@gmail.com>
+ * Salama AB <aksalj@aksalj.me>
++* Juan Villa <juan64@gmail.com>
+ 
+ Please visit https://crowdin.com/project/gnucash-android for a more complete list of translation contributions
+\ No newline at end of file
+diff --git a/app/build.gradle b/app/build.gradle
+index 2da97e1d..d72adee5 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -8,7 +8,7 @@ apply plugin: 'io.fabric'
+ def versionMajor = 2
+ def versionMinor = 1
+ def versionPatch = 4
+-def versionBuild = 1
++def versionBuild = 2
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd HH:mm 'UTC'")
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index c7c68286..a264ad7a 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -52,13 +52,13 @@
+   <string name="menu_move">DPLACER</string>
+   <string name="title_selected">%1$d slectionn(s)</string>
+   <string name="label_account_balance">Solde:</string>
+-  <string name="label_export_destination">Export To:</string>
++  <string name="label_export_destination">Exporter vers:</string>
+   <string name="title_export_dialog">Exporter les transactions</string>
+   <string name="option_export_all_transactions">Exporter toutes les transactions</string>
+   <string name="hint_export_choice">Par dfaut, seul les nouvelles transactions depuis le dernier export seront exportes. Cochez cette option pour exporter toutes les transactions</string>
+   <string name="toast_export_error">Erreur lors de l\'export des donnes en %1$s</string>
+   <string name="btn_export">Exporter</string>
+-  <string name="option_delete_after_export">Delete transactions after export</string>
++  <string name="option_delete_after_export">Effacer les transactions apres export</string>
+   <string name="hint_delete_after_export">Toutes les transactions exportes seront supprimes aprs l\'export</string>
+   <string name="title_settings">Paramtres</string>
+   <string-array name="export_destinations">
+@@ -66,7 +66,7 @@
+     <item>DropBox</item>
+     <item>Google Drive</item>
+     <item>ownCloud</item>
+-    <item>Send to&#8230;</item>
++    <item>Envoyer vers&#8230;</item>
+   </string-array>
+   <string name="btn_move">Dplacer</string>
+   <string name="title_move_transactions">Dplacer %1$d transaction(s)</string>
+@@ -82,8 +82,8 @@
+   <string name="label_permission_create_accounts">Permettre la cration de comptes dans GnuCash pour Android</string>
+   <string name="label_permission_group">Vos donnes GnuCash</string>
+   <string name="description_permission_group">Lire et modifier les donnes GnuCash</string>
+-  <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
+-  <string name="label_permission_create_account">Create accounts in GnuCash</string>
++  <string name="label_permission_record_transaction">Enregistrer les transactions dans GnuCash</string>
++  <string name="label_permission_create_account">Crer comptes dans GnuCash</string>
+   <string name="label_display_account">Afficher le compte</string>
+   <string name="btn_create_accounts">Crer les comptes</string>
+   <string name="title_default_accounts">Choisisez les comptes  crs</string>
+@@ -116,7 +116,7 @@
+   </string-array>
+   <string name="msg_delete_all_transactions_confirmation">tes vous sre de vouloir supprimer TOUTES les transactions ?</string>
+   <string name="msg_delete_transaction_confirmation">tes vous sre de vouloir supprimer cette transaction ?</string>
+-  <string name="title_export_preference_category">Export</string>
++  <string name="title_export_preference_category">Exporter</string>
+   <string name="title_export_all_transactions">Exporter toutes les transactions</string>
+   <string name="title_always_delete_exported_transactions">Supprimer les transactions exportes</string>
+   <string name="title_default_export_email">Email d\'export par dfaut</string>
+@@ -124,7 +124,7 @@
+   <string name="label_double_entry_account">Transfert entre comptes</string>
+   <string name="summary_use_double_entry">Toutes les transactions seront transfres d\'un compte  l\'autre</string>
+   <string name="title_use_double_entry">Activer les doubles entre</string>
+-  <string name="account_balance">Balance</string>
++  <string name="account_balance">Solde</string>
+   <string name="toast_no_account_name_entered">Entrer un nom de compte pour crer un compte</string>
+   <string name="label_account_currency">Monnaie</string>
+   <string name="label_parent_account">Compte parent</string>
+@@ -259,7 +259,7 @@
+   <string name="menu_order_by_size">Tri par taille</string>
+   <string name="menu_toggle_legend">Show legend</string>
+   <string name="menu_toggle_labels">Show labels</string>
+-  <string name="menu_toggle_percentage_mode">Show percentage</string>
++  <string name="menu_toggle_percentage_mode">Montrer pourcentage</string>
+   <string name="menu_toggle_average_lines">Show average lines</string>
+   <string name="menu_group_smaller_slices">Groupe par petites tranches</string>
+   <string name="label_chart_no_data">Aucune donnes de graphe disponible</string>
+@@ -276,11 +276,11 @@
+   <string name="label_tap_to_create_schedule">Appuyez sur pour crer le calendrier</string>
+   <string name="title_restore_backup">Restaurer Sauvegarde&#8230;</string>
+   <string name="header_backup_and_export_settings">Sauvegarde &amp; export</string>
+-  <string name="title_dropbox_sync_preference">Enable DropBox</string>
+-  <string name="title_owncloud_sync_preference">Enable ownCloud </string>
++  <string name="title_dropbox_sync_preference">Activer DropBox</string>
++  <string name="title_owncloud_sync_preference">Activer ownCloud </string>
+   <string name="title_backup_preference_category">Sauvegarde</string>
+-  <string name="summary_dropbox_sync">Enable exporting to DropBox</string>
+-  <string name="summary_owncloud_sync">Enable exporting to ownCloud</string>
++  <string name="summary_dropbox_sync">Activer export vers DropBox</string>
++  <string name="summary_owncloud_sync">Activer export vers owncloud</string>
+   <string name="title_select_gnucash_xml_file">Selectionner un fichier GnuCash XML</string>
+   <string name="title_backup_prefs">Sauvergarde Prfrences</string>
+   <string name="title_create_backup_pref">Crer Sauvegarde</string>
+@@ -289,8 +289,8 @@
+   <string name="toast_backup_successful">Sauvegarde russie</string>
+   <string name="toast_backup_failed">chec de la sauvegarde</string>
+   <string name="export_warning_xml">Exporte tous les comptes et les transactions</string>
+-  <string name="title_google_drive_sync_pref">Enable Google Drive</string>
+-  <string name="summary_google_drive_sync">Enable exporting to Google Drive</string>
++  <string name="title_google_drive_sync_pref">Activer Google Drive</string>
++  <string name="summary_google_drive_sync">Activer export vers Google Drive</string>
+   <string name="toast_install_file_manager">Installez un gestionnaire de fichiers pour slectionner les fichiers</string>
+   <string name="title_select_backup_to_restore">Slectionnez une sauvegarde  restaurer</string>
+   <string name="nav_menu_favorites">Favoris</string>
+@@ -299,11 +299,11 @@
+   <string name="nav_menu_scheduled_transactions">Transactions planifies</string>
+   <string name="nav_menu_export">Export&#8230;</string>
+   <string name="nav_menu_settings">Paramtres</string>
+-  <string name="username">User Name</string>
+-  <string name="password">Password</string>
+-  <string name="owncloud_pref">owncloud</string>
++  <string name="username">Nom d\'utilisateur</string>
++  <string name="password">Mot de passe</string>
++  <string name="owncloud_pref">ownCloud</string>
+   <string name="owncloud_server">https://</string>
+-  <string name="owncloud_server_invalid">OC server not found</string>
++  <string name="owncloud_server_invalid">Serveur OC inaccessible</string>
+   <string name="owncloud_user_invalid">OC username/password invalid</string>
+   <string name="owncloud_dir_invalid">Invalid chars: \\ &lt; &gt; : \&quot; | * ? </string>
+   <string name="owncloud_server_ok">OC server OK</string>

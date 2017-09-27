@@ -1,0 +1,168 @@
+From 535dd3717fb42224b2c0249b00ade459ceedca0b Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 17 Sep 2014 11:10:10 +0200
+Subject: [PATCH] Instead of modifying input stream before importing, we update
+ currency in database after importing.
+
+Introduce task delegate for executing tasks on completion of import.
+---
+ .../gnucash/android/importer/ImportAsyncTask.java  | 13 +++++++-
+ .../android/ui/account/AccountsActivity.java       | 39 ++++++++++++----------
+ .../org/gnucash/android/ui/util/TaskDelegate.java  | 30 +++++++++++++++++
+ 3 files changed, 63 insertions(+), 19 deletions(-)
+ create mode 100644 app/src/org/gnucash/android/ui/util/TaskDelegate.java
+
+diff --git a/app/src/org/gnucash/android/importer/ImportAsyncTask.java b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+index a19cb035..ecc69235 100644
+--- a/app/src/org/gnucash/android/importer/ImportAsyncTask.java
++++ b/app/src/org/gnucash/android/importer/ImportAsyncTask.java
+@@ -12,7 +12,8 @@
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+- */package org.gnucash.android.importer;
++ */
++package org.gnucash.android.importer;
+ 
+ import android.app.Activity;
+ import android.app.ProgressDialog;
+@@ -23,6 +24,7 @@
+ import android.widget.Toast;
+ import org.gnucash.android.R;
+ import org.gnucash.android.ui.account.AccountsActivity;
++import org.gnucash.android.ui.util.TaskDelegate;
+ 
+ import java.io.InputStream;
+ 
+@@ -32,12 +34,18 @@
+  */
+ public class ImportAsyncTask extends AsyncTask<InputStream, Void, Boolean> {
+     private final Activity context;
++    private TaskDelegate mDelegate;
+     private ProgressDialog progressDialog;
+ 
+     public ImportAsyncTask(Activity context){
+         this.context = context;
+     }
+ 
++    public ImportAsyncTask(Activity context, TaskDelegate delegate){
++        this.context = context;
++        this.mDelegate = delegate;
++    }
++
+     @Override
+     protected void onPreExecute() {
+         super.onPreExecute();
+@@ -76,6 +84,9 @@ public void run() {
+ 
+     @Override
+     protected void onPostExecute(Boolean importSuccess) {
++        if (mDelegate != null)
++            mDelegate.onTaskComplete();
++
+         if (progressDialog != null && progressDialog.isShowing())
+             progressDialog.dismiss();
+ 
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+index cfd38db5..c4a2dbb3 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -47,6 +47,8 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.UxArgument;
+@@ -56,6 +58,7 @@
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+ import org.gnucash.android.ui.util.OnAccountClickedListener;
+ import org.gnucash.android.ui.util.Refreshable;
++import org.gnucash.android.ui.util.TaskDelegate;
+ 
+ import java.io.BufferedReader;
+ import java.io.ByteArrayInputStream;
+@@ -486,27 +489,27 @@ public void onClick(DialogInterface dialogInterface, int i) {
+ 	}
+ 
+     /**
+-     * Creates default accounts with the specified currency
++     * Creates default accounts with the specified currency code.
++     * If the currency parameter is null, then locale currency will be used if available
+      *
+-     * @param currencyCode
+-     * @param activity
++     * @param currencyCode Currency code to assign to the imported accounts
++     * @param activity Activity for providing context and displaying dialogs
+      */
+-    public static void createDefaultAccounts(String currencyCode, Activity activity) {
+-        InputStream accountFileInputStream = activity.getResources().openRawResource(R.raw.default_accounts);
+-        BufferedReader reader = new BufferedReader(new InputStreamReader(accountFileInputStream));
+-        StringBuilder sb = new StringBuilder();
+-        String line = null;
+-        try {
+-            while ((line = reader.readLine()) != null) {
+-                sb.append(line).append("\n");
+-            }
+-            reader.close();
+-        } catch (IOException e) {
+-            e.printStackTrace();
++    public static void createDefaultAccounts(final String currencyCode, final Activity activity) {
++        TaskDelegate delegate = null;
++        if (currencyCode != null) {
++            delegate = new TaskDelegate() {
++                @Override
++                public void onTaskComplete() {
++                    AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(activity);
++                    accountsDbAdapter.updateAllAccounts(DatabaseSchema.AccountEntry.COLUMN_CURRENCY, currencyCode);
++                    accountsDbAdapter.close();
++                }
++            };
+         }
+-        String accountFile = sb.toString().replaceAll("<cmdty:id>(.*?)</cmdty:id>", "<cmdty:id>" + currencyCode + "</cmdty:id>");
+-        accountFileInputStream = new ByteArrayInputStream(accountFile.getBytes());
+-        new ImportAsyncTask(activity).execute(accountFileInputStream);
++
++        InputStream accountFileInputStream = activity.getResources().openRawResource(R.raw.default_accounts);
++        new ImportAsyncTask(activity, delegate).execute(accountFileInputStream);
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/ui/util/TaskDelegate.java b/app/src/org/gnucash/android/ui/util/TaskDelegate.java
+new file mode 100644
+index 00000000..04953c05
+--- /dev/null
++++ b/app/src/org/gnucash/android/ui/util/TaskDelegate.java
+@@ -0,0 +1,30 @@
++/*
++ * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.gnucash.android.ui.util;
++
++/**
++ * Interface for delegates which can be used to execute functions when an AsyncTask is complete
++ * @see org.gnucash.android.importer.ImportAsyncTask
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
++public interface TaskDelegate {
++
++    /**
++     * Function to execute on completion of task
++     */
++    public void onTaskComplete();
++}

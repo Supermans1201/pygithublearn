@@ -1,0 +1,1544 @@
+From 73072a9fd1d08bb6d47593b1ce2dde42649a93ee Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 17 Apr 2015 13:56:18 +0200
+Subject: [PATCH] Feature: Save backups and export to DropBox
+
+Feature: Schedule backups per export type
+Added: Setting for manually creating backup
+Added: Setting for restoring from any backup file
+Improved account import file chooser filter
+Improved text in export warnings
+Renamed general preferences to backup preferences
+Extracted strings for internationalization
+---
+ app/src/main/AndroidManifest.xml                   |   9 ++-
+ .../gnucash/android/export/ExportAsyncTask.java    |  35 ++++++++++-
+ .../android/export/ExportDialogFragment.java       |  67 ++++++++++++++++-----
+ .../org/gnucash/android/export/ExportFormat.java   |   4 +-
+ .../java/org/gnucash/android/export/Exporter.java  |   8 +--
+ .../gnucash/android/export/xml/GncXmlExporter.java |  10 ++-
+ ...Fragment.java => BackupPreferenceFragment.java} |  13 +++-
+ .../android/ui/settings/SettingsActivity.java      |  64 +++++++++++++++++---
+ .../main/res/drawable-hdpi/ic_dropbox_android.png  | Bin 0 -> 1865 bytes
+ .../main/res/drawable-mdpi/ic_dropbox_android.png  | Bin 0 -> 1258 bytes
+ .../main/res/drawable-xhdpi/ic_dropbox_android.png | Bin 0 -> 2415 bytes
+ .../res/drawable-xxhdpi/ic_dropbox_android.png     | Bin 0 -> 3613 bytes
+ app/src/main/res/layout/dialog_export.xml          |   4 +-
+ app/src/main/res/values-de/strings.xml             |  24 ++++++--
+ app/src/main/res/values-el/strings.xml             |  24 ++++++--
+ app/src/main/res/values-es-rMX/strings.xml         |  22 +++++--
+ app/src/main/res/values-es/strings.xml             |  24 ++++++--
+ app/src/main/res/values-fr/strings.xml             |  22 +++++--
+ app/src/main/res/values-hu/strings.xml             |  22 +++++--
+ app/src/main/res/values-it/strings.xml             |  22 +++++--
+ app/src/main/res/values-nb/strings.xml             |  24 ++++++--
+ app/src/main/res/values-nl/strings.xml             |  22 +++++--
+ app/src/main/res/values-pt-rBR/strings.xml         |  24 ++++++--
+ app/src/main/res/values-ru/strings.xml             |  22 +++++--
+ app/src/main/res/values-zh/strings.xml             |  24 ++++++--
+ app/src/main/res/values/donottranslate.xml         |   2 +
+ app/src/main/res/values/strings.xml                |  22 +++++--
+ ...erences.xml => fragment_backup_preferences.xml} |  12 +++-
+ app/src/main/res/xml/preference_headers.xml        |   4 +-
+ 29 files changed, 430 insertions(+), 100 deletions(-)
+ rename app/src/main/java/org/gnucash/android/ui/settings/{GeneralPreferenceFragment.java => BackupPreferenceFragment.java} (87%)
+ create mode 100644 app/src/main/res/drawable-hdpi/ic_dropbox_android.png
+ create mode 100644 app/src/main/res/drawable-mdpi/ic_dropbox_android.png
+ create mode 100644 app/src/main/res/drawable-xhdpi/ic_dropbox_android.png
+ create mode 100644 app/src/main/res/drawable-xxhdpi/ic_dropbox_android.png
+ rename app/src/main/res/xml/{fragment_general_preferences.xml => fragment_backup_preferences.xml} (78%)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 15c048ff..ee6fe345 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -49,6 +49,7 @@
+         android:label="Schedule repeating transactions when device is rebooted"/>
+     <uses-permission android:name="android.permission.INTERNET"
+         android:label="Export and backup to 3rd party hosting services" />
++    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+ 
+     <application android:name="org.gnucash.android.app.GnuCashApplication"
+         android:icon="@drawable/ic_launcher"
+@@ -85,18 +86,24 @@
+         <activity android:name=".ui.chart.PieChartActivity" />
+         <activity android:name=".ui.chart.LineChartActivity" />
+         <activity android:name=".ui.chart.BarChartActivity" />
++        <activity android:name="com.dropbox.sync.android.DbxAuthActivity" />
+         <activity
+             android:name="com.dropbox.client2.android.AuthActivity"
+             android:launchMode="singleTask"
+             android:configChanges="orientation|keyboard">
+             <intent-filter>
+                 <!-- Change this to be db- followed by your app key -->
+-                <data android:scheme="db-86miy05q183gy7r" />
++                <data android:scheme="db-dhjh8ke9wf05948" />
+                 <action android:name="android.intent.action.VIEW" />
+                 <category android:name="android.intent.category.BROWSABLE"/>
+                 <category android:name="android.intent.category.DEFAULT" />
+             </intent-filter>
+         </activity>
++        <service
++            android:name="com.dropbox.sync.android.DbxSyncService"
++            android:enabled="true"
++            android:exported="false"
++            android:label="Dropbox Sync" />
+         <service android:name=".service.SchedulerService"
+             android:exported="false"
+             android:label="GnuCash Android Scheduler Execution Service"/>
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index e3b28045..86597ea8 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -29,6 +29,12 @@
+ import android.util.Log;
+ import android.widget.Toast;
+ 
++import com.dropbox.sync.android.DbxAccountManager;
++import com.dropbox.sync.android.DbxException;
++import com.dropbox.sync.android.DbxFile;
++import com.dropbox.sync.android.DbxFileSystem;
++import com.dropbox.sync.android.DbxPath;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+@@ -39,6 +45,7 @@
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.ui.account.AccountsActivity;
++import org.gnucash.android.ui.settings.SettingsActivity;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+ 
+ import java.io.BufferedReader;
+@@ -62,6 +69,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class ExportAsyncTask extends AsyncTask<ExportParams, Void, Boolean> {
++
+     /**
+      * App context
+      */
+@@ -119,7 +127,7 @@ protected Boolean doInBackground(ExportParams... params) {
+                     mExporter = new OfxExporter(mExportParams);
+                     break;
+ 
+-                case GNC_XML:
++                case XML:
+                 default:
+                     mExporter = new GncXmlExporter(mExportParams);
+                     break;
+@@ -205,6 +213,31 @@ protected void onPostExecute(Boolean exportResult) {
+ 
+ 
+             case DROPBOX:
++                DbxAccountManager mDbxAcctMgr = DbxAccountManager.getInstance(mContext.getApplicationContext(),
++                        SettingsActivity.DROPBOX_APP_KEY, SettingsActivity.DROPBOX_APP_SECRET);
++                DbxFile dbExportFile = null;
++                try {
++                    DbxFileSystem dbxFileSystem = DbxFileSystem.forAccount(mDbxAcctMgr.getLinkedAccount());
++                    File exportedFile = new File(mExportParams.getTargetFilepath());
++                    dbExportFile = dbxFileSystem.create(new DbxPath(exportedFile.getName()));
++                    dbExportFile.writeFromExistingFile(exportedFile, false);
++                } catch (DbxException.Unauthorized unauthorized) {
++                    unauthorized.printStackTrace();
++                    Log.e(TAG, unauthorized.getMessage());
++                    if (mContext instanceof Activity){
++                        Toast.makeText(mContext, "DropBox access not authorized. Check your Settings", Toast.LENGTH_LONG).show();
++                    }
++                } catch (DbxException e) {
++                    e.printStackTrace();
++                    Log.e(TAG, e.getMessage());
++                } catch (IOException e) {
++                    Log.e(TAG, e.getMessage());
++                    e.printStackTrace();
++                } finally {
++                    if (dbExportFile != null) {
++                        dbExportFile.close();
++                    }
++                }
+                 break;
+ 
+             case GOOGLE_DRIVE:
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+index 7f0180cb..4724e017 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportDialogFragment.java
+@@ -28,22 +28,25 @@
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
++import android.widget.AdapterView;
+ import android.widget.ArrayAdapter;
+ import android.widget.Button;
+ import android.widget.CheckBox;
+ import android.widget.RadioButton;
+ import android.widget.Spinner;
+ import android.widget.TextView;
++import android.widget.Toast;
+ 
+ import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence;
+ import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrenceFormatter;
+ import com.doomonafireball.betterpickers.recurrencepicker.RecurrencePickerDialog;
++import com.dropbox.sync.android.DbxAccountManager;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+-import org.gnucash.android.model.BaseModel;
+ import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.ui.settings.SettingsActivity;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ 
+ import java.io.File;
+@@ -119,6 +122,10 @@
+ 	 */
+     private ExportFormat mExportFormat = ExportFormat.QIF;
+ 
++	private ExportParams.ExportTarget mExportTarget = ExportParams.ExportTarget.SD_CARD;
++
++	private DbxAccountManager mDbxAcctMgr;
++
+ 	/**
+ 	 * Click listener for positive button in the dialog.
+ 	 * @author Ngewi Fet <ngewif@gmail.com>
+@@ -130,10 +137,8 @@ public void onClick(View v) {
+             ExportParams exportParameters = new ExportParams(mExportFormat);
+             exportParameters.setExportAllTransactions(mExportAllCheckBox.isChecked());
+             exportParameters.setTargetFilepath(mFilePath);
+-            int position = mDestinationSpinner.getSelectedItemPosition();
+-			//TODO: accomodate all the different export targets
+-            exportParameters.setExportTarget(position == 0 ? ExportParams.ExportTarget.SHARING : ExportParams.ExportTarget.SD_CARD);
+-            exportParameters.setDeleteTransactionsAfterExport(mDeleteAllCheckBox.isChecked());
++			exportParameters.setExportTarget(mExportTarget);
++			exportParameters.setDeleteTransactionsAfterExport(mDeleteAllCheckBox.isChecked());
+ 
+ 			//TODO: Block from creating scheduled action with SHARE target
+ 			ScheduledActionDbAdapter scheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+@@ -180,8 +185,8 @@ public void onRadioButtonClicked(View view){
+ 				break;
+ 
+ 			case R.id.radio_xml_format:
+-				mExportFormat = ExportFormat.GNC_XML;
+-				mExportWarningTextView.setVisibility(View.GONE);
++				mExportFormat = ExportFormat.XML;
++				mExportWarningTextView.setText(R.string.export_warning_xml);
+ 				break;
+         }
+ 		refreshRecurrenceTextView(mExportFormat);
+@@ -209,7 +214,12 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+ 		return inflater.inflate(R.layout.dialog_export, container, false);
+ 	}
+-	
++
++	@Override
++	public void onCreate(Bundle savedInstanceState) {
++		super.onCreate(savedInstanceState);
++	}
++
+ 	@Override
+ 	public void onActivityCreated(Bundle savedInstanceState) {		
+ 		super.onActivityCreated(savedInstanceState);
+@@ -218,10 +228,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		getDialog().setTitle(R.string.title_export_dialog);
+ 	}
+ 
+-	/**
+-	 * Collects references to the UI elements and binds click listeners
+-	 */
+-	private void bindViews(){		
++	private void bindViews(){
+ 		View v = getView();
+         assert v != null;
+         mDestinationSpinner = (Spinner) v.findViewById(R.id.spinner_export_destination);
+@@ -229,7 +236,39 @@ private void bindViews(){
+ 		        R.array.export_destinations, android.R.layout.simple_spinner_item);
+ 		adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);		
+ 		mDestinationSpinner.setAdapter(adapter);
+-		
++		mDestinationSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
++			@Override
++			public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
++				View recurrenceOptionsView = getView().findViewById(R.id.recurrence_options);
++				switch (position){
++					case 0:
++						mExportTarget = ExportParams.ExportTarget.SD_CARD;
++						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						break;
++					case 1:
++						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						mExportTarget = ExportParams.ExportTarget.DROPBOX;
++						mDbxAcctMgr = DbxAccountManager.getInstance(getActivity().getApplicationContext(),
++								SettingsActivity.DROPBOX_APP_KEY, SettingsActivity.DROPBOX_APP_SECRET);
++						if (!mDbxAcctMgr.hasLinkedAccount()){
++							Toast.makeText(getActivity(), "You need to first link to your DropBox account in Settings", Toast.LENGTH_SHORT).show();
++							startActivity(new Intent(getActivity(), SettingsActivity.class));							//TODO: Try to open directly to the export preferences
++						}
++						break;
++					case 2:
++						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						break;
++					case 3:
++						recurrenceOptionsView.setVisibility(View.GONE);
++						break;
++				}
++			}
++
++			@Override
++			public void onNothingSelected(AdapterView<?> parent) {
++
++			}
++		});
+ 		SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+ 		mExportAllCheckBox = (CheckBox) v.findViewById(R.id.checkbox_export_all);
+ 		mExportAllCheckBox.setChecked(sharedPrefs.getBoolean(getString(R.string.key_export_all_transactions), false));
+@@ -303,7 +342,7 @@ public void onClick(View view) {
+ 
+ 		RadioButton xmlRadioButton = (RadioButton) v.findViewById(R.id.radio_xml_format);
+ 		xmlRadioButton.setOnClickListener(clickListener);
+-		if (defaultExportFormat.equalsIgnoreCase(ExportFormat.GNC_XML.name())){
++		if (defaultExportFormat.equalsIgnoreCase(ExportFormat.XML.name())){
+ 			xmlRadioButton.performClick();
+ 		}
+ 	}
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportFormat.java b/app/src/main/java/org/gnucash/android/export/ExportFormat.java
+index cd70a260..99ca1a34 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportFormat.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportFormat.java
+@@ -22,7 +22,7 @@
+ public enum ExportFormat {
+     QIF("Quicken Interchange Format"),
+     OFX("Open Financial eXchange"),
+-    GNC_XML ("GnuCash XML");
++    XML("GnuCash XML");
+ 
+     /**
+      * Full name of the export format acronym
+@@ -43,7 +43,7 @@ public String getExtension(){
+                 return ".qif";
+             case OFX:
+                 return ".ofx";
+-            case GNC_XML:
++            case XML:
+                 return ".gnca";
+             default:
+                 return ".txt";
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 275dbf28..5b682354 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -54,7 +54,7 @@
+     public static final String EXPORT_FOLDER_PATH =  BASE_FOLDER_PATH + "/exports/";
+ 
+     /**
+-     * Folder where GNC_XML backups will be saved
++     * Folder where XML backups will be saved
+      */
+     public static final String BACKUP_FOLDER_PATH = BASE_FOLDER_PATH + "/backups/";
+ 
+@@ -113,13 +113,13 @@ public static File createExportFile(ExportFormat format){
+     }
+ 
+     /**
+-     * Builds a file for backups of the database (in GNC_XML) format
++     * Builds a file for backups of the database (in XML) format
+      * @return File for saving backups
+      * @see #BACKUP_FOLDER_PATH
+      */
+-    public static File createBackupFile(){
++    public static File buildBackupFile(){
+         new File(BACKUP_FOLDER_PATH).mkdirs();
+-        return new File(BACKUP_FOLDER_PATH + buildExportFilename(ExportFormat.GNC_XML));
++        return new File(BACKUP_FOLDER_PATH + buildExportFilename(ExportFormat.XML) + ".zip");
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 7f479881..f5dd1322 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -561,6 +561,7 @@ public void generateExport(Writer writer) throws ExporterException{
+             exportTransactions(xmlSerializer, false);
+ 
+             //transaction templates
++            //TODO: do not include this tag at all if there are not template transactions
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+             exportTransactions(xmlSerializer, true);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+@@ -578,19 +579,22 @@ public void generateExport(Writer writer) throws ExporterException{
+     }
+     /**
+      * Creates a backup of current database contents to the default backup location
++     * @return {@code true} if backup was successful, {@code false} otherwise
+      */
+-    public static void createBackup(){
+-        ExportParams params = new ExportParams(ExportFormat.GNC_XML);
++    public static boolean createBackup(){
++        ExportParams params = new ExportParams(ExportFormat.XML);
+         try {
+-            FileOutputStream fileOutputStream = new FileOutputStream(Exporter.createBackupFile());
++            FileOutputStream fileOutputStream = new FileOutputStream(Exporter.buildBackupFile());
+             BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
+             GZIPOutputStream gzipOutputStream = new GZIPOutputStream(bufferedOutputStream);
+             OutputStreamWriter outputStreamWriter = new OutputStreamWriter(gzipOutputStream);
+             new GncXmlExporter(params).generateExport(outputStreamWriter);
+             outputStreamWriter.close();
++            return true;
+         } catch (IOException e) {
+             e.printStackTrace();
+             Log.e("GncXmlExporter", "Error creating backup", e);
++            return false;
+         }
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+similarity index 87%
+rename from app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
+rename to app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index 6cdc26a5..c4c856ea 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/GeneralPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -37,17 +37,17 @@
+  *
+  */
+ @TargetApi(11)
+-public class GeneralPreferenceFragment extends PreferenceFragment implements OnPreferenceChangeListener{
++public class BackupPreferenceFragment extends PreferenceFragment implements OnPreferenceChangeListener{
+ 	
+ 	@Override
+ 	public void onCreate(Bundle savedInstanceState) {
+ 		super.onCreate(savedInstanceState);
+ 		
+-		addPreferencesFromResource(R.xml.fragment_general_preferences);
++		addPreferencesFromResource(R.xml.fragment_backup_preferences);
+ 		ActionBar actionBar = ((SherlockPreferenceActivity) getActivity()).getSupportActionBar();
+ 		actionBar.setHomeButtonEnabled(true);
+ 		actionBar.setDisplayHomeAsUpEnabled(true);
+-		actionBar.setTitle(R.string.title_general_prefs);
++		actionBar.setTitle(R.string.title_backup_prefs);
+ 		
+ 	}	
+ 	
+@@ -77,6 +77,13 @@ public void onResume() {
+ 
+ 		pref = findPreference(getString(R.string.key_restore_backup));
+ 		pref.setOnPreferenceClickListener((SettingsActivity)getActivity());
++
++		pref = findPreference(getString(R.string.key_create_backup));
++		pref.setOnPreferenceClickListener((SettingsActivity)getActivity());
++
++		pref = findPreference(getString(R.string.key_dropbox_sync));
++		pref.setOnPreferenceClickListener((SettingsActivity)getActivity());
++		((SettingsActivity)getActivity()).toggleDropboxPreference(pref);
+ 	}
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index ff9ff106..38f842fc 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -35,6 +35,7 @@
+ import com.actionbarsherlock.app.ActionBar;
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
+ import com.actionbarsherlock.view.MenuItem;
++import com.dropbox.sync.android.DbxAccountManager;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -73,6 +74,12 @@
+      * Used on Android v2.3.3 or lower devices where dialogs cannot be instantiated easily in settings
+      */
+     public static final int DOUBLE_TAP_DELAY = 2000;
++    final static public String DROPBOX_APP_KEY      = "dhjh8ke9wf05948";
++    final static public String DROPBOX_APP_SECRET   = "h2t9fphj3nr4wkw";
++    /**
++     * Collects references to the UI elements and binds click listeners
++     */
++    public static final int REQUEST_LINK_TO_DBX = 0x11;
+ 
+     /**
+      * Counts the number of times the preference for deleting all accounts has been clicked.
+@@ -87,8 +94,9 @@
+      * Only useful on devices with API level < 11
+      */
+     private int mDeleteTransactionsClickCount;
++    private DbxAccountManager mDbxAccountManager;
+ 
+-	/**
++    /**
+ 	 * Constructs the headers to display in the header list when the Settings activity is first opened
+ 	 * Only available on Honeycomb and above
+ 	 */
+@@ -97,12 +105,15 @@
+ 	public void onBuildHeaders(List<Header> target) {
+ 		loadHeadersFromResource(R.xml.preference_headers, target);
+ 	}
+-	
++
+ 	@SuppressWarnings("deprecation")
+ 	@Override
+ 	protected void onCreate(Bundle savedInstanceState) {		
+ 		super.onCreate(savedInstanceState);
+-		
++
++        mDbxAccountManager = DbxAccountManager.getInstance(getApplicationContext(),
++                DROPBOX_APP_KEY, DROPBOX_APP_SECRET);
++
+ 		//retrieve version from Manifest and set it
+ 		String version = null;
+ 		try {
+@@ -122,9 +133,9 @@ protected void onCreate(Bundle savedInstanceState) {
+ 		actionBar.setDisplayHomeAsUpEnabled(true);
+ 		
+ 		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.HONEYCOMB){
+-			addPreferencesFromResource(R.xml.fragment_general_preferences);
+             addPreferencesFromResource(R.xml.fragment_account_preferences);
+ 			addPreferencesFromResource(R.xml.fragment_transaction_preferences);
++            addPreferencesFromResource(R.xml.fragment_backup_preferences);
+             addPreferencesFromResource(R.xml.fragment_passcode_preferences);
+ 			addPreferencesFromResource(R.xml.fragment_about_preferences);
+ 			setDefaultCurrencyListener();
+@@ -157,6 +168,13 @@ protected void onCreate(Bundle savedInstanceState) {
+             pref = findPreference(getString(R.string.key_change_passcode));
+             pref.setOnPreferenceClickListener(this);
+ 
++            pref = findPreference(getString(R.string.key_dropbox_sync));
++            toggleDropboxPreference(pref);
++            pref.setOnPreferenceClickListener(this);
++
++            pref = findPreference(getString(R.string.key_create_backup));
++            pref.setOnPreferenceClickListener(this);
++
+             pref = findPreference(getString(R.string.key_enable_passcode));
+             pref.setOnPreferenceChangeListener(this);
+             pref.setTitle(((CheckBoxPreference) pref).isChecked() ?
+@@ -164,6 +182,11 @@ protected void onCreate(Bundle savedInstanceState) {
+         }
+ 	}
+ 
++    public void toggleDropboxPreference(Preference pref) {
++        ((CheckBoxPreference)pref).setChecked(mDbxAccountManager.hasLinkedAccount());
++    }
++
++
+     @Override
+     protected void onResume() {
+         super.onResume();
+@@ -224,7 +247,7 @@ public boolean onPreferenceChange(Preference preference, Object newValue) {
+ 
+     @Override
+     protected boolean isValidFragment(String fragmentName) {
+-        return GeneralPreferenceFragment.class.getName().equals(fragmentName)
++        return BackupPreferenceFragment.class.getName().equals(fragmentName)
+                 || AccountPreferencesFragment.class.getName().equals(fragmentName)
+                 || PasscodePreferenceFragment.class.getName().equals(fragmentName)
+                 || TransactionsPreferenceFragment.class.getName().equals(fragmentName)
+@@ -255,6 +278,7 @@ private void setDefaultCurrencyListener() {
+     @Override
+     public boolean onPreferenceClick(Preference preference) {
+         String key = preference.getKey();
++
+         if (key.equals(getString(R.string.key_import_accounts)) || key.equals(getString(R.string.key_restore_backup))){
+             importAccounts();
+             return true;
+@@ -269,6 +293,17 @@ public boolean onPreferenceClick(Preference preference) {
+             importMostRecentBackup();
+         }
+ 
++        if (key.equals(getString(R.string.key_dropbox_sync))){
++            toggleDropboxSync();
++            toggleDropboxPreference(preference);
++        }
++
++        if (key.equals(getString(R.string.key_create_backup))){
++            boolean result = GncXmlExporter.createBackup();
++            int msg = result ? R.string.toast_backup_successful : R.string.toast_backup_failed;
++            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
++        }
++
+         //since we cannot get a support FragmentManager in the SettingsActivity pre H0NEYCOMB,
+         //we will just use 2 taps within 2 seconds as confirmation
+         if (key.equals(getString(R.string.key_delete_all_accounts))){
+@@ -320,6 +355,14 @@ public boolean onPreferenceClick(Preference preference) {
+         return false;
+     }
+ 
++    private void toggleDropboxSync() {
++        if (mDbxAccountManager.hasLinkedAccount()){
++            mDbxAccountManager.unlink();
++        } else {
++            mDbxAccountManager.startLink(this, REQUEST_LINK_TO_DBX);
++        }
++    }
++
+     /**
+      * Resets the tap counter for preferences which need to be double-tapped
+      */
+@@ -337,8 +380,8 @@ public void run() {
+      */
+     public void importAccounts() {
+         Intent pickIntent = new Intent(Intent.ACTION_GET_CONTENT);
+-        pickIntent.setType("application/*");
+-        Intent chooser = Intent.createChooser(pickIntent, "Select GnuCash account file");
++        pickIntent.setType("file/*");
++        Intent chooser = Intent.createChooser(pickIntent, getString(R.string.title_select_gnucash_xml_file));
+ 
+         startActivityForResult(chooser, AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE);
+ 
+@@ -395,6 +438,13 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+                     findPreference(getString(R.string.key_enable_passcode)).setTitle(getString(R.string.title_passcode_enabled));
+                 }
+                 break;
++
++            case REQUEST_LINK_TO_DBX:
++                Preference preference = findPreference(getString(R.string.key_dropbox_sync));
++                if (preference == null) //if we are in a preference header fragment, this may return null
++                    return;
++                toggleDropboxPreference(preference);
++                break;
+         }
+     }
+ }
+diff --git a/app/src/main/res/drawable-hdpi/ic_dropbox_android.png b/app/src/main/res/drawable-hdpi/ic_dropbox_android.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..8dc23a68d11a432b9be79918978474160ebc6221
+GIT binary patch
+literal 1865
+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
+Be+vKr
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-mdpi/ic_dropbox_android.png b/app/src/main/res/drawable-mdpi/ic_dropbox_android.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..f674824b06b96a12a05c8e7e5923a27aa44ede22
+GIT binary patch
+literal 1258
+zcmV<G1Qq*<P)<h;3K|Lk000e1NJLTq001xm001xu1^@s6R|5Hm00004XF*Lt006O%
+z3;baP00009a7bBm000ic000ic0Tn1pfB*mh7<5HgbW?9;ba!ELWdLwtX>N2bZe?^J
+zG%heMHD!e|WdHyKXh}ptRA@uhnp=ofRT#&&n1~h#q60ccULX++3$Z5=G(y4))Q}8_
+z=z}j_D#uG%lNMgkydXv?No6Hs;SDv5kcucDjOZy)1U2+HN2eJbXOv{rS^od~>^-wx
+z{`Wq6otcMO2Y$}+zb^Y*Ykl9hzcm^pKOG$%!;CS32Mmc!?)t#^xuRpQ1@_iNriaGY
+zs!qKf*gcznRI5f`kfKjW(I=$n6H@dEDf)yIeL{*pAw^fl?`$-|J6G{lw=4R;-(adY
+zU&B}3o);<RW#x~zOz`ei6TA)T8z2<SvL9}tN%too{oWQXHh2%L=GcN+aOftQbpLWl
+zF%RQ*TsOh;f(fvb!P<y50NTuNn$hL)F$<5j=rJn_X85McPD6@WEItM!xPv4%!UhIC
+z2e(R&oBBml$#@!U_x}L!Byoas4%~QTTsfqe#^`O)t}7#w&>-}C0zWx!1joH~rKGF=
+zG0|xZ*-#9}<w1&ypbmy(^0Gz{?Bqc7Tk~@(hL*+;-B>J*&$D=*?vl%$W3!NA8Z?SQ
+zm%0cBC5)ey5(5m@O!wowoCEH(?euL7d3+8VDQ5BPcDMs~GWlQzC0yp2E%^eG@e#UW
+zy|oZ5eyD@{5Gj^p#@EeVvA`2SN__MC7BuPpigmxVngNl~;XIgc(ysr|r2D5K#XQuX
+zYBhskz|_y1@K@a@53lWSHiNK$g-0rT7f3NL^S*OSd1=gbOr1%jn1|_mk=N<7$S!u9
+z3!}CorZCUMPab`5<VA|*7`63US4w3`fbWw(bMxQX`w&O;e`X!dv#MYQuXEoFDQ3~1
+z0mn3Gr&1Wu2aBmYnOzHQ__Zy3M})>F$HyrYZ2GMYUG;byDJqtnKnVdO!yUJckBQRh
+z$dq(C;p3F_nS^uTL|@Mt7gAL8VXeZ4tB2ZfC$ZR<zAC-YY7drqf!T1Qu!#8CSx7OB
+zPQT@1(oP|!?uvOK%ImX`DuZRHh02u?JQ-|~OFT)j993C$P2@&zz~wHr+&A;#3V$`U
+zn=QNtaPevGgEqzn``ORSLW+5){q{!bsN*a`7$0~u@BZ_S`KR$-7z?aIpF-QI3wO=2
+zbN`!uT!1|WoAL6OmAw$9=)xH0ah?WlWdpI3H1y>8yM|ZB&TJJeY}c7P=I>&=smA3c
+zTs(H&rF2$E(UqmgTg+J0{M_{&s3JpGq0vbfNx0U<oA=F&pEeqn5%yfJNYRB6>x<@(
+z%k8Fk`+=E%7}<vRhOA)4BBtSX_Alb&Y|}mSJgVE3KXu(3T#=#+gFh@8^)$<DR;J2m
+z8}zGUd?1_kh3naKx*$bY7V(};pC-y+8^#6}U9-RY#h?@`Wy&5DcnoO1CzRn)p6Bn8
+z?6H+1#qKhUSq6rNfy*q!m_T4Z33pqMTFCC-9i-S3gui}?%MbW`Pq>Rhiakk9$_2lt
+zkfKjW(I=$n6H@dEDf)yIeS-f|U!@v+A^yJ-ud2r04(y&@S^+-3Edutw5(Gi;5cHY#
+UN3Rv{3;+NC07*qoM6N<$f~UP!)c^nh
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xhdpi/ic_dropbox_android.png b/app/src/main/res/drawable-xhdpi/ic_dropbox_android.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..4607f457f9a9a6ea28ac7eac15f17086edbe8176
+GIT binary patch
+literal 2415
+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
+O1h7Y4LN-}r3I72OA&uGq
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xxhdpi/ic_dropbox_android.png b/app/src/main/res/drawable-xxhdpi/ic_dropbox_android.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..85a988e7cfcc00df7ec42103fae1a7226343e6c4
+GIT binary patch
+literal 3613
+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
+OIFNALt5leK%zptQ!p5-x
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/layout/dialog_export.xml b/app/src/main/res/layout/dialog_export.xml
+index 05914a4e..c462ac8f 100644
+--- a/app/src/main/res/layout/dialog_export.xml
++++ b/app/src/main/res/layout/dialog_export.xml
+@@ -78,7 +78,7 @@
+         <TextView android:id="@+id/export_warning"
+                   android:layout_marginLeft="@dimen/dialog_padding"
+                   android:text="Some format-based export warning"
+-                  android:textColor="@color/account_red"
++                  android:textColor="@color/title_green"
+                   style="@style/TextAppearance.Hint"
+                   android:visibility="gone" />
+ 
+@@ -109,7 +109,7 @@
+ 	        android:text="@string/hint_delete_after_export"
+ 	        style="@style/TextAppearance.Hint" />
+ 
+-        <LinearLayout
++        <LinearLayout android:id="@+id/recurrence_options"
+             android:layout_height="wrap_content"
+             android:layout_width="match_parent"
+             style="@style/FormRow">
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index b3f959a4..2f4ffcd6 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -55,8 +55,10 @@
+     <string name="hint_delete_after_export">Alle exportierten Buchungen werden nach dem Export gelscht.</string>
+     <string name="title_settings">Einstellungen</string>
+     <string-array name="export_destinations">
++		<item>SD-Kartenspeicher</item>
++		<item>DropBox</item>
++		<item>Google Drive</item>
+         <item>Senden&#8230;</item>
+-        <item>SD-Kartenspeicher</item>
+     </string-array>
+     <string name="btn_move">Verschieben</string>
+     <string name="title_move_transactions">%1$d Buchung(en) verschieben</string>
+@@ -408,7 +410,7 @@
+     </string>
+     <string name="title_save_opening_balances">Saldo als neuen Anfangsbestand bernehmen</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -449,9 +451,21 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
+-    <plurals name="label_every_x_days">
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++	<string name="header_backup_and_export_settings">Backup &amp; export</string>
++	<string name="title_dropbox_sync_preference">DropBox Sync</string>
++	<string name="title_backup_preference_category">Backup</string>
++	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++	<string name="title_backup_prefs">Backup Preferences</string>
++	<string name="title_create_backup_pref">Create Backup</string>
++	<string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++	<string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++	<string name="toast_backup_successful">Backup successful</string>
++	<string name="toast_backup_failed">Backup failed</string>
++	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+     </plurals>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index 26159d67..58e752a4 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -56,8 +56,10 @@
+     <string name="hint_delete_after_export">    ,       </string>
+     <string name="title_settings"></string>
+     <string-array name="export_destinations">
+-        <item> &#8230;</item>
+         <item> SD</item>
++		<item>DropBox</item>
++		<item>Google Drive</item>
++		<item> &#8230;</item>
+     </string-array>
+     <string name="btn_move"></string>
+     <string name="title_move_transactions"> %1$d ()</string>
+@@ -433,7 +435,7 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -474,9 +476,21 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
+-    <plurals name="label_every_x_days">
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++	<string name="header_backup_and_export_settings">Backup &amp; export</string>
++	<string name="title_dropbox_sync_preference">DropBox Sync</string>
++	<string name="title_backup_preference_category">Backup</string>
++	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++	<string name="title_backup_prefs">Backup Preferences</string>
++	<string name="title_create_backup_pref">Create Backup</string>
++	<string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++	<string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++	<string name="toast_backup_successful">Backup successful</string>
++	<string name="toast_backup_failed">Backup failed</string>
++	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+     </plurals>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index f1d03408..13369425 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -56,8 +56,10 @@
+     <string name="hint_delete_after_export">Todas las transacciones ser&#225;n borradas despu&#233;s de ser exportadas completamente</string>
+     <string name="title_settings">Opciones</string>
+     <string-array name="export_destinations">
+-        <item>Compartir archivo&#8230;</item>
+         <item>Tarjeta SD</item>
++        <item>DropBox</item>
++        <item>Google Drive</item>
++        <item>Compartir archivo&#8230;</item>
+     </string-array>
+     <string name="btn_move">Mover</string>
+     <string name="title_move_transactions">Mover %1$d transaccion(es)</string>
+@@ -418,7 +420,7 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -459,8 +461,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++    <string name="header_backup_and_export_settings">Backup &amp; export</string>
++    <string name="title_dropbox_sync_preference">DropBox Sync</string>
++    <string name="title_backup_preference_category">Backup</string>
++    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++    <string name="title_backup_prefs">Backup Preferences</string>
++    <string name="title_create_backup_pref">Create Backup</string>
++    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="toast_backup_successful">Backup successful</string>
++    <string name="toast_backup_failed">Backup failed</string>
++    <string name="export_warning_xml">Exports all accounts and transactions</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 66a8195a..9befc320 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -56,8 +56,10 @@
+     <string name="hint_delete_after_export">Todas las transacciones exportadas ser&#225;n borradas cuando la exportaci&#243;n haya terminado</string>
+     <string name="title_settings">Ajustes</string>
+     <string-array name="export_destinations">
+-        <item>Compartir archivo&#8230;</item>
+         <item>Tarjeta SD</item>
++		<item>DropBox</item>
++		<item>Google Drive</item>
++		<item>Compartir archivo&#8230;</item>
+     </string-array>
+     <string name="btn_move">Mover</string>
+     <string name="title_move_transactions">Mover %1$d transacci&#243;n(es)</string>
+@@ -415,7 +417,7 @@
+     </string>
+     <string name="title_save_opening_balances">Guardar saldos de apertura</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -456,9 +458,21 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
+-    <plurals name="label_every_x_days">
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++	<string name="header_backup_and_export_settings">Backup &amp; export</string>
++	<string name="title_dropbox_sync_preference">DropBox Sync</string>
++	<string name="title_backup_preference_category">Backup</string>
++	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++	<string name="title_backup_prefs">Backup Preferences</string>
++	<string name="title_create_backup_pref">Create Backup</string>
++	<string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++	<string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++	<string name="toast_backup_successful">Backup successful</string>
++	<string name="toast_backup_failed">Backup failed</string>
++	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+     </plurals>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index ad832eaa..837ee900 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -56,8 +56,10 @@
+     <string name="hint_delete_after_export">Toutes les transactions export&#233;es seront supprimes apr&#233;s l\'export</string>
+     <string name="title_settings">Param&#232;tres</string>
+     <string-array name="export_destinations">
+-        <item>Partager le fichier&#8230;</item>
+         <item>Carte SD</item>
++        <item>DropBox</item>
++        <item>Google Drive</item>
++        <item>Partager le fichier&#8230;</item>
+     </string-array>
+     <string name="btn_move">D&#233;placer</string>
+     <string name="title_move_transactions">D&#233;placer %1$d transaction(s)</string>
+@@ -415,7 +417,7 @@
+     </string>
+     <string name="title_save_opening_balances">Enregistrer les soldes des comptes d\'ouverture</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -456,8 +458,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++    <string name="header_backup_and_export_settings">Backup &amp; export</string>
++    <string name="title_dropbox_sync_preference">DropBox Sync</string>
++    <string name="title_backup_preference_category">Backup</string>
++    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++    <string name="title_backup_prefs">Backup Preferences</string>
++    <string name="title_create_backup_pref">Create Backup</string>
++    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="toast_backup_successful">Backup successful</string>
++    <string name="toast_backup_failed">Backup failed</string>
++    <string name="export_warning_xml">Exports all accounts and transactions</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 79930b63..78a43241 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -56,8 +56,10 @@
+     <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+     <string name="title_settings">Settings</string>
+     <string-array name="export_destinations">
+-        <item>Share file&#8230;</item>
+         <item>SD Card</item>
++        <item>DropBox</item>
++        <item>Google Drive</item>
++        <item>Share file&#8230;</item>
+     </string-array>
+     <string name="btn_move">Move</string>
+     <string name="title_move_transactions">Move %1$d transaction(s)</string>
+@@ -419,7 +421,7 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -460,8 +462,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++    <string name="header_backup_and_export_settings">Backup &amp; export</string>
++    <string name="title_dropbox_sync_preference">DropBox Sync</string>
++    <string name="title_backup_preference_category">Backup</string>
++    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++    <string name="title_backup_prefs">Backup Preferences</string>
++    <string name="title_create_backup_pref">Create Backup</string>
++    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="toast_backup_successful">Backup successful</string>
++    <string name="toast_backup_failed">Backup failed</string>
++    <string name="export_warning_xml">Exports all accounts and transactions</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index 5d812b75..d7f31b1f 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -57,8 +57,10 @@
+     <string name="hint_delete_after_export">Tutte le transazioni esportate verranno eliminate al termine dell\'esportazione</string>
+     <string name="title_settings">Impostazioni</string>
+     <string-array name="export_destinations">
+-        <item>Condividi file&#8230;</item>
+         <item>Scheda SD</item>
++        <item>DropBox</item>
++        <item>Google Drive</item>
++        <item>Condividi file&#8230;</item>
+     </string-array>
+     <string name="btn_move">Sposta</string>
+     <string name="title_move_transactions">Sposta %1$d transazioni</string>
+@@ -419,7 +421,7 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -460,8 +462,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++    <string name="header_backup_and_export_settings">Backup &amp; export</string>
++    <string name="title_dropbox_sync_preference">DropBox Sync</string>
++    <string name="title_backup_preference_category">Backup</string>
++    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++    <string name="title_backup_prefs">Backup Preferences</string>
++    <string name="title_create_backup_pref">Create Backup</string>
++    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="toast_backup_successful">Backup successful</string>
++    <string name="toast_backup_failed">Backup failed</string>
++    <string name="export_warning_xml">Exports all accounts and transactions</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 3f1771a5..6617df4e 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -57,8 +57,10 @@
+     <string name="hint_delete_after_export">Alle eksporterte transaksjoner vil bli slettet etter eksportering</string>
+     <string name="title_settings">Innstillinger</string>
+     <string-array name="export_destinations">
+-        <item>Delt fil&#8230;</item>
+         <item>SD-kort</item>
++		<item>DropBox</item>
++		<item>Google Drive</item>
++		<item>Delt fil&#8230;</item>
+     </string-array>
+     <string name="btn_move">Flytt</string>
+     <string name="title_move_transactions">Flytt %1$d transaksjoner</string>
+@@ -415,7 +417,7 @@
+     <string name="summary_save_opening_balances">Merk for  lagre gjeldende konto balanse (fr sletting) som ny inngende balanse (etter sletting av transaksjoner).</string>
+     <string name="title_save_opening_balances">Lagre inngende balanser</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -456,9 +458,21 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
+-    <plurals name="label_every_x_days">
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++	<string name="header_backup_and_export_settings">Backup &amp; export</string>
++	<string name="title_dropbox_sync_preference">DropBox Sync</string>
++	<string name="title_backup_preference_category">Backup</string>
++	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++	<string name="title_backup_prefs">Backup Preferences</string>
++	<string name="title_create_backup_pref">Create Backup</string>
++	<string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++	<string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++	<string name="toast_backup_successful">Backup successful</string>
++	<string name="toast_backup_failed">Backup failed</string>
++	<string name="export_warning_xml">Exports all accounts and transactions</string>
++	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+     </plurals>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index cde60205..6a2828be 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -56,8 +56,10 @@
+     <string name="hint_delete_after_export">Alle ge&#235;xporteerde transacties zullen verwijderd worden na de export</string>
+     <string name="title_settings">Instellingen</string>
+     <string-array name="export_destinations">
+-        <item>Verzenden&#8230;</item>
+         <item>SD kaart</item>
++        <item>DropBox</item>
++        <item>Google Drive</item>
++        <item>Verzenden&#8230;</item>
+     </string-array>
+     <string name="btn_move">Verplaatsen</string>
+     <string name="title_move_transactions">%1$d transactie(s) verplaatsen</string>
+@@ -420,7 +422,7 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -461,8 +463,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++    <string name="header_backup_and_export_settings">Backup &amp; export</string>
++    <string name="title_dropbox_sync_preference">DropBox Sync</string>
++    <string name="title_backup_preference_category">Backup</string>
++    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++    <string name="title_backup_prefs">Backup Preferences</string>
++    <string name="title_create_backup_pref">Create Backup</string>
++    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="toast_backup_successful">Backup successful</string>
++    <string name="toast_backup_failed">Backup failed</string>
++    <string name="export_warning_xml">Exports all accounts and transactions</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 4724468f..d3ac3b80 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -55,8 +55,10 @@
+ 	  <string name="hint_delete_after_export">Todas as transao exportadas sero deletadas aps completar o procedimento de exportar.</string>
+ 	  <string name="title_settings">Configuraes</string>
+ 	  <string-array name="export_destinations">
+-	    <item>Compartilhar arquivo</item>
+-	    <item>Carto SD</item>
++	      <item>Carto SD</item>
++		  <item>DropBox</item>
++		  <item>Google Drive</item>
++		  <item>Compartilhar arquivo</item>
+ 	  </string-array>
+ 	  <string name="btn_move">Mover</string>
+ 	  <string name="title_move_transactions">Mover %1$d transao(es)</string>
+@@ -418,7 +420,7 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -459,8 +461,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+ 	<string name="title_restore_last_backup">Restore last backup</string>
+-	<string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-	<string name="title_restore_backup">Restore Backup...</string>
++	<string name="summary_restore_last_backup">Restore the most recent backup</string>
++	<string name="title_restore_backup">Restore Backup</string>
++	<string name="header_backup_and_export_settings">Backup &amp; export</string>
++	<string name="title_dropbox_sync_preference">DropBox Sync</string>
++	<string name="title_backup_preference_category">Backup</string>
++	<string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++	<string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++	<string name="title_backup_prefs">Backup Preferences</string>
++	<string name="title_create_backup_pref">Create Backup</string>
++	<string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++	<string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++	<string name="toast_backup_successful">Backup successful</string>
++	<string name="toast_backup_failed">Backup failed</string>
++	<string name="export_warning_xml">Exports all accounts and transactions</string>
+ 	<plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 49f1ee3e..90bb8a9b 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -56,8 +56,10 @@
+     <string name="hint_delete_after_export">      .</string>
+     <string name="title_settings"></string>
+     <string-array name="export_destinations">
+-        <item> &#8230;</item>
+         <item> </item>
++        <item>DropBox</item>
++        <item>Google Drive</item>
++        <item> &#8230;</item>
+     </string-array>
+     <string name="btn_move"></string>
+     <string name="title_move_transactions"> %1$d (,,)</string>
+@@ -421,7 +423,7 @@
+     </string>
+     <string name="title_save_opening_balances">   </string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -462,8 +464,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++    <string name="header_backup_and_export_settings">Backup &amp; export</string>
++    <string name="title_dropbox_sync_preference">DropBox Sync</string>
++    <string name="title_backup_preference_category">Backup</string>
++    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++    <string name="title_backup_prefs">Backup Preferences</string>
++    <string name="title_create_backup_pref">Create Backup</string>
++    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="toast_backup_successful">Backup successful</string>
++    <string name="toast_backup_failed">Backup failed</string>
++    <string name="export_warning_xml">Exports all accounts and transactions</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index 1e782b8e..ecce50b6 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -61,8 +61,10 @@
+     <string name="hint_delete_after_export"></string>
+     <string name="title_settings"></string>
+     <string-array name="export_destinations">
+-        <item></item>
+         <item>SD</item>
++        <item>DropBox</item>
++        <item>Google Drive</item>
++        <item></item>
+     </string-array>
+     <string name="btn_move"></string>
+     <string name="title_move_transactions"> %1$d </string>
+@@ -381,9 +383,7 @@
+     <!-- Default title for color picker dialog [CHAR LIMIT=30] -->
+     <string name="color_picker_default_title"></string>
+     <!-- Content description for a color square. -->
+-    <string name="color_swatch_description" translatable="false">Color <xliff:g id="color_index" example="14">%1$d</xliff:g></string>
+     <!-- Content description for a selected color square. -->
+-    <string name="color_swatch_description_selected" translatable="false">Color <xliff:g id="color_index" example="14">%1$d</xliff:g> selected</string>
+     <string name="label_account_color_and_type"></string>
+     <string name="label_delete_sub_accounts"></string>
+     <string name="title_recent_accounts"></string>
+@@ -427,7 +427,7 @@
+     <string name="summary_save_opening_balances"></string>
+     <string name="title_save_opening_balances"></string>
+     <string name="export_warning_ofx">OFX </string>
+-    <string name="export_warning_qif">QIF</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits"></string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split"></string>
+@@ -457,8 +457,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule"></string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++    <string name="header_backup_and_export_settings">Backup &amp; export</string>
++    <string name="title_dropbox_sync_preference">DropBox Sync</string>
++    <string name="title_backup_preference_category">Backup</string>
++    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++    <string name="title_backup_prefs">Backup Preferences</string>
++    <string name="title_create_backup_pref">Create Backup</string>
++    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="toast_backup_successful">Backup successful</string>
++    <string name="toast_backup_failed">Backup failed</string>
++    <string name="export_warning_xml">Exports all accounts and transactions</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/values/donottranslate.xml b/app/src/main/res/values/donottranslate.xml
+index 33960b1d..b8accda2 100644
+--- a/app/src/main/res/values/donottranslate.xml
++++ b/app/src/main/res/values/donottranslate.xml
+@@ -24,6 +24,8 @@
+     <string name="key_restore_last_backup">restore_last_backup</string>
+     <string name="key_save_opening_balances">save_opening_balances</string>
+     <string name="key_restore_backup">restore_backup</string>
++    <string name="key_dropbox_sync">dropbox_sync</string>
++    <string name="key_create_backup">create_backup</string>
+ 
+     <string-array name="key_transaction_type_values">
+         <item>CREDIT</item>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 388908d3..5a74571b 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -61,8 +61,10 @@
+     <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+     <string name="title_settings">Settings</string>
+     <string-array name="export_destinations">
+-        <item>Share file&#8230;</item>
+         <item>SD Card</item>
++        <item>DropBox</item>
++        <item>Google Drive</item>
++        <item>Share file&#8230;</item>
+     </string-array>
+     <string name="btn_move">Move</string>
+     <string name="title_move_transactions">Move %1$d transaction(s)</string>
+@@ -429,7 +431,7 @@
+     </string>
+     <string name="title_save_opening_balances">Save account opening balances</string>
+     <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-    <string name="export_warning_qif">A separate QIF file will be generated for each currency in use</string>
++    <string name="export_warning_qif">Generates separate QIF files per currency</string>
+     <string name="title_transaction_splits">Transaction splits</string>
+     <string name="label_imbalance">Imbalance:</string>
+     <string name="btn_add_split">Add split</string>
+@@ -459,8 +461,20 @@
+     <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+     <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+     <string name="title_restore_last_backup">Restore last backup</string>
+-    <string name="summary_restore_last_backup">Restore accounts and transactions from the last backup</string>
+-    <string name="title_restore_backup">Restore Backup...</string>
++    <string name="summary_restore_last_backup">Restore the most recent backup</string>
++    <string name="title_restore_backup">Restore Backup</string>
++    <string name="header_backup_and_export_settings">Backup &amp; export</string>
++    <string name="title_dropbox_sync_preference">DropBox Sync</string>
++    <string name="title_backup_preference_category">Backup</string>
++    <string name="summary_dropbox_sync">Enable to link to your DropBox</string>
++    <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++    <string name="title_backup_prefs">Backup Preferences</string>
++    <string name="title_create_backup_pref">Create Backup</string>
++    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
++    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="toast_backup_successful">Backup successful</string>
++    <string name="toast_backup_failed">Backup failed</string>
++    <string name="export_warning_xml">Exports all accounts and transactions</string>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>
+diff --git a/app/src/main/res/xml/fragment_general_preferences.xml b/app/src/main/res/xml/fragment_backup_preferences.xml
+similarity index 78%
+rename from app/src/main/res/xml/fragment_general_preferences.xml
+rename to app/src/main/res/xml/fragment_backup_preferences.xml
+index 3cf64644..a38307b0 100644
+--- a/app/src/main/res/xml/fragment_general_preferences.xml
++++ b/app/src/main/res/xml/fragment_backup_preferences.xml
+@@ -16,13 +16,21 @@
+ -->
+ 
+ <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" >
+-    <PreferenceCategory android:title="Backup">
++    <PreferenceCategory android:title="@string/title_backup_preference_category">
++        <Preference android:title="@string/title_create_backup_pref"
++            android:key="@string/key_create_backup"
++            android:summary="@string/summary_create_backup_pref" />
+         <Preference android:summary="@string/summary_restore_last_backup"
+             android:key="@string/key_restore_last_backup"
+             android:title="@string/title_restore_last_backup" />
+         <Preference android:title="@string/title_restore_backup"
+             android:key="@string/key_restore_backup"
+-            android:summary="Select a specific backup to restore from. \nBackups are located on SDCARD/org.gnucash.android/backups" />
++            android:summary="@string/summary_restore_backup_pref" />
++        <CheckBoxPreference android:title="@string/title_dropbox_sync_preference"
++            android:summary="@string/summary_dropbox_sync"
++            android:checked="false"
++            android:key="@string/key_dropbox_sync"
++            android:icon="@drawable/ic_dropbox_android" />
+     </PreferenceCategory>
+     <PreferenceCategory android:title="@string/title_export_preference_category">
+ 
+diff --git a/app/src/main/res/xml/preference_headers.xml b/app/src/main/res/xml/preference_headers.xml
+index b8559671..5232aae2 100644
+--- a/app/src/main/res/xml/preference_headers.xml
++++ b/app/src/main/res/xml/preference_headers.xml
+@@ -15,12 +15,12 @@
+  limitations under the License.
+ -->
+ <preference-headers xmlns:android="http://schemas.android.com/apk/res/android">
+-    <header android:fragment="org.gnucash.android.ui.settings.GeneralPreferenceFragment"        
+-        android:title="@string/header_general_settings" />
+     <header android:fragment="org.gnucash.android.ui.settings.AccountPreferencesFragment"
+             android:title="@string/header_account_settings" />
+     <header android:fragment="org.gnucash.android.ui.settings.TransactionsPreferenceFragment" 
+         android:title="@string/header_transaction_settings" />
++    <header android:fragment="org.gnucash.android.ui.settings.BackupPreferenceFragment"
++        android:title="@string/header_backup_and_export_settings" />
+     <header android:fragment="org.gnucash.android.ui.settings.PasscodePreferenceFragment"
+         android:title="@string/header_passcode_settings" />
+     <header android:fragment="org.gnucash.android.ui.settings.AboutPreferenceFragment"

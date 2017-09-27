@@ -1,0 +1,2012 @@
+From 5bbe6310f8969d4c6099e6924dc02123c4222bf9 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 27 Nov 2015 15:49:11 +0100
+Subject: [PATCH] Add new editor for budget amounts (using FormActivity)
+
+Fix crash when creating/editing budgets
+Fix recurrence rule not including count/end time
+Fix crash when parsing weekly recurrences
+
+Upgrade gradle wrapper to version 2.9
+Update Android build tools and plugin (for use with Android Studio 2.0.0)
+---
+ app/build.gradle                                   |   2 +-
+ .../android/db/adapter/AccountsDbAdapter.java      |   6 +-
+ .../java/org/gnucash/android/model/Account.java    |   4 -
+ .../java/org/gnucash/android/model/Budget.java     |   1 -
+ .../org/gnucash/android/model/BudgetAmount.java    |  50 +++-
+ .../main/java/org/gnucash/android/model/Money.java |   2 -
+ .../java/org/gnucash/android/model/Recurrence.java |  25 +-
+ .../android/ui/account/AccountsActivity.java       |  47 ++--
+ .../ui/budget/BudgetAmountEditorFragment.java      | 278 +++++++++++++++++++++
+ .../android/ui/budget/BudgetDetailFragment.java    |   5 +-
+ .../android/ui/budget/BudgetFormFragment.java      | 244 ++++++++----------
+ .../gnucash/android/ui/common/FormActivity.java    |  16 +-
+ .../org/gnucash/android/ui/common/UxArgument.java  |   5 +
+ .../gnucash/android/ui/util/RecurrenceParser.java  |   2 +-
+ .../ui/util/RecurrenceViewClickListener.java       |   3 +-
+ .../res/layout/fragment_budget_amount_editor.xml   |  42 ++++
+ app/src/main/res/layout/fragment_budget_form.xml   | 174 ++++++-------
+ app/src/main/res/layout/fragment_split_editor.xml  |   2 +-
+ app/src/main/res/layout/item_budget_amount.xml     |   5 +-
+ .../main/res/menu/budget_amount_editor_actions.xml |  27 ++
+ .../test/unit/db/AccountsDbAdapterTest.java        |  13 +-
+ build.gradle                                       |   2 +-
+ gradle/wrapper/gradle-wrapper.jar                  | Bin 52266 -> 53636 bytes
+ gradle/wrapper/gradle-wrapper.properties           |   4 +-
+ gradlew                                            |  10 +-
+ 25 files changed, 669 insertions(+), 300 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/ui/budget/BudgetAmountEditorFragment.java
+ create mode 100644 app/src/main/res/layout/fragment_budget_amount_editor.xml
+ create mode 100644 app/src/main/res/menu/budget_amount_editor_actions.xml
+
+diff --git a/app/build.gradle b/app/build.gradle
+index c0952bdc..62c5c1c8 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -21,7 +21,7 @@ def gitSha() {
+ 
+ android {
+     compileSdkVersion 23
+-    buildToolsVersion "23.0.1"
++    buildToolsVersion '23.0.2'
+     defaultConfig {
+         applicationId "org.gnucash.android"
+         testApplicationId 'org.gnucash.android.test'
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+index 906b9673..5ecc726f 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+@@ -1203,14 +1203,18 @@ public static int getActiveAccountColorResource(@NonNull String accountUID) {
+ 	 */
+     @Override
+ 	public int deleteAllRecords() {
+-        mDb.delete(DatabaseSchema.PriceEntry.TABLE_NAME, null, null);
+         // Relies "ON DELETE CASCADE" takes too much time
+         // It take more than 300s to complete the deletion on my dataset without
+         // clearing the split table first, but only needs a little more that 1s
+         // if the split table is cleared first.
++        mDb.delete(DatabaseSchema.PriceEntry.TABLE_NAME, null, null);
+         mDb.delete(SplitEntry.TABLE_NAME, null, null);
+         mDb.delete(TransactionEntry.TABLE_NAME, null, null);
+         mDb.delete(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, null, null);
++        mDb.delete(DatabaseSchema.BudgetAmountEntry.TABLE_NAME, null, null);
++        mDb.delete(DatabaseSchema.BudgetEntry.TABLE_NAME, null, null);
++        mDb.delete(DatabaseSchema.RecurrenceEntry.TABLE_NAME, null, null);
++
+         return mDb.delete(AccountEntry.TABLE_NAME, null, null);
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index 6df05036..5ae6bc42 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -17,11 +17,7 @@
+ package org.gnucash.android.model;
+ 
+ 
+-import android.preference.PreferenceManager;
+-
+ import org.gnucash.android.BuildConfig;
+-import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.ofx.OfxHelper;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+diff --git a/app/src/main/java/org/gnucash/android/model/Budget.java b/app/src/main/java/org/gnucash/android/model/Budget.java
+index 8605146e..db199b36 100644
+--- a/app/src/main/java/org/gnucash/android/model/Budget.java
++++ b/app/src/main/java/org/gnucash/android/model/Budget.java
+@@ -23,7 +23,6 @@
+ 
+ import java.math.BigDecimal;
+ import java.util.ArrayList;
+-import java.util.Currency;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.List;
+diff --git a/app/src/main/java/org/gnucash/android/model/BudgetAmount.java b/app/src/main/java/org/gnucash/android/model/BudgetAmount.java
+index 8aa42b26..714e4478 100644
+--- a/app/src/main/java/org/gnucash/android/model/BudgetAmount.java
++++ b/app/src/main/java/org/gnucash/android/model/BudgetAmount.java
+@@ -15,12 +15,19 @@
+  */
+ package org.gnucash.android.model;
+ 
++import android.os.Parcel;
++import android.os.Parcelable;
++
++import org.gnucash.android.app.GnuCashApplication;
++
++import java.math.BigDecimal;
++
+ /**
+  * Budget amounts for the different accounts.
+  * The {@link Money} amounts are absolute values
+  * @see Budget
+  */
+-public class BudgetAmount extends BaseModel {
++public class BudgetAmount extends BaseModel implements Parcelable {
+ 
+     private String mBudgetUID;
+     private String mAccountUID;
+@@ -101,4 +108,45 @@ public Money getAmount() {
+     public void setAmount(Money amount) {
+         this.mAmount = amount.abs();
+     }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(Parcel dest, int flags) {
++        dest.writeString(getUID());
++        dest.writeString(mBudgetUID);
++        dest.writeString(mAccountUID);
++        dest.writeString(mAmount.toPlainString());
++        dest.writeLong(mPeriodNum);
++    }
++
++    public static final Parcelable.Creator<BudgetAmount> CREATOR = new Parcelable.Creator<BudgetAmount>(){
++
++        @Override
++        public BudgetAmount createFromParcel(Parcel source) {
++            return new BudgetAmount(source);
++        }
++
++        @Override
++        public BudgetAmount[] newArray(int size) {
++            return new BudgetAmount[size];
++        }
++    };
++
++    /**
++     * Private constructor for creating new BudgetAmounts from a Parcel
++     * @param source Parcel
++     */
++    private BudgetAmount(Parcel source){
++        setUID(source.readString());
++        mBudgetUID = source.readString();
++        mAccountUID = source.readString();
++        mAmount = new Money(new BigDecimal(source.readString()), Commodity.DEFAULT_COMMODITY);
++        mPeriodNum = source.readLong();
++    }
++
++
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 7c5e0a70..ef7cec86 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -25,11 +25,9 @@
+ import java.math.BigDecimal;
+ import java.math.BigInteger;
+ import java.math.RoundingMode;
+-import java.security.InvalidParameterException;
+ import java.text.DecimalFormat;
+ import java.text.DecimalFormatSymbols;
+ import java.text.NumberFormat;
+-import java.text.ParseException;
+ import java.util.Currency;
+ import java.util.Locale;
+ 
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index 87dcb562..331a0bd1 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -125,13 +125,16 @@ public long getPeriod(){
+     public String getRepeatString(){
+         String dayOfWeek = new SimpleDateFormat("EEEE", Locale.US).format(new Date(mPeriodStart.getTime()));
+ 
+-        StringBuilder ruleBuilder = new StringBuilder(mPeriodType.getFrequencyRepeatString());
++        StringBuilder repeatBuilder = new StringBuilder(mPeriodType.getFrequencyRepeatString());
+ 
+         if (mPeriodType == PeriodType.WEEK) {
+-            ruleBuilder.append(" on ").append(dayOfWeek);
++            repeatBuilder.append(" on ").append(dayOfWeek);
+         }
+ 
+-        return ruleBuilder.toString();
++        if (mPeriodEnd != null){
++            repeatBuilder.append(" until " + SimpleDateFormat.getDateInstance().format(new Date(mPeriodEnd.getTime())));
++        }
++        return repeatBuilder.toString();
+     }
+ 
+         /**
+@@ -158,6 +161,8 @@ public String getRuleString(){
+ 
+         ruleBuilder.append("FREQ=").append(mPeriodType.getFrequencyDescription()).append(separator);
+         ruleBuilder.append("INTERVAL=").append(mPeriodType.getMultiplier()).append(separator);
++        if (getCount() > 0)
++            ruleBuilder.append("COUNT=").append(getCount()).append(separator);
+         ruleBuilder.append(mPeriodType.getByParts(mPeriodStart.getTime())).append(separator);
+ 
+         return ruleBuilder.toString();
+@@ -275,7 +280,8 @@ public int getCount(){
+                 count = Years.yearsBetween(startDate, endDate).getYears();
+                 break;
+         }
+-        return count;
++
++        return count/mPeriodType.getMultiplier();
+     }
+ 
+     /**
+@@ -285,21 +291,22 @@ public int getCount(){
+     public void setPeriodEnd(int numberOfOccurences){
+         LocalDateTime localDate = new LocalDateTime(mPeriodStart.getTime());
+         LocalDateTime endDate;
++        int occurrenceDuration = numberOfOccurences * mPeriodType.getMultiplier();
+         switch (mPeriodType){
+             case DAY:
+-                endDate = localDate.dayOfWeek().getLocalDateTime().plusDays(numberOfOccurences);
++                endDate = localDate.dayOfWeek().getLocalDateTime().plusDays(occurrenceDuration);
+                 break;
+             case WEEK:
+-                endDate = localDate.dayOfWeek().getLocalDateTime().plusWeeks(numberOfOccurences);
++                endDate = localDate.dayOfWeek().getLocalDateTime().plusWeeks(occurrenceDuration);
+                 break;
+             case MONTH:
+-                endDate = localDate.dayOfMonth().getLocalDateTime().plusMonths(numberOfOccurences);
++                endDate = localDate.dayOfMonth().getLocalDateTime().plusMonths(occurrenceDuration);
+                 break;
+             case YEAR:
+-                endDate = localDate.monthOfYear().getLocalDateTime().plusYears(numberOfOccurences);
++                endDate = localDate.monthOfYear().getLocalDateTime().plusYears(occurrenceDuration);
+                 break;
+             default: //default to monthly
+-                endDate = localDate.dayOfMonth().getLocalDateTime().plusMonths(numberOfOccurences);
++                endDate = localDate.dayOfMonth().getLocalDateTime().plusMonths(occurrenceDuration);
+                 break;
+         }
+         mPeriodEnd = new Timestamp(endDate.toDate().getTime());
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 126094a1..493ca6e2 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -163,23 +163,25 @@ public AccountViewPagerAdapter(FragmentManager fm){
+ 
+         @Override
+         public Fragment getItem(int i) {
+-            AccountsListFragment currentFragment;
+-            switch (i){
+-                case INDEX_RECENT_ACCOUNTS_FRAGMENT:
+-                    currentFragment = AccountsListFragment.newInstance(AccountsListFragment.DisplayMode.RECENT);
+-                    break;
+-
+-                case INDEX_FAVORITE_ACCOUNTS_FRAGMENT:
+-                    currentFragment = AccountsListFragment.newInstance(AccountsListFragment.DisplayMode.FAVORITES);
+-                    break;
+-
+-                case INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT:
+-                default:
+-                    currentFragment = AccountsListFragment.newInstance(AccountsListFragment.DisplayMode.TOP_LEVEL);
+-                    break;
++            AccountsListFragment currentFragment = (AccountsListFragment) mFragmentPageReferenceMap.get(i);
++            if (currentFragment == null) {
++                switch (i) {
++                    case INDEX_RECENT_ACCOUNTS_FRAGMENT:
++                        currentFragment = AccountsListFragment.newInstance(AccountsListFragment.DisplayMode.RECENT);
++                        break;
++
++                    case INDEX_FAVORITE_ACCOUNTS_FRAGMENT:
++                        currentFragment = AccountsListFragment.newInstance(AccountsListFragment.DisplayMode.FAVORITES);
++                        break;
++
++                    case INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT:
++                    default:
++                        currentFragment = AccountsListFragment.newInstance(AccountsListFragment.DisplayMode.TOP_LEVEL);
++                        break;
++                }
++                mFragmentPageReferenceMap.put(i, currentFragment);
+             }
+ 
+-            mFragmentPageReferenceMap.put(i, currentFragment);
+             return currentFragment;
+         }
+ 
+@@ -259,10 +261,7 @@ public void onTabReselected(TabLayout.Tab tab) {
+             }
+         });
+ 
+-        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(this);
+-        int lastTabIndex = preferences.getInt(LAST_OPEN_TAB_INDEX, INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
+-        int index = intent.getIntExtra(EXTRA_TAB_INDEX, lastTabIndex);
+-        mViewPager.setCurrentItem(index);
++        setCurrentTab();
+ 
+         mFloatingActionButton.setOnClickListener(new View.OnClickListener() {
+             @Override
+@@ -348,17 +347,19 @@ public void onRequestPermissionsResult(int requestCode, String[] permissions, in
+     @Override
+     protected void onNewIntent(Intent intent) {
+         super.onNewIntent(intent);
+-        int index = intent.getIntExtra(EXTRA_TAB_INDEX, INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
+-        setTab(index);
++        setIntent(intent);
++        setCurrentTab();
+ 
+         handleOpenFileIntent(intent);
+     }
+ 
+     /**
+      * Sets the current tab in the ViewPager
+-     * @param index Index of fragment to be loaded
+      */
+-    public void setTab(int index){
++    public void setCurrentTab(){
++        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(this);
++        int lastTabIndex = preferences.getInt(LAST_OPEN_TAB_INDEX, INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
++        int index = getIntent().getIntExtra(EXTRA_TAB_INDEX, lastTabIndex);
+         mViewPager.setCurrentItem(index);
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/budget/BudgetAmountEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/budget/BudgetAmountEditorFragment.java
+new file mode 100644
+index 00000000..522ab0db
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/ui/budget/BudgetAmountEditorFragment.java
+@@ -0,0 +1,278 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.ui.budget;
++
++import android.app.Activity;
++import android.content.Intent;
++import android.database.Cursor;
++import android.inputmethodservice.KeyboardView;
++import android.os.Bundle;
++import android.support.annotation.Nullable;
++import android.support.v4.app.Fragment;
++import android.support.v7.app.ActionBar;
++import android.support.v7.app.AppCompatActivity;
++import android.view.LayoutInflater;
++import android.view.Menu;
++import android.view.MenuInflater;
++import android.view.MenuItem;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.AdapterView;
++import android.widget.ImageView;
++import android.widget.LinearLayout;
++import android.widget.Spinner;
++import android.widget.TextView;
++import android.widget.Toast;
++
++import org.gnucash.android.R;
++import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BudgetsDbAdapter;
++import org.gnucash.android.model.BudgetAmount;
++import org.gnucash.android.model.Commodity;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.ui.common.UxArgument;
++import org.gnucash.android.ui.util.widget.CalculatorEditText;
++import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
++
++import java.math.BigDecimal;
++import java.util.ArrayList;
++import java.util.Currency;
++import java.util.List;
++
++import butterknife.Bind;
++import butterknife.ButterKnife;
++
++/**
++ * Fragment for editing budgeting amounts
++ */
++public class BudgetAmountEditorFragment extends Fragment {
++
++    private Cursor mAccountCursor;
++    private QualifiedAccountNameCursorAdapter mAccountCursorAdapter;
++    private List<View> mBudgetAmountViews = new ArrayList<>();
++    private AccountsDbAdapter mAccountsDbAdapter;
++
++    @Bind(R.id.budget_amount_layout)    LinearLayout mBudgetAmountTableLayout;
++    @Bind(R.id.calculator_keyboard)     KeyboardView mKeyboardView;
++
++    public static BudgetAmountEditorFragment newInstance(Bundle args){
++        BudgetAmountEditorFragment fragment = new BudgetAmountEditorFragment();
++        fragment.setArguments(args);
++        return fragment;
++    }
++
++    @Nullable
++    @Override
++    public View onCreateView(LayoutInflater inflater, @Nullable ViewGroup container,
++                             @Nullable Bundle savedInstanceState) {
++        View view = inflater.inflate(R.layout.fragment_budget_amount_editor, container, false);
++        ButterKnife.bind(this, view);
++        setupAccountSpinnerAdapter();
++        return view;
++    }
++
++    @Override
++    public void onCreate(@Nullable Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++        mAccountsDbAdapter = AccountsDbAdapter.getInstance();
++    }
++
++    @Override
++    public void onActivityCreated(@Nullable Bundle savedInstanceState) {
++        super.onActivityCreated(savedInstanceState);
++
++        ActionBar actionBar = ((AppCompatActivity)getActivity()).getSupportActionBar();
++        assert actionBar != null;
++        actionBar.setTitle("Edit Budget Amounts");
++        setHasOptionsMenu(true);
++
++        ArrayList<BudgetAmount> budgetAmounts = getArguments().getParcelableArrayList(UxArgument.BUDGET_AMOUNT_LIST);
++        if (budgetAmounts != null) {
++            if (budgetAmounts.isEmpty()){
++                BudgetAmountViewHolder viewHolder = (BudgetAmountViewHolder) addBudgetAmountView(null).getTag();
++                viewHolder.removeItemBtn.setVisibility(View.GONE); //there should always be at least one
++            } else {
++                loadBudgetAmountViews(budgetAmounts);
++            }
++        } else {
++            BudgetAmountViewHolder viewHolder = (BudgetAmountViewHolder) addBudgetAmountView(null).getTag();
++            viewHolder.removeItemBtn.setVisibility(View.GONE); //there should always be at least one
++        }
++
++    }
++
++    @Override
++    public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
++        inflater.inflate(R.menu.budget_amount_editor_actions, menu);
++    }
++
++    @Override
++    public boolean onOptionsItemSelected(MenuItem item) {
++        switch (item.getItemId()){
++            case R.id.menu_add_budget_amount:
++                addBudgetAmountView(null);
++                return true;
++
++            case R.id.menu_save:
++                saveBudgetAmounts();
++                return true;
++
++            default:
++                return super.onOptionsItemSelected(item);
++        }
++    }
++
++    /**
++     * Checks if the budget amounts can be saved
++     * @return {@code true} if all amounts a properly entered, {@code false} otherwise
++     */
++    private boolean canSave(){
++        for (View budgetAmountView : mBudgetAmountViews) {
++            BudgetAmountViewHolder viewHolder = (BudgetAmountViewHolder) budgetAmountView.getTag();
++            viewHolder.amountEditText.evaluate();
++            if (viewHolder.amountEditText.getError() != null){
++                return false;
++            }
++            //at least one account should be loaded (don't create budget with empty account tree
++            if (viewHolder.budgetAccountSpinner.getCount() == 0){
++                Toast.makeText(getActivity(), "You need an account hierarchy to create a budget!",
++                        Toast.LENGTH_SHORT).show();
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private void saveBudgetAmounts() {
++        if (canSave()){
++            ArrayList<BudgetAmount> budgetAmounts = (ArrayList<BudgetAmount>) extractBudgetAmounts();
++            Intent data = new Intent();
++            data.putParcelableArrayListExtra(UxArgument.BUDGET_AMOUNT_LIST, budgetAmounts);
++            getActivity().setResult(Activity.RESULT_OK, data);
++            getActivity().finish();
++        }
++    }
++
++    /**
++     * Load views for the budget amounts
++     * @param budgetAmounts List of {@link BudgetAmount}s
++     */
++    private void loadBudgetAmountViews(List<BudgetAmount> budgetAmounts){
++        for (BudgetAmount budgetAmount : budgetAmounts) {
++            addBudgetAmountView(budgetAmount);
++        }
++    }
++
++    /**
++     * Inflates a new BudgetAmount item view and adds it to the UI.
++     * <p>If the {@code budgetAmount} is not null, then it is used to initialize the view</p>
++     * @param budgetAmount Budget amount
++     */
++    private View addBudgetAmountView(BudgetAmount budgetAmount){
++        LayoutInflater layoutInflater = getActivity().getLayoutInflater();
++        View budgetAmountView = layoutInflater.inflate(R.layout.item_budget_amount,
++                mBudgetAmountTableLayout, false);
++        BudgetAmountViewHolder viewHolder = new BudgetAmountViewHolder(budgetAmountView);
++        if (budgetAmount != null){
++            viewHolder.bindViews(budgetAmount);
++        }
++        mBudgetAmountTableLayout.addView(budgetAmountView, 0);
++        mBudgetAmountViews.add(budgetAmountView);
++//        mScrollView.fullScroll(ScrollView.FOCUS_DOWN);
++        return budgetAmountView;
++    }
++
++    /**
++     * Loads the accounts in the spinner
++     */
++    private void setupAccountSpinnerAdapter(){
++        String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_HIDDEN + " = 0 )";
++
++        if (mAccountCursor != null) {
++            mAccountCursor.close();
++        }
++        mAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions, null);
++
++        mAccountCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(), mAccountCursor);
++    }
++
++    /**
++     * Extract {@link BudgetAmount}s from the views
++     * @return List of budget amounts
++     */
++    private List<BudgetAmount> extractBudgetAmounts(){
++        List<BudgetAmount> budgetAmounts = new ArrayList<>();
++        for (View view : mBudgetAmountViews) {
++            BudgetAmountViewHolder viewHolder = (BudgetAmountViewHolder) view.getTag();
++            BigDecimal amountValue = viewHolder.amountEditText.getValue();
++            if (amountValue == null)
++                continue;
++            Money amount = new Money(amountValue, Commodity.DEFAULT_COMMODITY);
++            String accountUID = mAccountsDbAdapter.getUID(viewHolder.budgetAccountSpinner.getSelectedItemId());
++            BudgetAmount budgetAmount = new BudgetAmount(amount, accountUID);
++            budgetAmounts.add(budgetAmount);
++        }
++        return budgetAmounts;
++    }
++
++    /**
++     * View holder for budget amounts
++     */
++    class BudgetAmountViewHolder{
++        @Bind(R.id.currency_symbol)     TextView currencySymbolTextView;
++        @Bind(R.id.input_budget_amount) CalculatorEditText amountEditText;
++        @Bind(R.id.btn_remove_item)     ImageView removeItemBtn;
++        @Bind(R.id.input_budget_account_spinner) Spinner budgetAccountSpinner;
++        View itemView;
++
++        public BudgetAmountViewHolder(View view){
++            itemView = view;
++            ButterKnife.bind(this, view);
++            itemView.setTag(this);
++
++            amountEditText.bindListeners(mKeyboardView);
++            budgetAccountSpinner.setAdapter(mAccountCursorAdapter);
++
++            budgetAccountSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
++                @Override
++                public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
++                    String currencyCode = mAccountsDbAdapter.getCurrencyCode(mAccountsDbAdapter.getUID(id));
++                    Currency currency = Currency.getInstance(currencyCode);
++                    currencySymbolTextView.setText(currency.getSymbol());
++                }
++
++                @Override
++                public void onNothingSelected(AdapterView<?> parent) {
++                    //nothing to see here, move along
++                }
++            });
++
++            removeItemBtn.setOnClickListener(new View.OnClickListener() {
++                @Override
++                public void onClick(View v) {
++                    mBudgetAmountTableLayout.removeView(itemView);
++                    mBudgetAmountViews.remove(itemView);
++                }
++            });
++        }
++
++        public void bindViews(BudgetAmount budgetAmount){
++            amountEditText.setValue(budgetAmount.getAmount().asBigDecimal());
++            budgetAccountSpinner.setSelection(mAccountCursorAdapter.getPosition(budgetAmount.getAccountUID()));
++        }
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java b/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
+index d103ab71..40d9eac8 100644
+--- a/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/budget/BudgetDetailFragment.java
+@@ -23,6 +23,7 @@
+ import android.os.Bundle;
+ import android.support.annotation.Nullable;
+ import android.support.v4.app.Fragment;
++import android.support.v7.app.ActionBar;
+ import android.support.v7.app.AppCompatActivity;
+ import android.support.v7.widget.GridLayoutManager;
+ import android.support.v7.widget.LinearLayoutManager;
+@@ -144,7 +145,9 @@ public void onResume() {
+     public void refresh() {
+         bindViews();
+         String budgetName = mBudgetsDbAdapter.getAttribute(mBudgetUID, DatabaseSchema.BudgetEntry.COLUMN_NAME);
+-        ((AppCompatActivity) getActivity()).getSupportActionBar().setTitle(budgetName);
++        ActionBar actionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
++        assert actionBar != null;
++        actionBar.setTitle("Budget: " + budgetName);
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/budget/BudgetFormFragment.java b/app/src/main/java/org/gnucash/android/ui/budget/BudgetFormFragment.java
+index fe50d322..d0210b76 100644
+--- a/app/src/main/java/org/gnucash/android/ui/budget/BudgetFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/budget/BudgetFormFragment.java
+@@ -16,9 +16,12 @@
+ 
+ package org.gnucash.android.ui.budget;
+ 
++import android.app.Activity;
++import android.content.Intent;
+ import android.database.Cursor;
+ import android.inputmethodservice.KeyboardView;
+ import android.os.Bundle;
++import android.os.Parcelable;
+ import android.support.annotation.Nullable;
+ import android.support.design.widget.TextInputLayout;
+ import android.support.v4.app.Fragment;
+@@ -31,12 +34,9 @@
+ import android.view.MenuItem;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import android.widget.AdapterView;
+ import android.widget.Button;
+ import android.widget.EditText;
+-import android.widget.ImageView;
+ import android.widget.Spinner;
+-import android.widget.TableLayout;
+ import android.widget.TextView;
+ import android.widget.Toast;
+ 
+@@ -54,6 +54,7 @@
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Recurrence;
++import org.gnucash.android.ui.common.FormActivity;
+ import org.gnucash.android.ui.common.UxArgument;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+@@ -66,9 +67,9 @@
+ import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.Calendar;
+-import java.util.Currency;
+ import java.util.Date;
+ import java.util.GregorianCalendar;
++import java.util.IllegalFormatCodePointException;
+ import java.util.List;
+ 
+ import butterknife.Bind;
+@@ -80,28 +81,28 @@
+  */
+ public class BudgetFormFragment extends Fragment implements RecurrencePickerDialogFragment.OnRecurrenceSetListener, CalendarDatePickerDialogFragment.OnDateSetListener {
+ 
++    public static final int REQUEST_EDIT_BUDGET_AMOUNTS = 0xBA;
+     @Bind(R.id.input_budget_name)   EditText mBudgetNameInput;
+     @Bind(R.id.input_description)   EditText mDescriptionInput;
+     @Bind(R.id.input_recurrence)    TextView mRecurrenceInput;
+     @Bind(R.id.name_text_input_layout)  TextInputLayout mNameTextInputLayout;
+     @Bind(R.id.calculator_keyboard)     KeyboardView mKeyboardView;
+-    @Bind(R.id.budget_amount_table_layout) TableLayout mBudgetAmountTableLayout;
++    @Bind(R.id.input_budget_amount)     CalculatorEditText mBudgetAmountInput;
++    @Bind(R.id.input_budget_account_spinner) Spinner mBudgetAccountSpinner;
+     @Bind(R.id.btn_add_budget_amount)   Button mAddBudgetAmount;
+     @Bind(R.id.input_start_date)        TextView mStartDateInput;
++    @Bind(R.id.budget_amount_layout)    View mBudgetAmountLayout;
+ 
+     EventRecurrence mEventRecurrence = new EventRecurrence();
+     String mRecurrenceRule;
+ 
+-    private Cursor mAccountCursor;
+-    private AccountsDbAdapter mAccountsDbAdapter;
+     private BudgetsDbAdapter mBudgetsDbAdapter;
+ 
+     private Budget mBudget;
+-    private QualifiedAccountNameCursorAdapter mAccountCursorAdapter;
+-
+-    private List<View> mBudgetAmountViews = new ArrayList<>();
+-
+     private Calendar mStartDate;
++    private ArrayList<BudgetAmount> mBudgetAmounts;
++    private AccountsDbAdapter mAccountsDbAdapter;
++    private QualifiedAccountNameCursorAdapter mAccountsCursorAdapter;
+ 
+     @Nullable
+     @Override
+@@ -109,16 +110,8 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle sa
+         View view = inflater.inflate(R.layout.fragment_budget_form, container, false);
+         ButterKnife.bind(this, view);
+ 
+-        setupAccountSpinnerAdapter();
+-        mRecurrenceInput.setOnClickListener(
+-                new RecurrenceViewClickListener((AppCompatActivity) getActivity(), mRecurrenceRule, this));
+-
+-        mAddBudgetAmount.setOnClickListener(new View.OnClickListener() {
+-            @Override
+-            public void onClick(View v) {
+-                addBudgetAmountView(null);
+-            }
+-        });
++        view.findViewById(R.id.btn_remove_item).setVisibility(View.GONE);
++        mBudgetAmountInput.bindListeners(mKeyboardView);
+         mStartDateInput.setText(TransactionFormFragment.DATE_FORMATTER.format(mStartDate.getTime()));
+         return view;
+     }
+@@ -126,75 +119,35 @@ public void onClick(View v) {
+     @Override
+     public void onCreate(@Nullable Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+-        mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+         mBudgetsDbAdapter = BudgetsDbAdapter.getInstance();
+         mStartDate = Calendar.getInstance();
++        mBudgetAmounts = new ArrayList<>();
++        String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_HIDDEN + " = 0 )";
++        mAccountsDbAdapter = AccountsDbAdapter.getInstance();
++        Cursor accountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions, null);
++        mAccountsCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(), accountCursor);
+     }
+ 
+     @Override
+     public void onActivityCreated(@Nullable Bundle savedInstanceState) {
+         super.onActivityCreated(savedInstanceState);
+-        ActionBar actionbar = ((AppCompatActivity) getActivity()).getSupportActionBar();
+-        actionbar.setTitle("Create Budget");
+ 
+         setHasOptionsMenu(true);
+ 
++        mBudgetAccountSpinner.setAdapter(mAccountsCursorAdapter);
+         String budgetUID = getArguments().getString(UxArgument.BUDGET_UID);
+         if (budgetUID != null){ //if we are editing the budget
+             initViews(mBudget = mBudgetsDbAdapter.getRecord(budgetUID));
+-            loadBudgetAmountViews(mBudget.getCompactedBudgetAmounts());
+-        } else {
+-            BudgetAmountViewHolder viewHolder = (BudgetAmountViewHolder) addBudgetAmountView(null).getTag();
+-            viewHolder.removeItemBtn.setVisibility(View.GONE); //there should always be at least one
+-        }
+-    }
+-
+-    /**
+-     * Load views for the budget amounts
+-     * @param budgetAmounts List of {@link BudgetAmount}s
+-     */
+-    private void loadBudgetAmountViews(List<BudgetAmount> budgetAmounts){
+-        for (BudgetAmount budgetAmount : budgetAmounts) {
+-            addBudgetAmountView(budgetAmount);
+-        }
+-    }
+-
+-    /**
+-     * Extract {@link BudgetAmount}s from the views
+-     * @return List of budget amounts
+-     */
+-    private List<BudgetAmount> extractBudgetAmounts(){
+-        List<BudgetAmount> budgetAmounts = new ArrayList<>();
+-        for (View view : mBudgetAmountViews) {
+-            BudgetAmountViewHolder viewHolder = (BudgetAmountViewHolder) view.getTag();
+-            BigDecimal amountValue = viewHolder.amountEditText.getValue();
+-            if (amountValue == null)
+-                continue;
+-            Money amount = new Money(amountValue, Commodity.DEFAULT_COMMODITY);
+-            String accountUID = mAccountsDbAdapter.getUID(viewHolder.budgetAccountSpinner.getSelectedItemId());
+-            BudgetAmount budgetAmount = new BudgetAmount(amount, accountUID);
+-            budgetAmounts.add(budgetAmount);
+         }
+-        return budgetAmounts;
+-    }
++        ActionBar actionbar = ((AppCompatActivity) getActivity()).getSupportActionBar();
++        assert actionbar != null;
++        if (mBudget ==  null)
++            actionbar.setTitle("Create Budget");
++        else
++            actionbar.setTitle("Edit Budget");
+ 
+-    /**
+-     * Inflates a new BudgetAmount item view and adds it to the UI.
+-     * <p>If the {@code budgetAmount} is not null, then it is used to initialize the view</p>
+-     * @param budgetAmount Budget amount
+-     */
+-    private View addBudgetAmountView(BudgetAmount budgetAmount){
+-        LayoutInflater layoutInflater = getActivity().getLayoutInflater();
+-        View budgetAmountView = layoutInflater.inflate(R.layout.item_budget_amount,
+-                mBudgetAmountTableLayout, false);
+-        BudgetAmountViewHolder viewHolder = new BudgetAmountViewHolder(budgetAmountView);
+-        if (budgetAmount != null){
+-            viewHolder.bindViews(budgetAmount);
+-        }
+-        mBudgetAmountTableLayout.addView(budgetAmountView, 0);
+-        mBudgetAmountViews.add(budgetAmountView);
+-//        mScrollView.fullScroll(ScrollView.FOCUS_DOWN);
+-        return budgetAmountView;
++        mRecurrenceInput.setOnClickListener(
++                new RecurrenceViewClickListener((AppCompatActivity) getActivity(), mRecurrenceRule, this));
+     }
+ 
+     /**
+@@ -209,20 +162,32 @@ private void initViews(Budget budget){
+         mRecurrenceRule = recurrenceRuleString;
+         mEventRecurrence.parse(recurrenceRuleString);
+         mRecurrenceInput.setText(budget.getRecurrence().getRepeatString());
++
++        mBudgetAmounts = (ArrayList<BudgetAmount>) budget.getCompactedBudgetAmounts();
++        toggleAmountInputVisibility();
+     }
+ 
+     /**
+-     * Loads the accounts in the spinner
++     * Extracts the budget amounts from the form
++     * <p>If the budget amount was input using the simple form, then read the values.<br>
++     *     Else return the values gotten from the BudgetAmountEditor</p>
++     * @return List of budget amounts
+      */
+-    private void setupAccountSpinnerAdapter(){
+-        String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_HIDDEN + " = 0 )";
+-
+-        if (mAccountCursor != null) {
+-            mAccountCursor.close();
++    private ArrayList<BudgetAmount> extractBudgetAmounts(){
++        BigDecimal value = mBudgetAmountInput.getValue();
++        if (value == null)
++            return mBudgetAmounts;
++
++        if (mBudgetAmounts.isEmpty()){ //has not been set in budget amounts editor
++            ArrayList<BudgetAmount> budgetAmounts = new ArrayList<>();
++            Money amount = new Money(value, Commodity.DEFAULT_COMMODITY);
++            String accountUID = mAccountsDbAdapter.getUID(mBudgetAccountSpinner.getSelectedItemId());
++            BudgetAmount budgetAmount = new BudgetAmount(amount, accountUID);
++            budgetAmounts.add(budgetAmount);
++            return budgetAmounts;
++        } else {
++            return mBudgetAmounts;
+         }
+-        mAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions, null);
+-
+-        mAccountCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(), mAccountCursor);
+     }
+ 
+     /**
+@@ -232,20 +197,6 @@ private void setupAccountSpinnerAdapter(){
+      * @return {@code true} if the budget can be saved, {@code false} otherwise
+      */
+     private boolean canSave(){
+-        for (View budgetAmountView : mBudgetAmountViews) {
+-            BudgetAmountViewHolder viewHolder = (BudgetAmountViewHolder) budgetAmountView.getTag();
+-            viewHolder.amountEditText.evaluate();
+-            if (viewHolder.amountEditText.getError() != null){
+-                return false;
+-            }
+-            //at least one account should be loaded (don't create budget with empty account tree
+-            if (viewHolder.budgetAccountSpinner.getCount() == 0){
+-                Toast.makeText(getActivity(), "You need an account hierarchy to create a budget!",
+-                        Toast.LENGTH_SHORT).show();
+-                return false;
+-            }
+-        }
+-
+         if (mEventRecurrence.until != null && mEventRecurrence.until.length() > 0
+                 || mEventRecurrence.count <= 0){
+             Toast.makeText(getActivity(),
+@@ -254,11 +205,13 @@ private boolean canSave(){
+             return false;
+         }
+ 
++        mBudgetAmounts = extractBudgetAmounts();
+         String budgetName = mBudgetNameInput.getText().toString();
+         boolean canSave = mRecurrenceRule != null
+-                && !budgetName.isEmpty();
+-        if (!canSave){
++                && !budgetName.isEmpty()
++                && !mBudgetAmounts.isEmpty();
+ 
++        if (!canSave){
+             if (budgetName.isEmpty()){
+                 mNameTextInputLayout.setError("A name is required");
+                 mNameTextInputLayout.setErrorEnabled(true);
+@@ -266,8 +219,15 @@ private boolean canSave(){
+                 mNameTextInputLayout.setErrorEnabled(false);
+             }
+ 
++            if (mBudgetAmounts.isEmpty()){
++                mBudgetAmountInput.setError("Enter an amount for the budget");
++                Toast.makeText(getActivity(), "Add budget amounts in order to save the budget",
++                        Toast.LENGTH_SHORT).show();
++            }
++
+             if (mRecurrenceRule == null){
+-                Toast.makeText(getActivity(), "Set a repeat pattern to create a budget!", Toast.LENGTH_SHORT).show();
++                Toast.makeText(getActivity(), "Set a repeat pattern to create a budget!",
++                        Toast.LENGTH_SHORT).show();
+             }
+         }
+ 
+@@ -290,7 +250,8 @@ private void saveBudget(){
+         }
+ 
+         // TODO: 22.10.2015 set the period num of the budget amount
+-        mBudget.setBudgetAmounts(extractBudgetAmounts());
++        extractBudgetAmounts();
++        mBudget.setBudgetAmounts(mBudgetAmounts);
+ 
+         mBudget.setDescription(mDescriptionInput.getText().toString().trim());
+ 
+@@ -318,7 +279,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     }
+ 
+     @OnClick(R.id.input_start_date)
+-    public void onClick(View v) {
++    public void onClickBudgetStartDate(View v) {
+         long dateMillis = 0;
+         try {
+             Date date = TransactionFormFragment.DATE_FORMATTER.parse(((TextView) v).getText().toString());
+@@ -338,6 +299,15 @@ public void onClick(View v) {
+         datePickerDialog.show(getFragmentManager(), "date_picker_fragment");
+     }
+ 
++    @OnClick(R.id.btn_add_budget_amount)
++    public void onOpenBudgetAmountEditor(View v){
++        Intent intent = new Intent(getActivity(), FormActivity.class);
++        intent.putExtra(UxArgument.FORM_TYPE, FormActivity.FormType.BUDGET_AMOUNT_EDITOR.name());
++        mBudgetAmounts = extractBudgetAmounts();
++        intent.putParcelableArrayListExtra(UxArgument.BUDGET_AMOUNT_LIST, mBudgetAmounts);
++        startActivityForResult(intent, REQUEST_EDIT_BUDGET_AMOUNTS);
++    }
++
+     @Override
+     public void onRecurrenceSet(String rrule) {
+         mRecurrenceRule = rrule;
+@@ -359,50 +329,36 @@ public void onDateSet(CalendarDatePickerDialogFragment dialog, int year, int mon
+         mStartDate.set(Calendar.DAY_OF_MONTH, dayOfMonth);
+     }
+ 
+-    /**
+-     * View holder for budget amounts
+-     */
+-    class BudgetAmountViewHolder{
+-        @Bind(R.id.currency_symbol) TextView currencySymbolTextView;
+-        @Bind(R.id.input_budget_amount) CalculatorEditText amountEditText;
+-        @Bind(R.id.input_budget_account_spinner) Spinner budgetAccountSpinner;
+-        @Bind(R.id.btn_remove_item) ImageView removeItemBtn;
+-        View itemView;
+-
+-        public BudgetAmountViewHolder(View view){
+-            itemView = view;
+-            ButterKnife.bind(this, view);
+-            itemView.setTag(this);
+-
+-            amountEditText.bindListeners(mKeyboardView);
+-            budgetAccountSpinner.setAdapter(mAccountCursorAdapter);
+-
+-            budgetAccountSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+-                @Override
+-                public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+-                    String currencyCode = mAccountsDbAdapter.getCurrencyCode(mAccountsDbAdapter.getUID(id));
+-                    Currency currency = Currency.getInstance(currencyCode);
+-                    currencySymbolTextView.setText(currency.getSymbol());
+-                }
+-
+-                @Override
+-                public void onNothingSelected(AdapterView<?> parent) {
+-                    //nothing to see here, move along
+-                }
+-            });
+-
+-            removeItemBtn.setOnClickListener(new View.OnClickListener() {
+-                @Override
+-                public void onClick(View v) {
+-                    mBudgetAmountTableLayout.removeView(itemView);
+-                    mBudgetAmountViews.remove(itemView);
++    @Override
++    public void onActivityResult(int requestCode, int resultCode, Intent data) {
++        if (requestCode == REQUEST_EDIT_BUDGET_AMOUNTS){
++            if (resultCode == Activity.RESULT_OK){
++                ArrayList<BudgetAmount> budgetAmounts = data.getParcelableArrayListExtra(UxArgument.BUDGET_AMOUNT_LIST);
++                if (budgetAmounts != null){
++                    mBudgetAmounts = budgetAmounts;
++                    toggleAmountInputVisibility();
+                 }
+-            });
++                return;
++            }
+         }
++        super.onActivityResult(requestCode, resultCode, data);
++    }
+ 
+-        public void bindViews(BudgetAmount budgetAmount){
+-            amountEditText.setValue(budgetAmount.getAmount().asBigDecimal());
+-            budgetAccountSpinner.setSelection(mAccountCursorAdapter.getPosition(budgetAmount.getAccountUID()));
++    /**
++     * Toggles the visibility of the amount input based on {@link #mBudgetAmounts}
++     */
++    private void toggleAmountInputVisibility() {
++        if (mBudgetAmounts.size() > 1){
++            mBudgetAmountLayout.setVisibility(View.GONE);
++            mAddBudgetAmount.setText("Edit Budget Amounts");
++        } else {
++            mAddBudgetAmount.setText("Add Budget Amounts");
++            mBudgetAmountLayout.setVisibility(View.VISIBLE);
++            if (!mBudgetAmounts.isEmpty()) {
++                BudgetAmount budgetAmount = mBudgetAmounts.get(0);
++                mBudgetAmountInput.setValue(budgetAmount.getAmount().asBigDecimal());
++                mBudgetAccountSpinner.setSelection(mAccountsCursorAdapter.getPosition(budgetAmount.getAccountUID()));
++            }
+         }
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java b/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
+index a079e8cd..f6abfed8 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/FormActivity.java
+@@ -30,6 +30,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.ui.account.AccountFormFragment;
++import org.gnucash.android.ui.budget.BudgetAmountEditorFragment;
+ import org.gnucash.android.ui.budget.BudgetFormFragment;
+ import org.gnucash.android.ui.export.ExportFormFragment;
+ import org.gnucash.android.ui.passcode.PasscodeLockActivity;
+@@ -49,7 +50,7 @@
+ 
+     private CalculatorKeyboard mOnBackListener;
+ 
+-    public enum FormType {ACCOUNT, TRANSACTION, EXPORT, SPLIT_EDITOR, BUDGET}
++    public enum FormType {ACCOUNT, TRANSACTION, EXPORT, SPLIT_EDITOR, BUDGET, BUDGET_AMOUNT_EDITOR}
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+@@ -100,6 +101,10 @@ protected void onCreate(Bundle savedInstanceState) {
+                 showBudgetFormFragment(intent.getExtras());
+                 break;
+ 
++            case BUDGET_AMOUNT_EDITOR:
++                showBudgetAmountEditorFragment(intent.getExtras());
++                break;
++
+             default:
+                 throw new IllegalArgumentException("No form display type specified");
+         }
+@@ -180,6 +185,15 @@ private void showBudgetFormFragment(Bundle args){
+     }
+ 
+     /**
++     * Load the budget amount editor fragment
++     * @param args Arguments
++     */
++    private void showBudgetAmountEditorFragment(Bundle args){
++        BudgetAmountEditorFragment fragment = BudgetAmountEditorFragment.newInstance(args);
++        showFormFragment(fragment);
++    }
++
++    /**
+      * Loads the fragment into the fragment container, replacing whatever was there before
+      * @param fragment Fragment to be displayed
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java b/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
+index 7d29f685..7566ba15 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
+@@ -98,6 +98,11 @@
+     public static final String BUDGET_UID = "budget_uid";
+ 
+     /**
++     * List of budget amounts (as csv)
++     */
++    public static final String BUDGET_AMOUNT_LIST = "budget_amount_list";
++
++    /**
+      * GUID of splits which have been removed from the split editor
+      */
+     public static String REMOVED_SPLITS = "removed_split_guids";
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index 3e19812d..6309db40 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -155,7 +155,7 @@ private static String parseByDay(int[] byday){
+             }
+             builder.append(",");
+         }
+-        builder.deleteCharAt(builder.length());
++        builder.deleteCharAt(builder.length()-1);
+         return builder.toString();
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceViewClickListener.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceViewClickListener.java
+index 73891997..457e9184 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceViewClickListener.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceViewClickListener.java
+@@ -35,7 +35,8 @@
+     String mRecurrenceRule;
+     OnRecurrenceSetListener mRecurrenceSetListener;
+ 
+-    public RecurrenceViewClickListener(AppCompatActivity activity, String recurrenceRule, OnRecurrenceSetListener recurrenceSetListener){
++    public RecurrenceViewClickListener(AppCompatActivity activity, String recurrenceRule,
++                                       OnRecurrenceSetListener recurrenceSetListener){
+         this.mActivity = activity;
+         this.mRecurrenceRule = recurrenceRule;
+         this.mRecurrenceSetListener = recurrenceSetListener;
+diff --git a/app/src/main/res/layout/fragment_budget_amount_editor.xml b/app/src/main/res/layout/fragment_budget_amount_editor.xml
+new file mode 100644
+index 00000000..e5a556a5
+--- /dev/null
++++ b/app/src/main/res/layout/fragment_budget_amount_editor.xml
+@@ -0,0 +1,42 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++ Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:animateLayoutChanges="true"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    tools:context=".ui.common.FormActivity">
++    <ScrollView
++        android:layout_width="match_parent"
++        android:layout_height="match_parent">
++        <LinearLayout android:id="@+id/budget_amount_layout"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:minHeight="200dp"
++            android:orientation="vertical"/>
++    </ScrollView>
++
++    <android.inputmethodservice.KeyboardView android:id="@+id/calculator_keyboard"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_alignParentBottom="true"
++        android:layout_alignParentLeft="true"
++        android:layout_alignParentRight="true"
++        android:focusable="true"
++        android:focusableInTouchMode="true"
++        android:visibility="gone" />
++</RelativeLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/fragment_budget_form.xml b/app/src/main/res/layout/fragment_budget_form.xml
+index 43955696..db920d07 100644
+--- a/app/src/main/res/layout/fragment_budget_form.xml
++++ b/app/src/main/res/layout/fragment_budget_form.xml
+@@ -21,117 +21,103 @@
+     android:orientation="vertical"
+     android:layout_width="match_parent"
+     android:layout_height="match_parent">
+-
+-    <TableLayout android:id="@+id/budget_info_table"
++    <ScrollView
++        android:id="@+id/scroll_view"
++        android:layout_above="@id/calculator_keyboard"
+         android:layout_width="match_parent"
+-        android:layout_height="wrap_content"
+-        android:layout_marginTop="@dimen/dialog_padding"
+-        android:orientation="vertical" >
+-
+-        <android.support.design.widget.TextInputLayout
+-            android:id="@+id/name_text_input_layout"
+-            android:paddingLeft="@dimen/dialog_padding"
+-            android:paddingRight="@dimen/dialog_padding"
++        android:layout_height="wrap_content">
++        <TableLayout android:id="@+id/budget_info_table"
+             android:layout_width="match_parent"
+-            android:layout_height="wrap_content">
+-            <EditText
+-                android:id="@+id/input_budget_name"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="@dimen/dialog_padding"
++            android:orientation="vertical" >
++
++            <android.support.design.widget.TextInputLayout
++                android:id="@+id/name_text_input_layout"
++                android:paddingLeft="@dimen/dialog_padding"
++                android:paddingRight="@dimen/dialog_padding"
+                 android:layout_width="match_parent"
+-                android:layout_height="wrap_content"
+-                android:ems="15"
+-                android:inputType="textCapWords"
+-                android:singleLine="true"
+-                android:ellipsize="start"
+-                android:hint="Budget name"
+-                style="@style/ListItemText">
+-            </EditText>
+-        </android.support.design.widget.TextInputLayout>
++                android:layout_height="wrap_content">
++                <EditText
++                    android:id="@+id/input_budget_name"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:ems="15"
++                    android:inputType="textCapWords"
++                    android:singleLine="true"
++                    android:ellipsize="start"
++                    android:hint="Budget name"
++                    style="@style/ListItemText">
++                </EditText>
++            </android.support.design.widget.TextInputLayout>
+ 
+-        <TableRow style="@style/FormRow"
+-            android:paddingLeft="@dimen/dialog_padding"
+-            android:paddingRight="@dimen/dialog_padding">
+-            <ImageView style="@style/FormIcon"
+-                android:src="@drawable/ic_action_sort_by_size"/>
++            <TableRow style="@style/FormRow"
++                android:paddingLeft="@dimen/dialog_padding"
++                android:paddingRight="@dimen/dialog_padding">
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_sort_by_size"/>
+ 
+-            <EditText android:id="@+id/input_description"
+-                android:layout_width="0dp"
+-                android:layout_weight="5"
+-                android:layout_height="wrap_content"
+-                android:singleLine="false"
+-                android:background="@android:color/transparent"
+-                android:hint="Description"
+-                android:inputType="textMultiLine|textCapSentences" />
+-        </TableRow>
+-        <View style="@style/Divider" />
++                <EditText android:id="@+id/input_description"
++                    android:layout_width="0dp"
++                    android:layout_weight="5"
++                    android:layout_height="wrap_content"
++                    android:singleLine="false"
++                    android:background="@android:color/transparent"
++                    android:hint="Description"
++                    android:inputType="textMultiLine|textCapSentences" />
++            </TableRow>
++            <View style="@style/Divider" />
+ 
+-        <TableRow style="@style/FormRow"
+-            android:paddingLeft="@dimen/dialog_padding"
+-            android:paddingRight="@dimen/dialog_padding">
++            <TableRow style="@style/FormRow"
++                android:paddingLeft="@dimen/dialog_padding"
++                android:paddingRight="@dimen/dialog_padding">
+ 
+-            <ImageView style="@style/FormIcon"
+-                android:src="@drawable/ic_action_rotate_right"/>
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_rotate_right"/>
+ 
+-            <TextView android:id="@+id/input_recurrence"
+-                android:layout_width="0dp"
+-                android:layout_height="wrap_content"
+-                android:layout_weight="5"
+-                android:gravity="left"
+-                android:text="Set budget period"
+-                style="@style/Dropdown.TextView" />
++                <TextView android:id="@+id/input_recurrence"
++                    android:layout_width="0dp"
++                    android:layout_height="wrap_content"
++                    android:layout_weight="5"
++                    android:gravity="left"
++                    android:text="Set budget period"
++                    style="@style/Dropdown.TextView" />
+ 
+-        </TableRow>
++            </TableRow>
+ 
+-        <TableRow style="@style/FormRow"
+-            android:paddingLeft="@dimen/dialog_padding"
+-            android:paddingRight="@dimen/dialog_padding">
++            <TableRow style="@style/FormRow"
++                android:paddingLeft="@dimen/dialog_padding"
++                android:paddingRight="@dimen/dialog_padding">
+ 
+-            <TextView
+-                android:layout_width="0dp"
+-                android:layout_weight="2"
+-                android:layout_height="wrap_content"
+-                android:textAllCaps="true"
+-                android:text="START"/>
++                <TextView
++                    android:layout_width="0dp"
++                    android:layout_weight="1.2"
++                    android:layout_height="wrap_content"
++                    android:textAllCaps="true"
++                    android:text="START"/>
+ 
+-            <TextView android:id="@+id/input_start_date"
+-                android:layout_width="0dp"
+-                android:layout_weight="5"
+-                android:layout_height="wrap_content"
+-                tools:text="29.11.2015"
+-                android:clickable="true"
+-                android:textColor="@android:color/black"
+-                android:gravity="left"      />
+-        </TableRow>
++                <TextView android:id="@+id/input_start_date"
++                    android:layout_width="0dp"
++                    android:layout_weight="5"
++                    android:layout_height="wrap_content"
++                    tools:text="29.11.2015"
++                    android:clickable="true"
++                    android:textSize="16sp"
++                    android:padding="3dp"
++                    android:textColor="@android:color/black"
++                    android:gravity="left"      />
++            </TableRow>
+ 
+-        <TableRow style="@style/FormRow"
+-            android:paddingLeft="@dimen/dialog_padding"
+-            android:layout_marginBottom="@dimen/dialog_padding"
+-            android:layout_marginTop="@dimen/dialog_padding">
+-            <TextView android:id="@+id/label_budgeted_accounts_header"
+-                android:layout_width="match_parent"
+-                android:layout_height="wrap_content"
+-                android:singleLine="true"
+-                android:padding="@dimen/dialog_padding"
+-                android:textSize="18sp"
+-                android:textColor="@color/theme_accent"
+-                android:text="Budgeted Accounts"/>
++            <include android:id="@+id/budget_amount_layout"
++                layout="@layout/item_budget_amount" />
+ 
+             <Button android:id="@+id/btn_add_budget_amount"
++                style="?attr/borderlessButtonStyle"
+                 android:layout_width="wrap_content"
+                 android:layout_height="wrap_content"
+-                android:layout_gravity="right|end"
+-                android:textColor="@android:color/white"
+-                android:text="Add"/>
+-        </TableRow>
+-    </TableLayout>
+-    <ScrollView
+-        android:id="@+id/scroll_view"
+-        android:layout_above="@id/calculator_keyboard"
+-        android:layout_below="@id/budget_info_table"
+-        android:layout_width="match_parent"
+-        android:layout_height="wrap_content">
+-        <TableLayout android:id="@+id/budget_amount_table_layout"
+-            android:layout_width="match_parent"
+-            android:layout_height="wrap_content" />
++                android:textColor="@color/theme_accent"
++                android:text="Add Budget Amounts"/>
++        </TableLayout>
+     </ScrollView>
+     <android.inputmethodservice.KeyboardView android:id="@+id/calculator_keyboard"
+         android:layout_width="match_parent"
+diff --git a/app/src/main/res/layout/fragment_split_editor.xml b/app/src/main/res/layout/fragment_split_editor.xml
+index ebc5337a..60f428ec 100644
+--- a/app/src/main/res/layout/fragment_split_editor.xml
++++ b/app/src/main/res/layout/fragment_split_editor.xml
+@@ -19,7 +19,7 @@ limitations under the License.
+     android:animateLayoutChanges="true"
+     android:layout_width="match_parent"
+     android:layout_height="match_parent"
+-    tools:context=".ui.FormActivity">
++    tools:context=".ui.common.FormActivity">
+ 
+     <LinearLayout android:id="@+id/imbalance_layout"
+         android:layout_width="match_parent"
+diff --git a/app/src/main/res/layout/item_budget_amount.xml b/app/src/main/res/layout/item_budget_amount.xml
+index e8393881..80d75537 100644
+--- a/app/src/main/res/layout/item_budget_amount.xml
++++ b/app/src/main/res/layout/item_budget_amount.xml
+@@ -21,9 +21,6 @@
+     app:cardUseCompatPadding="true"
+     app:cardPreventCornerOverlap="false"
+     app:cardElevation="5dp"
+-    android:foreground="?selectableItemBackground"
+-    android:focusable="true"
+-    android:clickable="true"
+     android:orientation="vertical"
+     android:layout_width="match_parent"
+     android:layout_height="wrap_content">
+@@ -49,7 +46,7 @@
+                 android:id="@+id/input_budget_amount"
+                 android:layout_width="0dp"
+                 android:layout_weight="3"
+-                android:layout_height="wrap_content"
++                android:layout_height="match_parent"
+                 android:hint="@string/label_transaction_amount"
+                 android:inputType="none"
+                 android:nextFocusDown="@+id/input_description"
+diff --git a/app/src/main/res/menu/budget_amount_editor_actions.xml b/app/src/main/res/menu/budget_amount_editor_actions.xml
+new file mode 100644
+index 00000000..fc6348b3
+--- /dev/null
++++ b/app/src/main/res/menu/budget_amount_editor_actions.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++-->
++<menu xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto">
++    <item android:id="@+id/menu_add_budget_amount"
++        android:icon="@drawable/ic_add_white_24dp"
++        android:title="Add Budget Amount"
++        app:showAsAction="always"/>
++
++    <item android:id="@+id/menu_save"
++        android:title="@string/btn_save"
++        app:showAsAction="always|withText"/>
++</menu>
+\ No newline at end of file
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index cbb6ab78..6e10760b 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -5,6 +5,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BudgetAmountsDbAdapter;
+ import org.gnucash.android.db.adapter.BudgetsDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.db.adapter.PricesDbAdapter;
+@@ -14,9 +15,12 @@
+ import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Budget;
++import org.gnucash.android.model.BudgetAmount;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.PeriodType;
++import org.gnucash.android.model.Price;
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Split;
+@@ -231,14 +235,21 @@ public void shouldClearAllTablesWhenDeletingAllAccounts(){
+ 
+         scheduledActionDbAdapter.addRecord(scheduledAction);
+ 
++        Budget budget = new Budget("Test");
++        BudgetAmount budgetAmount = new BudgetAmount(Money.getZeroInstance(), account.getUID());
++        budget.addBudgetAmount(budgetAmount);
++        budget.setRecurrence(new Recurrence(PeriodType.MONTH));
++        BudgetsDbAdapter.getInstance().addRecord(budget);
++
+         mAccountsDbAdapter.deleteAllRecords();
+ 
+         assertThat(mAccountsDbAdapter.getRecordsCount()).isZero();
+         assertThat(mTransactionsDbAdapter.getRecordsCount()).isZero();
+         assertThat(mSplitsDbAdapter.getRecordsCount()).isZero();
+         assertThat(scheduledActionDbAdapter.getRecordsCount()).isZero();
+-        assertThat(PricesDbAdapter.getInstance().getRecordsCount()).isZero();
++        assertThat(BudgetAmountsDbAdapter.getInstance().getRecordsCount()).isZero();
+         assertThat(BudgetsDbAdapter.getInstance().getRecordsCount()).isZero();
++        assertThat(PricesDbAdapter.getInstance().getRecordsCount()).isZero(); //prices should remain
+         assertThat(CommoditiesDbAdapter.getInstance().getRecordsCount()).isGreaterThan(50); //commodities should remain
+     }
+ 
+diff --git a/build.gradle b/build.gradle
+index b2d2eee5..87976eb1 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -4,7 +4,7 @@ buildscript {
+ 		jcenter()
+ 	}
+ 	dependencies {
+-		classpath 'com.android.tools.build:gradle:1.3.0'
++		classpath 'com.android.tools.build:gradle:2.0.0-alpha1'
+ 		classpath 'io.fabric.tools:gradle:1.+'
+ 	}
+ }
+diff --git a/gradle/wrapper/gradle-wrapper.jar b/gradle/wrapper/gradle-wrapper.jar
+index b5166dad4d90021f6a0b45268c0755719f1d5cd4..941144813d241db74e1bf25b6804c679fbe7f0a3 100644
+GIT binary patch
+delta 12505
+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
+AlK=n!
+
+delta 11140
+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
+
+diff --git a/gradle/wrapper/gradle-wrapper.properties b/gradle/wrapper/gradle-wrapper.properties
+index c04ec63a..ffc4f428 100644
+--- a/gradle/wrapper/gradle-wrapper.properties
++++ b/gradle/wrapper/gradle-wrapper.properties
+@@ -1,6 +1,6 @@
+-#Sat May 09 23:59:20 CEST 2015
++#Tue Nov 24 14:46:11 CET 2015
+ distributionBase=GRADLE_USER_HOME
+ distributionPath=wrapper/dists
+ zipStoreBase=GRADLE_USER_HOME
+ zipStorePath=wrapper/dists
+-distributionUrl=https\://services.gradle.org/distributions/gradle-2.4-all.zip
++distributionUrl=https\://services.gradle.org/distributions/gradle-2.9-bin.zip
+diff --git a/gradlew b/gradlew
+index 91a7e269..9d82f789 100755
+--- a/gradlew
++++ b/gradlew
+@@ -42,11 +42,6 @@ case "`uname`" in
+     ;;
+ esac
+ 
+-# For Cygwin, ensure paths are in UNIX format before anything is touched.
+-if $cygwin ; then
+-    [ -n "$JAVA_HOME" ] && JAVA_HOME=`cygpath --unix "$JAVA_HOME"`
+-fi
+-
+ # Attempt to set APP_HOME
+ # Resolve links: $0 may be a link
+ PRG="$0"
+@@ -61,9 +56,9 @@ while [ -h "$PRG" ] ; do
+     fi
+ done
+ SAVED="`pwd`"
+-cd "`dirname \"$PRG\"`/" >&-
++cd "`dirname \"$PRG\"`/" >/dev/null
+ APP_HOME="`pwd -P`"
+-cd "$SAVED" >&-
++cd "$SAVED" >/dev/null
+ 
+ CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+ 
+@@ -114,6 +109,7 @@ fi
+ if $cygwin ; then
+     APP_HOME=`cygpath --path --mixed "$APP_HOME"`
+     CLASSPATH=`cygpath --path --mixed "$CLASSPATH"`
++    JAVACMD=`cygpath --unix "$JAVACMD"`
+ 
+     # We build the pattern for arguments to be converted via cygpath
+     ROOTDIRSRAW=`find -L / -maxdepth 1 -mindepth 1 -type d 2>/dev/null`

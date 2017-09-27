@@ -1,0 +1,308 @@
+From 8ad3e047e3fe5f74f610fb9ab96cb01cb808968f Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 20 Apr 2017 13:17:46 +0200
+Subject: [PATCH] Select export destination using Storage Access Framework
+ (SAF) - #646
+
+    Remove UI references to explicit Google Drive integration. It can now all be accomplished using the SAF.
+    Previously scheduled explicit Google Drive exports would still work, but users will be warned of its deprecation.
+    In the next version, explicit integrations for Google Drive would be removed.
+
+- Improve mime type selection for opening files from navigation drawer
+- Refactored some strings
+---
+ .../android/ui/common/BaseDrawerActivity.java      |  4 +-
+ .../android/ui/export/ExportFormFragment.java      | 78 +++++++++++++++++-----
+ .../ui/settings/BackupPreferenceFragment.java      | 14 +---
+ app/src/main/res/values/strings.xml                |  9 +--
+ .../main/res/xml/fragment_backup_preferences.xml   | 10 +--
+ 5 files changed, 76 insertions(+), 39 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index 4a5b7eb3..6ead30e2 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -237,7 +237,9 @@ protected void onDrawerMenuItemClicked(int itemId) {
+                     //use the storage access framework
+                     Intent openDocument = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                     openDocument.addCategory(Intent.CATEGORY_OPENABLE);
+-                    openDocument.setType("*/*");
++                    openDocument.setType("text/*|application/*");
++                    String[] mimeTypes = {"text/*", "application/*"};
++                    openDocument.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+                     startActivityForResult(openDocument, REQUEST_OPEN_DOCUMENT);
+ 
+                 } else {
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+index e937a854..c10b5e34 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+@@ -16,12 +16,10 @@
+ 
+ package org.gnucash.android.ui.export;
+ 
+-import android.Manifest;
+ import android.app.Activity;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+-import android.content.pm.PackageManager;
+-import android.os.Build;
++import android.net.Uri;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.Fragment;
+@@ -53,15 +51,16 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.DatabaseAdapter;
+ import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
+ import org.gnucash.android.export.DropboxHelper;
+ import org.gnucash.android.export.ExportAsyncTask;
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.BaseModel;
+ import org.gnucash.android.model.ScheduledAction;
+-import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.common.UxArgument;
+ import org.gnucash.android.ui.settings.BackupPreferenceFragment;
+ import org.gnucash.android.ui.settings.dialog.OwnCloudDialogFragment;
+@@ -91,7 +90,12 @@
+ 		RecurrencePickerDialogFragment.OnRecurrenceSetListener,
+ 		CalendarDatePickerDialogFragment.OnDateSetListener,
+ 		RadialTimePickerDialogFragment.OnTimeSetListener {
+-		
++
++	/**
++	 * Request code for intent to pick export file destination
++	 */
++	private static final int REQUEST_EXPORT_FILE = 0x14;
++
+ 	/**
+ 	 * Spinner for selecting destination for the exported file.
+ 	 * The destination could either be SD card, or another application which
+@@ -156,6 +160,16 @@
+ 
+ 	private ExportParams.ExportTarget mExportTarget = ExportParams.ExportTarget.SD_CARD;
+ 
++	/**
++	 * The Uri target for the export
++	 */
++	private Uri mExportUri;
++
++	/**
++	 * Flag to determine if export has been started.
++	 * Used to continue export after user has picked a destination file
++	 */
++	private boolean mExportStarted = false;
+ 
+ 	private void onRadioButtonClicked(View view){
+         switch (view.getId()){
+@@ -254,6 +268,12 @@ public void onPause() {
+ 	 * Starts the export of transactions with the specified parameters
+ 	 */
+ 	private void startExport(){
++		if (mExportTarget == ExportParams.ExportTarget.URI && mExportUri == null){
++			mExportStarted = true;
++			selectExportFile();
++			return;
++		}
++
+ 		ExportParams exportParameters = new ExportParams(mExportFormat);
+ 
+ 		if (mExportAllSwitch.isChecked()){
+@@ -263,6 +283,7 @@ private void startExport(){
+ 		}
+ 
+ 		exportParameters.setExportTarget(mExportTarget);
++		exportParameters.setExportLocation(mExportUri != null ? mExportUri.toString() : null);
+ 		exportParameters.setDeleteTransactionsAfterExport(mDeleteAllCheckBox.isChecked());
+ 
+ 		Log.i(TAG, "Commencing async export of transactions");
+@@ -301,8 +322,9 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 				View recurrenceOptionsView = getView().findViewById(R.id.recurrence_options);
+ 				switch (position) {
+ 					case 0:
+-						mExportTarget = ExportParams.ExportTarget.SD_CARD;
++						mExportTarget = ExportParams.ExportTarget.URI;
+ 						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						selectExportFile();
+ 						break;
+ 					case 1:
+ 						recurrenceOptionsView.setVisibility(View.VISIBLE);
+@@ -316,12 +338,6 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 						break;
+ 					case 2:
+ 						recurrenceOptionsView.setVisibility(View.VISIBLE);
+-						mExportTarget = ExportParams.ExportTarget.GOOGLE_DRIVE;
+-						BackupPreferenceFragment.mGoogleApiClient = BackupPreferenceFragment.getGoogleApiClient(getActivity());
+-						BackupPreferenceFragment.mGoogleApiClient.connect();
+-						break;
+-					case 3:
+-						recurrenceOptionsView.setVisibility(View.VISIBLE);
+ 						mExportTarget = ExportParams.ExportTarget.OWNCLOUD;
+ 						if(!(PreferenceManager.getDefaultSharedPreferences(getActivity())
+ 								.getBoolean(getString(R.string.key_owncloud_sync), false))) {
+@@ -329,7 +345,7 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 							ocDialog.show(getActivity().getSupportFragmentManager(), "ownCloud dialog");
+ 						}
+ 						break;
+-					case 4:
++					case 3:
+ 						mExportTarget = ExportParams.ExportTarget.SHARING;
+ 						recurrenceOptionsView.setVisibility(View.GONE);
+ 						break;
+@@ -455,6 +471,17 @@ public void onClick(View view) {
+ 
+ 	}
+ 
++	/**
++	 * Open a chooser for user to pick a file to export to
++	 */
++	private void selectExportFile() {
++		Intent createIntent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
++		createIntent.setType("text/*").addCategory(Intent.CATEGORY_OPENABLE);
++		String bookName = BooksDbAdapter.getInstance().getActiveBookDisplayName();
++		createIntent.putExtra(Intent.EXTRA_TITLE, Exporter.buildExportFilename(mExportFormat, bookName));
++		startActivityForResult(createIntent, REQUEST_EXPORT_FILE);
++	}
++
+ 	@Override
+ 	public void onRecurrenceSet(String rrule) {
+ 		mRecurrenceRule = rrule;
+@@ -473,8 +500,29 @@ public void onRecurrenceSet(String rrule) {
+ 	 */
+ 	@Override
+ 	public void onActivityResult(int requestCode, int resultCode, Intent data) {
+-		if (requestCode == BackupPreferenceFragment.REQUEST_RESOLVE_CONNECTION && resultCode == Activity.RESULT_OK) {
+-			BackupPreferenceFragment.mGoogleApiClient.connect();
++
++		switch (requestCode){
++			case BackupPreferenceFragment.REQUEST_RESOLVE_CONNECTION:
++				if (resultCode == Activity.RESULT_OK) {
++					BackupPreferenceFragment.mGoogleApiClient.connect();
++				}
++				break;
++
++			case REQUEST_EXPORT_FILE:
++				if (resultCode == Activity.RESULT_OK){
++					if (data != null){
++						mExportUri = data.getData();
++					}
++
++					final int takeFlags = data.getFlags()
++							& (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
++					getActivity().getContentResolver().takePersistableUriPermission(mExportUri, takeFlags);
++
++					if (mExportStarted)
++						startExport();
++
++				}
++				break;
+ 		}
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index f7886454..ad78b2af 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -160,10 +160,6 @@ public void onResume() {
+ 		pref.setOnPreferenceClickListener(this);
+ 		toggleDropboxPreference(pref);
+ 
+-		pref = findPreference(getString(R.string.key_google_drive_sync));
+-		pref.setOnPreferenceClickListener(this);
+-		toggleGoogleDrivePreference(pref);
+-
+ 		pref = findPreference(getString(R.string.key_owncloud_sync));
+ 		pref.setOnPreferenceClickListener(this);
+ 		toggleOwnCloudPreference(pref);
+@@ -179,9 +175,10 @@ public boolean onPreferenceClick(Preference preference) {
+ 
+ 		if (key.equals(getString(R.string.key_backup_location))){
+ 			Intent createIntent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+-			createIntent.setType("application/xml");
++			createIntent.setType("application/zip");
+ 			createIntent.addCategory(Intent.CATEGORY_OPENABLE);
+-			createIntent.putExtra(Intent.EXTRA_TITLE, "gnucash_android_backup.gnca");
++			String bookName = BooksDbAdapter.getInstance().getActiveBookDisplayName();
++			createIntent.putExtra(Intent.EXTRA_TITLE, Exporter.sanitizeFilename(bookName)+ "_" + "gnucash_android_backup.gnca");
+ 			startActivityForResult(createIntent, REQUEST_BACKUP_FILE);
+ 		}
+ 
+@@ -190,11 +187,6 @@ public boolean onPreferenceClick(Preference preference) {
+ 			toggleDropboxPreference(preference);
+ 		}
+ 
+-		if (key.equals(getString(R.string.key_google_drive_sync))){
+-			toggleGoogleDriveSync();
+-			toggleGoogleDrivePreference(preference);
+-		}
+-
+ 		if (key.equals(getString(R.string.key_owncloud_sync))){
+ 			toggleOwnCloudSync(preference);
+ 			toggleOwnCloudPreference(preference);
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index dc73d2f3..eff3c2ce 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -63,9 +63,8 @@
+     <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+     <string name="title_settings">Settings</string>
+     <string-array name="export_destinations">
+-        <item>SD Card</item>
++        <item>Select File</item>
+         <item>Dropbox</item>
+-        <item>Google Drive</item>
+         <item>ownCloud</item>
+         <item>Send to&#8230;</item>
+     </string-array>
+@@ -293,8 +292,8 @@
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+-    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
+-    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="summary_create_backup_pref">Create a backup of the active book</string>
++    <string name="summary_restore_backup_pref">Restore most recent backup of active book</string>
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
+@@ -496,4 +495,6 @@
+     <string name="title_rename_book">Rename Book</string>
+     <string name="btn_rename">Rename</string>
+     <string name="menu_rename">Rename</string>
++    <string name="title_select_backup_file">Select backup file</string>
++    <string name="summary_select_backup_file">Select a file for automatic backups</string>
+ </resources>
+diff --git a/app/src/main/res/xml/fragment_backup_preferences.xml b/app/src/main/res/xml/fragment_backup_preferences.xml
+index 78938863..9c2c0ad0 100644
+--- a/app/src/main/res/xml/fragment_backup_preferences.xml
++++ b/app/src/main/res/xml/fragment_backup_preferences.xml
+@@ -17,9 +17,9 @@
+ 
+ <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" >
+     <PreferenceCategory android:title="@string/title_backup_preference_category">
+-        <Preference android:title="Select backup file"
++        <Preference android:title="@string/title_select_backup_file"
+                     android:key="@string/key_backup_location"
+-                    android:summary="Select a location for automatic backups" />
++                    android:summary="@string/summary_select_backup_file" />
+         <Preference android:title="@string/title_create_backup_pref"
+             android:key="@string/key_create_backup"
+             android:summary="@string/summary_create_backup_pref" />
+@@ -32,12 +32,6 @@
+             android:key="@string/key_dropbox_sync"
+             android:icon="@drawable/ic_dropbox_android" />
+ 
+-        <CheckBoxPreference android:title="@string/title_google_drive_sync_pref"
+-            android:summary="@string/summary_google_drive_sync"
+-            android:checked="false"
+-            android:key="@string/key_google_drive_sync"
+-            android:icon="@drawable/ic_google_drive" />
+-
+         <CheckBoxPreference android:title="@string/title_owncloud_sync_preference"
+             android:summary="@string/summary_owncloud_sync"
+             android:checked="false"

@@ -1,0 +1,2261 @@
+From 7ae602de8467e9cdd5ecdcd43e4c447c8ef713ee Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 27 Sep 2014 10:51:51 +0800
+Subject: [PATCH] Move Db to Application
+
+---
+ .../gnucash/android/app/GnuCashApplication.java    | 43 +++++++++++
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 54 ++++---------
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 88 +++++-----------------
+ .../gnucash/android/db/DatabaseCursorLoader.java   |  6 +-
+ .../org/gnucash/android/db/MigrationHelper.java    |  2 +-
+ .../org/gnucash/android/db/SplitsDbAdapter.java    |  9 +--
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 38 ++++------
+ app/src/org/gnucash/android/export/Exporter.java   | 13 +---
+ .../gnucash/android/export/ofx/OfxExporter.java    | 14 +---
+ .../gnucash/android/export/qif/QifExporter.java    |  9 +--
+ .../gnucash/android/export/xml/GncXmlExporter.java | 16 +---
+ .../gnucash/android/importer/GncXmlHandler.java    | 17 +----
+ .../gnucash/android/importer/GncXmlImporter.java   |  2 +-
+ app/src/org/gnucash/android/model/Transaction.java |  6 +-
+ .../gnucash/android/receivers/AccountCreator.java  |  5 +-
+ .../android/receivers/TransactionRecorder.java     |  7 +-
+ .../android/ui/account/AccountFormFragment.java    | 26 ++-----
+ .../android/ui/account/AccountsActivity.java       |  4 +-
+ .../android/ui/account/AccountsListFragment.java   | 16 ++--
+ .../DeleteAllAccountsConfirmationDialog.java       |  5 +-
+ .../DeleteAllTransacationsConfirmationDialog.java  |  6 +-
+ .../android/ui/settings/SettingsActivity.java      |  9 +--
+ .../ScheduledTransactionsListFragment.java         | 17 ++---
+ .../ui/transaction/TransactionFormFragment.java    | 24 +++---
+ .../ui/transaction/TransactionsActivity.java       | 10 +--
+ .../ui/transaction/TransactionsListFragment.java   |  9 +--
+ .../transaction/dialog/BulkMoveDialogFragment.java |  6 +-
+ .../dialog/SplitEditorDialogFragment.java          |  7 +-
+ ...ansactionsDeleteConfirmationDialogFragment.java | 10 +--
+ .../android/ui/util/AccountBalanceTask.java        |  6 +-
+ .../ui/widget/WidgetConfigurationActivity.java     | 12 +--
+ .../android/test/db/AccountsDbAdapterTest.java     | 40 +++++++---
+ .../android/test/db/TransactionsDbAdapterTest.java | 37 ++++++---
+ .../android/test/ui/AccountsActivityTest.java      | 70 ++++++++---------
+ .../android/test/ui/ExportTransactionsTest.java    | 37 ++++++---
+ .../android/test/ui/TransactionsActivityTest.java  | 83 ++++++++++----------
+ 36 files changed, 328 insertions(+), 435 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/app/GnuCashApplication.java b/app/src/org/gnucash/android/app/GnuCashApplication.java
+index f4add72a..7fa20445 100644
+--- a/app/src/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/org/gnucash/android/app/GnuCashApplication.java
+@@ -18,9 +18,16 @@
+ import android.app.Application;
+ import android.content.Context;
+ import android.content.SharedPreferences;
++import android.database.SQLException;
++import android.database.sqlite.SQLiteDatabase;
+ import android.preference.PreferenceManager;
++import android.support.annotation.NonNull;
+ import android.util.Log;
+ import org.gnucash.android.R;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.SplitsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ 
+ import java.util.Currency;
+ import java.util.Locale;
+@@ -44,9 +51,45 @@
+ 
+     private static Context context;
+ 
++    private static DatabaseHelper mDbHelper;
++
++    private static SQLiteDatabase mDb;
++
++    private static AccountsDbAdapter mAccountsDbAdapter;
++
++    private static TransactionsDbAdapter mTransactionsDbAdapter;
++
++    private static SplitsDbAdapter mSplitsDbAdapter;
++
++    @Override
+     public void onCreate(){
+         super.onCreate();
+         GnuCashApplication.context = getApplicationContext();
++        mDbHelper = new DatabaseHelper(getApplicationContext());
++        try {
++            mDb = mDbHelper.getWritableDatabase();
++        } catch (SQLException e) {
++            Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
++            mDb = mDbHelper.getReadableDatabase();
++        }
++        mSplitsDbAdapter = new SplitsDbAdapter(mDb);
++        mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
++        mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
++    }
++
++    @NonNull
++    public static AccountsDbAdapter getAccountsDbAdapter() {
++        return mAccountsDbAdapter;
++    }
++
++    @NonNull
++    public static TransactionsDbAdapter getTransactionDbAdapter() {
++        return mTransactionsDbAdapter;
++    }
++
++    @NonNull
++    public static SplitsDbAdapter getSplitsDbAdapter() {
++        return mSplitsDbAdapter;
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 3ce9583d..26007682 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -50,24 +50,15 @@
+ 	/**
+ 	 * Transactions database adapter for manipulating transactions associated with accounts
+ 	 */
+-	private TransactionsDbAdapter mTransactionsAdapter;
+-	
+-	/**
+-	 * Constructor. Creates a new adapter instance using the application context
+-	 * @param context Application context
+-	 */
+-	public AccountsDbAdapter(Context context) {
+-		super(context);
+-		mTransactionsAdapter = new TransactionsDbAdapter(context);
+-	}
++	private final TransactionsDbAdapter mTransactionsAdapter;
+ 
+     /**
+      * Overloaded constructor. Creates an adapter for an already open database
+      * @param db SQliteDatabase instance
+      */
+-    public AccountsDbAdapter(SQLiteDatabase db) {
++    public AccountsDbAdapter(@NonNull SQLiteDatabase db, @NonNull TransactionsDbAdapter transactionsDbAdapter) {
+         super(db);
+-        mTransactionsAdapter = new TransactionsDbAdapter(db);
++        mTransactionsAdapter = transactionsDbAdapter;
+     }
+ 
+     /**
+@@ -636,10 +627,8 @@ public String getOrCreateImbalanceAccountUID(Currency currency){
+      * @param accountType Type to assign to all accounts created
+      * @return String unique ID of the account at bottom of hierarchy
+      */
+-    public String createAccountHierarchy(String fullName, AccountType accountType){
+-        if (fullName == null)
+-            throw new IllegalArgumentException("The account name cannot be null");
+-
++    @NonNull
++    public String createAccountHierarchy(@NonNull String fullName, @NonNull AccountType accountType) {
+         String[] tokens = fullName.trim().split(ACCOUNT_NAME_SEPARATOR);
+         String uid = getGnuCashRootAccountUID();
+         String parentName = "";
+@@ -647,10 +636,9 @@ public String createAccountHierarchy(String fullName, AccountType accountType){
+         for (String token : tokens) {
+             parentName += token;
+             String parentUID = findAccountUidByFullName(parentName);
+-            if (parentUID != null){ //the parent account exists, don't recreate
++            if (parentUID != null) { //the parent account exists, don't recreate
+                 uid = parentUID;
+-            }
+-            else {
++            } else {
+                 Account account = new Account(token);
+                 account.setAccountType(accountType);
+                 account.setParentUID(uid); //set its parent
+@@ -809,9 +797,7 @@ public Money getAccountBalance(long accountId){
+             }
+         }
+ 
+-        SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getContext());
+-        Money splitSum = splitsDbAdapter.computeSplitBalance(getAccountUID(accountId));
+-        splitsDbAdapter.close();
++        Money splitSum = mTransactionsAdapter.getSplitDbAdapter().computeSplitBalance(getAccountUID(accountId));
+         return balance.add(splitSum);
+     }
+ 
+@@ -832,10 +818,8 @@ public Money getAccountBalance(String accountUID){
+ 
+         accountsList.add(0, accountUID);
+ 
+-        SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getContext());
+         Log.d(TAG, "all account list : " + accountsList.size());
+-        Money splitSum = splitsDbAdapter.computeSplitBalance(accountsList, currencyCode, hasDebitNormalBalance);
+-        splitsDbAdapter.close();
++        Money splitSum = mTransactionsAdapter.getSplitDbAdapter().computeSplitBalance(accountsList, currencyCode, hasDebitNormalBalance);
+         return balance.add(splitSum);
+     }
+ 
+@@ -930,15 +914,9 @@ public Cursor fetchSubAccounts(String accountUID){
+      */
+     public Cursor fetchTopLevelAccounts(){
+         //condition which selects accounts with no parent, whose UID is not ROOT and whose name is not ROOT
+-        StringBuilder condition = new StringBuilder("(");
+-        condition.append(AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IS NULL");
+-        condition.append(" OR ");
+-        condition.append(AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ");
+-        condition.append("'").append(getGnuCashRootAccountUID()).append("'");
+-        condition.append(")");
+-        condition.append(" AND ");
+-        condition.append(AccountEntry.COLUMN_TYPE + " != " + "'").append(AccountType.ROOT.name()).append("'");
+-        return fetchAccounts(condition.toString());
++        return fetchAccounts("(" + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IS NULL OR "
++                + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = '" + getGnuCashRootAccountUID() + "') AND "
++                + AccountEntry.COLUMN_TYPE + " != '" + AccountType.ROOT.name() + "'");
+     }
+ 
+     /**
+@@ -1245,7 +1223,7 @@ public boolean isFavoriteAccount(long accountId){
+                 if (balance.asBigDecimal().compareTo(new BigDecimal(0)) == 0)
+                     continue;
+ 
+-                Transaction transaction = new Transaction(mContext.getString(R.string.account_name_opening_balances));
++                Transaction transaction = new Transaction(GnuCashApplication.getAppContext().getString(R.string.account_name_opening_balances));
+                 transaction.setNote(getName(id));
+                 transaction.setCurrencyCode(currencyCode);
+                 TransactionType transactionType = Transaction.getTypeForBalance(getAccountType(accountUID),
+@@ -1306,12 +1284,6 @@ public static String getOpeningBalanceAccountFullName(){
+         return currencyList;
+     }
+ 
+-    @Override
+-    public void close() {
+-        super.close();
+-        mTransactionsAdapter.close();
+-    }
+-
+     /**
+ 	 * Deletes all accounts and their transactions (and their splits) from the database.
+      * Basically empties all 3 tables, so use with care ;)
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index 239364d8..fe2894ad 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -17,12 +17,11 @@
+ package org.gnucash.android.db;
+ 
+ import android.content.ContentValues;
+-import android.content.Context;
+ import android.database.Cursor;
+-import android.database.SQLException;
+ import android.database.sqlite.SQLiteDatabase;
+-import android.util.Log;
+-import org.gnucash.android.app.GnuCashApplication;
++import android.support.annotation.NonNull;
++import android.support.annotation.Nullable;
++
+ import org.gnucash.android.db.DatabaseSchema.*;
+ import org.gnucash.android.model.AccountType;
+ 
+@@ -40,38 +39,17 @@
+ 	protected static final String TAG = DatabaseAdapter.class.getName();
+ 
+ 	/**
+-	 * {@link DatabaseHelper} for creating and opening the database
+-	 */
+-	protected DatabaseHelper mDbHelper;
+-	
+-	/**
+ 	 * SQLite database
+ 	 */
+-	protected SQLiteDatabase mDb;
+-	
+-	/**
+-	 * Application context
+-	 */
+-	protected Context mContext;
+-	
+-	/**
+-	 * Opens (or creates if it doesn't exist) the database for reading and writing
+-	 * @param context Application context to be used for opening database
+-	 */
+-	public DatabaseAdapter(Context context) {
+-        mDbHelper = new DatabaseHelper(context);
+-        mContext = context.getApplicationContext();
+-        open();
+-        createTempView();
+-    }
++	@NonNull
++    protected final SQLiteDatabase mDb;
+ 
+     /**
+      * Opens the database adapter with an existing database
+      * @param db SQLiteDatabase object
+      */
+-    public DatabaseAdapter(SQLiteDatabase db) {
++    public DatabaseAdapter(@NonNull SQLiteDatabase db) {
+         this.mDb = db;
+-        this.mContext = GnuCashApplication.getAppContext();
+         if (!db.isOpen() || db.isReadOnly())
+             throw new IllegalArgumentException("Database not open or is read-only. Require writeable database");
+         createTempView();
+@@ -170,33 +148,6 @@ private void createTempView() {
+         );
+     }
+ 
+-	/**
+-	 * Opens/creates database to be used for reading or writing. 
+-	 * @return Reference to self for database manipulation
+-	 */
+-	public DatabaseAdapter open(){
+-		try {
+-			mDb = mDbHelper.getWritableDatabase();
+-		} catch (SQLException e) {
+-			Log.e(TAG, "Error getting database: " + e.getMessage());
+-			mDb = mDbHelper.getReadableDatabase();
+-		}
+-		
+-		return this;
+-	}
+-	
+-	/**
+-	 * Close the database
+-	 */
+-	public void close(){
+-        //only close if we opened the db ourselves (through the helper)
+-        //if we received the database object (during migrations) leave it alone
+-		if (mDbHelper != null) {
+-            mDbHelper.close();
+-            mDb.close();
+-        }
+-	}
+-
+     /**
+      * Checks if the database is open
+      * @return <code>true</code> if the database is open, <code>false</code> otherwise
+@@ -205,21 +156,14 @@ public boolean isOpen(){
+         return mDb.isOpen();
+     }
+ 
+-    /**
+-     * Returns the context used to create this adapter
+-     * @return Android application context
+-     */
+-    public Context getContext(){
+-        return mContext.getApplicationContext();
+-    }
+-
+ 	/**
+ 	 * Retrieves record with id <code>rowId</code> from table <code>tableName</code>
+ 	 * @param tableName Name of table where record is found
+ 	 * @param rowId ID of record to be retrieved
+ 	 * @return {@link Cursor} to record retrieved
+ 	 */
+-	protected Cursor fetchRecord(String tableName, long rowId){
++    @NonNull
++	protected Cursor fetchRecord(@NonNull String tableName, long rowId){
+ 		return mDb.query(tableName, null, DatabaseSchema.CommonColumns._ID + "=" + rowId,
+ 				null, null, null, null);
+ 	}
+@@ -229,7 +173,8 @@ protected Cursor fetchRecord(String tableName, long rowId){
+ 	 * @param tableName Name of table in database
+ 	 * @return {@link Cursor} to all records in table <code>tableName</code>
+ 	 */
+-	protected Cursor fetchAllRecords(String tableName){
++    @NonNull
++	protected Cursor fetchAllRecords(@NonNull String tableName){
+ 		return mDb.query(tableName, 
+         		null, null, null, null, null, null);
+ 	}
+@@ -258,12 +203,14 @@ protected int deleteAllRecords(String tableName){
+      * @param rowId ID of record to be retrieved
+      * @return {@link Cursor} to record retrieved
+      */
++    @NonNull
+     public abstract Cursor fetchRecord(long rowId);
+ 
+     /**
+      * Retrieves all records from database table corresponding to this adapter
+      * @return {@link Cursor} to all records in table
+      */
++    @NonNull
+     public abstract Cursor fetchAllRecords();
+ 
+     /**
+@@ -285,7 +232,8 @@ protected int deleteAllRecords(String tableName){
+      * @param accountUID Unique Identifier of the account
+      * @return Currency code of the account
+      */
+-    public String getCurrencyCode(String accountUID) {
++    @Nullable
++    public String getCurrencyCode(@NonNull String accountUID) {
+         Cursor cursor = mDb.query(DatabaseSchema.AccountEntry.TABLE_NAME,
+                 new String[] {DatabaseSchema.AccountEntry.COLUMN_CURRENCY},
+                 DatabaseSchema.AccountEntry.COLUMN_UID + "= ?",
+@@ -316,10 +264,11 @@ public AccountType getAccountType(String accountUID){
+                 new String[]{DatabaseSchema.AccountEntry.COLUMN_TYPE},
+                 DatabaseSchema.AccountEntry.COLUMN_UID + "=?",
+                 new String[]{accountUID}, null, null, null);
+-        if (c != null) {
++        try {
+             if (c.moveToFirst()) {
+                 type = c.getString(c.getColumnIndexOrThrow(DatabaseSchema.AccountEntry.COLUMN_TYPE));
+             }
++        } finally {
+             c.close();
+         }
+         return AccountType.valueOf(type);
+@@ -327,9 +276,10 @@ public AccountType getAccountType(String accountUID){
+ 
+     /**
+      * Returns an account UID of the account with record id <code>accountRowID</code>
+-     * @param accountRowID Record ID of account as long paramenter
++     * @param accountRowID Record ID of account as long parameter
+      * @return String containing UID of account
+      */
++    @Nullable
+     public String getAccountUID(long accountRowID){
+         String uid = null;
+         Cursor c = mDb.query(DatabaseSchema.AccountEntry.TABLE_NAME,
+@@ -350,7 +300,7 @@ public String getAccountUID(long accountRowID){
+      * @param accountUID Unique identifier of the account
+      * @return Database row ID of the account
+      */
+-    public long getAccountID(String accountUID){
++    public long getAccountID(@Nullable String accountUID){
+         long id = -1;
+         if (accountUID == null)
+             return id;
+diff --git a/app/src/org/gnucash/android/db/DatabaseCursorLoader.java b/app/src/org/gnucash/android/db/DatabaseCursorLoader.java
+index b8bd5de7..c6c69d43 100644
+--- a/app/src/org/gnucash/android/db/DatabaseCursorLoader.java
++++ b/app/src/org/gnucash/android/db/DatabaseCursorLoader.java
+@@ -140,10 +140,6 @@ protected void onReset() {
+      */
+ 	protected void onReleaseResources(Cursor c) {
+ 		if (c != null)
+-			c.close();		
+-		
+-		if (mDatabaseAdapter != null){
+-			mDatabaseAdapter.close();
+-		}
++			c.close();
+ 	}
+ }
+diff --git a/app/src/org/gnucash/android/db/MigrationHelper.java b/app/src/org/gnucash/android/db/MigrationHelper.java
+index 87a76a3f..7151d556 100644
+--- a/app/src/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/org/gnucash/android/db/MigrationHelper.java
+@@ -124,7 +124,7 @@ static String exportGnucashXML(SQLiteDatabase db) throws IOException {
+                 + "/gnucash/" + Exporter.buildExportFilename(ExportFormat.GNC_XML));
+ 
+         //we do not use the ExporterAsyncTask here because we want to use an already open db
+-        GncXmlExporter exporter = new GncXmlExporter(exportParams, db);
++        GncXmlExporter exporter = new GncXmlExporter(exportParams);
+         BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+                 new FileOutputStream(exportParams.getTargetFilepath()), "UTF-8"));
+         try {
+diff --git a/app/src/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+index e01a93fb..3f3453d9 100644
+--- a/app/src/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -23,6 +23,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
++import android.support.annotation.NonNull;
+ import android.text.TextUtils;
+ import android.util.Log;
+ import org.gnucash.android.model.AccountType;
+@@ -48,11 +49,7 @@
+ 
+     protected static final String TAG = "SplitsDbAdapter";
+ 
+-    public SplitsDbAdapter(Context context){
+-        super(context);
+-    }
+-
+-    public SplitsDbAdapter(SQLiteDatabase db) {
++    public SplitsDbAdapter(@NonNull SQLiteDatabase db) {
+         super(db);
+     }
+ 
+@@ -469,7 +466,7 @@ public boolean deleteRecord(long rowId) {
+         Cursor cursor = fetchSplitsForTransaction(transactionUID);
+         if (cursor != null){
+             if (cursor.getCount() > 0){
+-                result &= deleteTransaction(getTransactionID(transactionUID));
++                result = deleteTransaction(getTransactionID(transactionUID));
+             }
+             cursor.close();
+         }
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 69675d11..e2eea3b2 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -25,8 +25,10 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteQueryBuilder;
+ import android.database.sqlite.SQLiteStatement;
++import android.support.annotation.NonNull;
+ import android.util.Log;
+ 
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.*;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.*;
+@@ -42,30 +44,20 @@
+  */
+ public class TransactionsDbAdapter extends DatabaseAdapter {
+ 
+-    SplitsDbAdapter mSplitsDbAdapter;
+-	/**
+-	 * Constructor. 
+-	 * Calls to the base class to open the database
+-	 * @param context Application context
+-	 */
+-	public TransactionsDbAdapter(Context context) {
+-		super(context);
+-        mSplitsDbAdapter = new SplitsDbAdapter(context);
+-	}
++    private final SplitsDbAdapter mSplitsDbAdapter;
+ 
+     /**
+      * Overloaded constructor. Creates adapter for already open db
+      * @param db SQlite db instance
+      */
+-    public TransactionsDbAdapter(SQLiteDatabase db) {
++    public TransactionsDbAdapter(@NonNull SQLiteDatabase db, @NonNull SplitsDbAdapter splitsDbAdapter) {
+         super(db);
+-        mSplitsDbAdapter = new SplitsDbAdapter(db);
++        mSplitsDbAdapter = splitsDbAdapter;
+     }
+ 
+-    @Override
+-    public void close() {
+-        super.close();
+-        mSplitsDbAdapter.close();
++    @NonNull
++    public SplitsDbAdapter getSplitDbAdapter() {
++        return mSplitsDbAdapter;
+     }
+ 
+     /**
+@@ -242,6 +234,7 @@ public Cursor fetchAllTransactionsForAccount(String accountUID){
+      * They are not considered when computing account balances</p>
+      * @return Cursor holding set of all recurring transactions
+      */
++    @NonNull
+     public Cursor fetchAllRecurringTransactions(){
+         return mDb.query(TransactionEntry.TABLE_NAME,
+                 null,
+@@ -545,14 +538,11 @@ public Cursor fetchRecord(long rowId) {
+      * @param prefix Starting characters of the transaction name
+      * @return Cursor to the data set containing all matching transactions
+      */
+-    public Cursor fetchTransactionsStartingWith(String prefix){
+-        StringBuffer stringBuffer = new StringBuffer(TransactionEntry.COLUMN_DESCRIPTION)
+-                .append(" LIKE '").append(prefix).append("%'");
+-        String selection = stringBuffer.toString();
+-
++    @NonNull
++    public Cursor fetchTransactionsStartingWith(@NonNull String prefix){
+         return mDb.query(TransactionEntry.TABLE_NAME,
+                 new String[]{TransactionEntry._ID, TransactionEntry.COLUMN_DESCRIPTION},
+-                selection,
++                TransactionEntry.COLUMN_DESCRIPTION + " LIKE '" + prefix + "%'",
+                 null, null, null,
+                 TransactionEntry.COLUMN_DESCRIPTION + " ASC");
+     }
+@@ -582,9 +572,9 @@ public void scheduleTransaction(Transaction recurringTransaction) {
+         long firstRunMillis = System.currentTimeMillis() + recurrencePeriodMillis;
+         long recurringTransactionId = addTransaction(recurringTransaction);
+ 
+-        PendingIntent recurringPendingIntent = PendingIntent.getBroadcast(mContext,
++        PendingIntent recurringPendingIntent = PendingIntent.getBroadcast(GnuCashApplication.getAppContext(),
+                 (int)recurringTransactionId, Transaction.createIntent(recurringTransaction), PendingIntent.FLAG_UPDATE_CURRENT);
+-        AlarmManager alarmManager = (AlarmManager) mContext.getSystemService(Context.ALARM_SERVICE);
++        AlarmManager alarmManager = (AlarmManager) GnuCashApplication.getAppContext().getSystemService(Context.ALARM_SERVICE);
+         alarmManager.setRepeating(AlarmManager.RTC_WAKEUP, firstRunMillis,
+                 recurrencePeriodMillis, recurringPendingIntent);
+     }
+diff --git a/app/src/org/gnucash/android/export/Exporter.java b/app/src/org/gnucash/android/export/Exporter.java
+index e7b121ec..cdcd87d2 100644
+--- a/app/src/org/gnucash/android/export/Exporter.java
++++ b/app/src/org/gnucash/android/export/Exporter.java
+@@ -62,18 +62,7 @@
+     public Exporter(ExportParams params){
+         this.mParameters = params;
+         mContext = GnuCashApplication.getAppContext();
+-        mAccountsDbAdapter = new AccountsDbAdapter(mContext);
+-    }
+-
+-    /**
+-     * Overloaded constructor, provided the database object to use
+-     * @param params Export parameters
+-     * @param db Database from which to export (should be initialized and open)
+-     */
+-    public Exporter(ExportParams params, SQLiteDatabase db){
+-        this.mParameters = params;
+-        mAccountsDbAdapter = new AccountsDbAdapter(db);
+-        mContext = GnuCashApplication.getAppContext();
++        mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/org/gnucash/android/export/ofx/OfxExporter.java
+index 5caa4ad5..977e3cd3 100644
+--- a/app/src/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -25,6 +25,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.preference.PreferenceManager;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.Account;
+@@ -62,15 +63,6 @@ public OfxExporter(ExportParams params) {
+ 	}
+ 
+     /**
+-     * Initializes the OFX exporter with a specific database to export from
+-     * @param params Export parameters/options
+-     * @param db SQLite database object (should be already open)
+-     */
+-    public OfxExporter(ExportParams params, SQLiteDatabase db){
+-        super(params, db);
+-    }
+-
+-    /**
+ 	 * Converts all expenses into OFX XML format and adds them to the XML document
+ 	 * @param doc DOM document of the OFX expenses.
+ 	 * @param parent Parent node for all expenses in report
+@@ -88,7 +80,7 @@ private void generateOfx(Document doc, Element parent){
+ 		
+ 		parent.appendChild(bankmsgs);		
+ 		
+-		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(mContext);
++		AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+ 		for (Account account : mAccountsList) {		
+ 			if (account.getTransactionCount() == 0)
+ 				continue; 
+@@ -100,13 +92,11 @@ private void generateOfx(Document doc, Element parent){
+ 			accountsDbAdapter.markAsExported(account.getUID());
+ 			
+ 		}
+-		accountsDbAdapter.close();
+ 	}
+ 
+     public String generateExport() throws ExporterException {
+         mAccountsList = mParameters.shouldExportAllTransactions() ?
+                 mAccountsDbAdapter.getAllAccounts() : mAccountsDbAdapter.getExportableAccounts();
+-        mAccountsDbAdapter.close();
+ 
+         DocumentBuilderFactory docFactory = DocumentBuilderFactory
+                 .newInstance();
+diff --git a/app/src/org/gnucash/android/export/qif/QifExporter.java b/app/src/org/gnucash/android/export/qif/QifExporter.java
+index e1ce6046..476d8708 100644
+--- a/app/src/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/org/gnucash/android/export/qif/QifExporter.java
+@@ -45,14 +45,10 @@ public QifExporter(ExportParams params){
+         super(params);
+     }
+ 
+-    public QifExporter(ExportParams params,  SQLiteDatabase db){
+-        super(params, db);
+-    }
+-
+     @Override
+     public void generateExport(Writer writer) throws ExporterException {
+         final String newLine = "\n";
+-        TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(GnuCashApplication.getAppContext());
++        TransactionsDbAdapter transactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+         try {
+             Cursor cursor = transactionsDbAdapter.fetchTransactionsWithSplitsWithTransactionAccount(
+                     new String[]{
+@@ -174,8 +170,5 @@ public void generateExport(Writer writer) throws ExporterException {
+         {
+             throw new ExporterException(mParameters, e);
+         }
+-        finally {
+-            transactionsDbAdapter.close();
+-        }
+     }
+ }
+diff --git a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+index 1fc81fdc..2a3608d2 100644
+--- a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -21,6 +21,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.util.Log;
+ 
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseSchema;
+ import static org.gnucash.android.db.DatabaseSchema.*;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -62,18 +63,7 @@
+ 
+     public GncXmlExporter(ExportParams params){
+         super(params);
+-        mTransactionsDbAdapter = new TransactionsDbAdapter(mContext);
+-    }
+-
+-    /**
+-     * Overloaded constructor.
+-     * <p>This method is used mainly by the {@link org.gnucash.android.db.DatabaseHelper} for database migrations</p>
+-     * @param params Export parameters
+-     * @param db SQLite database from which to export
+-     */
+-    public GncXmlExporter(ExportParams params, SQLiteDatabase db){
+-        super(params, db);
+-        mTransactionsDbAdapter = new TransactionsDbAdapter(db);
++        mTransactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+     }
+ 
+     private void exportSlots(XmlSerializer xmlSerializer,
+@@ -491,8 +481,6 @@ public String generateXML() throws ParserConfigurationException {
+         }
+ 
+         document.appendChild(rootElement);
+-        mAccountsDbAdapter.close();
+-        mTransactionsDbAdapter.close();
+ 
+         StringWriter stringWriter = new StringWriter();
+         try {
+diff --git a/app/src/org/gnucash/android/importer/GncXmlHandler.java b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+index 7f52a96e..7b6cdf32 100644
+--- a/app/src/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+@@ -123,8 +123,8 @@ public GncXmlHandler(Context context, boolean bulk) {
+ 
+     private void init(Context context, boolean bulk) {
+         mContext = context;
+-        mAccountsDbAdapter = new AccountsDbAdapter(mContext);
+-        mTransactionsDbAdapter = new TransactionsDbAdapter(mContext);
++        mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
++        mTransactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+         mContent = new StringBuilder();
+         mBulk = bulk;
+         if (bulk) {
+@@ -133,15 +133,8 @@ private void init(Context context, boolean bulk) {
+         }
+     }
+ 
+-    /**
+-     * Instantiates handler to parse XML into already open db
+-     * @param db SQLite Database
+-     */
+-    public GncXmlHandler(SQLiteDatabase db){
+-        mContext = GnuCashApplication.getAppContext();
+-        mAccountsDbAdapter = new AccountsDbAdapter(db);
+-        mTransactionsDbAdapter = new TransactionsDbAdapter(db);
+-        mContent = new StringBuilder();
++    public GncXmlHandler(){
++        init(GnuCashApplication.getAppContext(), false);
+     }
+ 
+     @Override
+@@ -402,7 +395,5 @@ public void endDocument() throws SAXException {
+             long endTime = System.nanoTime();
+             Log.d("Handler:", String.format(" bulk insert time: %d", endTime - startTime));
+         }
+-        mAccountsDbAdapter.close();
+-        mTransactionsDbAdapter.close();
+     }
+ }
+diff --git a/app/src/org/gnucash/android/importer/GncXmlImporter.java b/app/src/org/gnucash/android/importer/GncXmlImporter.java
+index e8de150d..d52be7f3 100644
+--- a/app/src/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/org/gnucash/android/importer/GncXmlImporter.java
+@@ -55,7 +55,7 @@ public static void parse(SQLiteDatabase db, InputStream gncXmlInputStream) throw
+ 
+         /** Create handler to handle XML Tags ( extends DefaultHandler ) */
+ 
+-        GncXmlHandler handler = new GncXmlHandler(db);
++        GncXmlHandler handler = new GncXmlHandler();
+         xr.setContentHandler(handler);
+         xr.parse(new InputSource(bos));
+     }
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index 8e1cddc3..8de70df6 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -237,10 +237,9 @@ public Money getImbalance(){
+      * @return Money list of splits
+      */
+     public static Money computeBalance(String accountUID, List<Split> splitList){
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(GnuCashApplication.getAppContext());
++        AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+         AccountType accountType = accountsDbAdapter.getAccountType(accountUID);
+         String currencyCode = accountsDbAdapter.getCurrencyCode(accountUID);
+-        accountsDbAdapter.close();
+ 
+         boolean isDebitAccount = accountType.hasDebitNormalBalance();
+         Money balance = Money.createZeroInstance(currencyCode);
+@@ -493,10 +492,9 @@ public Element toOFX(Document doc, String accountUID){
+             acctId.appendChild(doc.createTextNode(transferAccountUID));
+ 
+             Element accttype = doc.createElement(OfxHelper.TAG_ACCOUNT_TYPE);
+-            AccountsDbAdapter acctDbAdapter = new AccountsDbAdapter(GnuCashApplication.getAppContext());
++            AccountsDbAdapter acctDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+             OfxAccountType ofxAccountType = Account.convertToOfxAccountType(acctDbAdapter.getAccountType(transferAccountUID));
+             accttype.appendChild(doc.createTextNode(ofxAccountType.toString()));
+-            acctDbAdapter.close();
+ 
+             Element bankAccountTo = doc.createElement(OfxHelper.TAG_BANK_ACCOUNT_TO);
+             bankAccountTo.appendChild(bankId);
+diff --git a/app/src/org/gnucash/android/receivers/AccountCreator.java b/app/src/org/gnucash/android/receivers/AccountCreator.java
+index 768db160..1d2171e1 100644
+--- a/app/src/org/gnucash/android/receivers/AccountCreator.java
++++ b/app/src/org/gnucash/android/receivers/AccountCreator.java
+@@ -18,6 +18,7 @@
+ 
+ import java.util.Currency;
+ 
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ 
+@@ -57,9 +58,7 @@ public void onReceive(Context context, Intent intent) {
+ 		if (uid != null)
+ 			account.setUID(uid);
+ 		
+-		AccountsDbAdapter accountsAdapter = new AccountsDbAdapter(context);
+-		accountsAdapter.addAccount(account);
+-		accountsAdapter.close();
++		GnuCashApplication.getAccountsDbAdapter().addAccount(account);
+ 	}
+ 
+ }
+diff --git a/app/src/org/gnucash/android/receivers/TransactionRecorder.java b/app/src/org/gnucash/android/receivers/TransactionRecorder.java
+index cb27ed83..9bc90267 100644
+--- a/app/src/org/gnucash/android/receivers/TransactionRecorder.java
++++ b/app/src/org/gnucash/android/receivers/TransactionRecorder.java
+@@ -21,6 +21,8 @@
+ import android.content.Intent;
+ import android.os.Bundle;
+ import android.util.Log;
++
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.*;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+@@ -91,12 +93,9 @@ public void onReceive(Context context, Intent intent) {
+             }
+         }
+ 
+-		TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(context);
+-		transactionsDbAdapter.addTransaction(transaction);
++		GnuCashApplication.getTransactionDbAdapter().addTransaction(transaction);
+ 		
+ 		WidgetConfigurationActivity.updateAllWidgets(context);
+-
+-		transactionsDbAdapter.close();
+ 	}
+ 
+ }
+diff --git a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+index 1d8b6573..e04f5960 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -28,7 +28,6 @@
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.annotation.NonNull;
+-import android.support.annotation.Nullable;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.text.TextUtils;
+@@ -43,6 +42,7 @@
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.model.Account;
+@@ -84,11 +84,6 @@
+ 	 */
+ 	private AccountsDbAdapter mAccountsDbAdapter;
+ 
+-    /**
+-     * Whether the AccountsDbAdapter is created inside this class.
+-     * If so, it should be also closed by this class
+-     */
+-    private boolean mReleaseDbAdapter = false;
+ 	
+ 	/**
+ 	 * List of all currency codes (ISO 4217) supported by the app
+@@ -213,10 +208,10 @@ public AccountFormFragment() {
+ 	 * @param dbAdapter {@link AccountsDbAdapter} for saving the account
+ 	 * @return New instance of the dialog fragment
+ 	 */
+-	static public AccountFormFragment newInstance(AccountsDbAdapter dbAdapter){
++    @NonNull
++	static public AccountFormFragment newInstance(@NonNull AccountsDbAdapter dbAdapter){
+ 		AccountFormFragment f = new AccountFormFragment();
+ 		f.mAccountsDbAdapter = dbAdapter;
+-        f.mReleaseDbAdapter = false;
+ 		return f;
+ 	}
+ 	
+@@ -224,10 +219,7 @@ static public AccountFormFragment newInstance(AccountsDbAdapter dbAdapter){
+ 	public void onCreate(Bundle savedInstanceState) {
+ 		super.onCreate(savedInstanceState);
+ 		setHasOptionsMenu(true);
+-        if (mAccountsDbAdapter == null){
+-            mReleaseDbAdapter = true;
+-            mAccountsDbAdapter = new AccountsDbAdapter(getSherlockActivity());
+-        }
++        mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+ 
+         SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+         mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), true);
+@@ -236,7 +228,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 	/**
+ 	 * Inflates the dialog view and retrieves references to the dialog elements
+ 	 */
+-	@Override
++	@Override @NonNull
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+ 		View view = inflater.inflate(R.layout.fragment_new_account, container, false);
+@@ -675,11 +667,6 @@ public void onDestroy() {
+ 		super.onDestroyView();
+ 		if (mParentAccountCursor != null)
+ 			mParentAccountCursor.close();
+-        // The mAccountsDbAdapter should only be closed when it is not passed in
+-        // by other Activities.
+-		if (mReleaseDbAdapter && mAccountsDbAdapter != null) {
+-            mAccountsDbAdapter.close();
+-        }
+         if (mDefaultTransferAccountCursorAdapter != null) {
+             mDefaultTransferAccountCursorAdapter.getCursor().close();
+         }
+@@ -780,7 +767,7 @@ private void saveAccount() {
+         }
+         accountsToUpdate.add(mAccount);
+ 		if (mAccountsDbAdapter == null)
+-			mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
++			mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+         // bulk update, will not update transactions
+ 		mAccountsDbAdapter.bulkAddAccounts(accountsToUpdate);
+ 
+@@ -791,6 +778,7 @@ private void saveAccount() {
+      * Returns the currently selected account type in the spinner
+      * @return {@link org.gnucash.android.model.AccountType} currently selected
+      */
++    @NonNull
+     private AccountType getSelectedAccountType() {
+         int selectedAccountTypeIndex = mAccountTypeSpinner.getSelectedItemPosition();
+         String[] accountTypeEntries = getResources().getStringArray(R.array.key_account_type_entries);
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+index e0ed799e..12163ecf 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -495,9 +495,7 @@ public static void createDefaultAccounts(final String currencyCode, final Activi
+             delegate = new TaskDelegate() {
+                 @Override
+                 public void onTaskComplete() {
+-                    AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(activity);
+-                    accountsDbAdapter.updateAllAccounts(DatabaseSchema.AccountEntry.COLUMN_CURRENCY, currencyCode);
+-                    accountsDbAdapter.close();
++                    GnuCashApplication.getAccountsDbAdapter().updateAllAccounts(DatabaseSchema.AccountEntry.COLUMN_CURRENCY, currencyCode);
+                 }
+             };
+         }
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
+index f8ead4fd..77c877e2 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -51,6 +51,7 @@
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.db.*;
+ import org.gnucash.android.export.ExportDialogFragment;
+@@ -212,7 +213,7 @@ public void onCreate(Bundle savedInstanceState) {
+         if (args != null)
+             mParentAccountUID = args.getString(UxArgument.PARENT_ACCOUNT_UID);
+ 
+-        mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
++        mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+         mAccountsCursorAdapter = new AccountsCursorAdapter(
+                 getActivity().getApplicationContext(),
+                 R.layout.list_item_account, null,
+@@ -429,8 +430,6 @@ public void refresh() {
+     @Override
+     public void onDestroy() {
+         super.onDestroy();
+-        mAccountsDbAdapter.close();
+-        mAccountsCursorAdapter.close();
+     }
+ 
+     /**
+@@ -556,7 +555,7 @@ public Dialog onCreateDialog(Bundle savedInstanceState) {
+                             new DialogInterface.OnClickListener() {
+                                 public void onClick(DialogInterface dialog, int whichButton) {
+                                     Context context = getDialog().getContext();
+-                                    AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
++                                    AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+                                     if (uid == null) {
+                                         accountsDbAdapter.deleteAllRecords();
+                                         Toast.makeText(context, R.string.toast_all_accounts_deleted, Toast.LENGTH_SHORT).show();
+@@ -566,7 +565,6 @@ public void onClick(DialogInterface dialog, int whichButton) {
+                                         long rowId = accountsDbAdapter.getID(uid);
+                                         ((AccountsListFragment) getTargetFragment()).deleteAccount(rowId, deleteSubAccountsCheckBox.isChecked());
+                                     }
+-                                    accountsDbAdapter.close();
+                                 }
+                             })
+                     .setNegativeButton(R.string.alert_dialog_cancel,
+@@ -621,7 +619,7 @@ public AccountsCursorLoader(Context context, String filter){
+ 
+         @Override
+         public Cursor loadInBackground() {
+-            mDatabaseAdapter = new AccountsDbAdapter(getContext());
++            mDatabaseAdapter = GnuCashApplication.getAccountsDbAdapter();
+             Cursor cursor;
+ 
+             if (mFilter != null){
+@@ -665,11 +663,7 @@ public Cursor loadInBackground() {
+         public AccountsCursorAdapter(Context context, int layout, Cursor c,
+                                      String[] from, int[] to) {
+             super(context, layout, c, from, to, 0);
+-            transactionsDBAdapter = new TransactionsDbAdapter(context);
+-        }
+-
+-        public void close() {
+-            transactionsDBAdapter.close();
++            transactionsDBAdapter = GnuCashApplication.getTransactionDbAdapter();
+         }
+ 
+         @Override
+diff --git a/app/src/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java b/app/src/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
+index e4668af6..ad408de9 100644
+--- a/app/src/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
++++ b/app/src/org/gnucash/android/ui/settings/DeleteAllAccountsConfirmationDialog.java
+@@ -24,6 +24,7 @@
+ import android.os.Bundle;
+ import android.widget.Toast;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+@@ -51,9 +52,7 @@ public Dialog onCreateDialog(Bundle savedInstanceState) {
+                             public void onClick(DialogInterface dialog, int whichButton) {
+                                 Context context = getDialog().getContext();
+                                 GncXmlExporter.createBackup();
+-                                AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
+-                                accountsDbAdapter.deleteAllRecords();
+-                                accountsDbAdapter.close();
++                                GnuCashApplication.getAccountsDbAdapter().deleteAllRecords();
+                                 Toast.makeText(context, R.string.toast_all_accounts_deleted, Toast.LENGTH_SHORT).show();
+                                 WidgetConfigurationActivity.updateAllWidgets(context);
+                             }
+diff --git a/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java b/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+index 578e5bf2..d83639d3 100644
+--- a/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
++++ b/app/src/org/gnucash/android/ui/settings/DeleteAllTransacationsConfirmationDialog.java
+@@ -58,20 +58,18 @@ public void onClick(DialogInterface dialog, int whichButton) {
+                                 GncXmlExporter.createBackup();
+ 
+                                 Context context = getActivity();
+-                                AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
++                                AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+                                 List<Transaction> openingBalances = new ArrayList<Transaction>();
+                                 boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
+                                 if (preserveOpeningBalances) {
+                                     openingBalances = accountsDbAdapter.getAllOpeningBalanceTransactions();
+-                                    accountsDbAdapter.close();
+                                 }
+-                                TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(context);
++                                TransactionsDbAdapter transactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+                                 transactionsDbAdapter.deleteAllRecords();
+ 
+                                 if (preserveOpeningBalances) {
+                                     transactionsDbAdapter.bulkAddTransactions(openingBalances);
+                                 }
+-                                transactionsDbAdapter.close();
+                                 Toast.makeText(context, R.string.toast_all_transactions_deleted, Toast.LENGTH_SHORT).show();
+                                 WidgetConfigurationActivity.updateAllWidgets(getActivity());
+                             }
+diff --git a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+index 596d71df..4d7eca90 100644
+--- a/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -239,9 +239,8 @@ public boolean onPreferenceClick(Preference preference) {
+                 Toast.makeText(this, R.string.toast_tap_again_to_confirm_delete, Toast.LENGTH_SHORT).show();
+             } else {
+                 GncXmlExporter.createBackup(); //create backup before deleting everything
+-                AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(this);
++                AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+                 accountsDbAdapter.deleteAllRecords();
+-                accountsDbAdapter.close();
+                 Toast.makeText(this, R.string.toast_all_accounts_deleted, Toast.LENGTH_LONG).show();
+             }
+             Timer timer = new Timer();
+@@ -258,17 +257,15 @@ public boolean onPreferenceClick(Preference preference) {
+                 List<Transaction> openingBalances = new ArrayList<Transaction>();
+                 boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
+                 if (preserveOpeningBalances) {
+-                    AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(this);
++                    AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+                     openingBalances = accountsDbAdapter.getAllOpeningBalanceTransactions();
+-                    accountsDbAdapter.close();
+                 }
+-                TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(this);
++                TransactionsDbAdapter transactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+                 transactionsDbAdapter.deleteAllRecords();
+ 
+                 if (preserveOpeningBalances) {
+                     transactionsDbAdapter.bulkAddTransactions(openingBalances);
+                 }
+-                transactionsDbAdapter.close();
+                 Toast.makeText(this, R.string.toast_all_transactions_deleted, Toast.LENGTH_LONG).show();
+             }
+             Timer timer = new Timer();
+diff --git a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+index 005a8e92..d54c2e00 100644
+--- a/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/ScheduledTransactionsListFragment.java
+@@ -23,6 +23,7 @@
+ import android.database.Cursor;
+ import android.graphics.Rect;
+ import android.os.Bundle;
++import android.support.annotation.NonNull;
+ import android.support.v4.app.LoaderManager;
+ import android.support.v4.content.Loader;
+ import android.support.v4.widget.SimpleCursorAdapter;
+@@ -40,6 +41,7 @@
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.db.*;
+ import org.gnucash.android.ui.UxArgument;
+@@ -127,7 +129,7 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+     public void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+ 
+-        mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
++        mTransactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+         mCursorAdapter = new TransactionsCursorAdapter(
+                 getActivity().getApplicationContext(),
+                 R.layout.list_item_scheduled_trxn, null,
+@@ -170,12 +172,6 @@ public void onResume() {
+     }
+ 
+     @Override
+-    public void onDestroy() {
+-        super.onDestroy();
+-        mTransactionsDbAdapter.close();
+-    }
+-
+-    @Override
+     public void onListItemClick(ListView l, View v, int position, long id) {
+         super.onListItemClick(l, v, position, id);
+         if (mInEditMode){
+@@ -415,13 +411,12 @@ public RecurringTransactionsCursorLoader(Context context) {
+             super(context);
+         }
+ 
+-        @Override
++        @Override @NonNull
+         public Cursor loadInBackground() {
+-            mDatabaseAdapter = new TransactionsDbAdapter(getContext());
++            mDatabaseAdapter = GnuCashApplication.getTransactionDbAdapter();
+             Cursor c = ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllRecurringTransactions();
+ 
+-            if (c != null)
+-                registerContentObserver(c);
++            registerContentObserver(c);
+             return c;
+         }
+     }
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index db9ab545..1b25dcfe 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -22,10 +22,12 @@
+ import java.text.ParseException;
+ import java.util.*;
+ 
++import android.support.annotation.NonNull;
+ import android.support.v4.app.FragmentManager;
+ import android.text.Editable;
+ import android.widget.*;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.*;
+ import org.gnucash.android.model.*;
+ import org.gnucash.android.ui.transaction.dialog.DatePickerDialogFragment;
+@@ -186,7 +188,7 @@
+     /**
+ 	 * Create the view and retrieve references to the UI elements
+ 	 */
+-	@Override
++	@Override @NonNull
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+ 		View v = inflater.inflate(R.layout.fragment_new_transaction, container, false);
+@@ -222,7 +224,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		}
+ 
+         mAccountUID = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
+-		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
++		mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+         mAccountType = mAccountsDbAdapter.getAccountType(mAccountUID);
+ 
+         ArrayAdapter<CharSequence> recurrenceAdapter = ArrayAdapter.createFromResource(getActivity(),
+@@ -231,7 +233,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         mRecurringTransactionSpinner.setAdapter(recurrenceAdapter);
+ 
+         String transactionUID = getArguments().getString(UxArgument.SELECTED_TRANSACTION_UID);
+-		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
++		mTransactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+ 		mTransaction = mTransactionsDbAdapter.getTransaction(transactionUID);
+         if (mTransaction != null) {
+             mMultiCurrency = mTransactionsDbAdapter.getNumCurrencies(mTransaction.getUID()) > 1;
+@@ -576,7 +578,7 @@ public void onAccountChanged(long newAccountId) {
+             Toast.makeText(getActivity(), R.string.toast_error_edit_multi_currency_transaction, Toast.LENGTH_LONG).show();
+             return;
+         }
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
++        AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+         String currencyCode = accountsDbAdapter.getCurrencyCode(newAccountId);
+         Currency currency = Currency.getInstance(currencyCode);
+         mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
+@@ -585,8 +587,6 @@ public void onAccountChanged(long newAccountId) {
+         mTransactionTypeButton.setAccountType(mAccountType);
+ 
+         updateTransferAccountsList();
+-
+-        accountsDbAdapter.close();
+     }
+ 
+ 	/**
+@@ -626,11 +626,10 @@ private void saveNewTransaction() {
+ 		if (mTransaction != null){
+             if (!mUseDoubleEntry){
+                 //first remove old splits for this transaction, since there is only one split
+-                SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
++                SplitsDbAdapter splitsDbAdapter = GnuCashApplication.getSplitsDbAdapter();
+                 for (Split split : mTransaction.getSplits()) {
+                     splitsDbAdapter.deleteSplit(split.getUID());
+                 }
+-                splitsDbAdapter.close();
+ 
+                 Split split = new Split(amount, accountUID);
+                 split.setType(mTransactionTypeButton.getTransactionType());
+@@ -709,8 +708,6 @@ public void onDestroyView() {
+ 		super.onDestroyView();
+ 		if (mCursor != null)
+ 			mCursor.close();
+-		mAccountsDbAdapter.close();
+-		mTransactionsDbAdapter.close();
+ 	}
+ 
+ 	@Override
+@@ -760,11 +757,10 @@ public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
+             setAmountEditViewVisible(View.GONE);
+         }
+ 
+-        SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
++        SplitsDbAdapter splitsDbAdapter = GnuCashApplication.getSplitsDbAdapter();
+         for (String removedSplitUID : removedSplitUIDs) {
+             splitsDbAdapter.deleteRecord(splitsDbAdapter.getID(removedSplitUID));
+         }
+-        splitsDbAdapter.close();
+     }
+ 
+     /**
+@@ -839,16 +835,16 @@ public static String stripCurrencyFormatting(String s){
+ 	 * @param amountString String with amount information
+ 	 * @return BigDecimal with the amount parsed from <code>amountString</code>
+ 	 */
++    @NonNull
+ 	public static BigDecimal parseInputToDecimal(String amountString){
+ 		String clean = stripCurrencyFormatting(amountString);
+         if (clean.length() == 0) //empty string
+                 return BigDecimal.ZERO;
+ 		//all amounts are input to 2 decimal places, so after removing decimal separator, divide by 100
+         //TODO: Handle currencies with different kinds of decimal places
+-		BigDecimal amount = new BigDecimal(clean).setScale(2,
++		return new BigDecimal(clean).setScale(2,
+ 				RoundingMode.HALF_EVEN).divide(new BigDecimal(100), 2,
+ 				RoundingMode.HALF_EVEN);
+-		return amount;
+ 	}
+ 
+     private class AmountTextWatcher extends AmountInputFormatter {
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 87d06394..d9b5eb2f 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -281,7 +281,7 @@ protected void onCreate(Bundle savedInstanceState) {
+ 
+ 		mAccountUID = getIntent().getStringExtra(UxArgument.SELECTED_ACCOUNT_UID);
+ 
+-        mAccountsDbAdapter = new AccountsDbAdapter(this);
++        mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+ 
+         setupActionBarNavigation();
+ 
+@@ -409,9 +409,7 @@ public boolean onPrepareOptionsMenu(Menu menu) {
+         if (favoriteAccountMenuItem == null) //when the activity is used to edit a transaction
+             return super.onPrepareOptionsMenu(menu);
+ 
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(this);
+-        boolean isFavoriteAccount = accountsDbAdapter.isFavoriteAccount(mAccountsDbAdapter.getAccountID(mAccountUID));
+-        accountsDbAdapter.close();
++        boolean isFavoriteAccount = GnuCashApplication.getAccountsDbAdapter().isFavoriteAccount(mAccountsDbAdapter.getAccountID(mAccountUID));
+ 
+         int favoriteIcon = isFavoriteAccount ? android.R.drawable.btn_star_big_on : android.R.drawable.btn_star_big_off;
+         favoriteAccountMenuItem.setIcon(favoriteIcon);
+@@ -435,12 +433,11 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	        return true;
+ 
+             case R.id.menu_favorite_account:
+-                AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(this);
++                AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+                 long accountId = accountsDbAdapter.getAccountID(mAccountUID);
+                 boolean isFavorite = accountsDbAdapter.isFavoriteAccount(accountId);
+                 //toggle favorite preference
+                 accountsDbAdapter.updateAccount(accountId, DatabaseSchema.AccountEntry.COLUMN_FAVORITE, isFavorite ? "0" : "1");
+-                accountsDbAdapter.close();
+                 supportInvalidateOptionsMenu();
+                 return true;
+ 
+@@ -469,7 +466,6 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 	protected void onDestroy() {
+ 		super.onDestroy();
+         mAccountsCursor.close();
+-		mAccountsDbAdapter.close();
+ 	}
+ 	
+ 	/**
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index 337262b8..b5466abf 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -47,6 +47,7 @@
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.*;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.transaction.dialog.BulkMoveDialogFragment;
+@@ -117,11 +118,10 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+ 				return true;
+ 
+ 			case R.id.context_menu_delete:
+-                SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(getActivity());
++                SplitsDbAdapter splitsDbAdapter = GnuCashApplication.getSplitsDbAdapter();
+ 				for (long id : getListView().getCheckedItemIds()) {
+                     splitsDbAdapter.deleteSplitsForTransactionAndAccount(mTransactionsDbAdapter.getUID(id), mAccountUID);
+ 				}
+-                splitsDbAdapter.close();
+ 				refresh();
+ 				mode.finish();
+ 				WidgetConfigurationActivity.updateAllWidgets(getActivity());
+@@ -140,7 +140,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 		Bundle args = getArguments();
+ 		mAccountUID = args.getString(UxArgument.SELECTED_ACCOUNT_UID);
+ 
+-		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
++		mTransactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+ 		mCursorAdapter = new TransactionsCursorAdapter(
+ 				getActivity().getApplicationContext(), 
+ 				R.layout.list_item_transaction, null, 
+@@ -212,7 +212,6 @@ public void onResume() {
+ 	@Override
+ 	public void onDestroy() {
+ 		super.onDestroy();
+-		mTransactionsDbAdapter.close();
+ 	}
+ 	
+ 	@Override
+@@ -492,7 +491,7 @@ public TransactionsCursorLoader(Context context, String accountUID) {
+ 		
+ 		@Override
+ 		public Cursor loadInBackground() {
+-			mDatabaseAdapter = new TransactionsDbAdapter(getContext());
++			mDatabaseAdapter = GnuCashApplication.getTransactionDbAdapter();
+ 			Cursor c = ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllTransactionsForAccount(accountUID);
+ 			if (c != null)
+ 				registerContentObserver(c);
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+index af55c964..f05452c6 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+@@ -17,6 +17,7 @@
+ package org.gnucash.android.ui.transaction.dialog;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -103,7 +104,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 				mTransactionIds.length);
+ 		getDialog().setTitle(title);
+ 		
+-		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
++		mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+         String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID    + " != '" + mOriginAccountUID + "' AND "
+                 + DatabaseSchema.AccountEntry.COLUMN_CURRENCY               + " = '" + mAccountsDbAdapter.getCurrencyCode(mOriginAccountUID)
+                 + "' AND " + DatabaseSchema.AccountEntry.COLUMN_UID         + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+@@ -139,7 +140,7 @@ public void onClick(View v) {
+ 				}
+ 				
+ 				long dstAccountId = mDestinationAccountSpinner.getSelectedItemId();
+-				TransactionsDbAdapter trxnAdapter = new TransactionsDbAdapter(getActivity());
++				TransactionsDbAdapter trxnAdapter = GnuCashApplication.getTransactionDbAdapter();
+ 				if (!trxnAdapter.getCurrencyCode(dstAccountId).equals(trxnAdapter.getCurrencyCode(mOriginAccountUID))){
+ 					Toast.makeText(getActivity(), R.string.toast_incompatible_currency, Toast.LENGTH_LONG).show();
+ 					return;
+@@ -149,7 +150,6 @@ public void onClick(View v) {
+ 				for (long trxnId : mTransactionIds) {
+ 					trxnAdapter.moveTranscation(trxnAdapter.getUID(trxnId), srcAccountUID, dstAccountUID);
+ 				}
+-				trxnAdapter.close();
+ 
+ 				WidgetConfigurationActivity.updateAllWidgets(getActivity());
+ 				((Refreshable)getTargetFragment()).refresh();
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index a150ca79..da0eb1b1 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -27,6 +27,7 @@
+ import android.view.WindowManager;
+ import android.widget.*;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.SplitsDbAdapter;
+@@ -105,7 +106,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         getDialog().setTitle(R.string.title_transaction_splits);
+ 
+         mSplitItemViewList = new ArrayList<View>();
+-        mSplitsDbAdapter = new SplitsDbAdapter(getActivity());
++        mSplitsDbAdapter = GnuCashApplication.getSplitsDbAdapter();
+ 
+         //we are editing splits for a new transaction.
+         // But the user may have already created some splits before. Let's check
+@@ -186,7 +187,7 @@ private View addSplitView(Split split){
+      * Extracts arguments passed to the view and initializes necessary adapters and cursors
+      */
+     private void initArgs() {
+-        mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
++        mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+ 
+         Bundle args     = getArguments();
+         mAccountUID      = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
+@@ -366,8 +367,6 @@ private void updateTotal(){
+     @Override
+     public void onDestroy() {
+         super.onDestroy();
+-        mAccountsDbAdapter.close();
+-        mSplitsDbAdapter.close();
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
+index cc90ff29..2e8232ad 100644
+--- a/app/src/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
+@@ -29,6 +29,7 @@
+ import android.app.Dialog;
+ import android.content.DialogInterface;
+ import android.os.Bundle;
++import android.support.annotation.NonNull;
+ 
+ import com.actionbarsherlock.app.SherlockDialogFragment;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+@@ -53,7 +54,7 @@ public static TransactionsDeleteConfirmationDialogFragment newInstance(int title
+         return frag;
+     }
+ 
+-    @Override
++    @Override @NonNull
+     public Dialog onCreateDialog(Bundle savedInstanceState) {
+         int title = getArguments().getInt("title");
+         final long rowId = getArguments().getLong(UxArgument.SELECTED_TRANSACTION_IDS);
+@@ -64,15 +65,13 @@ public Dialog onCreateDialog(Bundle savedInstanceState) {
+                 .setPositiveButton(R.string.alert_dialog_ok_delete,
+                         new DialogInterface.OnClickListener() {
+                             public void onClick(DialogInterface dialog, int whichButton) {
+-                                TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(getSherlockActivity());
++                                TransactionsDbAdapter transactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+                                 if (rowId == 0) {
+                                     GncXmlExporter.createBackup(); //create backup before deleting everything
+                                     List<Transaction> openingBalances = new ArrayList<Transaction>();
+                                     boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
+                                     if (preserveOpeningBalances) {
+-                                        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-                                        openingBalances = accountsDbAdapter.getAllOpeningBalanceTransactions();
+-                                        accountsDbAdapter.close();
++                                        openingBalances = GnuCashApplication.getAccountsDbAdapter().getAllOpeningBalanceTransactions();
+                                     }
+ 
+                                     transactionsDbAdapter.deleteAllRecords();
+@@ -83,7 +82,6 @@ public void onClick(DialogInterface dialog, int whichButton) {
+                                 } else {
+                                     transactionsDbAdapter.deleteRecord(rowId);
+                                 }
+-                                transactionsDbAdapter.close();
+                                 if (getTargetFragment() instanceof AccountsListFragment) {
+                                     ((AccountsListFragment) getTargetFragment()).refresh();
+                                 }
+diff --git a/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java b/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
+index 2deef3bc..919f6d1b 100644
+--- a/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
++++ b/app/src/org/gnucash/android/ui/util/AccountBalanceTask.java
+@@ -22,6 +22,7 @@
+ import android.util.Log;
+ import android.widget.TextView;
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.model.Money;
+ 
+@@ -40,7 +41,7 @@
+ 
+     public AccountBalanceTask(TextView balanceTextView, Context context){
+         accountBalanceTextViewReference = new WeakReference<TextView>(balanceTextView);
+-        accountsDbAdapter = new AccountsDbAdapter(context);
++        accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+     }
+ 
+     @Override
+@@ -68,7 +69,7 @@ protected Money doInBackground(String... params) {
+     @Override
+     protected void onPostExecute(Money balance) {
+         if (accountBalanceTextViewReference.get() != null && balance != null){
+-            final Context context = accountsDbAdapter.getContext();
++            final Context context = GnuCashApplication.getAppContext();
+             final TextView balanceTextView = accountBalanceTextViewReference.get();
+             if (balanceTextView != null){
+                 balanceTextView.setText(balance.formattedString());
+@@ -77,6 +78,5 @@ protected void onPostExecute(Money balance) {
+                 balanceTextView.setTextColor(fontColor);
+             }
+         }
+-        accountsDbAdapter.close();
+     }
+ }
+diff --git a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 39fe7266..93a09813 100644
+--- a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -19,6 +19,7 @@
+ import java.util.Locale;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.db.AccountsDbAdapter;
+@@ -70,7 +71,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 		mOkButton 		= (Button) findViewById(R.id.btn_save);
+ 		mCancelButton 	= (Button) findViewById(R.id.btn_cancel);
+ 
+-		mAccountsDbAdapter = new AccountsDbAdapter(this);
++		mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+ 		Cursor cursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+ 		
+ 		if (cursor.getCount() <= 0){
+@@ -87,12 +88,6 @@ public void onCreate(Bundle savedInstanceState) {
+ 		bindListeners();
+ 	}
+ 
+-	@Override
+-	protected void onDestroy() {		
+-		super.onDestroy();
+-		mAccountsDbAdapter.close();
+-	}
+-	
+ 	/**
+ 	 * Sets click listeners for the buttons in the dialog
+ 	 */
+@@ -150,7 +145,7 @@ public static void updateWidget(Context context, int appWidgetId, String account
+ 		Log.i("WidgetConfiguration", "Updating widget: " + appWidgetId);
+ 		AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
+ 
+-		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(context);
++		AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+ 		Account account = accountsDbAdapter.getAccount(accountUID);
+ 
+ 		
+@@ -202,7 +197,6 @@ public static void updateWidget(Context context, int appWidgetId, String account
+ 		views.setOnClickPendingIntent(R.id.btn_new_transaction, pendingIntent);
+ 		
+ 		appWidgetManager.updateAppWidget(appWidgetId, views);
+-        accountsDbAdapter.close();
+ 	}
+ 	
+ 	/**
+diff --git a/integration-tests/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java b/integration-tests/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+index e7f6e3c2..b98e70e3 100644
+--- a/integration-tests/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
++++ b/integration-tests/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+@@ -3,23 +3,42 @@
+ import java.util.Currency;
+ import java.util.List;
+ 
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.SplitsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ 
++import android.database.SQLException;
++import android.database.sqlite.SQLiteDatabase;
+ import android.test.AndroidTestCase;
++import android.util.Log;
+ 
+ public class AccountsDbAdapterTest extends AndroidTestCase {
+ 
+ 	private static final String BRAVO_ACCOUNT_NAME = "Bravo";
+ 	private static final String ALPHA_ACCOUNT_NAME = "Alpha";
+-	private AccountsDbAdapter mAdapter;
++    private DatabaseHelper mDbHelper;
++    private SQLiteDatabase mDb;
++    private AccountsDbAdapter mAccountsDbAdapter;
++    private TransactionsDbAdapter mTransactionsDbAdapter;
++    private SplitsDbAdapter mSplitsDbAdapter;
+ 	
+ 	@Override
+ 	protected void setUp() throws Exception {		
+ 		super.setUp();
+-		mAdapter = new AccountsDbAdapter(getContext());
+-		mAdapter.deleteAllRecords();
++        mDbHelper = new DatabaseHelper(getContext());
++        try {
++            mDb = mDbHelper.getWritableDatabase();
++        } catch (SQLException e) {
++            Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
++            mDb = mDbHelper.getReadableDatabase();
++        }
++        mSplitsDbAdapter = new SplitsDbAdapter(mDb);
++        mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
++        mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
++		mAccountsDbAdapter.deleteAllRecords();
+ 		Account first = new Account(ALPHA_ACCOUNT_NAME);
+ 		Transaction t1 = new Transaction("T800");
+ 		Transaction t2 = new Transaction("T1000");
+@@ -27,12 +46,12 @@ protected void setUp() throws Exception {
+ 		Account second = new Account(BRAVO_ACCOUNT_NAME);
+ 		Transaction t = new Transaction("buyout");
+ 		
+-		mAdapter.addAccount(second);
+-		mAdapter.addAccount(first);
++		mAccountsDbAdapter.addAccount(second);
++		mAccountsDbAdapter.addAccount(first);
+ 	}
+ 	
+ 	public void testAlphabeticalSorting(){
+-		List<Account> accountsList = mAdapter.getAllAccounts();
++		List<Account> accountsList = mAccountsDbAdapter.getAllAccounts();
+ 		assertEquals(2, accountsList.size());
+ 		//bravo was saved first, but alpha should be first alphabetically
+ 		assertEquals(ALPHA_ACCOUNT_NAME, accountsList.get(0).getName());
+@@ -47,9 +66,9 @@ public void testTransactionsHaveSameCurrencyAsAccount(){
+ 		acc1.addTransaction(trx);
+ 		acc1.addTransaction(term);
+ 		
+-		mAdapter.addAccount(acc1);
++		mAccountsDbAdapter.addAccount(acc1);
+ 		
+-		Account account = mAdapter.getAccount("simile");
++		Account account = mAccountsDbAdapter.getAccount("simile");
+ 		for (Transaction t : account.getTransactions()) {
+ 			assertEquals("JPY", t.getBalance(acc1.getUID()).getCurrency().getCurrencyCode());
+ 		}
+@@ -58,7 +77,8 @@ public void testTransactionsHaveSameCurrencyAsAccount(){
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		super.tearDown();
+-		mAdapter.deleteAllRecords();
+-		mAdapter.close();
++		mAccountsDbAdapter.deleteAllRecords();
++        mDbHelper.close();
++        mDb.close();
+ 	}
+ }
+diff --git a/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java b/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+index 304b29f4..d78034cc 100644
+--- a/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
++++ b/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+@@ -2,25 +2,42 @@
+ 
+ import java.util.List;
+ 
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ 
++import android.database.SQLException;
++import android.database.sqlite.SQLiteDatabase;
+ import android.test.AndroidTestCase;
++import android.util.Log;
+ 
+ public class TransactionsDbAdapterTest extends AndroidTestCase {
+ 	private static final String ALPHA_ACCOUNT_NAME = "Alpha";
+ 	private static final String BRAVO_ACCOUNT_NAME = "Bravo";
+ 	private static final String ALPHA_ACCOUNT_UID = "alpha-team";
+-	
+-	private TransactionsDbAdapter mAdapter;	
++
++    private DatabaseHelper mDbHelper;
++    private SQLiteDatabase mDb;
++    private AccountsDbAdapter mAccountsDbAdapter;
++    private TransactionsDbAdapter mTransactionsDbAdapter;
++    private SplitsDbAdapter mSplitsDbAdapter;
+ 	
+ 	@Override
+ 	protected void setUp() throws Exception {
+ 		super.setUp();
+-		mAdapter = new TransactionsDbAdapter(getContext());
+-		AccountsDbAdapter accountsAdapter = new AccountsDbAdapter(mContext);
++        mDbHelper = new DatabaseHelper(getContext());
++        try {
++            mDb = mDbHelper.getWritableDatabase();
++        } catch (SQLException e) {
++            Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
++            mDb = mDbHelper.getReadableDatabase();
++        }
++        mSplitsDbAdapter = new SplitsDbAdapter(mDb);
++        mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
++        mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+ 		Account first = new Account(ALPHA_ACCOUNT_NAME);
+ 		first.setUID(ALPHA_ACCOUNT_UID);
+ 		Transaction t1 = new Transaction("T800");
+@@ -34,12 +51,12 @@ protected void setUp() throws Exception {
+ 		Transaction t = new Transaction( "buyout");
+ 		second.addTransaction(t);
+ 		
+-		accountsAdapter.addAccount(second);
+-		accountsAdapter.addAccount(first);
++		mAccountsDbAdapter.addAccount(second);
++		mAccountsDbAdapter.addAccount(first);
+ 	}
+ 	
+ 	public void testTransactionsAreTimeSorted(){
+-		List<Transaction> transactionsList = mAdapter.getAllTransactionsForAccount(ALPHA_ACCOUNT_UID);
++		List<Transaction> transactionsList = mTransactionsDbAdapter.getAllTransactionsForAccount(ALPHA_ACCOUNT_UID);
+ 		assertEquals("T1000", transactionsList.get(0).getDescription());
+ 		assertEquals("T800", transactionsList.get(1).getDescription());
+ 	}
+@@ -47,8 +64,8 @@ public void testTransactionsAreTimeSorted(){
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		super.tearDown();
+-		AccountsDbAdapter accAdapter = new AccountsDbAdapter(mContext);
+-		accAdapter.deleteAllRecords();
+-		accAdapter.close();
++		mAccountsDbAdapter.deleteAllRecords();
++        mDbHelper.close();
++        mDb.close();
+ 	}
+ }
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/AccountsActivityTest.java b/integration-tests/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+index a173f31d..4bbc8bd5 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -19,15 +19,20 @@
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.SharedPreferences.Editor;
++import android.database.SQLException;
++import android.database.sqlite.SQLiteDatabase;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.Fragment;
+ import android.test.ActivityInstrumentationTestCase2;
++import android.util.Log;
+ import android.view.View;
+ import android.widget.EditText;
+ import android.widget.ListView;
+ import android.widget.TextView;
+ import com.jayway.android.robotium.solo.Solo;
+ import org.gnucash.android.R;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Transaction;
+@@ -48,9 +53,23 @@
+ 	private static final String DUMMY_ACCOUNT_NAME = "Dummy account";
+     public static final String  DUMMY_ACCOUNT_UID   = "dummy-account";
+ 	private Solo mSolo;
+-
++    private DatabaseHelper mDbHelper;
++    private SQLiteDatabase mDb;
++    private AccountsDbAdapter mAccountsDbAdapter;
++    private TransactionsDbAdapter mTransactionsDbAdapter;
++    private SplitsDbAdapter mSplitsDbAdapter;
+ 	public AccountsActivityTest() {
+ 		super(AccountsActivity.class);
++        mDbHelper = new DatabaseHelper(getInstrumentation().getTargetContext());
++        try {
++            mDb = mDbHelper.getWritableDatabase();
++        } catch (SQLException e) {
++            Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
++            mDb = mDbHelper.getReadableDatabase();
++        }
++        mSplitsDbAdapter = new SplitsDbAdapter(mDb);
++        mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
++        mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+ 	}
+ 
+ 	protected void setUp() throws Exception {
+@@ -61,12 +80,10 @@ protected void setUp() throws Exception {
+ 		
+ 		mSolo = new Solo(getInstrumentation(), getActivity());	
+ 		
+-		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+         account.setUID(DUMMY_ACCOUNT_UID);
+ 		account.setCurrency(Currency.getInstance(DUMMY_ACCOUNT_CURRENCY_CODE));
+-		adapter.addAccount(account);
+-		adapter.close();
++		mAccountsDbAdapter.addAccount(account);
+ 
+         //the What's new dialog is usually displayed on first run
+         String dismissDialog = getActivity().getString(R.string.label_dismiss);
+@@ -78,12 +95,10 @@ protected void setUp() throws Exception {
+ 	
+ 	public void testDisplayAccountsList(){
+         final int NUMBER_OF_ACCOUNTS = 15;
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+         for (int i = 0; i < NUMBER_OF_ACCOUNTS; i++) {
+             Account account = new Account("Acct " + i);
+-            accountsDbAdapter.addAccount(account);
++            mAccountsDbAdapter.addAccount(account);
+         }
+-        accountsDbAdapter.close();
+ 
+         //there should exist a listview of accounts
+         refreshAccountsList();
+@@ -100,9 +115,7 @@ public void testSearchAccounts(){
+ 
+         Account account = new Account(SEARCH_ACCOUNT_NAME);
+         account.setParentUID(DUMMY_ACCOUNT_UID);
+-        AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-        accountsDbAdapter.addAccount(account);
+-        accountsDbAdapter.close();
++        mAccountsDbAdapter.addAccount(account);
+ 
+         refreshAccountsList();
+ 
+@@ -146,15 +159,12 @@ public void testCreateAccount(){
+ 				.findViewById(R.id.primary_text);
+ 
+ 		assertEquals(NEW_ACCOUNT_NAME, v.getText().toString());
+-		AccountsDbAdapter accAdapter = new AccountsDbAdapter(getActivity());
+-		
+-		List<Account> accounts = accAdapter.getAllAccounts();
++
++		List<Account> accounts = mAccountsDbAdapter.getAllAccounts();
+ 		Account newestAccount = accounts.get(0);
+ 		
+ 		assertEquals(NEW_ACCOUNT_NAME, newestAccount.getName());
+ 		assertEquals(Money.DEFAULT_CURRENCY_CODE, newestAccount.getCurrency().getCurrencyCode());
+-
+-		accAdapter.close();		
+ 	}
+ 
+ 	public void testEditAccount(){
+@@ -186,14 +196,11 @@ public void testEditAccount(){
+ 				.findViewById(R.id.primary_text);
+ 		assertEquals(editedAccountName, tv.getText().toString());
+ 		
+-		AccountsDbAdapter accAdapter = new AccountsDbAdapter(getActivity());
+-		
+-		List<Account> accounts = accAdapter.getAllAccounts();
++		List<Account> accounts = mAccountsDbAdapter.getAllAccounts();
+ 		Account latest = accounts.get(0);  //will be the first due to alphabetical sorting
+ 		
+ 		assertEquals(latest.getName(), "Edited Account");
+ 		assertEquals(DUMMY_ACCOUNT_CURRENCY_CODE, latest.getCurrency().getCurrencyCode());	
+-		accAdapter.close();
+ 	}
+ 	
+ 	public void testDeleteAccount(){
+@@ -205,8 +212,7 @@ public void testDeleteAccount(){
+ 
+         Transaction transaction = new Transaction("hats");
+         acc.addTransaction(transaction);
+-        AccountsDbAdapter accDbAdapter = new AccountsDbAdapter(getActivity());
+-        accDbAdapter.addAccount(acc);
++        mAccountsDbAdapter.addAccount(acc);
+ 
+         Fragment fragment = getActivity()
+                 .getSupportFragmentManager()
+@@ -225,27 +231,21 @@ public void testDeleteAccount(){
+         mSolo.waitForDialogToClose(1000);
+         mSolo.waitForText("Accounts");
+ 
+-        long id = accDbAdapter.getAccountID(accountUidToDelete);
++        long id = mAccountsDbAdapter.getAccountID(accountUidToDelete);
+         assertEquals(-1, id);
+ 
+-        TransactionsDbAdapter transDbAdapter = new TransactionsDbAdapter(getActivity());
+-        List<Transaction> transactions = transDbAdapter.getAllTransactionsForAccount(accountUidToDelete);
++        List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(accountUidToDelete);
+ 
+         assertEquals(0, transactions.size());
+-
+-        accDbAdapter.close();
+-        transDbAdapter.close();
+     }
+ 
+ 	public void testDisplayTransactionsList(){
+         final int TRANSACTION_COUNT = 15;
+         //first create a couple of transations
+-        TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+         for (int i = 0; i < TRANSACTION_COUNT; i++) {
+             Transaction transaction = new Transaction("Transaxion " + i);
+-            transactionsDbAdapter.addTransaction(transaction);
++            mTransactionsDbAdapter.addTransaction(transaction);
+         }
+-        transactionsDbAdapter.close();
+ 
+ 		Fragment fragment = getActivity()
+ 				.getSupportFragmentManager()
+@@ -292,9 +292,7 @@ public void testIntentAccountCreation(){
+ 			}
+ 		}
+ 				
+-		AccountsDbAdapter dbAdapter = new AccountsDbAdapter(getActivity());
+-		Account account = dbAdapter.getAccount("intent-account");
+-		dbAdapter.close();
++		Account account = mAccountsDbAdapter.getAccount("intent-account");
+ 		assertNotNull(account);
+ 		assertEquals("Intent Account", account.getName());
+ 		assertEquals("intent-account", account.getUID());
+@@ -303,10 +301,8 @@ public void testIntentAccountCreation(){
+ 	
+ 	
+ 	protected void tearDown() throws Exception {
+-		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.deleteAllRecords();
+-		adapter.close();
+-		
++		mAccountsDbAdapter.deleteAllRecords();
++
+ 		mSolo.finishOpenedActivities();		
+ 		super.tearDown();
+ 	}
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/ExportTransactionsTest.java b/integration-tests/src/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 6da6059b..a7d8b82b 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -19,6 +19,8 @@
+ import java.io.File;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.Transaction;
+@@ -27,8 +29,11 @@
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ 
++import android.database.SQLException;
++import android.database.sqlite.SQLiteDatabase;
+ import android.os.Environment;
+ import android.test.ActivityInstrumentationTestCase2;
++import android.util.Log;
+ import android.widget.Spinner;
+ 
+ import com.jayway.android.robotium.solo.Solo;
+@@ -37,9 +42,23 @@
+ 		ActivityInstrumentationTestCase2<AccountsActivity> {
+ 
+ 	private Solo mSolo;
+-	
++    private DatabaseHelper mDbHelper;
++    private SQLiteDatabase mDb;
++    private AccountsDbAdapter mAccountsDbAdapter;
++    private TransactionsDbAdapter mTransactionsDbAdapter;
++    private SplitsDbAdapter mSplitsDbAdapter;
+ 	public ExportTransactionsTest() {
+ 		super(AccountsActivity.class);
++        mDbHelper = new DatabaseHelper(getActivity());
++        try {
++            mDb = mDbHelper.getWritableDatabase();
++        } catch (SQLException e) {
++            Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
++            mDb = mDbHelper.getReadableDatabase();
++        }
++        mSplitsDbAdapter = new SplitsDbAdapter(mDb);
++        mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
++        mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+ 	}
+ 	
+ 	@Override
+@@ -54,9 +73,7 @@ protected void setUp() throws Exception {
+ 		
+ 		account.addTransaction(transaction);
+ 		
+-		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.addAccount(account);
+-		adapter.close();	
++		mAccountsDbAdapter.addAccount(account);
+ 	}
+ 	
+ 	/**
+@@ -126,8 +143,7 @@ public void testQifExport(){
+     }
+ 
+ 	public void testDeleteTransactionsAfterExport(){
+-		TransactionsDbAdapter transAdapter = new TransactionsDbAdapter(getActivity());
+-		assertTrue(transAdapter.getAllTransactionsCount() != 0);
++		assertTrue(mTransactionsDbAdapter.getAllTransactionsCount() != 0);
+ 		
+         mSolo.clickOnActionBarItem(R.id.menu_export);
+ //        ActionBarUtils.clickSherlockActionBarItem(mSolo, R.id.menu_export);
+@@ -150,9 +166,8 @@ public void testDeleteTransactionsAfterExport(){
+ 		mSolo.waitForDialogToClose(1000);
+         mSolo.sleep(1000);
+ 
+-		assertEquals(0, transAdapter.getAllTransactionsCount());
++		assertEquals(0, mTransactionsDbAdapter.getAllTransactionsCount());
+ 		
+-		transAdapter.close();
+         mSolo.goBack();
+ 	}
+ 	
+@@ -227,9 +242,9 @@ public void testValidityOfExport(){
+ 	
+ 	@Override
+ 	protected void tearDown() throws Exception {
+-		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.deleteAllRecords();
+-		adapter.close();
++		mAccountsDbAdapter.deleteAllRecords();
++        mDbHelper.close();
++        mDb.close();
+ 		mSolo.finishOpenedActivities();
+ 		super.tearDown();
+ 	}
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java b/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 974896b5..116346ea 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -20,15 +20,20 @@
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
++import android.database.SQLException;
++import android.database.sqlite.SQLiteDatabase;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.Fragment;
+ import android.test.ActivityInstrumentationTestCase2;
++import android.util.Log;
+ import android.view.View;
+ import android.widget.Spinner;
+ import android.widget.TextView;
+ import android.widget.ToggleButton;
+ import com.jayway.android.robotium.solo.Solo;
+ import org.gnucash.android.R;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Transaction;
+@@ -56,6 +61,12 @@
+ 	private Solo mSolo;
+ 	private Transaction mTransaction;
+ 	private long mTransactionTimeMillis;
++
++    private SQLiteDatabase mDb;
++    private DatabaseHelper mDbHelper;
++    private AccountsDbAdapter mAccountsDbAdapter;
++    private TransactionsDbAdapter mTransactionsDbAdapter;
++    private SplitsDbAdapter mSplitsDbAdapter;
+ 	
+ 	public TransactionsActivityTest() {
+ 		super(TransactionsActivity.class);
+@@ -63,6 +74,17 @@ public TransactionsActivityTest() {
+ 	
+ 	@Override
+ 	protected void setUp() throws Exception {
++        mDbHelper = new DatabaseHelper(getInstrumentation().getTargetContext());
++        try {
++            mDb = mDbHelper.getWritableDatabase();
++        } catch (SQLException e) {
++            Log.e(getClass().getName(), "Error getting database: " + e.getMessage());
++            mDb = mDbHelper.getReadableDatabase();
++        }
++        mSplitsDbAdapter = new SplitsDbAdapter(mDb);
++        mTransactionsDbAdapter = new TransactionsDbAdapter(mDb, mSplitsDbAdapter);
++        mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
++
+         mTransactionTimeMillis = System.currentTimeMillis();
+         Account account = new Account(DUMMY_ACCOUNT_NAME);
+         account.setUID(DUMMY_ACCOUNT_UID);
+@@ -73,10 +95,7 @@ protected void setUp() throws Exception {
+ 
+         account.addTransaction(mTransaction);
+ 
+-        Context context = getInstrumentation().getTargetContext();
+-        AccountsDbAdapter adapter = new AccountsDbAdapter(context);
+-        long id = adapter.addAccount(account);
+-        adapter.close();
++        long id = mAccountsDbAdapter.addAccount(account);
+         assertTrue(id > 0);
+ 
+         Intent intent = new Intent(Intent.ACTION_VIEW);
+@@ -104,9 +123,7 @@ private void validateTransactionListDisplayed(){
+ 	}
+ 	
+ 	private int getTranscationCount(){
+-		TransactionsDbAdapter transactionsDb = new TransactionsDbAdapter(getActivity());
+-		int count = transactionsDb.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID).size();
+-		transactionsDb.close();
++		int count = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID).size();
+ 		return count;
+ 	}
+ 	
+@@ -127,8 +144,7 @@ public void testAddTransactionShouldRequireAmount(){
+ 		mSolo.waitForText(TRANSACTION_NAME);
+ 		validateTransactionListDisplayed();
+ 		
+-		TransactionsDbAdapter adapter = new TransactionsDbAdapter(getActivity());
+-		int beforeCount = adapter.getTransactionsCount(adapter.getAccountID(DUMMY_ACCOUNT_UID));
++		int beforeCount = mTransactionsDbAdapter.getTransactionsCount(mTransactionsDbAdapter.getAccountID(DUMMY_ACCOUNT_UID));
+         clickSherlockActionBarItem(R.id.menu_add_transaction);
+ 		mSolo.waitForText("Description");
+ 		mSolo.enterText(0, "Lunch");
+@@ -138,10 +154,9 @@ public void testAddTransactionShouldRequireAmount(){
+ 		boolean toastFound = mSolo.waitForText(toastAmountRequired);
+         assertTrue(toastFound);
+ 
+-		int afterCount = adapter.getTransactionsCount(adapter.getAccountID(DUMMY_ACCOUNT_UID));
++		int afterCount = mTransactionsDbAdapter.getTransactionsCount(mTransactionsDbAdapter.getAccountID(DUMMY_ACCOUNT_UID));
+ 		assertEquals(beforeCount, afterCount);
+ 
+-        adapter.close();
+         mSolo.goBack();
+ 	}
+ 	
+@@ -279,8 +294,7 @@ public void testToggleTransactionType(){
+ 		clickSherlockActionBarItem(R.id.menu_save);
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		
+-		TransactionsDbAdapter adapter = new TransactionsDbAdapter(getActivity());
+-		List<Transaction> transactions = adapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
+ 		
+ 		assertEquals(1, transactions.size());
+ 		Transaction trx = transactions.get(0);
+@@ -303,8 +317,7 @@ public void testOpenTransactionEditShouldNotModifyTransaction(){
+ 
+ 			mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 			
+-			TransactionsDbAdapter adapter = new TransactionsDbAdapter(getActivity());
+-			List<Transaction> transactions = adapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++			List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
+ 			
+ 			assertEquals(1, transactions.size());
+ 			Transaction trx = transactions.get(0);
+@@ -329,24 +342,17 @@ public void testDeleteTransaction(){
+ 		mSolo.clickOnCheckBox(0);		
+ 		clickSherlockActionBarItem(R.id.context_menu_delete);
+ 		
+-		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		long id = accountsDbAdapter.getID(DUMMY_ACCOUNT_UID);
+-		TransactionsDbAdapter adapter = new TransactionsDbAdapter(getActivity());
+-		assertEquals(0, adapter.getTransactionsCount(id));
+-		
+-		accountsDbAdapter.close();
+-		adapter.close();
+-		
++		long id = mAccountsDbAdapter.getID(DUMMY_ACCOUNT_UID);
++		assertEquals(0, mTransactionsDbAdapter.getTransactionsCount(id));
+ 	}
+ 	
+ 	public void testBulkMoveTransactions(){
+         String targetAccountName = "Target";
+         Account account = new Account(targetAccountName);
+ 		account.setCurrency(Currency.getInstance(Locale.getDefault()));
+-		AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		accountsDbAdapter.addAccount(account);
++		mAccountsDbAdapter.addAccount(account);
+ 		
+-		int beforeOriginCount = accountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
++		int beforeOriginCount = mAccountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
+ 		
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		
+@@ -368,19 +374,15 @@ public void testBulkMoveTransactions(){
+ 		
+ 		mSolo.waitForDialogToClose(2000);
+ 		
+-		int targetCount = accountsDbAdapter.getAccount(account.getUID()).getTransactionCount();		
++		int targetCount = mAccountsDbAdapter.getAccount(account.getUID()).getTransactionCount();
+ 		assertEquals(1, targetCount);
+ 		
+-		int afterOriginCount = accountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
++		int afterOriginCount = mAccountsDbAdapter.getAccount(DUMMY_ACCOUNT_UID).getTransactionCount();
+ 		assertEquals(beforeOriginCount-1, afterOriginCount);
+-		
+-		accountsDbAdapter.close();
+-		
+ 	}
+ 	
+ 	public void testIntentTransactionRecording(){
+-		TransactionsDbAdapter trxnAdapter = new TransactionsDbAdapter(getActivity());
+-		int beforeCount = trxnAdapter.getTransactionsCount(trxnAdapter.getAccountID(DUMMY_ACCOUNT_UID));
++		int beforeCount = mTransactionsDbAdapter.getTransactionsCount(mTransactionsDbAdapter.getAccountID(DUMMY_ACCOUNT_UID));
+ 		Intent transactionIntent = new Intent(Intent.ACTION_INSERT);
+ 		transactionIntent.setType(Transaction.MIME_TYPE);
+ 		transactionIntent.putExtra(Intent.EXTRA_TITLE, "Power intents");
+@@ -392,11 +394,11 @@ public void testIntentTransactionRecording(){
+ 
+         mSolo.sleep(2000);
+ 
+-		int afterCount = trxnAdapter.getTransactionsCount(trxnAdapter.getAccountID(DUMMY_ACCOUNT_UID));
++		int afterCount = mTransactionsDbAdapter.getTransactionsCount(mTransactionsDbAdapter.getAccountID(DUMMY_ACCOUNT_UID));
+ 		
+ 		assertEquals(beforeCount + 1, afterCount);
+ 		
+-		List<Transaction> transactions = trxnAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
+ 		
+ 		for (Transaction transaction : transactions) {
+ 			if (transaction.getDescription().equals("Power intents")){
+@@ -404,18 +406,15 @@ public void testIntentTransactionRecording(){
+ 				assertEquals(4.99, transaction.getBalance(DUMMY_ACCOUNT_UID).asDouble());
+ 			}
+ 		}
+-		
+-		trxnAdapter.close();
+ 	}
+ 
+ 	@Override
+ 	protected void tearDown() throws Exception {	
+-		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.deleteAllRecords();
+-		adapter.close();
+-		
++		mAccountsDbAdapter.deleteAllRecords();
++
+ 		mSolo.finishOpenedActivities();
+-		
++		mDbHelper.close();
++        mDb.close();
+ 		super.tearDown();
+ 	}
+ }

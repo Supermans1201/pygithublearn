@@ -1,0 +1,749 @@
+From 80b0384a57822555221fdba70db4172bcd305b5b Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Mon, 24 Aug 2015 10:33:25 +0200
+Subject: [PATCH] Fixed pie chart total (makes a bigger total than the real
+ one) Fixed few grouping bugs Display accounts which actually have
+ transactions Skip months with no data Added pie chart basic UI tests
+
+---
+ app/build.gradle                                   |   7 +-
+ .../android/test/ui/PieChartActivityTest.java      | 315 +++++++++++++++++++++
+ .../gnucash/android/ui/chart/PieChartActivity.java | 259 +++++++++--------
+ 3 files changed, 464 insertions(+), 117 deletions(-)
+ create mode 100644 app/src/androidTest/java/org/gnucash/android/test/ui/PieChartActivityTest.java
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 3583f75c..946a1855 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -182,8 +182,11 @@ dependencies {
+     androidTestCompile ('com.android.support:support-annotations:'  + androidSupportVersion,
+                         'com.android.support.test:runner:'          + androidSupportTestVersion,
+                         'com.android.support.test:rules:'           + androidSupportTestVersion,
+-                        'com.android.support.test.espresso:espresso-core:'      + androidEspressoVersion,
+-                        'com.android.support.test.espresso:espresso-contrib:'   + androidEspressoVersion)
++                        'com.android.support.test.espresso:espresso-core:'      + androidEspressoVersion)
++    androidTestCompile ('com.android.support.test.espresso:espresso-contrib:'   + androidEspressoVersion) {
++        exclude group: 'com.android.support', module: 'support-v4'
++        exclude module: 'recyclerview-v7'
++    }
+ 
+     androidTestCompile('com.squareup.assertj:assertj-android:1.0.0'){
+         exclude group: 'com.android.support', module:'support-annotations'
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartActivityTest.java
+new file mode 100644
+index 00000000..d3504cca
+--- /dev/null
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartActivityTest.java
+@@ -0,0 +1,315 @@
++/*
++ * Copyright (c) 2015 Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.gnucash.android.test.ui;
++
++import android.content.Intent;
++import android.database.SQLException;
++import android.database.sqlite.SQLiteDatabase;
++import android.support.test.InstrumentationRegistry;
++import android.support.test.espresso.ViewAction;
++import android.support.test.espresso.action.CoordinatesProvider;
++import android.support.test.espresso.action.GeneralClickAction;
++import android.support.test.espresso.action.Press;
++import android.support.test.espresso.action.Tap;
++import android.support.test.espresso.contrib.PickerActions;
++import android.support.test.runner.AndroidJUnit4;
++import android.test.ActivityInstrumentationTestCase2;
++import android.util.Log;
++import android.view.View;
++import android.widget.DatePicker;
++
++import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.SplitsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.importer.GncXmlImporter;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
++import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.ui.chart.PieChartActivity;
++import org.joda.time.LocalDateTime;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++
++import java.math.BigDecimal;
++import java.util.Currency;
++
++import static android.support.test.espresso.Espresso.onView;
++import static android.support.test.espresso.action.ViewActions.click;
++import static android.support.test.espresso.assertion.ViewAssertions.matches;
++import static android.support.test.espresso.matcher.ViewMatchers.isEnabled;
++import static android.support.test.espresso.matcher.ViewMatchers.withClassName;
++import static android.support.test.espresso.matcher.ViewMatchers.withId;
++import static android.support.test.espresso.matcher.ViewMatchers.withText;
++import static org.hamcrest.Matchers.anyOf;
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.equalTo;
++import static org.hamcrest.Matchers.not;
++
++@RunWith(AndroidJUnit4.class)
++public class PieChartActivityTest extends ActivityInstrumentationTestCase2<PieChartActivity> {
++
++    public static final String TAG = PieChartActivityTest.class.getName();
++
++    private static final String TRANSACTION_NAME = "Pizza";
++    private static final double TRANSACTION_AMOUNT = 9.99;
++
++    private static final String TRANSACTION2_NAME = "1984";
++    private static final double TRANSACTION2_AMOUNT = 12.49;
++
++    private static final String TRANSACTION3_NAME = "Nice gift";
++    private static final double TRANSACTION3_AMOUNT = 2000.00;
++
++    private static final String CASH_IN_WALLET_ASSET_ACCOUNT_UID = "b687a487849470c25e0ff5aaad6a522b";
++
++    private static final String DINING_EXPENSE_ACCOUNT_UID = "62922c5ccb31d6198259739d27d858fe";
++    private static final String DINING_EXPENSE_ACCOUNT_NAME = "Dining";
++
++    private static final String BOOKS_EXPENSE_ACCOUNT_UID = "a8b342435aceac7c3cac214f9385dd72";
++    private static final String BOOKS_EXPENSE_ACCOUNT_NAME = "Books";
++
++    private static final String GIFTS_RECEIVED_INCOME_ACCOUNT_UID = "b01950c0df0890b6543209d51c8e0b0f";
++    private static final String GIFTS_RECEIVED_INCOME_ACCOUNT_NAME = "Gifts Received";
++
++    public static final Currency CURRENCY = Currency.getInstance("USD");
++
++    private AccountsDbAdapter mAccountsDbAdapter;
++    private TransactionsDbAdapter mTransactionsDbAdapter;
++
++    private PieChartActivity mPieChartActivity;
++
++	public PieChartActivityTest() {
++		super(PieChartActivity.class);
++	}
++	
++	@Override
++	@Before
++	public void setUp() throws Exception {
++		super.setUp();
++		injectInstrumentation(InstrumentationRegistry.getInstrumentation());
++
++        SQLiteDatabase db;
++        DatabaseHelper dbHelper = new DatabaseHelper(getInstrumentation().getTargetContext());
++        try {
++            db = dbHelper.getWritableDatabase();
++        } catch (SQLException e) {
++            Log.e(TAG, "Error getting database: " + e.getMessage());
++            db = dbHelper.getReadableDatabase();
++        }
++        mTransactionsDbAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
++        mAccountsDbAdapter = new AccountsDbAdapter(db, mTransactionsDbAdapter);
++        mAccountsDbAdapter.deleteAllRecords();
++
++        // creates default accounts
++        GncXmlImporter.parse(GnuCashApplication.getAppContext().getResources().openRawResource(R.raw.default_accounts));
++	}
++
++    /**
++     * Call this method in every tests after adding data
++     */
++    private void getTestActivity() {
++        setActivityIntent(new Intent(Intent.ACTION_VIEW));
++        mPieChartActivity = getActivity();
++    }
++
++    private void addTransactionForCurrentMonth() throws Exception {
++        Transaction transaction = new Transaction(TRANSACTION_NAME);
++        transaction.setTime(System.currentTimeMillis());
++
++        Split split = new Split(new Money(BigDecimal.valueOf(TRANSACTION_AMOUNT), CURRENCY), DINING_EXPENSE_ACCOUNT_UID);
++        split.setType(TransactionType.DEBIT);
++
++        transaction.addSplit(split);
++        transaction.addSplit(split.createPair(CASH_IN_WALLET_ASSET_ACCOUNT_UID));
++
++        Account account = mAccountsDbAdapter.getRecord(DINING_EXPENSE_ACCOUNT_UID);
++        account.addTransaction(transaction);
++        mTransactionsDbAdapter.addRecord(transaction);
++    }
++
++    private void addTransactionForPreviousMonth(int minusMonths) {
++        Transaction transaction = new Transaction(TRANSACTION2_NAME);
++        transaction.setTime(new LocalDateTime().minusMonths(minusMonths).toDate().getTime());
++
++        Split split = new Split(new Money(BigDecimal.valueOf(TRANSACTION2_AMOUNT), CURRENCY), BOOKS_EXPENSE_ACCOUNT_UID);
++        split.setType(TransactionType.DEBIT);
++
++        transaction.addSplit(split);
++        transaction.addSplit(split.createPair(CASH_IN_WALLET_ASSET_ACCOUNT_UID));
++
++        Account account = mAccountsDbAdapter.getRecord(BOOKS_EXPENSE_ACCOUNT_UID);
++        account.addTransaction(transaction);
++        mTransactionsDbAdapter.addRecord(transaction);
++    }
++
++
++    @Test
++    public void testNoData() {
++        getTestActivity();
++
++        onView(withId(R.id.chart_date)).check(matches(withText("Overall")));
++        onView(withId(R.id.chart_date)).check(matches(not(isEnabled())));
++
++        onView(withId(R.id.previous_month_chart_button)).check(matches(not(isEnabled())));
++        onView(withId(R.id.next_month_chart_button)).check(matches(not(isEnabled())));
++
++        onView(withId(R.id.pie_chart)).perform(click());
++        onView(withId(R.id.selected_chart_slice)).check(matches(withText("")));
++    }
++
++    @Test
++    public void testSelectingValue() throws Exception {
++        addTransactionForCurrentMonth();
++        addTransactionForPreviousMonth(1);
++        getTestActivity();
++
++        onView(withId(R.id.pie_chart)).perform(clickXY(Position.BEGIN, Position.MIDDLE));
++        float percent = (float) (TRANSACTION_AMOUNT / (TRANSACTION_AMOUNT + TRANSACTION2_AMOUNT) * 100);
++        String selectedText = String.format(PieChartActivity.SELECTED_VALUE_PATTERN, DINING_EXPENSE_ACCOUNT_NAME, TRANSACTION_AMOUNT, percent);
++        onView(withId(R.id.selected_chart_slice)).check(matches(withText(selectedText)));
++    }
++
++    @Test
++    public void testDatePicker() throws Exception {
++        addTransactionForCurrentMonth();
++        addTransactionForPreviousMonth(1);
++        addTransactionForPreviousMonth(2);
++        getTestActivity();
++
++        onView(withId(R.id.chart_date)).check(matches(isEnabled()));
++        onView(withId(R.id.chart_date)).check(matches(withText("Overall")));
++        onView(withId(R.id.chart_date)).perform(click());
++
++        LocalDateTime date = new LocalDateTime().minusMonths(2);
++        onView(withClassName(equalTo(DatePicker.class.getName()))).perform(PickerActions.setDate(date.getYear(), date.getMonthOfYear(), 1));
++        onView(anyOf(withText(containsString("Done")), withText(containsString("Set")), withText(containsString("OK")))).perform(click());
++        
++        onView(withId(R.id.chart_date)).check(matches(withText(date.toString(PieChartActivity.DATE_PATTERN))));
++    }
++
++    @Test
++    public void testPreviousAndNextMonthButtons() throws Exception {
++        addTransactionForCurrentMonth();
++        addTransactionForPreviousMonth(1);
++        addTransactionForPreviousMonth(2);
++        getTestActivity();
++
++        onView(withId(R.id.previous_month_chart_button)).check(matches(isEnabled()));
++        onView(withId(R.id.next_month_chart_button)).check(matches(not(isEnabled())));
++
++        onView(withId(R.id.previous_month_chart_button)).perform(click());
++
++        onView(withId(R.id.previous_month_chart_button)).check(matches(isEnabled()));
++        onView(withId(R.id.next_month_chart_button)).check(matches(isEnabled()));
++
++        onView(withId(R.id.previous_month_chart_button)).perform(click());
++
++        onView(withId(R.id.previous_month_chart_button)).check(matches(not(isEnabled())));
++        onView(withId(R.id.next_month_chart_button)).check(matches(isEnabled()));
++
++        onView(withId(R.id.next_month_chart_button)).perform(click());
++
++        onView(withId(R.id.previous_month_chart_button)).check(matches(isEnabled()));
++        onView(withId(R.id.next_month_chart_button)).check(matches(isEnabled()));
++
++        onView(withId(R.id.next_month_chart_button)).perform(click());
++
++        onView(withId(R.id.previous_month_chart_button)).check(matches(isEnabled()));
++        onView(withId(R.id.next_month_chart_button)).check(matches(not(isEnabled())));
++    }
++
++    @Test
++    public void testSpinner() throws Exception {
++        Split split = new Split(new Money(BigDecimal.valueOf(TRANSACTION3_AMOUNT), CURRENCY), GIFTS_RECEIVED_INCOME_ACCOUNT_UID);
++        Transaction transaction = new Transaction(TRANSACTION3_NAME);
++        transaction.addSplit(split);
++        transaction.addSplit(split.createPair(CASH_IN_WALLET_ASSET_ACCOUNT_UID));
++
++        mAccountsDbAdapter.getRecord(GIFTS_RECEIVED_INCOME_ACCOUNT_UID).addTransaction(transaction);
++        mTransactionsDbAdapter.addRecord(transaction);
++
++        getTestActivity();
++
++        onView(withId(R.id.chart_data_spinner)).perform(click());
++        onView(withText(containsString(AccountType.INCOME.name()))).perform(click());
++
++        onView(withId(R.id.pie_chart)).perform(click());
++        String selectedText = String.format(PieChartActivity.SELECTED_VALUE_PATTERN, GIFTS_RECEIVED_INCOME_ACCOUNT_NAME, TRANSACTION3_AMOUNT, 100f);
++        onView(withId(R.id.selected_chart_slice)).check(matches(withText(selectedText)));
++
++        onView(withId(R.id.chart_data_spinner)).perform(click());
++        onView(withText(containsString(AccountType.EXPENSE.name()))).perform(click());
++
++        onView(withId(R.id.pie_chart)).perform(click());
++        onView(withId(R.id.selected_chart_slice)).check(matches(withText("")));
++    }
++
++    public static ViewAction clickXY(final Position horizontal, final Position vertical){
++        return new GeneralClickAction(
++                Tap.SINGLE,
++                new CoordinatesProvider() {
++                    @Override
++                    public float[] calculateCoordinates(View view) {
++                        int[] xy = new int[2];
++                        view.getLocationOnScreen(xy);
++
++                        float x = horizontal.getPosition(xy[0], view.getWidth());
++                        float y = vertical.getPosition(xy[1], view.getHeight());
++                        return new float[]{x, y};
++                    }
++                },
++                Press.FINGER);
++    }
++
++    private enum Position {
++        BEGIN {
++            @Override
++            public float getPosition(int viewPos, int viewLength) {
++                return viewPos + (viewLength * 0.15f);
++            }
++        },
++        MIDDLE {
++            @Override
++            public float getPosition(int viewPos, int viewLength) {
++                return viewPos + (viewLength * 0.5f);
++            }
++        },
++        END {
++            @Override
++            public float getPosition(int viewPos, int viewLength) {
++                return viewPos + (viewLength * 0.85f);
++            }
++        };
++
++        abstract float getPosition(int widgetPos, int widgetLength);
++    }
++
++    @Override
++	@After
++	public void tearDown() throws Exception {
++		mPieChartActivity.finish();
++		super.tearDown();
++	}
++
++}
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
+index 87cfe51a..0f882a88 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
+@@ -55,13 +55,10 @@
+ 
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.Currency;
+-import java.util.HashMap;
+ import java.util.List;
+ import java.util.Locale;
+-import java.util.Map;
+-
+-import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
+ 
+ /**
+  * Activity used for drawing a pie chart
+@@ -81,15 +78,28 @@
+             Color.parseColor("#fddef8"), Color.parseColor("#fa0e6e"), Color.parseColor("#d9e7b5")
+     };
+ 
+-    private static final String DATE_PATTERN = "MMMM\nYYYY";
++    public static final String SELECTED_VALUE_PATTERN = "%s - %.2f (%.2f %%)";
++    public static final String DATE_PATTERN = "MMMM\nYYYY";
+     private static final String TOTAL_VALUE_LABEL_PATTERN = "%s\n%.2f %s";
+     private static final int ANIMATION_DURATION = 1800;
++    private static final int NO_DATA_COLOR = Color.LTGRAY;
++    public static final int CENTER_TEXT_SIZE = 18;
++    /**
++     * The space in degrees between the chart slices
++     */
++    private static final float SPACE_BETWEEN_SLICES = 2f;
++    /**
++     * All pie slices less than this threshold will be group in "other" slice. Using percents not absolute values.
++     */
++    private static final double GROUPING_SMALLER_SLICES_THRESHOLD = 5;
+ 
+     private PieChart mChart;
+ 
+     private LocalDateTime mChartDate = new LocalDateTime();
+     private TextView mChartDateTextView;
+ 
++    private TextView mSelectedValueTextView;
++
+     private ImageButton mPreviousMonthButton;
+     private ImageButton mNextMonthButton;
+ 
+@@ -105,10 +115,18 @@
+ 
+     private boolean mUseAccountColor = true;
+ 
+-    private double mSlicePercentThreshold = 6;
++    private boolean mGroupSmallerSlices = true;
+ 
+     private String mCurrencyCode;
+ 
++    private TimePeriod mTimePeriod = TimePeriod.ALL_TIME;
++    /**
++     * Used to specify the time period for which data will be displayed
++     */
++    private enum TimePeriod {
++        PREVIOUS_MONTH, NEXT_MONTH, ALL_TIME
++    }
++
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+@@ -122,6 +140,7 @@ protected void onCreate(Bundle savedInstanceState) {
+         mPreviousMonthButton = (ImageButton) findViewById(R.id.previous_month_chart_button);
+         mNextMonthButton = (ImageButton) findViewById(R.id.next_month_chart_button);
+         mChartDateTextView = (TextView) findViewById(R.id.chart_date);
++        mSelectedValueTextView = (TextView) findViewById(R.id.selected_chart_slice);
+ 
+         mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+         mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
+@@ -130,7 +149,7 @@ protected void onCreate(Bundle savedInstanceState) {
+                 .getString(getString(R.string.key_report_currency), Money.DEFAULT_CURRENCY_CODE);
+ 
+         mChart = (PieChart) findViewById(R.id.pie_chart);
+-        mChart.setCenterTextSize(18);
++        mChart.setCenterTextSize(CENTER_TEXT_SIZE);
+         mChart.setDescription("");
+         mChart.getLegend().setEnabled(false);
+         mChart.setOnChartValueSelectedListener(this);
+@@ -141,16 +160,18 @@ protected void onCreate(Bundle savedInstanceState) {
+ 
+             @Override
+             public void onClick(View view) {
++                mTimePeriod = TimePeriod.PREVIOUS_MONTH;
+                 mChartDate = mChartDate.minusMonths(1);
+-                setData(true);
++                displayChart();
+             }
+         });
+         mNextMonthButton.setOnClickListener(new View.OnClickListener() {
+ 
+             @Override
+             public void onClick(View view) {
++                mTimePeriod = TimePeriod.NEXT_MONTH;
+                 mChartDate = mChartDate.plusMonths(1);
+-                setData(true);
++                displayChart();
+             }
+         });
+ 
+@@ -168,129 +189,98 @@ public void onClick(View view) {
+     }
+ 
+     /**
+-     * Sets the chart data
+-     * @param forCurrentMonth sets data only for current month if {@code true}, otherwise for all time
++     * Manages all actions about displaying the pie chart
+      */
+-    private void setData(boolean forCurrentMonth) {
+-        mChartDateTextView.setText(forCurrentMonth ? mChartDate.toString(DATE_PATTERN) : getResources().getString(R.string.label_chart_overall));
+-        ((TextView) findViewById(R.id.selected_chart_slice)).setText("");
++    private void displayChart() {
++        setImageButtonEnabled(mNextMonthButton,
++                mChartDate.plusMonths(1).dayOfMonth().withMinimumValue().withMillisOfDay(0).isBefore(mLatestTransactionDate));
++        setImageButtonEnabled(mPreviousMonthButton, (mEarliestTransactionDate.getYear() != 1970
++                && mChartDate.minusMonths(1).dayOfMonth().withMaximumValue().withMillisOfDay(86399999).isAfter(mEarliestTransactionDate)));
++
++        mSelectedValueTextView.setText("");
+         mChart.highlightValues(null);
+         mChart.clear();
+ 
+-        mChart.setData(getData(forCurrentMonth));
+-        if (mChartDataPresent) {
++        PieData pieData = getData();
++        if (pieData != null && pieData.getYValCount() != 0) {
++            mChartDataPresent = true;
++            mChart.setData(mGroupSmallerSlices ? groupSmallerSlices(pieData) : pieData);
++            float sum = mChart.getData().getYValueSum();
++            String total = getResources().getString(R.string.label_chart_total);
++            String currencySymbol = Currency.getInstance(mCurrencyCode).getSymbol(Locale.getDefault());
++            mChart.setCenterText(String.format(TOTAL_VALUE_LABEL_PATTERN, total, sum, currencySymbol));
+             mChart.animateXY(ANIMATION_DURATION, ANIMATION_DURATION);
++        } else {
++            mChartDataPresent = false;
++            mChart.setCenterText(getResources().getString(R.string.label_chart_no_data));
++            if (mTimePeriod != TimePeriod.ALL_TIME) {
++                switch (mTimePeriod) {
++                    case NEXT_MONTH:
++                        mChartDate = mChartDate.plusMonths(1);
++                        displayChart();
++                        return;
++                    case PREVIOUS_MONTH:
++                        mChartDate = mChartDate.minusMonths(1);
++                        displayChart();
++                        return;
++                }
++            } else {
++                mChart.setData(getEmptyData());
++            }
+         }
++
++        mChart.setTouchEnabled(mChartDataPresent);
+         mChart.invalidate();
+ 
+         mChartDateTextView.setEnabled(mChartDataPresent);
+-        setImageButtonEnabled(mNextMonthButton,
+-                mChartDate.plusMonths(1).dayOfMonth().withMinimumValue().withMillisOfDay(0).isBefore(mLatestTransactionDate));
+-        setImageButtonEnabled(mPreviousMonthButton, (mEarliestTransactionDate.getYear() != 1970
+-                && mChartDate.minusMonths(1).dayOfMonth().withMaximumValue().withMillisOfDay(86399999).isAfter(mEarliestTransactionDate)));
++        mChartDateTextView.setText(mTimePeriod != TimePeriod.ALL_TIME ? mChartDate.toString(DATE_PATTERN) : getResources().getString(R.string.label_chart_overall));
+     }
+ 
+     /**
+-     * Returns {@code PieData} instance with data entries and labels
+-     * @param forCurrentMonth sets data only for current month if {@code true}, otherwise for all time
++     * Returns {@code PieData} instance with data entries, colors and labels
+      * @return {@code PieData} instance
+      */
+-    private PieData getData(boolean forCurrentMonth) {
+-        List<Account> accountList = mAccountsDbAdapter.getSimpleAccountList(
+-                AccountEntry.COLUMN_TYPE + " = ? AND " + AccountEntry.COLUMN_PLACEHOLDER + " = ?",
+-                new String[]{ mAccountType.name(), "0" }, null);
+-        List<String> uidList = new ArrayList<>();
+-        for (Account account : accountList) {
+-            uidList.add(account.getUID());
+-        }
+-        double sum;
+-        if (forCurrentMonth) {
+-            long start = mChartDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
+-            long end = mChartDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+-            sum = mAccountsDbAdapter.getAccountsBalance(uidList, start, end).absolute().asDouble();
+-        } else {
+-            sum = mAccountsDbAdapter.getAccountsBalance(uidList, -1, -1).absolute().asDouble();
+-        }
+-
+-        double otherSlice = 0;
++    private PieData getData() {
+         PieDataSet dataSet = new PieDataSet(null, "");
+-        List<String> names = new ArrayList<>();
+-        List<String> skipUUID = new ArrayList<>();
+-        for (Account account : getCurrencyCodeToAccountMap(accountList).get(mCurrencyCode)) {
+-            if (mAccountsDbAdapter.getSubAccountCount(account.getUID()) > 0) {
+-                skipUUID.addAll(mAccountsDbAdapter.getDescendantAccountUIDs(account.getUID(), null, null));
+-            }
+-            if (!skipUUID.contains(account.getUID())) {
+-                double balance;
+-                if (forCurrentMonth) {
+-                    long start = mChartDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
+-                    long end = mChartDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+-                    balance = mAccountsDbAdapter.getAccountBalance(account.getUID(), start, end).absolute().asDouble();
+-                } else {
+-                    balance = mAccountsDbAdapter.getAccountBalance(account.getUID()).absolute().asDouble();
++        List<String> labels = new ArrayList<>();
++        List<Integer> colors = new ArrayList<>();
++        for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
++            if (account.getAccountType() == mAccountType
++                    && !account.isPlaceholderAccount()
++                    && account.getCurrency() == Currency.getInstance(mCurrencyCode)) {
++
++                long start = -1; long end = -1;
++                if (mTimePeriod != TimePeriod.ALL_TIME) {
++                    start = mChartDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
++                    end = mChartDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+                 }
+-
+-                if (balance / sum * 100 > mSlicePercentThreshold) {
++                double balance = mAccountsDbAdapter.getAccountsBalance(Collections.singletonList(account.getUID()), start, end).absolute().asDouble();
++                if (balance != 0) {
+                     dataSet.addEntry(new Entry((float) balance, dataSet.getEntryCount()));
+-                    if (mUseAccountColor) {
+-                        dataSet.getColors().set(dataSet.getColors().size() - 1, (account.getColorHexCode() != null)
+-                                ? Color.parseColor(account.getColorHexCode())
+-                                : COLORS[(dataSet.getEntryCount() - 1) % COLORS.length]);
+-                    }
+-                    dataSet.addColor(COLORS[(dataSet.getEntryCount() - 1) % COLORS.length]);
+-                    names.add(account.getName());
+-                } else {
+-                    otherSlice += balance;
++                    colors.add(mUseAccountColor && account.getColorHexCode() != null
++                            ? Color.parseColor(account.getColorHexCode())
++                            : COLORS[(dataSet.getEntryCount() - 1) % COLORS.length]);
++                    labels.add(account.getName());
+                 }
+             }
+         }
+-        if (otherSlice > 0) {
+-            dataSet.addEntry(new Entry((float) otherSlice, dataSet.getEntryCount()));
+-            dataSet.getColors().set(dataSet.getColors().size() - 1, Color.LTGRAY);
+-            names.add(getResources().getString(R.string.label_other_slice));
+-        }
+-
+-        if (dataSet.getEntryCount() == 0) {
+-            mChartDataPresent = false;
+-            dataSet.addEntry(new Entry(1, 0));
+-            dataSet.setColor(Color.LTGRAY);
+-            dataSet.setDrawValues(false);
+-            names.add("");
+-            mChart.setCenterText(getResources().getString(R.string.label_chart_no_data));
+-            mChart.setTouchEnabled(false);
+-        } else {
+-            mChartDataPresent = true;
+-            dataSet.setSliceSpace(2);
+-            mChart.setCenterText(String.format(TOTAL_VALUE_LABEL_PATTERN,
+-                            getResources().getString(R.string.label_chart_total),
+-                            dataSet.getYValueSum(),
+-                            Currency.getInstance(mCurrencyCode).getSymbol(Locale.getDefault()))
+-            );
+-            mChart.setTouchEnabled(true);
+-        }
+-
+-        return new PieData(names, dataSet);
++        dataSet.setColors(colors);
++        dataSet.setSliceSpace(SPACE_BETWEEN_SLICES);
++        return new PieData(labels, dataSet);
+     }
+ 
+     /**
+-     * Returns a map with a currency code as key and corresponding accounts list
+-     * as value from a specified list of accounts
+-     * @param accountList a list of accounts
+-     * @return a map with a currency code as key and corresponding accounts list as value
++     * Returns a data object that represents situation when no user data available
++     * @return a {@code PieData} instance for situation when no user data available
+      */
+-    private Map<String, List<Account>> getCurrencyCodeToAccountMap(List<Account> accountList) {
+-        Map<String, List<Account>> currencyAccountMap = new HashMap<>();
+-        for (Currency currency : mAccountsDbAdapter.getCurrencies()) {
+-            currencyAccountMap.put(currency.getCurrencyCode(), new ArrayList<Account>());
+-        }
+-
+-        for (Account account : accountList) {
+-            currencyAccountMap.get(account.getCurrency().getCurrencyCode()).add(account);
+-        }
+-        return currencyAccountMap;
++    private PieData getEmptyData() {
++        PieDataSet dataSet = new PieDataSet(null, getResources().getString(R.string.label_chart_no_data));
++        dataSet.addEntry(new Entry(1, 0));
++        dataSet.setColor(NO_DATA_COLOR);
++        dataSet.setDrawValues(false);
++        return new PieData(Collections.singletonList(""), dataSet);
+     }
+-
+-
++    
+     /**
+      * Sets the image button to the given state and grays-out the icon
+      *
+@@ -359,7 +349,9 @@ public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l)
+                 mEarliestTransactionDate = new LocalDateTime(mTransactionsDbAdapter.getTimestampOfEarliestTransaction(mAccountType, mCurrencyCode));
+                 mLatestTransactionDate = new LocalDateTime(mTransactionsDbAdapter.getTimestampOfLatestTransaction(mAccountType, mCurrencyCode));
+                 mChartDate = mLatestTransactionDate;
+-                setData(false);
++
++                mTimePeriod = TimePeriod.ALL_TIME;
++                displayChart();
+             }
+ 
+             @Override
+@@ -406,8 +398,8 @@ public boolean onOptionsItemSelected(MenuItem item) {
+                 break;
+             }
+             case R.id.menu_group_other_slice: {
+-                mSlicePercentThreshold = Math.abs(mSlicePercentThreshold - 6);
+-                setData(false);
++                mGroupSmallerSlices = !mGroupSmallerSlices;
++                displayChart();
+                 break;
+             }
+             case android.R.id.home: {
+@@ -419,6 +411,40 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     }
+ 
+     /**
++     * Groups smaller slices. All smaller slices will be combined and displayed as a single "Other".
++     * @param data the pie data which smaller slices will be grouped
++     * @return a {@code PieData} instance with combined smaller slices
++     */
++    private PieData groupSmallerSlices(PieData data) {
++        float otherSlice = 0f;
++        List<Entry> newEntries = new ArrayList<>();
++        List<String> newLabels = new ArrayList<>();
++        List<Integer> newColors = new ArrayList<>();
++        List<Entry> entries = data.getDataSet().getYVals();
++        for (int i = 0; i < entries.size(); i++) {
++            float val = entries.get(i).getVal();
++            if (val / data.getYValueSum() * 100 > GROUPING_SMALLER_SLICES_THRESHOLD) {
++                newEntries.add(new Entry(val, newEntries.size()));
++                newLabels.add(data.getXVals().get(i));
++                newColors.add(data.getDataSet().getColors().get(i));
++            } else {
++                otherSlice += val;
++            }
++        }
++
++        if (otherSlice > 0) {
++            newEntries.add(new Entry(otherSlice, newEntries.size()));
++            newLabels.add(getResources().getString(R.string.label_other_slice));
++            newColors.add(Color.LTGRAY);
++        }
++
++        PieDataSet dataSet = new PieDataSet(newEntries, "");
++        dataSet.setSliceSpace(SPACE_BETWEEN_SLICES);
++        dataSet.setColors(newColors);
++        return new PieData(newLabels, dataSet);
++    }
++
++    /**
+      * Since JellyBean, the onDateSet() method of the DatePicker class is called twice i.e. once when
+      * OK button is pressed and then when the DatePickerDialog is dismissed. It is a known bug.
+      */
+@@ -426,20 +452,23 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     public void onDateSet(DatePicker view, int year, int monthOfYear, int dayOfMonth) {
+         if (view.isShown()) {
+             mChartDate = new LocalDateTime(year, monthOfYear + 1, dayOfMonth, 0, 0);
+-            setData(true);
++            // no matter next or previous
++            mTimePeriod = TimePeriod.NEXT_MONTH;
++            displayChart();
+         }
+     }
+ 
+     @Override
+     public void onValueSelected(Entry e, int dataSetIndex, Highlight h) {
+         if (e == null) return;
+-        ((TextView) findViewById(R.id.selected_chart_slice))
+-                .setText(mChart.getData().getXVals().get(e.getXIndex()) + " - " + e.getVal()
+-                        + " (" + String.format("%.2f", (e.getVal() / mChart.getYValueSum()) * 100) + " %)");
++        String label = mChart.getData().getXVals().get(e.getXIndex());
++        float value = e.getVal();
++        float percent = value / mChart.getYValueSum() * 100;
++        mSelectedValueTextView.setText(String.format(SELECTED_VALUE_PATTERN, label, value, percent));
+     }
+ 
+     @Override
+     public void onNothingSelected() {
+-        ((TextView) findViewById(R.id.selected_chart_slice)).setText("");
++        mSelectedValueTextView.setText("");
+     }
+ }

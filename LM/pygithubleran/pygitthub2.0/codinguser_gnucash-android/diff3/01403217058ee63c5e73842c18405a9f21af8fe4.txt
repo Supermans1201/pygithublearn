@@ -1,0 +1,1289 @@
+From 01403217058ee63c5e73842c18405a9f21af8fe4 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 29 Aug 2015 14:37:29 +0200
+Subject: [PATCH] Added new time range options for reports - time range goes
+ from now into the past Removed currency option from reporting
+
+we now have multicurrency support, so only default account currency will be used for reporting and the balances should still be right
+Refactored account type into ReportActivity - all fragments get notified of changes
+Expanded report options interface to notify of other options
+---
+ .../org/gnucash/android/db/DatabaseHelper.java     |   1 +
+ .../org/gnucash/android/db/MigrationHelper.java    |  11 +-
+ .../android/ui/report/BalanceSheetFragment.java    |   9 -
+ .../android/ui/report/BarChartFragment.java        |  52 ++--
+ .../android/ui/report/LineChartFragment.java       |  26 +-
+ .../android/ui/report/PieChartFragment.java        |  94 +++----
+ .../android/ui/report/ReportOptionsListener.java   |  15 +-
+ .../android/ui/report/ReportSummaryFragment.java   |  12 +-
+ .../gnucash/android/ui/report/ReportsActivity.java | 299 ++++++++-------------
+ app/src/main/res/layout/activity_reports.xml       |  23 +-
+ app/src/main/res/layout/fragment_bar_chart.xml     |   7 +-
+ app/src/main/res/layout/fragment_pie_chart.xml     |   5 +-
+ app/src/main/res/menu/report_actions.xml           |   4 -
+ app/src/main/res/values-de/strings.xml             |   8 +
+ app/src/main/res/values-el/strings.xml             |   8 +
+ app/src/main/res/values-es-rMX/strings.xml         |   8 +
+ app/src/main/res/values-es/strings.xml             |   8 +
+ app/src/main/res/values-fr/strings.xml             |   8 +
+ app/src/main/res/values-hu/strings.xml             |   8 +
+ app/src/main/res/values-it/strings.xml             |   8 +
+ app/src/main/res/values-nb/strings.xml             |   8 +
+ app/src/main/res/values-nl/strings.xml             |   8 +
+ app/src/main/res/values-pl/strings.xml             |   8 +
+ app/src/main/res/values-pt-rBR/strings.xml         |   8 +
+ app/src/main/res/values-ru/strings.xml             |   8 +
+ app/src/main/res/values-uk/strings.xml             |   8 +
+ app/src/main/res/values-zh-rTW/strings.xml         |   8 +
+ app/src/main/res/values-zh/strings.xml             |   8 +
+ app/src/main/res/values/strings.xml                |   8 +
+ 29 files changed, 370 insertions(+), 316 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 64ce4baa..b2eb711a 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -290,6 +290,7 @@ private void createDatabaseTables(SQLiteDatabase db) {
+             throw new RuntimeException(e);
+         }
+ 
++//TODO: This might slow down insertions: potentially remove and insert commodity UID manually during db inserts
+         db.execSQL("CREATE TRIGGER insert_account_commodity "
+                 + " AFTER INSERT ON " + AccountEntry.TABLE_NAME
+                 + " BEGIN " + "UPDATE " + AccountEntry.TABLE_NAME
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 6f109304..b66cb9c5 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -872,6 +872,9 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+                 throw new RuntimeException(e);
+             }
+ 
++
++//TODO: This might slow down insertions: potentially remove and insert commodity UID manually during db inserts
++
+             db.execSQL("CREATE TRIGGER insert_account_commodity "
+                     + " AFTER INSERT ON " + AccountEntry.TABLE_NAME
+                     + " BEGIN " + "UPDATE " + AccountEntry.TABLE_NAME
+@@ -890,6 +893,7 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+                     + " WHERE " + TransactionEntry.COLUMN_UID + " = NEW." + TransactionEntry.COLUMN_UID + ";"
+                     + "  END;");
+ 
++
+             db.execSQL(" ALTER TABLE " + AccountEntry.TABLE_NAME
+                     + " ADD COLUMN " + AccountEntry.COLUMN_COMMODITY_UID + " varchar(255) "
+                     + " REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") ");
+@@ -967,9 +971,9 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+                     + SplitEntry.TABLE_NAME + "_bak." + SplitEntry.COLUMN_MEMO + " , "
+                     + SplitEntry.TABLE_NAME + "_bak." + SplitEntry.COLUMN_TYPE + " , "
+                     + SplitEntry.TABLE_NAME + "_bak.amount * 100, " //put the amount as both value and quantity since multicurrency transactions were not supported until now
+-                    + "100, " //default units of 2 decimal places were assumed until now
+-                    + SplitEntry.TABLE_NAME + "_bak.amount * 100, "
+-                    + "100, "
++                    + "100, " //todo: lookup the currency and use the appropriate denom
++                    + SplitEntry.TABLE_NAME + "_bak.amount * 100, " //default units of 2 decimal places were assumed until now
++                    + "100, " //todo: lookup the currency and use the appropriate denom
+                     + SplitEntry.TABLE_NAME + "_bak." + SplitEntry.COLUMN_ACCOUNT_UID + " , "
+                     + SplitEntry.TABLE_NAME + "_bak." + SplitEntry.COLUMN_TRANSACTION_UID
+                     + " FROM " + SplitEntry.TABLE_NAME + "_bak;");
+@@ -977,7 +981,6 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+             db.execSQL("DROP TABLE " + SplitEntry.TABLE_NAME + "_bak");
+ 
+ 
+-            //TODO: fix occurences of SplitEntry.COLUMN_AMOUNT
+             //TODO: add migrations here
+             db.setTransactionSuccessful();
+             oldVersion = 9;
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/BalanceSheetFragment.java b/app/src/main/java/org/gnucash/android/ui/report/BalanceSheetFragment.java
+index 6575427b..e2cc55fe 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/BalanceSheetFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/BalanceSheetFragment.java
+@@ -94,10 +94,7 @@ public void onActivityCreated(@Nullable Bundle savedInstanceState) {
+     @Override
+     public void onResume() {
+         super.onResume();
+-
+         ((ReportsActivity)getActivity()).setAppBarColor(R.color.account_purple);
+-        getActivity().findViewById(R.id.date_range_recyclerview).setVisibility(View.GONE);
+-        getActivity().findViewById(R.id.date_range_divider).setVisibility(View.GONE);
+     }
+ 
+     /**
+@@ -136,11 +133,5 @@ private void loadAccountViews(List<AccountType> accountTypes, TableLayout tableL
+ 
+         tableLayout.addView(totalView);
+     }
+-    @Override
+-    public void onDestroyView() {
+-        super.onDestroyView();
+-        getActivity().findViewById(R.id.date_range_recyclerview).setVisibility(View.VISIBLE);
+-        getActivity().findViewById(R.id.date_range_divider).setVisibility(View.VISIBLE);
+-    }
+ 
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/BarChartFragment.java b/app/src/main/java/org/gnucash/android/ui/report/BarChartFragment.java
+index 84fb422e..fb341d5e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/BarChartFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/BarChartFragment.java
+@@ -88,7 +88,6 @@
+     private AccountsDbAdapter mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+ 
+     @Bind(R.id.selected_chart_slice) TextView selectedValueTextView;
+-    @Bind(R.id.chart_data_spinner) Spinner mAccountTypeSpinner;
+     @Bind(R.id.bar_chart) BarChart mChart;
+ 
+     private Currency mCurrency;
+@@ -97,6 +96,14 @@
+     private boolean mTotalPercentageMode = true;
+     private boolean mChartDataPresent = true;
+ 
++    /**
++     * Reporting period start time
++     */
++    private long mReportStartTime = -1;
++    /**
++     * Reporting period end time
++     */
++    private long mReportEndTime = -1;
+ 
+     @Nullable
+     @Override
+@@ -137,7 +144,8 @@ public void onActivityCreated(@Nullable Bundle savedInstanceState) {
+         chartLegend.setPosition(Legend.LegendPosition.BELOW_CHART_CENTER);
+         chartLegend.setTextSize(16);
+ 
+-        setUpSpinner();
++        mChart.setData(getData(((ReportsActivity) getActivity()).getAccountType()));
++        displayChart();
+     }
+ 
+ 
+@@ -264,29 +272,6 @@ private LocalDate getEndDate(AccountType accountType) {
+     }
+ 
+     /**
+-     * Sets up settings and data for the account type spinner. Currently used only {@code EXPENSE} and {@code INCOME}
+-     * account types.
+-     */
+-    private void setUpSpinner() {
+-        ArrayAdapter<AccountType> dataAdapter = new ArrayAdapter<>(getActivity(),
+-                android.R.layout.simple_spinner_item,
+-                Arrays.asList(AccountType.EXPENSE, AccountType.INCOME));
+-        dataAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-        mAccountTypeSpinner.setAdapter(dataAdapter);
+-        mAccountTypeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+-            @Override
+-            public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l) {
+-                mChart.setData(getData((AccountType) mAccountTypeSpinner.getSelectedItem()));
+-                displayChart();
+-            }
+-
+-            @Override
+-            public void onNothingSelected(AdapterView<?> adapterView) {
+-            }
+-        });
+-    }
+-
+-    /**
+      * Displays the stacked bar chart
+      */
+     private void displayChart() {
+@@ -327,8 +312,21 @@ private void setCustomLegend() {
+     }
+ 
+     @Override
+-    public void updateDateRange(long start, long end, ReportsActivity.RangeInterval rangeInterval) {
+-        //TODO: update the bar chart to use the rangeInterval
++    public void onTimeRangeUpdated(long start, long end) {
++        mReportStartTime = start;
++        mReportEndTime = end;
++        //TODO: update the bar chart to use the groupInterval
++    }
++
++    @Override
++    public void onGroupingUpdated(ReportsActivity.GroupInterval groupInterval) {
++        //TODO: update bar chart display with appropriate grouping
++    }
++
++    @Override
++    public void onAccountTypeUpdated(AccountType accountType) {
++        mChart.setData(getData(accountType));
++        displayChart();
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/LineChartFragment.java b/app/src/main/java/org/gnucash/android/ui/report/LineChartFragment.java
+index bfd8fcc1..1ba676bf 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/LineChartFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/LineChartFragment.java
+@@ -97,6 +97,16 @@
+     private boolean mChartDataPresent = true;
+     private Currency mCurrency;
+ 
++    /**
++     * Reporting period start time
++     */
++    private long mReportStartTime = -1;
++
++    /**
++     * Reporting period end time
++     */
++    private long mReportEndTime = -1;
++
+     @Bind(R.id.line_chart) LineChart mChart;
+     @Bind(R.id.selected_chart_slice) TextView mChartSliceInfo;
+ 
+@@ -287,8 +297,20 @@ private int getXAxisOffset(AccountType accountType) {
+ 
+ 
+     @Override
+-    public void updateDateRange(long start, long end, ReportsActivity.RangeInterval rangeInterval) {
+-        //TODO: Use the rangeInterval to show line chart e.g. if MONTH interval, then plot months as points
++    public void onTimeRangeUpdated(long start, long end) {
++        mReportStartTime = start;
++        mReportEndTime = end;
++        //TODO: Update chart
++    }
++
++    @Override
++    public void onGroupingUpdated(ReportsActivity.GroupInterval groupInterval) {
++        //TODO: update chart
++    }
++
++    @Override
++    public void onAccountTypeUpdated(AccountType accountType) {
++        //FIXME: nothing to see here, line chart shows both income and expense
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/PieChartFragment.java b/app/src/main/java/org/gnucash/android/ui/report/PieChartFragment.java
+index b29eaac5..490eab2c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/PieChartFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/PieChartFragment.java
+@@ -72,7 +72,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class PieChartFragment extends Fragment implements OnChartValueSelectedListener,
+-        DatePickerDialog.OnDateSetListener, ReportOptionsListener {
++        ReportOptionsListener {
+ 
+     public static final String SELECTED_VALUE_PATTERN = "%s - %.2f (%.2f %%)";
+     public static final String DATE_PATTERN = "MMMM\nYYYY";
+@@ -93,7 +93,6 @@
+ 
+     @Bind(R.id.pie_chart) PieChart mChart;
+     @Bind(R.id.selected_chart_slice) TextView mSelectedValueTextView;
+-    @Bind(R.id.chart_data_spinner) Spinner mChartDataTypeSpinner;
+ 
+     private AccountsDbAdapter mAccountsDbAdapter;
+     private TransactionsDbAdapter mTransactionsDbAdapter;
+@@ -111,8 +110,15 @@
+ 
+     private String mCurrencyCode;
+ 
+-    private long mStartRangeMillis = -1;
+-    private long mEndRangeMillis = -1;
++    /**
++     * Start time for reporting period in millis
++     */
++    private long mReportStartTime = -1;
++
++    /**
++     * End time for reporting period in millis
++     */
++    private long mReportEndTime = -1;
+ 
+ 
+     @Nullable
+@@ -144,20 +150,8 @@ public void onActivityCreated(@Nullable Bundle savedInstanceState) {
+         mChart.getLegend().setEnabled(false);
+         mChart.setOnChartValueSelectedListener(this);
+ 
+-        setUpSpinner();
+-
+-        //TODO: We can re-use this in ReportsActivity if we add a "GoTo Date" option
+-//        mChartDateTextView.setOnClickListener(new View.OnClickListener() {
+-//
+-//            @Override
+-//            public void onClick(View view) {
+-//                DialogFragment newFragment = ChartDatePickerFragment.newInstance(PieChartFragment.this,
+-//                        mChartDate.toDate().getTime(),
+-//                        mEarliestTransactionDate.toDate().getTime(),
+-//                        mLatestTransactionDate.toDate().getTime());
+-//                newFragment.show(getActivity().getSupportFragmentManager(), "date_dialog");
+-//            }
+-//        });
++        mAccountType = ((ReportsActivity)getActivity()).getAccountType();
++        onAccountTypeUpdated(mAccountType);
+     }
+ 
+     /**
+@@ -209,7 +203,7 @@ private PieData getData() {
+                     && !account.isPlaceholderAccount()
+                     && account.getCurrency() == Currency.getInstance(mCurrencyCode)) {
+ 
+-                double balance = mAccountsDbAdapter.getAccountsBalance(Collections.singletonList(account.getUID()), mStartRangeMillis, mEndRangeMillis).absolute().asDouble();
++                double balance = mAccountsDbAdapter.getAccountsBalance(Collections.singletonList(account.getUID()), mReportStartTime, mReportEndTime).absolute().asDouble();
+                 if (balance != 0) {
+                     dataSet.addEntry(new Entry((float) balance, dataSet.getEntryCount()));
+                     colors.add(mUseAccountColor && account.getColorHexCode() != null
+@@ -225,9 +219,24 @@ private PieData getData() {
+     }
+ 
+     @Override
+-    public void updateDateRange(long start, long end, ReportsActivity.RangeInterval interval) {
+-        mStartRangeMillis = start;
+-        mEndRangeMillis = end;
++    public void onTimeRangeUpdated(long start, long end) {
++        mReportStartTime = start;
++        mReportEndTime = end;
++        displayChart();
++    }
++
++    @Override
++    public void onGroupingUpdated(ReportsActivity.GroupInterval groupInterval) {
++        //TODO: Does this make sense for a pie chart? Don't think so
++    }
++
++    @Override
++    public void onAccountTypeUpdated(AccountType accountType) {
++        mAccountType = accountType;
++        mEarliestTransactionDate = new LocalDateTime(mTransactionsDbAdapter.getTimestampOfEarliestTransaction(mAccountType, mCurrencyCode));
++        mLatestTransactionDate = new LocalDateTime(mTransactionsDbAdapter.getTimestampOfLatestTransaction(mAccountType, mCurrencyCode));
++        mChartDate = mLatestTransactionDate;
++
+         displayChart();
+     }
+ 
+@@ -276,33 +285,6 @@ private void bubbleSort() {
+         mChart.invalidate();
+     }
+ 
+-    /**
+-     * Sets up settings and data for the account type spinner. Currently used only {@code EXPENSE} and {@code INCOME}
+-     * account types.
+-     */
+-    private void setUpSpinner() {
+-        ArrayAdapter<AccountType> dataAdapter = new ArrayAdapter<>(getActivity(),
+-                android.R.layout.simple_spinner_item,
+-                Arrays.asList(AccountType.EXPENSE, AccountType.INCOME));
+-        dataAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-        mChartDataTypeSpinner.setAdapter(dataAdapter);
+-        mChartDataTypeSpinner.setOnItemSelectedListener(new OnItemSelectedListener() {
+-            @Override
+-            public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l) {
+-                mAccountType = (AccountType) mChartDataTypeSpinner.getSelectedItem();
+-                mEarliestTransactionDate = new LocalDateTime(mTransactionsDbAdapter.getTimestampOfEarliestTransaction(mAccountType, mCurrencyCode));
+-                mLatestTransactionDate = new LocalDateTime(mTransactionsDbAdapter.getTimestampOfLatestTransaction(mAccountType, mCurrencyCode));
+-                mChartDate = mLatestTransactionDate;
+-
+-                displayChart();
+-            }
+-
+-            @Override
+-            public void onNothingSelected(AdapterView<?> adapterView) {
+-            }
+-        });
+-    }
+-
+     @Override
+     public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+         inflater.inflate(R.menu.chart_actions, menu);
+@@ -316,6 +298,7 @@ public void onPrepareOptionsMenu(Menu menu) {
+         // hide line/bar chart specific menu items
+         menu.findItem(R.id.menu_percentage_mode).setVisible(false);
+         menu.findItem(R.id.menu_toggle_average_lines).setVisible(false);
++        menu.findItem(R.id.menu_group_reports_by).setVisible(false);
+     }
+ 
+     @Override
+@@ -387,19 +370,6 @@ public static PieData groupSmallerSlices(PieData data, Context context) {
+         return new PieData(newLabels, dataSet);
+     }
+ 
+-    /**
+-     * Since JellyBean, the onDateSet() method of the DatePicker class is called twice i.e. once when
+-     * OK button is pressed and then when the DatePickerDialog is dismissed. It is a known bug.
+-     */
+-    @Override
+-    public void onDateSet(DatePicker view, int year, int monthOfYear, int dayOfMonth) {
+-        if (view.isShown()) {
+-            mChartDate = new LocalDateTime(year, monthOfYear + 1, dayOfMonth, 0, 0);
+-            // no matter next or previous
+-            displayChart();
+-        }
+-    }
+-
+     @Override
+     public void onValueSelected(Entry e, int dataSetIndex, Highlight h) {
+         if (e == null) return;
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/ReportOptionsListener.java b/app/src/main/java/org/gnucash/android/ui/report/ReportOptionsListener.java
+index 8df86be2..7dfc1c71 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/ReportOptionsListener.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/ReportOptionsListener.java
+@@ -15,6 +15,8 @@
+  */
+ package org.gnucash.android.ui.report;
+ 
++import org.gnucash.android.model.AccountType;
++
+ /**
+  * Listener interface for passing reporting options from activity to the report fragments
+  */
+@@ -25,6 +27,17 @@
+      * @param start Start date in milliseconds since epoch
+      * @param end End date in milliseconds since epoch
+      */
+-    void updateDateRange(long start, long end, ReportsActivity.RangeInterval rangeInterval);
++    void onTimeRangeUpdated(long start, long end);
++
++    /**
++     * Updates the listener on a change of the grouping for the report
++     * @param groupInterval Group interval
++     */
++    void onGroupingUpdated(ReportsActivity.GroupInterval groupInterval);
+ 
++    /**
++     * Update to the account type for the report
++     * @param accountType Account type
++     */
++    void onAccountTypeUpdated(AccountType accountType);
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/ReportSummaryFragment.java b/app/src/main/java/org/gnucash/android/ui/report/ReportSummaryFragment.java
+index c8ace49b..245adc6b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/ReportSummaryFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/ReportSummaryFragment.java
+@@ -123,21 +123,17 @@ public void onResume() {
+         super.onResume();
+         ((AppCompatActivity)getActivity()).getSupportActionBar().setTitle(R.string.title_reports);
+         ((ReportsActivity)getActivity()).setAppBarColor(R.color.theme_primary);
+-        getActivity().findViewById(R.id.date_range_recyclerview).setVisibility(View.GONE);
+-        getActivity().findViewById(R.id.date_range_divider).setVisibility(View.GONE);
+-    }
+ 
+-    @Override
+-    public void onDestroyView() {
+-        super.onDestroyView();
+-        getActivity().findViewById(R.id.date_range_recyclerview).setVisibility(View.VISIBLE);
+-        getActivity().findViewById(R.id.date_range_divider).setVisibility(View.VISIBLE);
++        getActivity().findViewById(R.id.time_range_layout).setVisibility(View.GONE);
++        getActivity().findViewById(R.id.date_range_divider).setVisibility(View.GONE);
+     }
+ 
+     @Override
+     public void onActivityCreated(@Nullable Bundle savedInstanceState) {
+         super.onActivityCreated(savedInstanceState);
+ 
++        setHasOptionsMenu(true);
++
+         mChart.setCenterTextSize(PieChartFragment.CENTER_TEXT_SIZE);
+         mChart.setDescription("");
+         mChart.getLegend().setEnabled(true);
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/ReportsActivity.java b/app/src/main/java/org/gnucash/android/ui/report/ReportsActivity.java
+index 3f20d8c8..4475f0ed 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/ReportsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/ReportsActivity.java
+@@ -17,40 +17,37 @@
+ 
+ package org.gnucash.android.ui.report;
+ 
++import android.app.DatePickerDialog;
+ import android.graphics.Color;
+ import android.graphics.drawable.ColorDrawable;
+ import android.os.Build;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
++import android.support.v4.app.DialogFragment;
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.app.FragmentTransaction;
+ import android.support.v7.app.ActionBar;
+-import android.support.v7.widget.LinearLayoutManager;
+-import android.support.v7.widget.RecyclerView;
+ import android.support.v7.widget.Toolbar;
+-import android.view.LayoutInflater;
+ import android.view.Menu;
+ import android.view.MenuItem;
+ import android.view.View;
+-import android.view.ViewGroup;
+ import android.widget.AdapterView;
+ import android.widget.ArrayAdapter;
++import android.widget.DatePicker;
+ import android.widget.Spinner;
+-import android.widget.TextView;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.passcode.PassLockActivity;
++import org.joda.time.DateTime;
+ import org.joda.time.LocalDate;
+ 
+-import java.util.ArrayList;
+ import java.util.Arrays;
+-import java.util.Currency;
++import java.util.Calendar;
+ import java.util.List;
+ 
+ import butterknife.Bind;
+@@ -62,7 +59,8 @@
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class ReportsActivity extends PassLockActivity {
++public class ReportsActivity extends PassLockActivity implements AdapterView.OnItemSelectedListener,
++        DatePickerDialog.OnDateSetListener{
+ 
+     static final int[] COLORS = {
+             Color.parseColor("#17ee4e"), Color.parseColor("#cc1f09"), Color.parseColor("#3940f7"),
+@@ -74,19 +72,18 @@
+             Color.parseColor("#fddef8"), Color.parseColor("#fa0e6e"), Color.parseColor("#d9e7b5")
+     };
+ 
+-    @Bind(R.id.date_range_recyclerview)
+-    RecyclerView mDateRangeRecyclerView;
++    @Bind(R.id.time_range_spinner) Spinner mTimeRangeSpinner;
++    @Bind(R.id.report_account_type_spinner) Spinner mAccountTypeSpinner;
+ 
+     TransactionsDbAdapter mTransactionsDbAdapter;
+     AccountType mAccountType = AccountType.EXPENSE;
+ 
+-    List<LocalDate> mDateRange;
+-    LocalDate mSelectedBeginDate;
+-    private DateRangeAdapter mDateRangeAdapter;
++    public enum GroupInterval {WEEK, MONTH, QUARTER, YEAR, ALL}
+ 
+-    public enum RangeInterval {WEEK, MONTH, QUARTER, YEAR, ALL}
++    private long mReportStartTime = -1;
++    private long mReportEndTime = -1;
+ 
+-    RangeInterval mDateRangeInterval = RangeInterval.MONTH;
++    GroupInterval mReportGroupInterval = GroupInterval.MONTH;
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+@@ -104,45 +101,29 @@ protected void onCreate(Bundle savedInstanceState) {
+         actionBar.setDisplayHomeAsUpEnabled(true);
+ 
+         mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
+-        mDateRange = new ArrayList<>();
+-
+-        LinearLayoutManager layoutManager
+-                = new LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false);
+-        mDateRangeRecyclerView.setLayoutManager(layoutManager);
+-        mDateRangeAdapter = new DateRangeAdapter();
+-        mDateRangeRecyclerView.setAdapter(mDateRangeAdapter);
+-
+-        final List<String> allCurrencyCodes = Arrays.asList(getResources().getStringArray(R.array.key_currency_codes));
+-        final List<String> allCurrencyNames = Arrays.asList(getResources().getStringArray(R.array.currency_names));
+-
+-        Currency preferredCurrency = Currency.getInstance(PreferenceManager
+-                .getDefaultSharedPreferences(getApplicationContext())
+-                .getString(getString(R.string.key_report_currency), Money.DEFAULT_CURRENCY_CODE));
+-        List<Currency> currencies = AccountsDbAdapter.getInstance().getCurrencies();
+-        if (currencies.remove(preferredCurrency)) {
+-            currencies.add(0, preferredCurrency);
+-        }
+-        List<String> currencyNames = new ArrayList<>();
+-        for (Currency currency : currencies) {
+-            currencyNames.add(allCurrencyNames.get(allCurrencyCodes.indexOf(currency.getCurrencyCode())));
+-        }
+ 
+-        Spinner spinner = (Spinner) findViewById(R.id.report_currency_spinner);
+-        ArrayAdapter<String> dataAdapter = new ArrayAdapter<>(actionBar.getThemedContext(), android.R.layout.simple_spinner_item, currencyNames);
++
++        ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(this, R.array.report_time_range,
++                android.R.layout.simple_spinner_item);
++        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        mTimeRangeSpinner.setAdapter(adapter);
++        mTimeRangeSpinner.setOnItemSelectedListener(this);
++
++        ArrayAdapter<AccountType> dataAdapter = new ArrayAdapter<>(actionBar.getThemedContext(),
++                android.R.layout.simple_spinner_item,
++                Arrays.asList(AccountType.EXPENSE, AccountType.INCOME));
+         dataAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-        spinner.setAdapter(dataAdapter);
+-        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
++        mAccountTypeSpinner.setAdapter(dataAdapter);
++        mAccountTypeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+             @Override
+             public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l) {
+-                String currencyName = (String) ((Spinner) findViewById(R.id.report_currency_spinner)).getSelectedItem();
+-                PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
+-                        .edit()
+-                        .putString(getString(R.string.key_report_currency), allCurrencyCodes.get(allCurrencyNames.indexOf(currencyName)))
+-                        .commit();
++                mAccountType = (AccountType) mAccountTypeSpinner.getSelectedItem();
++                updateAccountTypeOnFragments();
+             }
+ 
+             @Override
+             public void onNothingSelected(AdapterView<?> adapterView) {
++                //nothing to see here, move along
+             }
+         });
+ 
+@@ -154,8 +135,19 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+             fragmentTransaction.replace(R.id.fragment_container, new ReportSummaryFragment());
+             fragmentTransaction.commit();
+         }
++    }
+ 
+-        setUpDateRangeGroups();
++    @Override
++    public void onAttachFragment(Fragment fragment) {
++        super.onAttachFragment(fragment);
++        //so far only the pie chart makes meaningful use of a specific date range
++        if (fragment instanceof ReportSummaryFragment || fragment instanceof BalanceSheetFragment){
++            findViewById(R.id.time_range_layout).setVisibility(View.GONE);
++            findViewById(R.id.date_range_divider).setVisibility(View.GONE);
++        } else {
++            findViewById(R.id.time_range_layout).setVisibility(View.VISIBLE);
++            findViewById(R.id.date_range_divider).setVisibility(View.VISIBLE);
++        }
+     }
+ 
+     /**
+@@ -170,75 +162,44 @@ public void setAppBarColor(int color) {
+             getWindow().setStatusBarColor(GnuCashApplication.darken(resolvedColor));
+     }
+ 
++    public AccountType getAccountType(){
++        return mAccountType;
++    }
++
++    /**
++     * Updates the reporting time range for all listening fragments
++     */
+     private void updateDateRangeOnFragment(){
+         List<Fragment> fragments = getSupportFragmentManager().getFragments();
+-        long start = -1, end = -1;
+         for (Fragment fragment : fragments) {
+             if (fragment instanceof ReportOptionsListener){
+-                start = mSelectedBeginDate.toDateTimeAtStartOfDay().getMillis();
+-                LocalDate endDate = new LocalDate();
+-                switch (mDateRangeInterval) {
+-                    case WEEK:
+-                        endDate = mSelectedBeginDate.plusWeeks(1);
+-                        end = endDate.toDateTimeAtCurrentTime().getMillis();
+-                        break;
+-                    case MONTH:
+-                        endDate = mSelectedBeginDate.plusMonths(1);
+-                        end = endDate.toDateTimeAtCurrentTime().getMillis();
+-                        break;
+-                    case QUARTER:
+-                        endDate = mSelectedBeginDate.plusMonths(3);
+-                        end = endDate.toDateTimeAtCurrentTime().getMillis();
+-                        break;
+-                    case YEAR:
+-                        endDate = mSelectedBeginDate.plusYears(1);
+-                        end = endDate.toDateTimeAtCurrentTime().getMillis();
+-                        break;
+-                    case ALL:
+-                        start = -1;
+-                        end = -1;
+-                        break;
+-                }
+-
+-                ((ReportOptionsListener) fragment).updateDateRange(start, end, mDateRangeInterval);
++                ((ReportOptionsListener) fragment).onTimeRangeUpdated(mReportStartTime, mReportEndTime);
+             }
+         }
+     }
++
+     /**
+-     * Loads the data set which is shown in the recycler list view.
+-     * The data is the different date ranges for which reports should be loaded
+-     * @see RangeInterval
++     * Updates the account type for all attached fragments which are listening
+      */
+-    private void setUpDateRangeGroups(){
+-        String mCurrencyCode = PreferenceManager.getDefaultSharedPreferences(this).getString(getString(R.string.key_report_currency), Money.DEFAULT_CURRENCY_CODE);
+-
+-        LocalDate mEarliestTransactionDate = new LocalDate(mTransactionsDbAdapter.getTimestampOfEarliestTransaction(mAccountType, mCurrencyCode));
+-        LocalDate mLatestTransactionDate = new LocalDate(mTransactionsDbAdapter.getTimestampOfLatestTransaction(mAccountType, mCurrencyCode));
++    private void updateAccountTypeOnFragments(){
++        List<Fragment> fragments = getSupportFragmentManager().getFragments();
++        for (Fragment fragment : fragments) {
++            if (fragment instanceof ReportOptionsListener){
++                ((ReportOptionsListener) fragment).onAccountTypeUpdated(mAccountType);
++            }
++        }
++    }
+ 
+-        mDateRange.clear();
+-        if (mDateRangeInterval == RangeInterval.ALL){
+-            mDateRange.add(new LocalDate());
+-        } else {
+-            LocalDate iteratorDate = mEarliestTransactionDate;
+-            while (iteratorDate.isBefore(mLatestTransactionDate)) {
+-                mDateRange.add(iteratorDate);
+-                switch (mDateRangeInterval) {
+-                    case WEEK:
+-                        iteratorDate = iteratorDate.plusWeeks(1);
+-                        break;
+-                    case MONTH:
+-                        iteratorDate = iteratorDate.plusMonths(1);
+-                        break;
+-                    case QUARTER:
+-                        iteratorDate = iteratorDate.plusMonths(3);
+-                        break;
+-                    case YEAR:
+-                        iteratorDate = iteratorDate.plusYears(1);
+-                        break;
+-                }
++    /**
++     * Updates the report grouping interval on all attached fragments which are listening
++     */
++    private void updateGroupingOnFragments(){
++        List<Fragment> fragments = getSupportFragmentManager().getFragments();
++        for (Fragment fragment : fragments) {
++            if (fragment instanceof ReportOptionsListener){
++                ((ReportOptionsListener) fragment).onGroupingUpdated(mReportGroupInterval);
+             }
+         }
+-        mDateRangeAdapter.notifyDataSetChanged();
+     }
+ 
+     @Override
+@@ -253,35 +214,22 @@ public boolean onOptionsItemSelected(MenuItem item) {
+             case R.id.menu_group_reports_by:
+                 return true;
+ 
+-            case R.id.group_by_week:
+-                item.setChecked(true);
+-                item.setChecked(!item.isChecked());
+-                mDateRangeInterval = RangeInterval.WEEK;
+-                setUpDateRangeGroups();
+-                return true;
+-
+             case R.id.group_by_month:
+                 item.setChecked(true);
+-                mDateRangeInterval = RangeInterval.MONTH;
+-                setUpDateRangeGroups();
++                mReportGroupInterval = GroupInterval.MONTH;
++                updateGroupingOnFragments();
+                 return true;
+ 
+             case R.id.group_by_quarter:
+                 item.setChecked(true);
+-                mDateRangeInterval = RangeInterval.QUARTER;
+-                setUpDateRangeGroups();
++                mReportGroupInterval = GroupInterval.QUARTER;
++                updateGroupingOnFragments();
+                 return true;
+ 
+             case R.id.group_by_year:
+                 item.setChecked(true);
+-                mDateRangeInterval = RangeInterval.YEAR;
+-                setUpDateRangeGroups();
+-                return true;
+-
+-            case R.id.group_all_time:
+-                item.setChecked(true);
+-                mDateRangeInterval = RangeInterval.ALL;
+-                setUpDateRangeGroups();
++                mReportGroupInterval = GroupInterval.YEAR;
++                updateGroupingOnFragments();
+                 return true;
+ 
+             case android.R.id.home:
+@@ -290,71 +238,54 @@ public boolean onOptionsItemSelected(MenuItem item) {
+             default:
+                 return false;
+         }
+-    }
+-
+-    /**
+-     * RecyclerView adapter which displays the different time ranges for reports
+-     * The time range is determined by {@link #mDateRangeInterval}
+-     * @see #setUpDateRangeGroups()
+-     */
+-    private class DateRangeAdapter extends RecyclerView.Adapter<DateRangeAdapter.DateViewHolder> {
+-
+-        int mSelectedPosition = -1;
+-
+-        @Override
+-        public DateViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
+-            View view = LayoutInflater.from(ReportsActivity.this).inflate(R.layout.card_item_date_range, parent, false);
+-            return new DateViewHolder(view);
+-        }
+ 
+-        @Override
+-        public void onBindViewHolder(DateViewHolder holder, final int position) {
+-            LocalDate date = mDateRange.get(position);
+-            String dateString = "";
+-
+-            switch (mDateRangeInterval){
+-
+-                case WEEK:
+-                    dateString = String.format("Week %s of %s", date.toString("w"), date.toString("yyyy"));
+-                    break;
+-                case MONTH:
+-                    dateString = date.toString("MMM yyyy");
+-                    break;
+-                case QUARTER:
+-                    int quarter = (date.getMonthOfYear() / 3) + 1;
+-                    dateString = String.format("%d quarter of %s", quarter, date.toString("yyyy"));
+-                    break;
+-                case YEAR:
+-                    dateString = date.toString("yyyy");
+-                    break;
+-                case ALL:
+-                    dateString = "All time";
+-                    break;
+-            }
++    }
+ 
+-            holder.dateText.setText(dateString);
+-            holder.itemView.setOnClickListener(new View.OnClickListener() {
+-                @Override
+-                public void onClick(View v) {
+-                    mSelectedBeginDate = mDateRange.get(position);
+-                    updateDateRangeOnFragment();
+-                    //TODO: fire range to chart fragment
+-                }
+-            });
++    @Override
++    public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
++        mReportEndTime = System.currentTimeMillis();
++        switch (position){
++            case 0: //ALL TIME
++                mReportStartTime = -1;
++                mReportEndTime = -1;
++                break;
++            case 1: //current month
++                mReportStartTime = new DateTime().dayOfMonth().withMinimumValue().toDate().getTime();
++                mReportEndTime = new DateTime().dayOfMonth().withMaximumValue().toDate().getTime();
++                break;
++            case 2:
++                mReportStartTime = new LocalDate().minusMonths(3).toDate().getTime();
++                break;
++            case 3:
++                mReportStartTime = new LocalDate().minusMonths(6).toDate().getTime();
++                break;
++            case 4:
++                mReportStartTime = new LocalDate().minusMonths(12).toDate().getTime();
++                break;
++            case 5:
++                String mCurrencyCode = PreferenceManager.getDefaultSharedPreferences(this).getString(getString(R.string.key_report_currency), Money.DEFAULT_CURRENCY_CODE);
++                long earliestTransactionTime = mTransactionsDbAdapter.getTimestampOfEarliestTransaction(mAccountType, mCurrencyCode);
++                long latestTransactionTime = mTransactionsDbAdapter.getTimestampOfLatestTransaction(mAccountType, mCurrencyCode);
++                DialogFragment newFragment = ChartDatePickerFragment.newInstance(
++                        this, System.currentTimeMillis(), earliestTransactionTime, latestTransactionTime); //TODO: limit to time of earliest transaction in the database
++                newFragment.show(getSupportFragmentManager(), "date_dialog");
++                break;
+         }
+-
+-        @Override
+-        public int getItemCount() {
+-            return mDateRange.size();
++        if (position != 5){ //the date picker will trigger the update itself
++            updateDateRangeOnFragment();
+         }
++    }
+ 
+-        class DateViewHolder extends RecyclerView.ViewHolder {
+-            TextView dateText;
++    @Override
++    public void onNothingSelected(AdapterView<?> parent) {
++        //nothing to see here, move along
++    }
+ 
+-            public DateViewHolder(final View itemView) {
+-                super(itemView);
+-                dateText = (TextView) itemView.findViewById(R.id.item_date_range);
+-            }
+-        }
++    @Override
++    public void onDateSet(DatePicker view, int year, int monthOfYear, int dayOfMonth) {
++        Calendar calendar = Calendar.getInstance();
++        calendar.set(year, monthOfYear, dayOfMonth);
++        mReportStartTime = calendar.getTimeInMillis();
++        updateDateRangeOnFragment();
+     }
+ }
+diff --git a/app/src/main/res/layout/activity_reports.xml b/app/src/main/res/layout/activity_reports.xml
+index 3301bc57..257b45f9 100644
+--- a/app/src/main/res/layout/activity_reports.xml
++++ b/app/src/main/res/layout/activity_reports.xml
+@@ -44,24 +44,37 @@
+                 app:popupTheme="@style/ThemeOverlay.AppCompat.Light" >
+ 
+                 <Spinner
+-                    android:id="@+id/report_currency_spinner"
++                    android:id="@+id/report_account_type_spinner"
+                     android:layout_gravity="right"
+                     android:layout_width="wrap_content"
+                     android:layout_height="wrap_content" />
+                 </android.support.v7.widget.Toolbar>
+ 
+-            <android.support.v7.widget.RecyclerView android:id="@+id/date_range_recyclerview"
++            <LinearLayout android:id="@+id/time_range_layout"
++                android:padding="@dimen/dialog_padding"
+                 android:layout_width="match_parent"
+-                android:minHeight="50dp"
+-                android:layout_height="0dp"
+-                android:layout_weight="1"/>
++                android:layout_height="wrap_content">
++                <TextView
++                    android:layout_width="0dp"
++                    android:layout_weight="1"
++                    android:gravity="center_vertical"
++                    android:textSize="14sp"
++                    android:layout_height="wrap_content"
++                    android:text="Time Range:"/>
+ 
++                <Spinner android:id="@+id/time_range_spinner"
++                    android:layout_weight="2"
++                    android:layout_width="0dp"
++                    android:layout_height="wrap_content" />
++            </LinearLayout>
+             <View android:id="@+id/date_range_divider"
+                 android:layout_width="match_parent"
+                 android:layout_height="1dp"
+                 android:layout_marginTop="5dp"
+                 android:background="@android:color/darker_gray" />
+ 
++
++
+             <FrameLayout android:id="@+id/fragment_container"
+                 android:orientation="vertical"
+                 android:layout_weight="3"
+diff --git a/app/src/main/res/layout/fragment_bar_chart.xml b/app/src/main/res/layout/fragment_bar_chart.xml
+index c17af312..e24f3ae5 100644
+--- a/app/src/main/res/layout/fragment_bar_chart.xml
++++ b/app/src/main/res/layout/fragment_bar_chart.xml
+@@ -44,15 +44,10 @@
+ 
+         <com.github.mikephil.charting.charts.BarChart
+             android:id="@+id/bar_chart"
+-            android:minHeight="300dp"
++            android:minHeight="400dp"
+             android:layout_width="match_parent"
+             android:layout_height="match_parent" />
+ 
+     </android.support.v7.widget.CardView>
+ 
+-    <Spinner android:id="@+id/chart_data_spinner"
+-        android:layout_weight="0.3"
+-        android:layout_width="match_parent"
+-        android:layout_height="0dp" />
+-
+ </LinearLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/fragment_pie_chart.xml b/app/src/main/res/layout/fragment_pie_chart.xml
+index ed8c208d..7f937091 100644
+--- a/app/src/main/res/layout/fragment_pie_chart.xml
++++ b/app/src/main/res/layout/fragment_pie_chart.xml
+@@ -43,10 +43,7 @@
+             android:orientation="horizontal"
+             android:layout_width="match_parent"
+             android:layout_height="match_parent"
+-            android:minHeight="300dp" />
++            android:minHeight="400dp" />
+     </android.support.v7.widget.CardView>
+ 
+-    <Spinner android:id="@+id/chart_data_spinner"
+-        android:layout_width="match_parent"
+-        android:layout_height="wrap_content" />
+ </LinearLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/menu/report_actions.xml b/app/src/main/res/menu/report_actions.xml
+index 89f0aeef..6a4c0ffc 100644
+--- a/app/src/main/res/menu/report_actions.xml
++++ b/app/src/main/res/menu/report_actions.xml
+@@ -7,8 +7,6 @@
+         app:showAsAction="ifRoom|withText">
+         <menu>
+             <group android:checkableBehavior="single">
+-                <item android:id="@+id/group_by_week"
+-                    android:title="Week"/>
+ 
+                 <item android:id="@+id/group_by_month"
+                     android:checked="true"
+@@ -20,8 +18,6 @@
+                 <item android:id="@+id/group_by_year"
+                     android:title="Year" />
+ 
+-                <item android:id="@+id/group_all_time"
+-                    android:title="All time" />
+             </group>
+         </menu>
+     </item>
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index a32107bd..6663719a 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -500,4 +500,12 @@ No user-identifiable information will be collected as part of this process!</str
+ 	<string name="title_create_export_schedule">Create export schedule</string>
+ 	<string name="toast_exported_to">Exported to: %1$s</string>
+ 	<string name="toast_legend_too_long">The legend is too long</string>
++	<string-array name="report_time_range">
++		<item>All time</item>
++		<item>Current month</item>
++		<item>Last 3 months</item>
++		<item>Last 6 months</item>
++		<item>Last 12 months</item>
++		<item>Custom range</item>
++	</string-array>
+ </resources>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index 727c1517..52826a53 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -519,4 +519,12 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="title_create_export_schedule">Create export schedule</string>
+ 	<string name="toast_exported_to">Exported to: %1$s</string>
+ 	<string name="toast_legend_too_long">The legend is too long</string>
++	<string-array name="report_time_range">
++		<item>All time</item>
++		<item>Current month</item>
++		<item>Last 3 months</item>
++		<item>Last 6 months</item>
++		<item>Last 12 months</item>
++		<item>Custom range</item>
++	</string-array>
+ </resources>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 147c7e03..f4680c51 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -504,4 +504,12 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_create_export_schedule">Create export schedule</string>
+     <string name="toast_exported_to">Exported to: %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 3a25a4e6..eb1c8b24 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -501,4 +501,12 @@ Este proceso solo recoge informaci&#243;n que no permite identificar al usuario<
+ 	<string name="title_create_export_schedule">Create export schedule</string>
+ 	<string name="toast_exported_to">Exported to: %1$s</string>
+ 	<string name="toast_legend_too_long">The legend is too long</string>
++	<string-array name="report_time_range">
++		<item>All time</item>
++		<item>Current month</item>
++		<item>Last 3 months</item>
++		<item>Last 6 months</item>
++		<item>Last 12 months</item>
++		<item>Custom range</item>
++	</string-array>
+ </resources>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 810e0d4d..2c00b4b0 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -501,4 +501,12 @@ Aucune information permettant d\'identifier l\'utilisateur ne sera recueillis da
+     <string name="title_create_export_schedule">Crer un export planifi</string>
+     <string name="toast_exported_to">Export vers : %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 474b60ba..8c5b007b 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -505,4 +505,12 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_create_export_schedule">Create export schedule</string>
+     <string name="toast_exported_to">Exported to: %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index 0f5b1972..dd609beb 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -505,4 +505,12 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_create_export_schedule">Create export schedule</string>
+     <string name="toast_exported_to">Exported to: %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 27c0b5da..dd48c9b6 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -502,4 +502,12 @@ Ingen brukerinformasjon vil bli delt i denne prosessen!
+ 	<string name="title_create_export_schedule">Opprett exporteringsplan</string>
+ 	<string name="toast_exported_to">Eksportert til: %1$s</string>
+ 	<string name="toast_legend_too_long">The legend is too long</string>
++	<string-array name="report_time_range">
++		<item>All time</item>
++		<item>Current month</item>
++		<item>Last 3 months</item>
++		<item>Last 6 months</item>
++		<item>Last 12 months</item>
++		<item>Custom range</item>
++	</string-array>
+ </resources>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 8d6b5c8e..214f9144 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -506,4 +506,12 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_create_export_schedule">Create export schedule</string>
+     <string name="toast_exported_to">Exported to: %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-pl/strings.xml b/app/src/main/res/values-pl/strings.xml
+index bb535193..4b44e6e1 100644
+--- a/app/src/main/res/values-pl/strings.xml
++++ b/app/src/main/res/values-pl/strings.xml
+@@ -502,4 +502,12 @@
+     <string name="title_create_export_schedule">Zaplanuj eksport</string>
+     <string name="toast_exported_to">Wyeksportowane do: %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 93bc3edb..f0b54688 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -504,4 +504,12 @@ Nenhuma informao de  identificao do usurio ser coletada neste proces
+ 	<string name="title_create_export_schedule">Criar programao de exportao</string>
+ 	<string name="toast_exported_to">Exported to: %1$s</string>
+ 	<string name="toast_legend_too_long">The legend is too long</string>
++	<string-array name="report_time_range">
++		<item>All time</item>
++		<item>Current month</item>
++		<item>Last 3 months</item>
++		<item>Last 6 months</item>
++		<item>Last 12 months</item>
++		<item>Custom range</item>
++	</string-array>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 38f23087..bfe33f0a 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -508,4 +508,12 @@
+     <string name="title_create_export_schedule">  </string>
+     <string name="toast_exported_to"> : %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-uk/strings.xml b/app/src/main/res/values-uk/strings.xml
+index 55671e59..d4fa1d2a 100644
+--- a/app/src/main/res/values-uk/strings.xml
++++ b/app/src/main/res/values-uk/strings.xml
+@@ -488,4 +488,12 @@
+     <string name="title_create_export_schedule">   </string>
+     <string name="toast_exported_to"> : %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+index b493bcf2..868485b7 100644
+--- a/app/src/main/res/values-zh-rTW/strings.xml
++++ b/app/src/main/res/values-zh-rTW/strings.xml
+@@ -502,4 +502,12 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_create_export_schedule"></string>
+     <string name="toast_exported_to">%1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index f63b274b..6d869b8a 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -503,4 +503,12 @@ No user-identifiable information will be collected as part of this process!
+     <string name="title_create_export_schedule"></string>
+     <string name="toast_exported_to">%1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 75a07325..fdc30c96 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -509,4 +509,12 @@ No user-identifiable information will be collected as part of this process!</str
+     <string name="title_create_export_schedule">Create export schedule</string>
+     <string name="toast_exported_to">Exported to: %1$s</string>
+     <string name="toast_legend_too_long">The legend is too long</string>
++    <string-array name="report_time_range">
++        <item>All time</item>
++        <item>Current month</item>
++        <item>Last 3 months</item>
++        <item>Last 6 months</item>
++        <item>Last 12 months</item>
++        <item>Custom range</item>
++    </string-array>
+ </resources>

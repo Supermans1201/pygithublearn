@@ -1,0 +1,106 @@
+From 08230eb42a3d13924d202766caafcd2f8dc0172c Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Fri, 18 Sep 2015 22:44:20 +0800
+Subject: [PATCH] preload exchange rate and converted amount
+
+---
+ .../org/gnucash/android/db/PricesDbAdapter.java    | 46 ++++++++++++++++++++++
+ .../dialog/TransferFundsDialogFragment.java        | 16 ++++++++
+ 2 files changed, 62 insertions(+)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+index b03f1a92..83645f4f 100644
+--- a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+@@ -6,6 +6,7 @@
+ import android.database.sqlite.SQLiteStatement;
+ import android.support.annotation.NonNull;
+ import android.util.Log;
++import android.util.Pair;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Price;
+@@ -81,4 +82,49 @@ public Price buildModelInstance(@NonNull final Cursor cursor) {
+         populateBaseModelAttributes(cursor, price);
+         return price;
+     }
++
++    /**
++     * get the price for commodity / currency pair
++     *
++     * Pair is used instead of Price because we must sometimes invert the commodity/currency in DB,
++     * rendering the Price UID invalid.
++     *
++     * @return The numerator/denominator pair for commodity / currency pair
++     */
++    public Pair<Long, Long> getPrice(@NonNull String commodityUID, @NonNull String currencyUID) {
++        Pair<Long, Long> pairZero = new Pair<>(0L, 0L);
++        if (commodityUID.equals(currencyUID))
++        {
++            return new Pair<Long, Long>(1L, 1L);
++        }
++        Cursor cursor = mDb.query(PriceEntry.TABLE_NAME, null,
++                // the commodity and currency can be swapped
++                "( " + PriceEntry.COLUMN_COMMODITY_UID + " = ? AND " + PriceEntry.COLUMN_CURRENCY_UID + " = ? ) OR ( "
++                + PriceEntry.COLUMN_COMMODITY_UID + " = ? AND " + PriceEntry.COLUMN_CURRENCY_UID + " = ? )",
++                new String[]{commodityUID, currencyUID, currencyUID, commodityUID}, null, null,
++                // only get the latest price
++                PriceEntry.COLUMN_DATE + " DESC", "1");
++        try {
++            if (cursor.moveToNext()) {
++                String commodityUIDdb = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_COMMODITY_UID));
++                long valueNum     = cursor.getLong(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_NUM));
++                long valueDenom   = cursor.getLong(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_DENOM));
++                if (valueNum < 0 || valueDenom < 0) {
++                    // this should not happen
++                    return pairZero;
++                }
++                if (!commodityUIDdb.equals(commodityUID)) {
++                    // swap Num and denom
++                    long t = valueNum;
++                    valueNum = valueDenom;
++                    valueDenom = t;
++                }
++                return new Pair<Long, Long>(valueNum, valueDenom);
++            } else {
++                return pairZero;
++            }
++        } finally {
++            cursor.close();
++        }
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+index 74d1813c..d8ac800b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransferFundsDialogFragment.java
+@@ -24,6 +24,7 @@
+ import android.support.v4.app.DialogFragment;
+ import android.text.Editable;
+ import android.text.TextWatcher;
++import android.util.Pair;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+@@ -104,6 +105,21 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle sa
+ 
+         mSampleExchangeRate.setText("e.g. 1 " + fromCurrency.getCurrencyCode() + " = " + " x.xx " + mTargetCurrency.getCurrencyCode());
+         final InputWatcher textChangeListener = new InputWatcher();
++
++        CommoditiesDbAdapter commoditiesDbAdapter = CommoditiesDbAdapter.getInstance();
++        String commodityUID = commoditiesDbAdapter.getCommodityUID(fromCurrency.getCurrencyCode());
++        String currencyUID = commoditiesDbAdapter.getCommodityUID(mTargetCurrency.getCurrencyCode());
++        PricesDbAdapter pricesDbAdapter = PricesDbAdapter.getInstance();
++        Pair<Long, Long> price = pricesDbAdapter.getPrice(commodityUID, currencyUID);
++
++        if (price.first > 0 && price.second > 0) {
++            // a valid price exists
++            BigDecimal num = new BigDecimal(price.first);
++            BigDecimal denom = new BigDecimal(price.second);
++            mExchangeRateInput.setText(num.divide(denom, MathContext.DECIMAL32).toString());
++            mConvertedAmountInput.setText(mOriginAmount.asBigDecimal().multiply(num).divide(denom, mTargetCurrency.getDefaultFractionDigits(), BigDecimal.ROUND_HALF_EVEN).toString());
++        }
++
+         mExchangeRateInput.addTextChangedListener(textChangeListener);
+         mExchangeRateInput.addTextChangedListener(new AmountInputFormatter(mExchangeRateInput));
+         mConvertedAmountInput.addTextChangedListener(textChangeListener);

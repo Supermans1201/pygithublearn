@@ -1,0 +1,1256 @@
+From b3187d6d5edaa2aef2a4e4f499cc5d179cf3e014 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Fri, 17 Apr 2015 20:10:28 +0800
+Subject: [PATCH 1/8] remove ignorecase, if-else to switch, hashmap for account
+ UID query
+
+---
+ .../gnucash/android/importer/GncXmlHandler.java    | 495 ++++++++++-----------
+ 1 file changed, 247 insertions(+), 248 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index e51b49d4..9d58a4c1 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -90,6 +90,11 @@
+     List<Account> mAccountList;
+ 
+     /**
++     * Account map for quick referencing from UID
++     */
++    HashMap<String, Account> mAccountMap;
++
++    /**
+      * Transaction instance which will be built for each transaction found
+      */
+     Transaction mTransaction;
+@@ -183,6 +188,7 @@ private void init(@Nullable SQLiteDatabase db) {
+         mContent = new StringBuilder();
+ 
+         mAccountList = new ArrayList<>();
++        mAccountMap = new HashMap<>();
+         mTransactionList = new ArrayList<>();
+         mScheduledActionsList = new ArrayList<>();
+     }
+@@ -190,7 +196,7 @@ private void init(@Nullable SQLiteDatabase db) {
+     @Override
+     public void startElement(String uri, String localName,
+                              String qualifiedName, Attributes attributes) throws SAXException {
+-        switch (qualifiedName.toLowerCase()){
++        switch (qualifiedName){
+             case GncXmlHelper.TAG_ACCOUNT:
+                 mAccount = new Account(""); // dummy name, will be replaced when we find name tag
+                 mISO4217Currency = false;
+@@ -234,266 +240,259 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+ 
+         if (mIgnoreElement != null) {
+             // Ignore everything inside
+-            if (qualifiedName.equalsIgnoreCase(mIgnoreElement)) {
++            if (qualifiedName.equals(mIgnoreElement)) {
+                 mIgnoreElement = null;
+             }
+             mContent.setLength(0);
+             return;
+         }
+ 
+-        if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_NAME)) {
+-            mAccount.setName(characterString);
+-            mAccount.setFullName(characterString);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_ACCT_ID)){
+-            mAccount.setUID(characterString);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TYPE)){
+-            AccountType accountType = AccountType.valueOf(characterString);
+-            mAccount.setAccountType(accountType);
+-            mAccount.setHidden(accountType == AccountType.ROOT); //flag root account as hidden
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_COMMODITY_SPACE)){
+-            if (characterString.equalsIgnoreCase("ISO4217")){
+-                mISO4217Currency = true;
+-            }
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_COMMODITY_ID)){
+-            String currencyCode = mISO4217Currency ? characterString : NO_CURRENCY_CODE;
+-            if (mAccount != null){
+-                mAccount.setCurrency(Currency.getInstance(currencyCode));
+-            }
+-            if (mTransaction != null){
+-                mTransaction.setCurrencyCode(currencyCode);
+-            }
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_PARENT_UID)){
+-            mAccount.setParentUID(characterString);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_ACCOUNT)){
+-            if (!mInTemplates) { //we ignore template accounts, we have no use for them
+-                mAccountList.add(mAccount);
+-                mAccount = null;
+-                //reset ISO 4217 flag for next account
+-                mISO4217Currency = false;
+-            }
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SLOT_KEY)){
+-            switch (characterString) {
+-                case GncXmlHelper.KEY_PLACEHOLDER:
+-                    mInPlaceHolderSlot = true;
+-                    break;
+-                case GncXmlHelper.KEY_COLOR:
+-                    mInColorSlot = true;
+-                    break;
+-                case GncXmlHelper.KEY_FAVORITE:
+-                    mInFavoriteSlot = true;
+-                    break;
+-                case GncXmlHelper.KEY_NOTES:
+-                    mIsNote = true;
+-                    break;
+-                case GncXmlHelper.KEY_DEFAULT_TRANSFER_ACCOUNT:
+-                    mInDefaultTransferAccount = true;
+-                    break;
+-                case GncXmlHelper.KEY_EXPORTED:
+-                    mInExported = true;
+-                    break;
+-                case GncXmlHelper.KEY_SPLIT_ACCOUNT:
+-                    mInSplitAccountSlot = true;
+-                    break;
+-                case GncXmlHelper.KEY_CREDIT_FORMULA:
+-                    mInCreditFormulaSlot = true;
+-                    break;
+-                case GncXmlHelper.KEY_DEBIT_FORMULA:
+-                    mInDebitFormulaSlot = true;
+-                    break;
+-            }
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SLOT_VALUE)){
+-            if (mInPlaceHolderSlot){
+-                Log.v(LOG_TAG, "Setting account placeholder flag");
+-                mAccount.setPlaceHolderFlag(Boolean.parseBoolean(characterString));
+-                mInPlaceHolderSlot = false;
+-            }
+-            else if (mInColorSlot){
+-                String color = characterString.trim();
+-                //Gnucash exports the account color in format #rrrgggbbb, but we need only #rrggbb.
+-                //so we trim the last digit in each block, doesn't affect the color much
+-                if (!color.equals("Not Set")) {
+-                    // avoid known exception, printStackTrace is very time consuming
+-                    if (!Pattern.matches(Account.COLOR_HEX_REGEX, color))
+-                        color = "#" + color.replaceAll(".(.)?", "$1").replace("null", "");
+-                    try {
+-                        if (mAccount != null)
+-                            mAccount.setColorCode(color);
+-                    } catch (IllegalArgumentException ex) {
+-                        //sometimes the color entry in the account file is "Not set" instead of just blank. So catch!
+-                        Log.i(LOG_TAG, "Invalid color code '" + color + "' for account " + mAccount.getName());
+-                        ex.printStackTrace();
+-                    }
++        switch (qualifiedName) {
++            case GncXmlHelper.TAG_NAME:
++                mAccount.setName(characterString);
++                mAccount.setFullName(characterString);
++                break;
++            case GncXmlHelper.TAG_ACCT_ID:
++                mAccount.setUID(characterString);
++                break;
++            case GncXmlHelper.TAG_TYPE:
++                AccountType accountType = AccountType.valueOf(characterString);
++                mAccount.setAccountType(accountType);
++                mAccount.setHidden(accountType == AccountType.ROOT); //flag root account as hidden
++                break;
++            case GncXmlHelper.TAG_COMMODITY_SPACE:
++                if (characterString.equals("ISO4217")) {
++                    mISO4217Currency = true;
+                 }
+-                mInColorSlot = false;
+-            }
+-            else if (mInFavoriteSlot){
+-                mAccount.setFavorite(Boolean.parseBoolean(characterString));
+-                mInFavoriteSlot = false;
+-            }
+-            else if (mIsNote){
+-                if (mTransaction != null){
+-                    mTransaction.setNote(characterString);
+-                    mIsNote = false;
++                break;
++            case GncXmlHelper.TAG_COMMODITY_ID:
++                String currencyCode = mISO4217Currency ? characterString : NO_CURRENCY_CODE;
++                if (mAccount != null) {
++                    mAccount.setCurrency(Currency.getInstance(currencyCode));
+                 }
+-            }
+-            else if (mInDefaultTransferAccount){
+-                mAccount.setDefaultTransferAccountUID(characterString);
+-                mInDefaultTransferAccount = false;
+-            }
+-            else if (mInExported){
+                 if (mTransaction != null) {
+-                    mTransaction.setExported(Boolean.parseBoolean(characterString));
+-                    mInExported = false;
++                    mTransaction.setCurrencyCode(currencyCode);
+                 }
+-            }
+-            else if (mInTemplates && mInSplitAccountSlot){
+-                mSplit.setAccountUID(characterString);
+-            }
+-            else if (mInTemplates && mInCreditFormulaSlot){
+-                NumberFormat numberFormat = NumberFormat.getNumberInstance(Locale.GERMANY);
+-                try {
+-                    Number number = numberFormat.parse(characterString);
+-                    Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
+-                    mSplit.setAmount(amount.absolute());
+-                    mSplit.setType(TransactionType.CREDIT);
+-                } catch (ParseException e) {
+-                    Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
+-                    e.printStackTrace();
+-                } finally {
+-                    mInCreditFormulaSlot = false;
+-                }
+-            }
+-            else if (mInTemplates && mInDebitFormulaSlot){
+-                NumberFormat numberFormat = GncXmlHelper.getNumberFormatForTemplateSplits();
+-                try {
+-                    Number number = numberFormat.parse(characterString);
+-                    Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
+-                    mSplit.setAmount(amount.absolute());
+-                    mSplit.setType(TransactionType.DEBIT);
+-                } catch (ParseException e) {
+-                    Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
+-                    e.printStackTrace();
+-                } finally {
+-                    mInDebitFormulaSlot = false;
+-                }
+-            }
+-        }
+-
+-
+-        //================  PROCESSING OF TRANSACTION TAGS =====================================
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRX_ID)){
+-            mTransaction.setUID(characterString);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRN_DESCRIPTION)){
+-            mTransaction.setDescription(characterString);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_DATE)){
+-            try {
+-                if (mIsDatePosted && mTransaction != null) {
+-                    mTransaction.setTime(GncXmlHelper.parseDate(characterString));
+-                    mIsDatePosted = false;
++                break;
++            case GncXmlHelper.TAG_PARENT_UID:
++                mAccount.setParentUID(characterString);
++                break;
++            case GncXmlHelper.TAG_ACCOUNT:
++                if (!mInTemplates) { //we ignore template accounts, we have no use for them
++                    mAccountList.add(mAccount);
++                    mAccountMap.put(mAccount.getUID(), mAccount);
++                    mAccount = null;
++                    //reset ISO 4217 flag for next account
++                    mISO4217Currency = false;
+                 }
+-                if (mIsDateEntered && mTransaction != null){
+-                    Timestamp timestamp = new Timestamp(GncXmlHelper.parseDate(characterString));
+-                    mTransaction.setCreatedTimestamp(timestamp);
+-                    mIsDateEntered = false;
++                break;
++            case GncXmlHelper.TAG_SLOT_KEY:
++                switch (characterString) {
++                    case GncXmlHelper.KEY_PLACEHOLDER:
++                        mInPlaceHolderSlot = true;
++                        break;
++                    case GncXmlHelper.KEY_COLOR:
++                        mInColorSlot = true;
++                        break;
++                    case GncXmlHelper.KEY_FAVORITE:
++                        mInFavoriteSlot = true;
++                        break;
++                    case GncXmlHelper.KEY_NOTES:
++                        mIsNote = true;
++                        break;
++                    case GncXmlHelper.KEY_DEFAULT_TRANSFER_ACCOUNT:
++                        mInDefaultTransferAccount = true;
++                        break;
++                    case GncXmlHelper.KEY_EXPORTED:
++                        mInExported = true;
++                        break;
++                    case GncXmlHelper.KEY_SPLIT_ACCOUNT:
++                        mInSplitAccountSlot = true;
++                        break;
++                    case GncXmlHelper.KEY_CREDIT_FORMULA:
++                        mInCreditFormulaSlot = true;
++                        break;
++                    case GncXmlHelper.KEY_DEBIT_FORMULA:
++                        mInDebitFormulaSlot = true;
++                        break;
+                 }
+-                if (mIsScheduledStart && mScheduledAction != null){
+-                    mScheduledAction.setStartTime(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
+-                    mIsScheduledStart = false;
++                break;
++            case GncXmlHelper.TAG_SLOT_VALUE:
++                if (mInPlaceHolderSlot) {
++                    Log.v(LOG_TAG, "Setting account placeholder flag");
++                    mAccount.setPlaceHolderFlag(Boolean.parseBoolean(characterString));
++                    mInPlaceHolderSlot = false;
++                } else if (mInColorSlot) {
++                    String color = characterString.trim();
++                    //Gnucash exports the account color in format #rrrgggbbb, but we need only #rrggbb.
++                    //so we trim the last digit in each block, doesn't affect the color much
++                    if (!color.equals("Not Set")) {
++                        // avoid known exception, printStackTrace is very time consuming
++                        if (!Pattern.matches(Account.COLOR_HEX_REGEX, color))
++                            color = "#" + color.replaceAll(".(.)?", "$1").replace("null", "");
++                        try {
++                            if (mAccount != null)
++                                mAccount.setColorCode(color);
++                        } catch (IllegalArgumentException ex) {
++                            //sometimes the color entry in the account file is "Not set" instead of just blank. So catch!
++                            Log.i(LOG_TAG, "Invalid color code '" + color + "' for account " + mAccount.getName());
++                            ex.printStackTrace();
++                        }
++                    }
++                    mInColorSlot = false;
++                } else if (mInFavoriteSlot) {
++                    mAccount.setFavorite(Boolean.parseBoolean(characterString));
++                    mInFavoriteSlot = false;
++                } else if (mIsNote) {
++                    if (mTransaction != null) {
++                        mTransaction.setNote(characterString);
++                        mIsNote = false;
++                    }
++                } else if (mInDefaultTransferAccount) {
++                    mAccount.setDefaultTransferAccountUID(characterString);
++                    mInDefaultTransferAccount = false;
++                } else if (mInExported) {
++                    if (mTransaction != null) {
++                        mTransaction.setExported(Boolean.parseBoolean(characterString));
++                        mInExported = false;
++                    }
++                } else if (mInTemplates && mInSplitAccountSlot) {
++                    mSplit.setAccountUID(characterString);
++                } else if (mInTemplates && mInCreditFormulaSlot) {
++                    NumberFormat numberFormat = NumberFormat.getNumberInstance(Locale.GERMANY);
++                    try {
++                        Number number = numberFormat.parse(characterString);
++                        Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
++                        mSplit.setAmount(amount.absolute());
++                        mSplit.setType(TransactionType.CREDIT);
++                    } catch (ParseException e) {
++                        Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
++                        e.printStackTrace();
++                    } finally {
++                        mInCreditFormulaSlot = false;
++                    }
++                } else if (mInTemplates && mInDebitFormulaSlot) {
++                    NumberFormat numberFormat = GncXmlHelper.getNumberFormatForTemplateSplits();
++                    try {
++                        Number number = numberFormat.parse(characterString);
++                        Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
++                        mSplit.setAmount(amount.absolute());
++                        mSplit.setType(TransactionType.DEBIT);
++                    } catch (ParseException e) {
++                        Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
++                        e.printStackTrace();
++                    } finally {
++                        mInDebitFormulaSlot = false;
++                    }
+                 }
++                break;
++            //================  PROCESSING OF TRANSACTION TAGS =====================================
++            case GncXmlHelper.TAG_TRX_ID:
++                mTransaction.setUID(characterString);
++                break;
++            case GncXmlHelper.TAG_TRN_DESCRIPTION:
++                mTransaction.setDescription(characterString);
++                break;
++            case GncXmlHelper.TAG_DATE:
++                try {
++                    if (mIsDatePosted && mTransaction != null) {
++                        mTransaction.setTime(GncXmlHelper.parseDate(characterString));
++                        mIsDatePosted = false;
++                    }
++                    if (mIsDateEntered && mTransaction != null) {
++                        Timestamp timestamp = new Timestamp(GncXmlHelper.parseDate(characterString));
++                        mTransaction.setCreatedTimestamp(timestamp);
++                        mIsDateEntered = false;
++                    }
++                    if (mIsScheduledStart && mScheduledAction != null) {
++                        mScheduledAction.setStartTime(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
++                        mIsScheduledStart = false;
++                    }
+ 
+-                if (mIsScheduledEnd && mScheduledAction != null){
+-                    mScheduledAction.setEndTime(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
+-                    mIsScheduledEnd = false;
+-                }
++                    if (mIsScheduledEnd && mScheduledAction != null) {
++                        mScheduledAction.setEndTime(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
++                        mIsScheduledEnd = false;
++                    }
+ 
+-                if (mIsLastRun && mScheduledAction != null){
+-                    mScheduledAction.setLastRun(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
+-                    mIsLastRun = false;
++                    if (mIsLastRun && mScheduledAction != null) {
++                        mScheduledAction.setLastRun(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
++                        mIsLastRun = false;
++                    }
++                } catch (ParseException e) {
++                    e.printStackTrace();
++                    throw new SAXException("Unable to parse transaction time", e);
+                 }
+-            } catch (ParseException e) {
+-                e.printStackTrace();
+-                throw new SAXException("Unable to parse transaction time", e);
+-            }
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_RECURRENCE_PERIOD)){
+-            mRecurrencePeriod = Long.parseLong(characterString);
+-            mTransaction.setTemplate(mRecurrencePeriod > 0);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SPLIT_ID)){
+-            mSplit.setUID(characterString);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SPLIT_MEMO)){
+-            mSplit.setMemo(characterString);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SPLIT_VALUE)){
+-            //the split amount uses the transaction currency, but in the db it will correctly use the account currency
+-            Money amount = new Money(GncXmlHelper.parseMoney(characterString), mTransaction.getCurrency());
+-
+-            //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
+-            mSplit.setType(amount.isNegative() ? TransactionType.CREDIT : TransactionType.DEBIT);
+-            mSplit.setAmount(amount.absolute());
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SPLIT_ACCOUNT)){
+-            mSplit.setAccountUID(characterString);
+-            mSplit.setAmount(mSplit.getAmount().withCurrency(getCurrencyForAccount(characterString)));
+-        }
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_TRN_SPLIT)){
+-            mTransaction.addSplit(mSplit);
+-        }
+-        else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRANSACTION)){
+-            mTransaction.setTemplate(mInTemplates);
+-            mTransaction.autoBalance();
+-            mTransactionList.add(mTransaction);
+-
+-            if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
+-                mTransaction.setTemplate(true);
+-                ScheduledAction scheduledAction = ScheduledAction.parseScheduledAction(mTransaction, mRecurrencePeriod);
+-                mScheduledActionsList.add(scheduledAction);
+-            }
+-            mRecurrencePeriod = 0;
+-            mTransaction = null;
+-        } else if (qualifiedName.equals(GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS)){
+-            mInTemplates = false;
+-        }
++                break;
++            case GncXmlHelper.TAG_RECURRENCE_PERIOD:
++                mRecurrencePeriod = Long.parseLong(characterString);
++                mTransaction.setTemplate(mRecurrencePeriod > 0);
++                break;
++            case GncXmlHelper.TAG_SPLIT_ID:
++                mSplit.setUID(characterString);
++                break;
++            case GncXmlHelper.TAG_SPLIT_MEMO:
++                mSplit.setMemo(characterString);
++                break;
++            case GncXmlHelper.TAG_SPLIT_VALUE:
++                //the split amount uses the transaction currency, but in the db it will correctly use the account currency
++                Money amount = new Money(GncXmlHelper.parseMoney(characterString), mTransaction.getCurrency());
+ 
+-        // ========================= PROCESSING SCHEDULED ACTIONS ==================================
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_ID)){
+-            mScheduledAction.setUID(characterString);
+-        }
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_NAME)){
+-            //FIXME: Do not rely on the type, rather lookup the SX_ID from previous tag to find action type
+-            ScheduledAction.ActionType type = ScheduledAction.ActionType.valueOf(characterString);
+-            mScheduledAction.setActionType(type);
+-        }
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_ENABLED)){
+-            mScheduledAction.setEnabled(characterString.equalsIgnoreCase("y"));
+-        }
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_NUM_OCCUR)){
+-            mScheduledAction.setTotalFrequency(Integer.parseInt(characterString));
+-        }
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_RX_MULT)){
+-            mRecurrenceMultiplier = Integer.parseInt(characterString);
+-        }
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_RX_PERIOD_TYPE)){
+-            PeriodType periodType = PeriodType.valueOf(characterString.toUpperCase());
+-            periodType.setMultiplier(mRecurrenceMultiplier);
+-            mScheduledAction.setPeriod(periodType);
+-        }
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_SX_TEMPL_ACTION)){
+-            mScheduledAction.setActionUID(characterString);
+-        }
+-        else if (qualifiedName.equals(GncXmlHelper.TAG_SCHEDULED_ACTION)){
+-            mScheduledActionsList.add(mScheduledAction);
++                //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
++                mSplit.setType(amount.isNegative() ? TransactionType.CREDIT : TransactionType.DEBIT);
++                mSplit.setAmount(amount.absolute());
++                break;
++            case GncXmlHelper.TAG_SPLIT_ACCOUNT:
++                mSplit.setAccountUID(characterString);
++                mSplit.setAmount(mSplit.getAmount().withCurrency(getCurrencyForAccount(characterString)));
++                break;
++            case GncXmlHelper.TAG_TRN_SPLIT:
++                mTransaction.addSplit(mSplit);
++                break;
++            case GncXmlHelper.TAG_TRANSACTION:
++                mTransaction.setTemplate(mInTemplates);
++                mTransaction.autoBalance();
++                mTransactionList.add(mTransaction);
++
++                if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
++                    mTransaction.setTemplate(true);
++                    ScheduledAction scheduledAction = ScheduledAction.parseScheduledAction(mTransaction, mRecurrencePeriod);
++                    mScheduledActionsList.add(scheduledAction);
++                }
++                mRecurrencePeriod = 0;
++                mTransaction = null;
++                break;
++            case GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS:
++                mInTemplates = false;
++                break;
++            // ========================= PROCESSING SCHEDULED ACTIONS ==================================
++            case GncXmlHelper.TAG_SX_ID:
++                mScheduledAction.setUID(characterString);
++                break;
++            case GncXmlHelper.TAG_SX_NAME:
++                //FIXME: Do not rely on the type, rather lookup the SX_ID from previous tag to find action type
++                ScheduledAction.ActionType type = ScheduledAction.ActionType.valueOf(characterString);
++                mScheduledAction.setActionType(type);
++                break;
++            case GncXmlHelper.TAG_SX_ENABLED:
++                mScheduledAction.setEnabled(characterString.equals("y"));
++                break;
++            case GncXmlHelper.TAG_SX_NUM_OCCUR:
++                mScheduledAction.setTotalFrequency(Integer.parseInt(characterString));
++                break;
++            case GncXmlHelper.TAG_RX_MULT:
++                mRecurrenceMultiplier = Integer.parseInt(characterString);
++                break;
++            case GncXmlHelper.TAG_RX_PERIOD_TYPE:
++                PeriodType periodType = PeriodType.valueOf(characterString.toUpperCase());
++                periodType.setMultiplier(mRecurrenceMultiplier);
++                mScheduledAction.setPeriod(periodType);
++                break;
++            case GncXmlHelper.TAG_SX_TEMPL_ACTION:
++                mScheduledAction.setActionUID(characterString);
++                break;
++            case GncXmlHelper.TAG_SCHEDULED_ACTION:
++                mScheduledActionsList.add(mScheduledAction);
++                break;
+         }
+ 
+         //reset the accumulated characters
+@@ -587,10 +586,10 @@ public void endDocument() throws SAXException {
+      * @return Currency of the account
+      */
+     private Currency getCurrencyForAccount(String accountUID){
+-        for (Account account : mAccountList) {
+-            if (account.getUID().equals(accountUID))
+-                return account.getCurrency();
++        try {
++            return mAccountMap.get(accountUID).getCurrency();
++        } catch (Exception e) {
++            return Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
+         }
+-        return Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
+     }
+ }
+
+From 0929534c61d37e0b87c6a0039af57c5e299ca031 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Mon, 20 Apr 2015 20:54:21 +0800
+Subject: [PATCH 2/8] import use account's currency
+
+---
+ app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java | 3 ++-
+ app/src/main/java/org/gnucash/android/model/Transaction.java      | 2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 9d58a4c1..84eb4949 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -433,7 +433,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SPLIT_MEMO:
+                 mSplit.setMemo(characterString);
+                 break;
+-            case GncXmlHelper.TAG_SPLIT_VALUE:
++            case GncXmlHelper.TAG_SPLIT_QUANTITY:
+                 //the split amount uses the transaction currency, but in the db it will correctly use the account currency
+                 Money amount = new Money(GncXmlHelper.parseMoney(characterString), mTransaction.getCurrency());
+ 
+@@ -589,6 +589,7 @@ private Currency getCurrencyForAccount(String accountUID){
+         try {
+             return mAccountMap.get(accountUID).getCurrency();
+         } catch (Exception e) {
++            e.printStackTrace();
+             return Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index eb1c8739..43c20fa9 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -230,7 +230,7 @@ public void setSplits(List<Split> splitList){
+      */
+     public void addSplit(Split split){
+         //sets the currency of the split to the currency of the transaction
+-        split.setAmount(split.getAmount().withCurrency(Currency.getInstance(mCurrencyCode)));
++        //split.setAmount(split.getAmount().withCurrency(Currency.getInstance(mCurrencyCode)));
+         split.setTransactionUID(mUID);
+         mSplitList.add(split);
+     }
+
+From 492960adeac8d71552259c77b4fe8e5a0e283f82 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Mon, 20 Apr 2015 23:02:14 +0800
+Subject: [PATCH 3/8] ensure ROOT account when importing.
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  7 ++++
+ .../gnucash/android/importer/GncXmlHandler.java    | 39 ++++++++++++++++------
+ .../main/java/org/gnucash/android/model/Money.java |  2 +-
+ 3 files changed, 36 insertions(+), 12 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index c2119380..4c754761 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -60,6 +60,13 @@
+      */
+     public static final String ACCOUNT_NAME_SEPARATOR = ":";
+ 
++    /**
++     * ROOT account full name.
++     * should ensure the ROOT account's full name will always sort before any other
++     * account's full name.
++     */
++    public static final String ROOT_ACCOUNT_FULL_NAME = " ";
++
+ 	/**
+ 	 * Transactions database adapter for manipulating transactions associated with accounts
+ 	 */
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 84eb4949..28db1316 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -95,6 +95,11 @@
+     HashMap<String, Account> mAccountMap;
+ 
+     /**
++     * ROOT account of the imported book
++     */
++    Account mRootAccount;
++
++    /**
+      * Transaction instance which will be built for each transaction found
+      */
+     Transaction mTransaction;
+@@ -185,6 +190,7 @@ private void init(@Nullable SQLiteDatabase db) {
+             mAccountsDbAdapter = new AccountsDbAdapter(db, mTransactionsDbAdapter);
+             mScheduledActionsDbAdapter = new ScheduledActionDbAdapter(db);
+         }
++
+         mContent = new StringBuilder();
+ 
+         mAccountList = new ArrayList<>();
+@@ -281,6 +287,15 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 if (!mInTemplates) { //we ignore template accounts, we have no use for them
+                     mAccountList.add(mAccount);
+                     mAccountMap.put(mAccount.getUID(), mAccount);
++                    // check ROOT account
++                    if (mAccount.getAccountType() == AccountType.ROOT) {
++                        if (mRootAccount == null) {
++                            mRootAccount = mAccount;
++                        } else {
++                            throw new SAXException("multiple ROOT accounts exist in book");
++                        }
++                    }
++                    // prepare for next input
+                     mAccount = null;
+                     //reset ISO 4217 flag for next account
+                     mISO4217Currency = false;
+@@ -507,18 +522,20 @@ public void characters(char[] chars, int start, int length) throws SAXException
+     @Override
+     public void endDocument() throws SAXException {
+         super.endDocument();
+-        HashMap<String, Account> map = new HashMap<>(mAccountList.size());
+         HashMap<String, String> mapFullName = new HashMap<>(mAccountList.size());
+-        Account rootAccount = null;
++
++        // The XML has no ROOT, create one
++        if (mRootAccount == null) {
++            mRootAccount = new Account("ROOT");
++            mRootAccount.setAccountType(AccountType.ROOT);
++            mAccountList.add(mRootAccount);
++            mAccountMap.put(mRootAccount.getUID(), mRootAccount);
++        }
++
+         for(Account account:mAccountList) {
+-            map.put(account.getUID(), account);
+             mapFullName.put(account.getUID(), null);
+-            if (account.getAccountType() == AccountType.ROOT) {
+-                if (rootAccount == null) {
+-                    rootAccount = account;
+-                } else {
+-                    throw new SAXException("Multiple ROOT accounts exists in the import file");
+-                }
++            if (account.getParentUID() == null && account.getAccountType() != AccountType.ROOT) {
++                account.setParentUID(mRootAccount.getUID());
+             }
+         }
+         java.util.Stack<Account> stack = new Stack<>();
+@@ -532,12 +549,12 @@ public void endDocument() throws SAXException {
+                 Account acc = stack.peek();
+                 if (acc.getAccountType() == AccountType.ROOT) {
+                     // append blank to Root Account, ensure it always sorts first
+-                    mapFullName.put(acc.getUID(), " " + acc.getName());
++                    mapFullName.put(acc.getUID(), AccountsDbAdapter.ROOT_ACCOUNT_FULL_NAME);
+                     stack.pop();
+                     continue;
+                 }
+                 String parentUID = acc.getParentUID();
+-                Account parentAccount = map.get(parentUID);
++                Account parentAccount = mAccountMap.get(parentUID);
+                 // In accounts tree that are not imported, top level ROOT account
+                 // does not exist, which will make all top level accounts have a
+                 // null parent
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 7c9a3a02..e012b151 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -463,7 +463,7 @@ public Money absolute() {
+ 	 */
+     public boolean isAmountZero() {
+ 		try {
+-			return mAmount.intValueExact() == 0;
++			return mAmount.compareTo(BigDecimal.ZERO) == 0;
+ 		} catch (ArithmeticException e){
+ 			e.printStackTrace();
+ 			return false;
+
+From 6e87b0e26fe6cd45b34225ad431954c8a3faebcf Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 22 Apr 2015 10:11:34 +0800
+Subject: [PATCH 4/8] fix: constraint violation when importing
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  8 +++++-
+ .../gnucash/android/importer/GncXmlHandler.java    | 33 +++++++++++++++++++++-
+ .../org/gnucash/android/model/Transaction.java     | 14 +++++----
+ 3 files changed, 48 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 4c754761..65031aa1 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -72,6 +72,8 @@
+ 	 */
+     private final TransactionsDbAdapter mTransactionsAdapter;
+ 
++    private static String mImbalanceAccountPrefix = GnuCashApplication.getAppContext().getString(R.string.imbalance_account_name) + "-";
++
+     /**
+      * Overloaded constructor. Creates an adapter for an already open database
+      * @param db SQliteDatabase instance
+@@ -606,6 +608,7 @@ public String getOrCreateImbalanceAccountUID(Currency currency){
+         if (uid == null){
+             Account account = new Account(imbalanceAccountName, currency);
+             account.setAccountType(AccountType.BANK);
++            account.setParentUID(getOrCreateGnuCashRootAccountUID());
+             account.setHidden(!GnuCashApplication.isDoubleEntryEnabled());
+             addAccount(account);
+             uid = account.getUID();
+@@ -1207,6 +1210,9 @@ public boolean isFavoriteAccount(String accountUID){
+         return openingTransactions;
+     }
+ 
++    public static String getImbalanceAccountPrefix() {
++         return mImbalanceAccountPrefix;
++    }
+ 
+     /**
+      * Returns the imbalance account where to store transactions which are not double entry
+@@ -1214,7 +1220,7 @@ public boolean isFavoriteAccount(String accountUID){
+      * @return Imbalance account name
+      */
+     public static String getImbalanceAccountName(Currency currency){
+-        return GnuCashApplication.getAppContext().getString(R.string.imbalance_account_name) + "-" + currency.getCurrencyCode();
++        return getImbalanceAccountPrefix() + currency.getCurrencyCode();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 28db1316..74a851f1 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -115,6 +115,11 @@
+     Split mSplit;
+ 
+     /**
++     * The list for all added split for autobalancing
++     */
++    List<Split> mAutoBalanceSplits;
++
++    /**
+      * Ignore certain elements in GnuCash XML file, such as "<gnc:template-transactions>"
+      */
+     String mIgnoreElement = null;
+@@ -197,6 +202,8 @@ private void init(@Nullable SQLiteDatabase db) {
+         mAccountMap = new HashMap<>();
+         mTransactionList = new ArrayList<>();
+         mScheduledActionsList = new ArrayList<>();
++
++        mAutoBalanceSplits = new ArrayList<>();
+     }
+ 
+     @Override
+@@ -465,7 +472,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_TRANSACTION:
+                 mTransaction.setTemplate(mInTemplates);
+-                mTransaction.autoBalance();
++                mAutoBalanceSplits.add(mTransaction.autoBalanceImportAccount());
+                 mTransactionList.add(mTransaction);
+ 
+                 if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
+@@ -523,6 +530,7 @@ public void characters(char[] chars, int start, int length) throws SAXException
+     public void endDocument() throws SAXException {
+         super.endDocument();
+         HashMap<String, String> mapFullName = new HashMap<>(mAccountList.size());
++        HashMap<String, Account> mapImbalanceAccount = new HashMap<>();
+ 
+         // The XML has no ROOT, create one
+         if (mRootAccount == null) {
+@@ -532,12 +540,35 @@ public void endDocument() throws SAXException {
+             mAccountMap.put(mRootAccount.getUID(), mRootAccount);
+         }
+ 
++        String imbalancePrefix = AccountsDbAdapter.getImbalanceAccountPrefix();
++
+         for(Account account:mAccountList) {
+             mapFullName.put(account.getUID(), null);
++            boolean topLevel = false;
+             if (account.getParentUID() == null && account.getAccountType() != AccountType.ROOT) {
+                 account.setParentUID(mRootAccount.getUID());
++                topLevel = true;
++            }
++            if (topLevel || (mRootAccount.getUID().equals(account.getParentUID()))) {
++                if (account.getName().startsWith(imbalancePrefix)) {
++                    mapImbalanceAccount.put(account.getName().substring(imbalancePrefix.length()), account);
++                }
+             }
+         }
++
++        for (Split split: mAutoBalanceSplits) {
++            String currencyCode = split.getAccountUID();
++            Account imbAccount = mapImbalanceAccount.get(currencyCode);
++            if (imbAccount == null) {
++                imbAccount = new Account(imbalancePrefix + currencyCode, Currency.getInstance(currencyCode));
++                imbAccount.setParentUID(mRootAccount.getUID());
++                imbAccount.setAccountType(AccountType.BANK);
++                mapImbalanceAccount.put(currencyCode, imbAccount);
++                mAccountList.add(imbAccount);
++            }
++            split.setAccountUID(imbAccount.getUID());
++        }
++
+         java.util.Stack<Account> stack = new Stack<>();
+         for (Account account:mAccountList){
+             if (mapFullName.get(account.getUID()) != null) {
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 43c20fa9..bbbda26a 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -166,8 +166,11 @@ private void initDefaults(){
+     /**
+      * Auto-balance the transaction by creating an imbalance split where necessary
+      * <p><b>Note:</b>If a transaction has splits with different currencies, not auto-balancing will be performed.</p>
++     *
++     * The added split will not use any account in db, but will use currency code as account UID.
++     * The added split will be returned, to be filled with proper account UID later.
+      */
+-    public void autoBalance(){
++    public Split autoBalanceImportAccount(){
+         //FIXME: when multiple currencies per transaction are supported
+         Currency lastCurrency = null;
+         for (Split split : mSplitList) {
+@@ -175,7 +178,7 @@ public void autoBalance(){
+             if (lastCurrency == null)
+                 lastCurrency = currentCurrency;
+             else if (lastCurrency != currentCurrency){
+-                return;
++                return null;
+             }
+         }
+ 
+@@ -183,9 +186,11 @@ else if (lastCurrency != currentCurrency){
+         if (!imbalance.isAmountZero()){
+             Currency currency = Currency.getInstance(mCurrencyCode);
+             Split split = new Split(imbalance.negate(),
+-                    AccountsDbAdapter.getInstance().getOrCreateImbalanceAccountUID(currency));
+-            mSplitList.add(split);
++                    currency.getCurrencyCode());
++            addSplit(split);
++            return split;
+         }
++        return null;
+     }
+ 
+     /**
+@@ -230,7 +235,6 @@ public void setSplits(List<Split> splitList){
+      */
+     public void addSplit(Split split){
+         //sets the currency of the split to the currency of the transaction
+-        //split.setAmount(split.getAmount().withCurrency(Currency.getInstance(mCurrencyCode)));
+         split.setTransactionUID(mUID);
+         mSplitList.add(split);
+     }
+
+From 32aaefbb6ea1c308c361d9d18f90ab909a6d2ce8 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 22 Apr 2015 10:21:00 +0800
+Subject: [PATCH 5/8] delay UID generation
+
+---
+ app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java | 5 ++++-
+ app/src/main/java/org/gnucash/android/model/BaseModel.java        | 5 ++++-
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 74a851f1..e4a39ab3 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -472,7 +472,10 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_TRANSACTION:
+                 mTransaction.setTemplate(mInTemplates);
+-                mAutoBalanceSplits.add(mTransaction.autoBalanceImportAccount());
++                Split imbSplit = mTransaction.autoBalanceImportAccount();
++                if (imbSplit != null) {
++                    mAutoBalanceSplits.add(imbSplit);
++                }
+                 mTransactionList.add(mTransaction);
+ 
+                 if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
+diff --git a/app/src/main/java/org/gnucash/android/model/BaseModel.java b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+index ad322f6c..71815c00 100644
+--- a/app/src/main/java/org/gnucash/android/model/BaseModel.java
++++ b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+@@ -32,7 +32,6 @@
+      * Initializes the model attributes and generates a GUID
+      */
+     public BaseModel(){
+-        mUID = generateUID();
+         mCreatedTimestamp = new Timestamp(System.currentTimeMillis());
+         mModifiedTimestamp = new Timestamp(System.currentTimeMillis());
+     }
+@@ -51,6 +50,10 @@ protected String generateUID(){
+      * @return String unique identifier for this model
+      */
+     public String getUID() {
++        if (mUID == null)
++        {
++            mUID = generateUID();
++        }
+         return mUID;
+     }
+ 
+
+From 4f6d1802144fe58ce92d62cdba9ef28c21aca728 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 22 Apr 2015 10:47:15 +0800
+Subject: [PATCH 6/8] delay generating amount
+
+---
+ .../java/org/gnucash/android/importer/GncXmlHandler.java | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index e4a39ab3..ddaf0016 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -115,6 +115,11 @@
+     Split mSplit;
+ 
+     /**
++     * Quantity of the split
++     */
++    BigDecimal mQuantity;
++
++    /**
+      * The list for all added split for autobalancing
+      */
+     List<Split> mAutoBalanceSplits;
+@@ -456,16 +461,17 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 mSplit.setMemo(characterString);
+                 break;
+             case GncXmlHelper.TAG_SPLIT_QUANTITY:
+-                //the split amount uses the transaction currency, but in the db it will correctly use the account currency
+-                Money amount = new Money(GncXmlHelper.parseMoney(characterString), mTransaction.getCurrency());
++                // delay the assignment of currency when the split account is seen
++                mQuantity = GncXmlHelper.parseMoney(characterString);
++                break;
++            case GncXmlHelper.TAG_SPLIT_ACCOUNT:
++                //the split amount uses the account currency
++                Money amount = new Money(mQuantity, getCurrencyForAccount(characterString));
+ 
+                 //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
+                 mSplit.setType(amount.isNegative() ? TransactionType.CREDIT : TransactionType.DEBIT);
+                 mSplit.setAmount(amount.absolute());
+-                break;
+-            case GncXmlHelper.TAG_SPLIT_ACCOUNT:
+                 mSplit.setAccountUID(characterString);
+-                mSplit.setAmount(mSplit.getAmount().withCurrency(getCurrencyForAccount(characterString)));
+                 break;
+             case GncXmlHelper.TAG_TRN_SPLIT:
+                 mTransaction.addSplit(mSplit);
+
+From 2adf84c12b3e1e45fd3bf1babb276c952cba7793 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 22 Apr 2015 12:12:49 +0800
+Subject: [PATCH 7/8] faster money parse
+
+---
+ .../org/gnucash/android/export/xml/GncXmlHelper.java    | 17 +++++++++++------
+ .../org/gnucash/android/importer/GncXmlHandler.java     |  7 ++++++-
+ 2 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 257a89df..dedcfcef 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -24,10 +24,12 @@
+ import org.w3c.dom.Element;
+ 
+ import java.math.BigDecimal;
++import java.math.BigInteger;
+ import java.text.NumberFormat;
+ import java.text.ParseException;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
++import java.util.IllegalFormatException;
+ import java.util.Locale;
+ 
+ /**
+@@ -171,12 +173,15 @@ public static String formatMoney(Split split){
+      * @param amountString String containing the amount
+      * @return BigDecimal with numerical value
+      */
+-    public static BigDecimal parseMoney(String amountString){
+-        String[] tokens = amountString.split("/");
+-        BigDecimal numerator = new BigDecimal(tokens[0]);
+-        BigDecimal denominator = new BigDecimal(tokens[1]);
+-
+-        return numerator.divide(denominator);
++    public static BigDecimal parseMoney(String amountString) throws ParseException {
++        int pos = amountString.indexOf("/");
++        if (pos < 0)
++        {
++            throw new ParseException("Cannot parse money string : " + amountString, 0);
++        }
++        BigInteger numerator = new BigInteger(amountString.substring(0, pos));
++        int scale = amountString.length() - pos - 2;
++        return new BigDecimal(numerator, scale);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index ddaf0016..e0851b04 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -462,7 +462,12 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_SPLIT_QUANTITY:
+                 // delay the assignment of currency when the split account is seen
+-                mQuantity = GncXmlHelper.parseMoney(characterString);
++                try {
++                    mQuantity = GncXmlHelper.parseMoney(characterString);
++                } catch (ParseException e) {
++                    e.printStackTrace();
++                    throw new SAXException("Unable to parse money", e);
++                }
+                 break;
+             case GncXmlHelper.TAG_SPLIT_ACCOUNT:
+                 //the split amount uses the account currency
+
+From 736e984bd97c1b892923a31500b60cffa2c414b8 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 22 Apr 2015 13:52:47 +0800
+Subject: [PATCH 8/8] code clean up
+
+---
+ .../org/gnucash/android/db/SplitsDbAdapter.java    |  5 ++-
+ .../gnucash/android/importer/GncXmlHandler.java    | 44 +++++++++++++++-------
+ .../main/java/org/gnucash/android/model/Money.java |  6 ++-
+ 3 files changed, 37 insertions(+), 18 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index d4b581a7..cb1843a8 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -95,7 +95,8 @@ public long addSplit(Split split){
+      * If the split already exists, then it is simply updated.
+      * This function will NOT update the exported status of corresponding transactions.
+      * All or none of the splits will be inserted/updated into the database.
+-     * @param splitList {@link org.gnucash.android.model.Split} to be recorded in DB
++     * @param splitList {@link org.gnucash.android.model.Split} to be recorded in DB. The amount
++     *                                                         of all splits should be non-negative
+      * @return Number of records of the newly saved split
+      */
+     public long bulkAddSplits(List<Split> splitList) {
+@@ -117,7 +118,7 @@ public long bulkAddSplits(List<Split> splitList) {
+                     replaceStatement.bindString(2, split.getMemo());
+                 }
+                 replaceStatement.bindString(3, split.getType().name());
+-                replaceStatement.bindString(4, split.getAmount().absolute().toPlainString());
++                replaceStatement.bindString(4, split.getAmount().toPlainString());
+                 replaceStatement.bindString(5, split.getCreatedTimestamp().toString());
+                 replaceStatement.bindString(6, split.getAccountUID());
+                 replaceStatement.bindString(7, split.getTransactionUID());
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index e0851b04..a906f94d 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -115,11 +115,16 @@
+     Split mSplit;
+ 
+     /**
+-     * Quantity of the split
++     * (Absolute) quantity of the split
+      */
+     BigDecimal mQuantity;
+ 
+     /**
++     * Whether the quantity is negative
++     */
++    boolean mNegativeQuantity;
++
++    /**
+      * The list for all added split for autobalancing
+      */
+     List<Split> mAutoBalanceSplits;
+@@ -399,13 +404,17 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                         mInCreditFormulaSlot = false;
+                     }
+                 } else if (mInTemplates && mInDebitFormulaSlot) {
+-                    NumberFormat numberFormat = GncXmlHelper.getNumberFormatForTemplateSplits();
+                     try {
+-                        Number number = numberFormat.parse(characterString);
+-                        Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
++                        // TODO: test this. I do not have template transactions to test
++                        // Going through double to decimal will lose accuracy.
++                        // NEVER use double for money.
++                        // from Android SDK Ddoc:
++                        //    new BigDecimal(0.1) is equal to 0.1000000000000000055511151231257827021181583404541015625. This happens as 0.1 cannot be represented exactly in binary.
++                        //    To generate a big decimal instance which is equivalent to 0.1 use the BigDecimal(String) constructor.
++                        Money amount = new Money(new BigDecimal(characterString), mTransaction.getCurrency());
+                         mSplit.setAmount(amount.absolute());
+                         mSplit.setType(TransactionType.DEBIT);
+-                    } catch (ParseException e) {
++                    } catch (NumberFormatException e) {
+                         Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
+                         e.printStackTrace();
+                     } finally {
+@@ -463,7 +472,14 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SPLIT_QUANTITY:
+                 // delay the assignment of currency when the split account is seen
+                 try {
+-                    mQuantity = GncXmlHelper.parseMoney(characterString);
++                    String q = characterString;
++                    if (q.charAt(0) == '-') {
++                        mNegativeQuantity = true;
++                        q = q.substring(1);
++                    } else {
++                        mNegativeQuantity = false;
++                    }
++                    mQuantity = GncXmlHelper.parseMoney(q);
+                 } catch (ParseException e) {
+                     e.printStackTrace();
+                     throw new SAXException("Unable to parse money", e);
+@@ -472,10 +488,9 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_SPLIT_ACCOUNT:
+                 //the split amount uses the account currency
+                 Money amount = new Money(mQuantity, getCurrencyForAccount(characterString));
+-
+                 //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
+-                mSplit.setType(amount.isNegative() ? TransactionType.CREDIT : TransactionType.DEBIT);
+-                mSplit.setAmount(amount.absolute());
++                mSplit.setType(mNegativeQuantity ? TransactionType.CREDIT : TransactionType.DEBIT);
++                mSplit.setAmount(amount);
+                 mSplit.setAccountUID(characterString);
+                 break;
+             case GncXmlHelper.TAG_TRN_SPLIT:
+@@ -556,6 +571,7 @@ public void endDocument() throws SAXException {
+ 
+         String imbalancePrefix = AccountsDbAdapter.getImbalanceAccountPrefix();
+ 
++        // Add all account without a parent to ROOT, and collect top level imbalance accounts
+         for(Account account:mAccountList) {
+             mapFullName.put(account.getUID(), null);
+             boolean topLevel = false;
+@@ -570,6 +586,7 @@ public void endDocument() throws SAXException {
+             }
+         }
+ 
++        // Set the account for created balancing splits to correct imbalance accounts
+         for (Split split: mAutoBalanceSplits) {
+             String currencyCode = split.getAccountUID();
+             Account imbAccount = mapImbalanceAccount.get(currencyCode);
+@@ -593,17 +610,16 @@ public void endDocument() throws SAXException {
+             while (!stack.isEmpty()) {
+                 Account acc = stack.peek();
+                 if (acc.getAccountType() == AccountType.ROOT) {
+-                    // append blank to Root Account, ensure it always sorts first
++                    // ROOT_ACCOUNT_FULL_NAME should ensure ROOT always sorts first
+                     mapFullName.put(acc.getUID(), AccountsDbAdapter.ROOT_ACCOUNT_FULL_NAME);
+                     stack.pop();
+                     continue;
+                 }
+                 String parentUID = acc.getParentUID();
+                 Account parentAccount = mAccountMap.get(parentUID);
+-                // In accounts tree that are not imported, top level ROOT account
+-                // does not exist, which will make all top level accounts have a
+-                // null parent
+-                if (parentAccount == null || parentAccount.getAccountType() == AccountType.ROOT) {
++                // ROOT account will be added if not exist, so now anly ROOT
++                // has an empty parent
++                if (parentAccount.getAccountType() == AccountType.ROOT) {
+                     // top level account, full name is the same as its name
+                     mapFullName.put(acc.getUID(), acc.getName());
+                     stack.pop();
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index e012b151..ee266545 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -17,6 +17,8 @@
+ package org.gnucash.android.model;
+ 
+ 
++import android.support.annotation.NonNull;
++
+ import java.math.BigDecimal;
+ import java.math.MathContext;
+ import java.math.RoundingMode;
+@@ -370,7 +372,7 @@ public Money multiply(int multiplier){
+ 	 * @return <code>true</code> if the amount is negative, <code>false</code> otherwise.
+ 	 */
+ 	public boolean isNegative(){
+-		return mAmount.compareTo(new BigDecimal(0)) == -1;
++		return mAmount.compareTo(BigDecimal.ZERO) == -1;
+ 	}
+ 	
+ 	/**
+@@ -422,7 +424,7 @@ public boolean equals(Object obj) {
+ 	}
+ 
+ 	@Override
+-	public int compareTo(Money another) {
++	public int compareTo(@NonNull Money another) {
+ 		if (!mCurrency.equals(another.mCurrency))
+ 			throw new IllegalArgumentException("Cannot compare different currencies yet");
+ 		return mAmount.compareTo(another.mAmount);

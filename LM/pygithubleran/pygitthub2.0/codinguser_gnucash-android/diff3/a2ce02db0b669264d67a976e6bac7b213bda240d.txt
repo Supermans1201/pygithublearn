@@ -1,0 +1,1248 @@
+From 4efa743e8b95a5c30be200ae5f23ca0694b8032f Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Tue, 19 May 2015 20:53:08 +0300
+Subject: [PATCH 01/10] Display expenses sub accounts as stacked bars
+
+---
+ .../gnucash/android/ui/chart/BarChartActivity.java | 44 ++++++++++++++++------
+ 1 file changed, 33 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 3a7cefa0..dbb138c1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -70,8 +70,13 @@
+     private static final int NO_DATA_COLOR = Color.LTGRAY;
+     private static final int NO_DATA_BAR_COUNTS = 3;
+     private static final int[] COLORS = {
+-            Color.parseColor("#68F1AF"), Color.parseColor("#CC1f09"), Color.parseColor("#EE8600"),
+-            Color.parseColor("#1469EB"), Color.parseColor("#B304AD"),
++            Color.parseColor("#17ee4e"), Color.parseColor("#cc1f09"), Color.parseColor("#3940f7"),
++            Color.parseColor("#f9cd04"), Color.parseColor("#5f33a8"), Color.parseColor("#e005b6"),
++            Color.parseColor("#17d6ed"), Color.parseColor("#e4a9a2"), Color.parseColor("#8fe6cd"),
++            Color.parseColor("#8b48fb"), Color.parseColor("#343a36"), Color.parseColor("#6decb1"),
++            Color.parseColor("#a6dcfd"), Color.parseColor("#5c3378"), Color.parseColor("#a6dcfd"),
++            Color.parseColor("#ba037c"), Color.parseColor("#708809"), Color.parseColor("#32072c"),
++            Color.parseColor("#fddef8"), Color.parseColor("#fa0e6e"), Color.parseColor("#d9e7b5")
+     };
+ 
+     private BarChart mChart;
+@@ -140,27 +145,44 @@ private BarData getData(List<AccountType> accountTypeList) {
+ 
+         List<BarDataSet> dataSets = new ArrayList<>();
+         List<BarEntry> values = new ArrayList<>();
++        List<String> labels = new ArrayList<>();
++        List<Integer> colors = new ArrayList<>();
+         List<String> xValues = new ArrayList<>();
+         for (int i = 0; i <= months; i++) {
+             xValues.add(startDate.toString(X_AXIS_PATTERN));
+ 
+             long start = startDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
+             long end = startDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+-            float stack[] = new float[accountTypeList.size()];
+-            int j = 0;
+-            for (Map.Entry<AccountType, List<String>> entry : getAccountTypeToAccountUidMap(accountTypeList).entrySet()) {
+-                stack[j++] = (float) mAccountsDbAdapter.getAccountsBalance(entry.getValue(), start, end).absolute().asDouble();
+-                Log.d(TAG, entry.getKey() + startDate.toString(" MMMM yyyy") + ", balance = " + stack[j - 1]);
++            List<Float> stack = new ArrayList<>();
++            for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
++                if (account.getAccountType() == AccountType.EXPENSE
++                        && !account.isPlaceholderAccount() && account.getCurrency() == mCurrency) {
++
++                    float balance = (float) mAccountsDbAdapter.getAccountsBalance(
++                            Collections.singletonList(account.getUID()), start, end).asDouble();
++                    if (balance != 0) {
++                        stack.add(balance);
++                        labels.add(account.getName());
++                        colors.add(COLORS[(colors.size()) % COLORS.length]);
++                        Log.i(TAG, "EXPENSE" + startDate.toString(" MMMM yyyy ") + account.getName()
++                                + " = " + stack.get(stack.size() - 1)  + ", color = " + colors.get(colors.size() - 1));
++                    }
++                }
+             }
+-            values.add(new BarEntry(stack, i));
++
++            float array[] = new float[stack.size()];
++            for (int k = 0;  k < stack.size(); k++) {
++                array[k] = stack.get(k);
++            }
++
++            values.add(new BarEntry(array, i));
+ 
+             startDate = startDate.plusMonths(1);
+         }
+ 
+         BarDataSet set = new BarDataSet(values, "");
+-        // conversion an enum list to a string array
+-        set.setStackLabels(accountTypeList.toString().substring(1, accountTypeList.toString().length() - 1).split(", "));
+-        set.setColors(Arrays.copyOfRange(COLORS, 0, accountTypeList.size()));
++        set.setStackLabels(labels.toArray(new String[labels.size()]));
++        set.setColors(colors);
+         dataSets.add(set);
+ 
+         if (set.getYValueSum() == 0) {
+
+From 0d630188375c21e7d6e69bd069b69fb979f5c9f4 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Wed, 20 May 2015 21:16:07 +0300
+Subject: [PATCH 02/10] Workaround to bypass legend restrictions
+
+---
+ .../gnucash/android/ui/chart/BarChartActivity.java  | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index dbb138c1..e0deabdf 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -52,9 +52,11 @@
+ import java.util.Currency;
+ import java.util.HashMap;
+ import java.util.Iterator;
++import java.util.LinkedHashSet;
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
++import java.util.Set;
+ 
+ /**
+  * Activity used for drawing a bar chart
+@@ -89,6 +91,9 @@
+     private boolean mChartDataPresent = true;
+     private Currency mCurrency;
+ 
++    private Set<String> mLegendLabels;
++    private Set<Integer> mLegendColors;
++
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         //it is necessary to set the view first before calling super because of the nav drawer in BaseDrawerActivity
+@@ -109,14 +114,13 @@ protected void onCreate(Bundle savedInstanceState) {
+         mChart.setDrawValuesForWholeStack(false);
+         mChart.getAxisLeft().setValueFormatter(new LargeValueFormatter(mCurrency.getSymbol(Locale.getDefault())));
+         mChart.getAxisRight().setEnabled(false);
++        mChart.getLegend().setEnabled(false);
++        mChart.getLegend().setForm(Legend.LegendForm.CIRCLE);
++        mChart.getLegend().setPosition(Legend.LegendPosition.RIGHT_OF_CHART_INSIDE);
+ 
+         // below we can add/remove displayed account's types
+         mChart.setData(getData(new ArrayList<>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE))));
+ 
+-        Legend legend = mChart.getLegend();
+-        legend.setForm(Legend.LegendForm.CIRCLE);
+-        legend.setPosition(Legend.LegendPosition.RIGHT_OF_CHART_INSIDE);
+-
+         if (!mChartDataPresent) {
+             mChart.getAxisLeft().setAxisMaxValue(10);
+             mChart.getAxisLeft().setDrawLabels(false);
+@@ -180,6 +184,9 @@ private BarData getData(List<AccountType> accountTypeList) {
+             startDate = startDate.plusMonths(1);
+         }
+ 
++        mLegendColors = new LinkedHashSet<>(colors);
++        mLegendLabels = new LinkedHashSet<>(labels);
++
+         BarDataSet set = new BarDataSet(values, "");
+         set.setStackLabels(labels.toArray(new String[labels.size()]));
+         set.setColors(colors);
+@@ -282,7 +289,11 @@ public boolean onPrepareOptionsMenu(Menu menu) {
+     public boolean onOptionsItemSelected(MenuItem item) {
+         switch (item.getItemId()) {
+             case R.id.menu_toggle_legend:
+-                mChart.getLegend().setEnabled(!mChart.getLegend().isEnabled());
++                // workaround for buggy legend
++                Legend legend = mChart.getLegend();
++                legend.setEnabled(!mChart.getLegend().isEnabled());
++                legend.setLabels(mLegendLabels.toArray(new String[mLegendLabels.size()]));
++                legend.setColors(Arrays.asList(mLegendColors.toArray(new Integer[mLegendLabels.size()])));
+                 mChart.invalidate();
+                 break;
+ 
+
+From 3a1859542d3c87706b5d662ff769a3f0ed98e4ca Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Wed, 20 May 2015 21:53:28 +0300
+Subject: [PATCH 03/10] Added account type spinner
+
+---
+ .../gnucash/android/ui/chart/BarChartActivity.java | 68 ++++++++++++++++------
+ app/src/main/res/layout/activity_bar_chart.xml     | 59 +++++++++++++++++++
+ 2 files changed, 109 insertions(+), 18 deletions(-)
+ create mode 100644 app/src/main/res/layout/activity_bar_chart.xml
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index e0deabdf..677d090e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -20,7 +20,11 @@
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.util.Log;
++import android.view.View;
++import android.widget.AdapterView;
++import android.widget.ArrayAdapter;
+ import android.widget.LinearLayout;
++import android.widget.Spinner;
+ import android.widget.TextView;
+ import android.widget.Toast;
+ 
+@@ -94,10 +98,12 @@
+     private Set<String> mLegendLabels;
+     private Set<Integer> mLegendColors;
+ 
++    private AccountType mAccountType = AccountType.EXPENSE;
++
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         //it is necessary to set the view first before calling super because of the nav drawer in BaseDrawerActivity
+-        setContentView(R.layout.activity_line_chart);
++        setContentView(R.layout.activity_bar_chart);
+         super.onCreate(savedInstanceState);
+         getSupportActionBar().setTitle(R.string.title_bar_chart);
+ 
+@@ -105,7 +111,7 @@ protected void onCreate(Bundle savedInstanceState) {
+                 .getString(getString(R.string.key_report_currency), Money.DEFAULT_CURRENCY_CODE));
+ 
+         mChart = new BarChart(this);
+-        ((LinearLayout) findViewById(R.id.chart)).addView(mChart);
++        ((LinearLayout) findViewById(R.id.bar_chart)).addView(mChart);
+         mChart.setOnChartValueSelectedListener(this);
+         mChart.setDescription("");
+         mChart.getXAxis().setDrawGridLines(false);
+@@ -118,19 +124,7 @@ protected void onCreate(Bundle savedInstanceState) {
+         mChart.getLegend().setForm(Legend.LegendForm.CIRCLE);
+         mChart.getLegend().setPosition(Legend.LegendPosition.RIGHT_OF_CHART_INSIDE);
+ 
+-        // below we can add/remove displayed account's types
+-        mChart.setData(getData(new ArrayList<>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE))));
+-
+-        if (!mChartDataPresent) {
+-            mChart.getAxisLeft().setAxisMaxValue(10);
+-            mChart.getAxisLeft().setDrawLabels(false);
+-            mChart.getXAxis().setDrawLabels(false);
+-            mChart.setTouchEnabled(false);
+-            ((TextView) findViewById(R.id.selected_chart_slice)).setText(getResources().getString(R.string.label_chart_no_data));
+-        } else {
+-            mChart.animateY(ANIMATION_DURATION);
+-        }
+-        mChart.invalidate();
++        setUpSpinner();
+     }
+ 
+     /**
+@@ -159,8 +153,9 @@ private BarData getData(List<AccountType> accountTypeList) {
+             long end = startDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+             List<Float> stack = new ArrayList<>();
+             for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+-                if (account.getAccountType() == AccountType.EXPENSE
+-                        && !account.isPlaceholderAccount() && account.getCurrency() == mCurrency) {
++                if (account.getAccountType() == mAccountType
++                        && !account.isPlaceholderAccount()
++                        && account.getCurrency() == mCurrency) {
+ 
+                     float balance = (float) mAccountsDbAdapter.getAccountsBalance(
+                             Collections.singletonList(account.getUID()), start, end).asDouble();
+@@ -168,7 +163,7 @@ private BarData getData(List<AccountType> accountTypeList) {
+                         stack.add(balance);
+                         labels.add(account.getName());
+                         colors.add(COLORS[(colors.size()) % COLORS.length]);
+-                        Log.i(TAG, "EXPENSE" + startDate.toString(" MMMM yyyy ") + account.getName()
++                        Log.i(TAG, mAccountType + startDate.toString(" MMMM yyyy ") + account.getName()
+                                 + " = " + stack.get(stack.size() - 1)  + ", color = " + colors.get(colors.size() - 1));
+                     }
+                 }
+@@ -268,6 +263,43 @@ private BarData getEmptyData() {
+         return new BarData(xValues, Collections.singletonList(set));
+     }
+ 
++    /**
++     * Sets up settings and data for the account type spinner. Currently used only {@code EXPENSE} and {@code INCOME}
++     * account types.
++     */
++    private void setUpSpinner() {
++        Spinner spinner = (Spinner) findViewById(R.id.chart_data_spinner);
++        ArrayAdapter<AccountType> dataAdapter = new ArrayAdapter<>(this,
++                android.R.layout.simple_spinner_item,
++                Arrays.asList(AccountType.EXPENSE, AccountType.INCOME));
++        dataAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        spinner.setAdapter(dataAdapter);
++        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
++            @Override
++            public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l) {
++                mAccountType = (AccountType) ((Spinner) findViewById(R.id.chart_data_spinner)).getSelectedItem();
++
++                // below we can add/remove displayed account's types
++                mChart.setData(getData(new ArrayList<>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE))));
++
++                if (!mChartDataPresent) {
++                    mChart.getAxisLeft().setAxisMaxValue(10);
++                    mChart.getAxisLeft().setDrawLabels(false);
++                    mChart.getXAxis().setDrawLabels(false);
++                    mChart.setTouchEnabled(false);
++                    ((TextView) findViewById(R.id.selected_chart_slice)).setText(getResources().getString(R.string.label_chart_no_data));
++                } else {
++                    mChart.animateY(ANIMATION_DURATION);
++                }
++                mChart.invalidate();
++            }
++
++            @Override
++            public void onNothingSelected(AdapterView<?> adapterView) {
++            }
++        });
++    }
++
+     @Override
+     public boolean onCreateOptionsMenu(Menu menu) {
+         getSupportMenuInflater().inflate(R.menu.chart_actions, menu);
+diff --git a/app/src/main/res/layout/activity_bar_chart.xml b/app/src/main/res/layout/activity_bar_chart.xml
+new file mode 100644
+index 00000000..288124eb
+--- /dev/null
++++ b/app/src/main/res/layout/activity_bar_chart.xml
+@@ -0,0 +1,59 @@
++<?xml version="1.0" encoding="utf-8"?>
++
++<!--
++ Copyright (c) 2015 Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
++
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++
++<android.support.v4.widget.DrawerLayout
++    xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/drawer_layout"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent">
++    <LinearLayout
++        android:orientation="vertical"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent">
++
++        <LinearLayout android:id="@+id/bar_chart"
++                      android:orientation="horizontal"
++                      android:layout_width="fill_parent"
++                      android:layout_height="0dip"
++                      android:layout_weight="1" />
++
++        <Spinner android:id="@+id/chart_data_spinner"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content" />
++
++        <LinearLayout android:layout_width="fill_parent"
++            android:layout_height="wrap_content"
++            android:gravity="center">
++
++            <TextView android:id="@+id/selected_chart_slice"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:gravity="center" />
++
++        </LinearLayout>
++
++    </LinearLayout>
++    <ListView android:id="@+id/left_drawer"
++        android:layout_width="240dp"
++        android:layout_height="match_parent"
++        android:layout_gravity="start"
++        android:choiceMode="singleChoice"
++        android:divider="@android:color/transparent"
++        android:dividerHeight="0dp"
++        android:background="#111"/>
++</android.support.v4.widget.DrawerLayout>
+\ No newline at end of file
+
+From 4eb80ed03103764e56db27a33525d1e40caa238f Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Fri, 22 May 2015 18:12:53 +0300
+Subject: [PATCH 04/10] Fixed x-axis calculating
+
+---
+ .../gnucash/android/ui/chart/BarChartActivity.java | 69 +++++++++++-----------
+ 1 file changed, 33 insertions(+), 36 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 677d090e..694f8e0a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -87,10 +87,6 @@
+ 
+     private BarChart mChart;
+     private AccountsDbAdapter mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+-    private Map<AccountType, Long> mEarliestTimestampsMap = new HashMap<>();
+-    private Map<AccountType, Long> mLatestTimestampsMap = new HashMap<>();
+-    private long mEarliestTransactionTimestamp;
+-    private long mLatestTransactionTimestamp;
+     private boolean mTotalPercentageMode = true;
+     private boolean mChartDataPresent = true;
+     private Currency mCurrency;
+@@ -100,6 +96,9 @@
+ 
+     private AccountType mAccountType = AccountType.EXPENSE;
+ 
++    private LocalDateTime mEarliestTransactionDate;
++    private LocalDateTime mLatestTransactionDate;
++
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         //it is necessary to set the view first before calling super because of the nav drawer in BaseDrawerActivity
+@@ -132,13 +131,21 @@ protected void onCreate(Bundle savedInstanceState) {
+      * @param accountTypeList account's types which will be displayed
+      * @return a {@code BarData} instance that represents a user data
+      */
+-    private BarData getData(List<AccountType> accountTypeList) {
+-        calculateEarliestAndLatestTimestamps(accountTypeList);
++    private BarData getData(AccountType accountType) {
++//        setEarliestAndLatestDates(accountType);
++
++        TransactionsDbAdapter adapter = TransactionsDbAdapter.getInstance();
++        String code = mCurrency.getCurrencyCode();
++        LocalDateTime startDate = new LocalDateTime(adapter.getTimestampOfEarliestTransaction(accountType, code))
++                .withDayOfMonth(1)
++                .withMillisOfDay(0);
++        LocalDateTime endDate = new LocalDateTime(adapter.getTimestampOfLatestTransaction(accountType, code))
++                .withDayOfMonth(1)
++                .withMillisOfDay(0);
++        Log.d(TAG, accountType + " X-axis star date: " + mEarliestTransactionDate.toString("dd MM yyyy"));
++        Log.d(TAG, accountType + " X-axis end date: " + mLatestTransactionDate.toString("dd MM yyyy"));
++//        int months = Months.monthsBetween(mEarliestTransactionDate, mLatestTransactionDate).getMonths();
+ 
+-        LocalDateTime startDate = new LocalDateTime(mEarliestTransactionTimestamp).withDayOfMonth(1).withMillisOfDay(0);
+-        LocalDateTime endDate = new LocalDateTime(mLatestTransactionTimestamp).withDayOfMonth(1).withMillisOfDay(0);
+-        Log.d(TAG, "X-axis star date: " + startDate.toString("dd MM yyyy"));
+-        Log.d(TAG, "X-axis end date: " + endDate.toString("dd MM yyyy"));
+         int months = Months.monthsBetween(startDate, endDate).getMonths();
+ 
+         List<BarDataSet> dataSets = new ArrayList<>();
+@@ -195,32 +202,23 @@ private BarData getData(List<AccountType> accountTypeList) {
+     }
+ 
+     /**
+-     * Calculates the earliest and latest transaction's timestamps of the specified account types
++     * Sets the earliest and latest transaction's dates of the specified account type
+      * @param accountTypeList account's types which will be processed
+      */
+-    private void calculateEarliestAndLatestTimestamps(List<AccountType> accountTypeList) {
+-        TransactionsDbAdapter dbAdapter = TransactionsDbAdapter.getInstance();
+-        for (Iterator<AccountType> iter = accountTypeList.iterator(); iter.hasNext();) {
+-            AccountType type = iter.next();
+-            long earliest = dbAdapter.getTimestampOfEarliestTransaction(type, mCurrency.getCurrencyCode());
+-            long latest = dbAdapter.getTimestampOfLatestTransaction(type, mCurrency.getCurrencyCode());
+-            if (earliest > 0 && latest > 0) {
+-                mEarliestTimestampsMap.put(type, earliest);
+-                mLatestTimestampsMap.put(type, latest);
+-            } else {
+-                iter.remove();
+-            }
+-        }
+-
+-        if (mEarliestTimestampsMap.isEmpty() || mLatestTimestampsMap.isEmpty()) {
+-            return;
+-        }
+-
+-        List<Long> timestamps = new ArrayList<>(mEarliestTimestampsMap.values());
+-        timestamps.addAll(mLatestTimestampsMap.values());
+-        Collections.sort(timestamps);
+-        mEarliestTransactionTimestamp = timestamps.get(0);
+-        mLatestTransactionTimestamp = timestamps.get(timestamps.size() - 1);
++    private int setEarliestAndLatestDates(AccountType accountType) {
++        TransactionsDbAdapter adapter = TransactionsDbAdapter.getInstance();
++        String code = mCurrency.getCurrencyCode();
++        mEarliestTransactionDate = new LocalDateTime(adapter.getTimestampOfEarliestTransaction(accountType, code))
++                .withDayOfMonth(1)
++                .withMillisOfDay(0);
++        mLatestTransactionDate = new LocalDateTime(adapter.getTimestampOfLatestTransaction(accountType, code))
++                .withDayOfMonth(1)
++                .withMillisOfDay(0);
++        Log.d(TAG, accountType + " X-axis star date: " + mEarliestTransactionDate.toString("dd MM yyyy"));
++        Log.d(TAG, accountType + " X-axis end date: " + mLatestTransactionDate.toString("dd MM yyyy"));
++        int months = Months.monthsBetween(mEarliestTransactionDate, mLatestTransactionDate).getMonths();
++        Log.w(TAG, "DIFF: " + months);
++        return months;
+     }
+ 
+     /**
+@@ -279,8 +277,7 @@ private void setUpSpinner() {
+             public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l) {
+                 mAccountType = (AccountType) ((Spinner) findViewById(R.id.chart_data_spinner)).getSelectedItem();
+ 
+-                // below we can add/remove displayed account's types
+-                mChart.setData(getData(new ArrayList<>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE))));
++                mChart.setData(getData(mAccountType));
+ 
+                 if (!mChartDataPresent) {
+                     mChart.getAxisLeft().setAxisMaxValue(10);
+
+From 8832972045dd04e71a146cb424a279cbe2a502b0 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Fri, 22 May 2015 20:53:09 +0300
+Subject: [PATCH 05/10] Use the same color for the same account in different
+ bars
+
+---
+ .../org/gnucash/android/ui/chart/BarChartActivity.java | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 694f8e0a..2156b286 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -55,7 +55,7 @@
+ import java.util.Collections;
+ import java.util.Currency;
+ import java.util.HashMap;
+-import java.util.Iterator;
++import java.util.LinkedHashMap;
+ import java.util.LinkedHashSet;
+ import java.util.List;
+ import java.util.Locale;
+@@ -99,6 +99,8 @@
+     private LocalDateTime mEarliestTransactionDate;
+     private LocalDateTime mLatestTransactionDate;
+ 
++    private Map<String, Integer> accountToColorMap = new LinkedHashMap<>();
++
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         //it is necessary to set the view first before calling super because of the nav drawer in BaseDrawerActivity
+@@ -142,8 +144,8 @@ private BarData getData(AccountType accountType) {
+         LocalDateTime endDate = new LocalDateTime(adapter.getTimestampOfLatestTransaction(accountType, code))
+                 .withDayOfMonth(1)
+                 .withMillisOfDay(0);
+-        Log.d(TAG, accountType + " X-axis star date: " + mEarliestTransactionDate.toString("dd MM yyyy"));
+-        Log.d(TAG, accountType + " X-axis end date: " + mLatestTransactionDate.toString("dd MM yyyy"));
++        Log.d(TAG, accountType + " X-axis star date: " + startDate.toString("dd MM yyyy"));
++        Log.d(TAG, accountType + " X-axis end date: " + endDate.toString("dd MM yyyy"));
+ //        int months = Months.monthsBetween(mEarliestTransactionDate, mLatestTransactionDate).getMonths();
+ 
+         int months = Months.monthsBetween(startDate, endDate).getMonths();
+@@ -167,9 +169,17 @@ private BarData getData(AccountType accountType) {
+                     float balance = (float) mAccountsDbAdapter.getAccountsBalance(
+                             Collections.singletonList(account.getUID()), start, end).asDouble();
+                     if (balance != 0) {
++
++                        if (!accountToColorMap.containsKey(account.getUID())) {
++                            Integer color = (account.getColorHexCode() != null)
++                                    ? Color.parseColor(account.getColorHexCode())
++                                    : COLORS[accountToColorMap.size()];
++                            accountToColorMap.put(account.getUID(), color);
++                        }
++
+                         stack.add(balance);
+                         labels.add(account.getName());
+-                        colors.add(COLORS[(colors.size()) % COLORS.length]);
++                        colors.add(accountToColorMap.get(account.getUID()));
+                         Log.i(TAG, mAccountType + startDate.toString(" MMMM yyyy ") + account.getName()
+                                 + " = " + stack.get(stack.size() - 1)  + ", color = " + colors.get(colors.size() - 1));
+                     }
+
+From 6217b94ddc5a5358cc14c3c1a2131fd541bcbbb9 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Sat, 23 May 2015 21:04:07 +0300
+Subject: [PATCH 06/10] Show stack label on chart value selected
+
+---
+ .../java/org/gnucash/android/ui/chart/BarChartActivity.java    | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 2156b286..e91e1460 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -191,7 +191,8 @@ private BarData getData(AccountType accountType) {
+                 array[k] = stack.get(k);
+             }
+ 
+-            values.add(new BarEntry(array, i));
++            String stackLabels = labels.subList(labels.size() - stack.size(), labels.size()).toString();
++            values.add(new BarEntry(array, i, stackLabels));
+ 
+             startDate = startDate.plusMonths(1);
+         }
+@@ -287,6 +288,9 @@ private void setUpSpinner() {
+             public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l) {
+                 mAccountType = (AccountType) ((Spinner) findViewById(R.id.chart_data_spinner)).getSelectedItem();
+ 
++                ((TextView) findViewById(R.id.selected_chart_slice)).setText("");
++                mChart.highlightValues(null);
++
+                 mChart.setData(getData(mAccountType));
+ 
+                 if (!mChartDataPresent) {
+@@ -354,7 +358,9 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     public void onValueSelected(Entry e, int dataSetIndex, Highlight h) {
+         if (e == null) return;
+         BarEntry entry = (BarEntry) e;
+-        String label = mChart.getData().getXVals().get(entry.getXIndex());
++        String stackLabels = entry.getData().toString();
++        String label = mChart.getData().getXVals().get(entry.getXIndex()) + ", "
++                + stackLabels.substring(1, stackLabels.length() - 1).split(",")[h.getStackIndex()];
+         double value = entry.getVals()[ h.getStackIndex() == -1 ? 0 : h.getStackIndex() ];
+         double sum = mTotalPercentageMode ? mChart.getData().getDataSetByIndex(dataSetIndex).getYValueSum() : entry.getVal();
+         ((TextView) findViewById(R.id.selected_chart_slice))
+
+From c46f8a2fdf038002c1f97247afe3a66a464ced7f Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Sun, 24 May 2015 20:43:34 +0300
+Subject: [PATCH 07/10] Code documentation and refactoring
+
+---
+ .../gnucash/android/ui/chart/BarChartActivity.java | 224 +++++++++------------
+ 1 file changed, 100 insertions(+), 124 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index e91e1460..6e8137d1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -47,6 +47,7 @@
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.passcode.PassLockActivity;
++import org.joda.time.LocalDate;
+ import org.joda.time.LocalDateTime;
+ import org.joda.time.Months;
+ 
+@@ -54,13 +55,11 @@
+ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.Currency;
+-import java.util.HashMap;
+ import java.util.LinkedHashMap;
+ import java.util.LinkedHashSet;
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
+-import java.util.Set;
+ 
+ /**
+  * Activity used for drawing a bar chart
+@@ -85,21 +84,16 @@
+             Color.parseColor("#fddef8"), Color.parseColor("#fa0e6e"), Color.parseColor("#d9e7b5")
+     };
+ 
+-    private BarChart mChart;
+     private AccountsDbAdapter mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+-    private boolean mTotalPercentageMode = true;
+-    private boolean mChartDataPresent = true;
+-    private Currency mCurrency;
+ 
+-    private Set<String> mLegendLabels;
+-    private Set<Integer> mLegendColors;
++    private TextView selectedValueTextView;
+ 
+-    private AccountType mAccountType = AccountType.EXPENSE;
++    private BarChart mChart;
+ 
+-    private LocalDateTime mEarliestTransactionDate;
+-    private LocalDateTime mLatestTransactionDate;
++    private Currency mCurrency;
+ 
+-    private Map<String, Integer> accountToColorMap = new LinkedHashMap<>();
++    private boolean mTotalPercentageMode = true;
++    private boolean mChartDataPresent = true;
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+@@ -108,6 +102,8 @@ protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         getSupportActionBar().setTitle(R.string.title_bar_chart);
+ 
++        selectedValueTextView = (TextView) findViewById(R.id.selected_chart_slice);
++
+         mCurrency = Currency.getInstance(PreferenceManager.getDefaultSharedPreferences(this)
+                 .getString(getString(R.string.key_report_currency), Money.DEFAULT_CURRENCY_CODE));
+ 
+@@ -115,13 +111,11 @@ protected void onCreate(Bundle savedInstanceState) {
+         ((LinearLayout) findViewById(R.id.bar_chart)).addView(mChart);
+         mChart.setOnChartValueSelectedListener(this);
+         mChart.setDescription("");
++        mChart.setDrawValuesForWholeStack(false);
+         mChart.getXAxis().setDrawGridLines(false);
+         mChart.getAxisRight().setEnabled(false);
+         mChart.getAxisLeft().enableGridDashedLine(4.0f, 4.0f, 0);
+-        mChart.setDrawValuesForWholeStack(false);
+         mChart.getAxisLeft().setValueFormatter(new LargeValueFormatter(mCurrency.getSymbol(Locale.getDefault())));
+-        mChart.getAxisRight().setEnabled(false);
+-        mChart.getLegend().setEnabled(false);
+         mChart.getLegend().setForm(Legend.LegendForm.CIRCLE);
+         mChart.getLegend().setPosition(Legend.LegendPosition.RIGHT_OF_CHART_INSIDE);
+ 
+@@ -130,128 +124,61 @@ protected void onCreate(Bundle savedInstanceState) {
+ 
+     /**
+      * Returns a data object that represents a user data of the specified account types
+-     * @param accountTypeList account's types which will be displayed
++     * @param accountType account's type which will be displayed
+      * @return a {@code BarData} instance that represents a user data
+      */
+     private BarData getData(AccountType accountType) {
+-//        setEarliestAndLatestDates(accountType);
+-
+-        TransactionsDbAdapter adapter = TransactionsDbAdapter.getInstance();
+-        String code = mCurrency.getCurrencyCode();
+-        LocalDateTime startDate = new LocalDateTime(adapter.getTimestampOfEarliestTransaction(accountType, code))
+-                .withDayOfMonth(1)
+-                .withMillisOfDay(0);
+-        LocalDateTime endDate = new LocalDateTime(adapter.getTimestampOfLatestTransaction(accountType, code))
+-                .withDayOfMonth(1)
+-                .withMillisOfDay(0);
+-        Log.d(TAG, accountType + " X-axis star date: " + startDate.toString("dd MM yyyy"));
+-        Log.d(TAG, accountType + " X-axis end date: " + endDate.toString("dd MM yyyy"));
+-//        int months = Months.monthsBetween(mEarliestTransactionDate, mLatestTransactionDate).getMonths();
+-
+-        int months = Months.monthsBetween(startDate, endDate).getMonths();
+-
+-        List<BarDataSet> dataSets = new ArrayList<>();
+         List<BarEntry> values = new ArrayList<>();
+         List<String> labels = new ArrayList<>();
+         List<Integer> colors = new ArrayList<>();
++        Map<String, Integer> accountToColorMap = new LinkedHashMap<>();
+         List<String> xValues = new ArrayList<>();
+-        for (int i = 0; i <= months; i++) {
+-            xValues.add(startDate.toString(X_AXIS_PATTERN));
+-
+-            long start = startDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
+-            long end = startDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
++        LocalDateTime tmpDate = new LocalDateTime(getStartDate(accountType).toDate().getTime());
++        for (int i = 0; i <= Months.monthsBetween(getStartDate(accountType), getEndDate(accountType)).getMonths(); i++) {
++            long start = tmpDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
++            long end = tmpDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+             List<Float> stack = new ArrayList<>();
+             for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+-                if (account.getAccountType() == mAccountType
++                if (account.getAccountType() == accountType
+                         && !account.isPlaceholderAccount()
+                         && account.getCurrency() == mCurrency) {
+ 
+-                    float balance = (float) mAccountsDbAdapter.getAccountsBalance(
++                    double balance = mAccountsDbAdapter.getAccountsBalance(
+                             Collections.singletonList(account.getUID()), start, end).asDouble();
+                     if (balance != 0) {
+-
+                         if (!accountToColorMap.containsKey(account.getUID())) {
+                             Integer color = (account.getColorHexCode() != null)
+                                     ? Color.parseColor(account.getColorHexCode())
+-                                    : COLORS[accountToColorMap.size()];
++                                    : COLORS[accountToColorMap.size() % COLORS.length];
+                             accountToColorMap.put(account.getUID(), color);
+                         }
+ 
+-                        stack.add(balance);
++                        stack.add((float) balance);
+                         labels.add(account.getName());
+                         colors.add(accountToColorMap.get(account.getUID()));
+-                        Log.i(TAG, mAccountType + startDate.toString(" MMMM yyyy ") + account.getName()
+-                                + " = " + stack.get(stack.size() - 1)  + ", color = " + colors.get(colors.size() - 1));
++                        Log.d(TAG, accountType + tmpDate.toString(" MMMM yyyy ") + account.getName() + " = " + stack.get(stack.size() - 1));
+                     }
+                 }
+             }
+ 
+-            float array[] = new float[stack.size()];
+-            for (int k = 0;  k < stack.size(); k++) {
+-                array[k] = stack.get(k);
+-            }
+-
+             String stackLabels = labels.subList(labels.size() - stack.size(), labels.size()).toString();
+-            values.add(new BarEntry(array, i, stackLabels));
++            values.add(new BarEntry(floatListToArray(stack), i,  stackLabels));
+ 
+-            startDate = startDate.plusMonths(1);
+-        }
++            xValues.add(tmpDate.toString(X_AXIS_PATTERN));
+ 
+-        mLegendColors = new LinkedHashSet<>(colors);
+-        mLegendLabels = new LinkedHashSet<>(labels);
++            tmpDate = tmpDate.plusMonths(1);
++        }
+ 
+         BarDataSet set = new BarDataSet(values, "");
+         set.setStackLabels(labels.toArray(new String[labels.size()]));
+         set.setColors(colors);
+-        dataSets.add(set);
+ 
+         if (set.getYValueSum() == 0) {
+             mChartDataPresent = false;
+             return getEmptyData();
+         }
+-        return new BarData(xValues, dataSets);
+-    }
+-
+-    /**
+-     * Sets the earliest and latest transaction's dates of the specified account type
+-     * @param accountTypeList account's types which will be processed
+-     */
+-    private int setEarliestAndLatestDates(AccountType accountType) {
+-        TransactionsDbAdapter adapter = TransactionsDbAdapter.getInstance();
+-        String code = mCurrency.getCurrencyCode();
+-        mEarliestTransactionDate = new LocalDateTime(adapter.getTimestampOfEarliestTransaction(accountType, code))
+-                .withDayOfMonth(1)
+-                .withMillisOfDay(0);
+-        mLatestTransactionDate = new LocalDateTime(adapter.getTimestampOfLatestTransaction(accountType, code))
+-                .withDayOfMonth(1)
+-                .withMillisOfDay(0);
+-        Log.d(TAG, accountType + " X-axis star date: " + mEarliestTransactionDate.toString("dd MM yyyy"));
+-        Log.d(TAG, accountType + " X-axis end date: " + mLatestTransactionDate.toString("dd MM yyyy"));
+-        int months = Months.monthsBetween(mEarliestTransactionDate, mLatestTransactionDate).getMonths();
+-        Log.w(TAG, "DIFF: " + months);
+-        return months;
+-    }
+-
+-    /**
+-     * Returns a map with an account type as key and correspond accounts UIDs as value
+-     * from a specified list of account types
+-     * @param accountTypeList account's types which will be used as keys
+-     * @return a map with an account type as key and correspond accounts UIDs as value
+-     */
+-    private Map<AccountType, List<String>> getAccountTypeToAccountUidMap(List<AccountType> accountTypeList) {
+-        Map<AccountType, List<String>> accountMap = new HashMap<>();
+-        for (AccountType accountType : accountTypeList) {
+-            List<String> accountUIDList = new ArrayList<>();
+-            for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+-                if (account.getAccountType() == accountType
+-                        && !account.isPlaceholderAccount()
+-                        && account.getCurrency() == mCurrency) {
+-                    accountUIDList.add(account.getUID());
+-                }
+-                accountMap.put(accountType, accountUIDList);
+-            }
+-        }
+-        return accountMap;
++        mChartDataPresent = true;
++        return new BarData(xValues, set);
+     }
+ 
+     /**
+@@ -263,13 +190,52 @@ private BarData getEmptyData() {
+         List<BarEntry> yValues = new ArrayList<>();
+         for (int i = 0; i < NO_DATA_BAR_COUNTS; i++) {
+             xValues.add("");
+-            yValues.add(new BarEntry(i % 2 == 0 ? 5f : 4.5f, i));
++            yValues.add(new BarEntry(i + 1, i));
+         }
+         BarDataSet set = new BarDataSet(yValues, getResources().getString(R.string.label_chart_no_data));
+         set.setDrawValues(false);
+         set.setColor(NO_DATA_COLOR);
+ 
+-        return new BarData(xValues, Collections.singletonList(set));
++        return new BarData(xValues, set);
++    }
++
++    /**
++     * Returns the start data of x-axis for the specified account type
++     * @param accountType account type
++     * @return the start data
++     */
++    private LocalDate getStartDate(AccountType accountType) {
++        TransactionsDbAdapter adapter = TransactionsDbAdapter.getInstance();
++        String code = mCurrency.getCurrencyCode();
++        LocalDate startDate = new LocalDate(adapter.getTimestampOfEarliestTransaction(accountType, code)).withDayOfMonth(1);
++        Log.d(TAG, accountType + " X-axis star date: " + startDate.toString("dd MM yyyy"));
++        return startDate;
++    }
++
++    /**
++     * Returns the end data of x-axis for the specified account type
++     * @param accountType account type
++     * @return the end data
++     */
++    private LocalDate getEndDate(AccountType accountType) {
++        TransactionsDbAdapter adapter = TransactionsDbAdapter.getInstance();
++        String code = mCurrency.getCurrencyCode();
++        LocalDate endDate = new LocalDate(adapter.getTimestampOfLatestTransaction(accountType, code)).withDayOfMonth(1);
++        Log.d(TAG, accountType + " X-axis end date: " + endDate.toString("dd MM yyyy"));
++        return endDate;
++    }
++
++    /**
++     * Converts the specified list of floats to an array
++     * @param list a list of floats
++     * @return a float array
++     */
++    private float[] floatListToArray(List<Float> list) {
++        float array[] = new float[list.size()];
++        for (int i = 0;  i < list.size(); i++) {
++            array[i] = list.get(i);
++        }
++        return array;
+     }
+ 
+     /**
+@@ -277,7 +243,7 @@ private BarData getEmptyData() {
+      * account types.
+      */
+     private void setUpSpinner() {
+-        Spinner spinner = (Spinner) findViewById(R.id.chart_data_spinner);
++        final Spinner spinner = (Spinner) findViewById(R.id.chart_data_spinner);
+         ArrayAdapter<AccountType> dataAdapter = new ArrayAdapter<>(this,
+                 android.R.layout.simple_spinner_item,
+                 Arrays.asList(AccountType.EXPENSE, AccountType.INCOME));
+@@ -286,23 +252,8 @@ private void setUpSpinner() {
+         spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+             @Override
+             public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l) {
+-                mAccountType = (AccountType) ((Spinner) findViewById(R.id.chart_data_spinner)).getSelectedItem();
+-
+-                ((TextView) findViewById(R.id.selected_chart_slice)).setText("");
+-                mChart.highlightValues(null);
+-
+-                mChart.setData(getData(mAccountType));
+-
+-                if (!mChartDataPresent) {
+-                    mChart.getAxisLeft().setAxisMaxValue(10);
+-                    mChart.getAxisLeft().setDrawLabels(false);
+-                    mChart.getXAxis().setDrawLabels(false);
+-                    mChart.setTouchEnabled(false);
+-                    ((TextView) findViewById(R.id.selected_chart_slice)).setText(getResources().getString(R.string.label_chart_no_data));
+-                } else {
+-                    mChart.animateY(ANIMATION_DURATION);
+-                }
+-                mChart.invalidate();
++                mChart.setData(getData((AccountType) spinner.getSelectedItem()));
++                displayChart();
+             }
+ 
+             @Override
+@@ -311,6 +262,29 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+         });
+     }
+ 
++    /**
++     * Displays the stacked bar chart
++     */
++    private void displayChart() {
++        mChart.highlightValues(null);
++        mChart.getLegend().setEnabled(false);
++
++        mChart.getAxisLeft().setDrawLabels(mChartDataPresent);
++        mChart.getXAxis().setDrawLabels(mChartDataPresent);
++        mChart.setTouchEnabled(mChartDataPresent);
++
++        selectedValueTextView.setText("");
++
++        if (mChartDataPresent) {
++            mChart.getAxisLeft().resetAxisMaxValue();
++            mChart.animateY(ANIMATION_DURATION);
++        } else {
++            selectedValueTextView.setText(getResources().getString(R.string.label_chart_no_data));
++        }
++
++        mChart.invalidate();
++    }
++
+     @Override
+     public boolean onCreateOptionsMenu(Menu menu) {
+         getSupportMenuInflater().inflate(R.menu.chart_actions, menu);
+@@ -335,8 +309,11 @@ public boolean onOptionsItemSelected(MenuItem item) {
+                 // workaround for buggy legend
+                 Legend legend = mChart.getLegend();
+                 legend.setEnabled(!mChart.getLegend().isEnabled());
+-                legend.setLabels(mLegendLabels.toArray(new String[mLegendLabels.size()]));
+-                legend.setColors(Arrays.asList(mLegendColors.toArray(new Integer[mLegendLabels.size()])));
++                BarDataSet dataSet = mChart.getData().getDataSetByIndex(0);
++                LinkedHashSet<String> labels = new LinkedHashSet<>(Arrays.asList(dataSet.getStackLabels()));
++                legend.setLabels(labels.toArray(new String[labels.size()]));
++                LinkedHashSet<Integer> colors = new LinkedHashSet<>(dataSet.getColors());
++                legend.setColors(Arrays.asList(colors.toArray(new Integer[colors.size()])));
+                 mChart.invalidate();
+                 break;
+ 
+@@ -363,12 +340,11 @@ public void onValueSelected(Entry e, int dataSetIndex, Highlight h) {
+                 + stackLabels.substring(1, stackLabels.length() - 1).split(",")[h.getStackIndex()];
+         double value = entry.getVals()[ h.getStackIndex() == -1 ? 0 : h.getStackIndex() ];
+         double sum = mTotalPercentageMode ? mChart.getData().getDataSetByIndex(dataSetIndex).getYValueSum() : entry.getVal();
+-        ((TextView) findViewById(R.id.selected_chart_slice))
+-                .setText(String.format(SELECTED_VALUE_PATTERN, label, value, value / sum * 100));
++        selectedValueTextView.setText(String.format(SELECTED_VALUE_PATTERN, label, value, value / sum * 100));
+     }
+ 
+     @Override
+     public void onNothingSelected() {
+-        ((TextView) findViewById(R.id.selected_chart_slice)).setText("");
++        selectedValueTextView.setText("");
+     }
+ }
+
+From ecfeeef01688a07a319cc346f740677b01173f87 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Sun, 24 May 2015 20:47:29 +0300
+Subject: [PATCH 08/10] Fix for animation
+
+---
+ app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 6e8137d1..750a3288 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -279,6 +279,7 @@ private void displayChart() {
+             mChart.getAxisLeft().resetAxisMaxValue();
+             mChart.animateY(ANIMATION_DURATION);
+         } else {
++            mChart.clearAnimation();
+             selectedValueTextView.setText(getResources().getString(R.string.label_chart_no_data));
+         }
+ 
+
+From a4072c785f6f9b7d857dff43dd1fbacdc544c90e Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Mon, 25 May 2015 17:41:50 +0300
+Subject: [PATCH 09/10] Use account color in the bar chart
+
+---
+ .../org/gnucash/android/ui/chart/BarChartActivity.java | 18 +++++++++++++-----
+ app/src/main/res/values-de/strings.xml                 |  2 +-
+ app/src/main/res/values-el/strings.xml                 |  2 +-
+ app/src/main/res/values-es-rMX/strings.xml             |  2 +-
+ app/src/main/res/values-es/strings.xml                 |  2 +-
+ app/src/main/res/values-fr/strings.xml                 |  2 +-
+ app/src/main/res/values-hu/strings.xml                 |  2 +-
+ app/src/main/res/values-it/strings.xml                 |  2 +-
+ app/src/main/res/values-nl/strings.xml                 |  2 +-
+ app/src/main/res/values-pt-rBR/strings.xml             |  2 +-
+ app/src/main/res/values-zh/strings.xml                 |  2 +-
+ app/src/main/res/values/strings.xml                    |  2 +-
+ 12 files changed, 24 insertions(+), 16 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 750a3288..01fc8b27 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -92,6 +92,7 @@
+ 
+     private Currency mCurrency;
+ 
++    private boolean mUseAccountColor = true;
+     private boolean mTotalPercentageMode = true;
+     private boolean mChartDataPresent = true;
+ 
+@@ -104,6 +105,9 @@ protected void onCreate(Bundle savedInstanceState) {
+ 
+         selectedValueTextView = (TextView) findViewById(R.id.selected_chart_slice);
+ 
++        mUseAccountColor = PreferenceManager.getDefaultSharedPreferences(getApplicationContext())
++                .getBoolean(getString(R.string.key_use_account_color), false);
++
+         mCurrency = Currency.getInstance(PreferenceManager.getDefaultSharedPreferences(this)
+                 .getString(getString(R.string.key_report_currency), Money.DEFAULT_CURRENCY_CODE));
+ 
+@@ -147,9 +151,14 @@ private BarData getData(AccountType accountType) {
+                             Collections.singletonList(account.getUID()), start, end).asDouble();
+                     if (balance != 0) {
+                         if (!accountToColorMap.containsKey(account.getUID())) {
+-                            Integer color = (account.getColorHexCode() != null)
+-                                    ? Color.parseColor(account.getColorHexCode())
+-                                    : COLORS[accountToColorMap.size() % COLORS.length];
++                            Integer color;
++                            if (mUseAccountColor) {
++                                color = (account.getColorHexCode() != null)
++                                        ? Color.parseColor(account.getColorHexCode())
++                                        : COLORS[accountToColorMap.size() % COLORS.length];
++                            } else {
++                                color = COLORS[accountToColorMap.size() % COLORS.length];
++                            }
+                             accountToColorMap.put(account.getUID(), color);
+                         }
+ 
+@@ -162,7 +171,7 @@ private BarData getData(AccountType accountType) {
+             }
+ 
+             String stackLabels = labels.subList(labels.size() - stack.size(), labels.size()).toString();
+-            values.add(new BarEntry(floatListToArray(stack), i,  stackLabels));
++            values.add(new BarEntry(floatListToArray(stack), i, stackLabels));
+ 
+             xValues.add(tmpDate.toString(X_AXIS_PATTERN));
+ 
+@@ -276,7 +285,6 @@ private void displayChart() {
+         selectedValueTextView.setText("");
+ 
+         if (mChartDataPresent) {
+-            mChart.getAxisLeft().resetAxisMaxValue();
+             mChart.animateY(ANIMATION_DURATION);
+         } else {
+             mChart.clearAnimation();
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index 7b21687a..c9a6b399 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -490,7 +490,7 @@ No user-identifiable information will be collected as part of this process!</str
+ 	<string name="header_report_settings">Reports</string>
+ 	<string name="label_report_currency">Select currency</string>
+ 	<string name="title_use_account_color">Account color in reports</string>
+-	<string name="summary_use_account_color">Use account color in the pie chart</string>
++	<string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+ 	<string name="label_confirm_passcode">Please confirm your passcode</string>
+ 	<string name="label_new_passcode">Enter your new passcode</string>
+ 	<string name="label_old_passcode">Enter your old passcode</string>
+diff --git a/app/src/main/res/values-el/strings.xml b/app/src/main/res/values-el/strings.xml
+index 05aaf65e..e503637a 100644
+--- a/app/src/main/res/values-el/strings.xml
++++ b/app/src/main/res/values-el/strings.xml
+@@ -509,7 +509,7 @@ No user-identifiable information will be collected as part of this process!
+ 	<string name="header_report_settings">Reports</string>
+ 	<string name="label_report_currency">Select currency</string>
+ 	<string name="title_use_account_color">Account color in reports</string>
+-	<string name="summary_use_account_color">Use account color in the pie chart</string>
++	<string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+ 	<string name="label_confirm_passcode">Please confirm your passcode</string>
+ 	<string name="label_new_passcode">Enter your new passcode</string>
+ 	<string name="label_old_passcode">Enter your old passcode</string>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 92d04e0f..67aa4efa 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -494,7 +494,7 @@ No user-identifiable information will be collected as part of this process!
+     <string name="header_report_settings">Reports</string>
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+-    <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+     <string name="label_confirm_passcode">Please confirm your passcode</string>
+     <string name="label_new_passcode">Enter your new passcode</string>
+     <string name="label_old_passcode">Enter your old passcode</string>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 961d8d9c..2ff2c2a0 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -491,7 +491,7 @@ Este proceso solo recoge informaci&#243;n que no permite identificar al usuario<
+ 	<string name="header_report_settings">Reports</string>
+ 	<string name="label_report_currency">Select currency</string>
+ 	<string name="title_use_account_color">Account color in reports</string>
+-	<string name="summary_use_account_color">Use account color in the pie chart</string>
++	<string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+ 	<string name="label_confirm_passcode">Confirme su contrase&#241;a</string>
+ 	<string name="label_new_passcode">Enter your new passcode</string>
+ 	<string name="label_old_passcode">Enter your old passcode</string>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 38c9ca45..1eed10dc 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -491,7 +491,7 @@ Aucune information permettant d\'identifier l\'utilisateur ne sera recueillis da
+     <string name="header_report_settings">Rapports</string>
+     <string name="label_report_currency">Slectionnez la monnaie</string>
+     <string name="title_use_account_color">Couleur du compte dans les rapports</string>
+-    <string name="summary_use_account_color">utiliser la couleur du compte dans le diagramme circulaire</string>
++    <string name="summary_use_account_color">utiliser la couleur du compte dans le diagramme bandes/circulaire</string>
+     <string name="label_confirm_passcode">Veuillez confirmer vorte code</string>
+     <string name="label_new_passcode">Entrez votre nouveau code</string>
+     <string name="label_old_passcode">Entrez votre ancien mot de passe</string>
+diff --git a/app/src/main/res/values-hu/strings.xml b/app/src/main/res/values-hu/strings.xml
+index 7f732dbf..eba5056a 100644
+--- a/app/src/main/res/values-hu/strings.xml
++++ b/app/src/main/res/values-hu/strings.xml
+@@ -495,7 +495,7 @@ No user-identifiable information will be collected as part of this process!
+     <string name="header_report_settings">Reports</string>
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+-    <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+     <string name="label_confirm_passcode">Please confirm your passcode</string>
+     <string name="label_new_passcode">Enter your new passcode</string>
+     <string name="label_old_passcode">Enter your old passcode</string>
+diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
+index a2529151..7cb3f3aa 100644
+--- a/app/src/main/res/values-it/strings.xml
++++ b/app/src/main/res/values-it/strings.xml
+@@ -495,7 +495,7 @@ No user-identifiable information will be collected as part of this process!
+     <string name="header_report_settings">Reports</string>
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+-    <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+     <string name="label_confirm_passcode">Please confirm your passcode</string>
+     <string name="label_new_passcode">Enter your new passcode</string>
+     <string name="label_old_passcode">Enter your old passcode</string>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+index 53262677..ac4f421a 100644
+--- a/app/src/main/res/values-nl/strings.xml
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -496,7 +496,7 @@ No user-identifiable information will be collected as part of this process!
+     <string name="header_report_settings">Reports</string>
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+-    <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+     <string name="label_confirm_passcode">Please confirm your passcode</string>
+     <string name="label_new_passcode">Enter your new passcode</string>
+     <string name="label_old_passcode">Enter your old passcode</string>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index afb38b01..8714b7c2 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -497,7 +497,7 @@ Nenhuma informao de  identificao do usurio ser coletada neste proces
+ 	<string name="header_report_settings">Relatrios</string>
+ 	<string name="label_report_currency">Selecionar moeda</string>
+ 	<string name="title_use_account_color">Cor de contas nos relatrios</string>
+-	<string name="summary_use_account_color">Utilizar cor de contas no grfico de pizza</string>
++	<string name="summary_use_account_color">Utilizar cor de contas no grfico de barras/pizza</string>
+ 	<string name="nav_menu_scheduled_backups">Backups agendados</string>
+ 	<string name="title_scheduled_exports">Exportaes agendadas</string>
+ 	<string name="label_no_scheduled_exports_to_display">Sem exportaes agendadas para  mostrar</string>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index 7ccfacb6..bc94f448 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -492,7 +492,7 @@ No user-identifiable information will be collected as part of this process!
+     <string name="header_report_settings">Reports</string>
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+-    <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+     <string name="label_confirm_passcode"></string>
+     <string name="label_new_passcode">Enter your new passcode</string>
+     <string name="label_old_passcode">Enter your old passcode</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 3545d22d..a6391dc3 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -437,7 +437,7 @@
+     <string name="title_report_prefs">Report Preferences</string>
+     <string name="label_report_currency">Select currency</string>
+     <string name="title_use_account_color">Account color in reports</string>
+-    <string name="summary_use_account_color">Use account color in the pie chart</string>
++    <string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+     <string name="header_report_settings">Reports</string>
+     <string name="menu_order_by_size">Order by size</string>
+     <string name="menu_toggle_legend">Toggle legend</string>
+
+From 4eda8cb738d162711491e0d15c1eb018ace73abc Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Tue, 26 May 2015 19:00:26 +0300
+Subject: [PATCH 10/10] Fix for empty bars
+
+---
+ .../main/java/org/gnucash/android/ui/chart/BarChartActivity.java   | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 01fc8b27..b6647896 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -342,12 +342,13 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 
+     @Override
+     public void onValueSelected(Entry e, int dataSetIndex, Highlight h) {
+-        if (e == null) return;
++        if (e == null || ((BarEntry) e).getVals().length == 0) return;
+         BarEntry entry = (BarEntry) e;
++        int index = h.getStackIndex() == -1 ? 0 : h.getStackIndex();
+         String stackLabels = entry.getData().toString();
+         String label = mChart.getData().getXVals().get(entry.getXIndex()) + ", "
+-                + stackLabels.substring(1, stackLabels.length() - 1).split(",")[h.getStackIndex()];
+-        double value = entry.getVals()[ h.getStackIndex() == -1 ? 0 : h.getStackIndex() ];
++                + stackLabels.substring(1, stackLabels.length() - 1).split(",")[index];
++        double value = entry.getVals()[index];
+         double sum = mTotalPercentageMode ? mChart.getData().getDataSetByIndex(dataSetIndex).getYValueSum() : entry.getVal();
+         selectedValueTextView.setText(String.format(SELECTED_VALUE_PATTERN, label, value, value / sum * 100));
+     }

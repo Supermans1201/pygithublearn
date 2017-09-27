@@ -1,0 +1,623 @@
+From f53efe9d2d4143663e6836a8bfeade56c9540795 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Tue, 14 Apr 2015 20:22:07 +0300
+Subject: [PATCH] Code documentation and refactoring
+
+---
+ .../gnucash/android/ui/chart/BarChartActivity.java | 137 ++++++++++++--------
+ .../android/ui/chart/ChartReportActivity.java      |  17 +++
+ .../android/ui/chart/LineChartActivity.java        | 143 +++++++++++++--------
+ .../gnucash/android/ui/chart/PieChartActivity.java |  12 +-
+ 4 files changed, 197 insertions(+), 112 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 3b9051f0..edcc0949 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -1,3 +1,19 @@
++/*
++ * Copyright (c) 2015 Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
+ package org.gnucash.android.ui.chart;
+ 
+ import android.graphics.Color;
+@@ -36,6 +52,7 @@
+ import java.util.Map;
+ 
+ /**
++ * Activity used for drawing a bar chart
+  *
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  */
+@@ -45,15 +62,15 @@
+     private static final String X_AXIS_PATTERN = "MMM YY";
+     private static final String SELECTED_VALUE_PATTERN = "%s - %.2f (%.2f %%)";
+     private static final int ANIMATION_DURATION = 3000;
+-
++    private static final int NO_DATA_COLOR = Color.LTGRAY;
++    private static final int NO_DATA_BAR_COUNTS = 3;
+     private static final int[] COLORS = {
+             Color.parseColor("#68F1AF"), Color.parseColor("#CC1f09"), Color.parseColor("#EE8600"),
+             Color.parseColor("#1469EB"), Color.parseColor("#B304AD"),
+     };
+ 
+-    private AccountsDbAdapter mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+-
+     private BarChart mChart;
++    private AccountsDbAdapter mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+     private Map<AccountType, Long> mEarliestTimestampsMap = new HashMap<AccountType, Long>();
+     private Map<AccountType, Long> mLatestTimestampsMap = new HashMap<AccountType, Long>();
+     private long mEarliestTransactionTimestamp;
+@@ -63,11 +80,12 @@
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
++        //it is necessary to set the view first before calling super because of the nav drawer in BaseDrawerActivity
+         setContentView(R.layout.activity_line_chart);
+         super.onCreate(savedInstanceState);
+         getSupportActionBar().setTitle(R.string.title_bar_chart);
+ 
+-        mChart = new com.github.mikephil.charting.charts.BarChart(this);
++        mChart = new BarChart(this);
+         ((LinearLayout) findViewById(R.id.chart)).addView(mChart);
+         mChart.setOnChartValueSelectedListener(this);
+         mChart.setDescription("");
+@@ -76,21 +94,34 @@ protected void onCreate(Bundle savedInstanceState) {
+         mChart.getAxisLeft().setValueFormatter(new LargeValueFormatter());
+         mChart.getAxisRight().setEnabled(false);
+ 
++        // below we can add/remove displayed account's types
+         mChart.setData(getData(new ArrayList<AccountType>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE))));
++
+         Legend legend = mChart.getLegend();
+         legend.setForm(Legend.LegendForm.CIRCLE);
+         legend.setPosition(Legend.LegendPosition.RIGHT_OF_CHART_INSIDE);
+ 
+-        if (mChartDataPresent) {
++        if (!mChartDataPresent) {
++            mChart.getAxisLeft().setAxisMaxValue(10);
++            mChart.getAxisLeft().setDrawLabels(false);
++            mChart.getXAxis().setDrawLabels(false);
++            mChart.setTouchEnabled(false);
++            ((TextView) findViewById(R.id.selected_chart_slice)).setText(getResources().getString(R.string.label_chart_no_data));
++        } else {
+             mChart.animateY(ANIMATION_DURATION);
+         }
+         mChart.invalidate();
+     }
+ 
++    /**
++     * Returns a data object that represents a user data of the specified account types
++     * @param accountTypeList account's types which will be displayed
++     * @return a {@code BarData} instance that represents a user data
++     */
+     private BarData getData(ArrayList<AccountType> accountTypeList) {
+         if (!calculateEarliestAndLatestTimestamps(accountTypeList)) {
+             mChartDataPresent = false;
+-            return getEmptyDataSet();
++            return getEmptyData();
+         }
+ 
+         LocalDateTime startDate = new LocalDateTime(mEarliestTransactionTimestamp).withDayOfMonth(1).withMillisOfDay(0);
+@@ -119,7 +150,7 @@ private BarData getData(ArrayList<AccountType> accountTypeList) {
+         }
+ 
+         BarDataSet set = new BarDataSet(values, "");
+-        // conversion enum list to string array
++        // conversion an enum list to a string array
+         set.setStackLabels(accountTypeList.toString().substring(1, accountTypeList.toString().length() - 1).split(", "));
+         set.setColors(Arrays.copyOfRange(COLORS, 0, accountTypeList.size()));
+         dataSets.add(set);
+@@ -127,45 +158,10 @@ private BarData getData(ArrayList<AccountType> accountTypeList) {
+         return new BarData(xValues, dataSets);
+     }
+ 
+-    private Map<AccountType, List<String>> getAccountMap(List<AccountType> accountTypeList) {
+-        Map<AccountType, List<String>> accountMap = new HashMap<AccountType, List<String>>();
+-        for (AccountType accountType : accountTypeList) {
+-            List<String> accountUIDList = new ArrayList<String>();
+-            for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+-                if (account.getAccountType() == accountType && !account.isPlaceholderAccount()) {
+-                    accountUIDList.add(account.getUID());
+-                }
+-                accountMap.put(accountType, accountUIDList);
+-            }
+-        }
+-        return accountMap;
+-    }
+-
+-    private BarData getEmptyDataSet() {
+-        ArrayList<String> xValues = new ArrayList<String>();
+-        ArrayList<BarEntry> yValues = new ArrayList<BarEntry>();
+-        for (int i = 0; i < 3; i++) {
+-            xValues.add("");
+-            yValues.add(new BarEntry(i % 2 == 0 ? 5f : 4.5f, i));
+-        }
+-        String noDataMsg = getResources().getString(R.string.label_chart_no_data);
+-        BarDataSet set = new BarDataSet(yValues, noDataMsg);
+-        set.setDrawValues(false);
+-        set.setColor(Color.LTGRAY);
+-
+-        mChart.getAxisLeft().setAxisMaxValue(10);
+-        mChart.getAxisLeft().setDrawLabels(false);
+-        mChart.getXAxis().setDrawLabels(false);
+-        mChart.setTouchEnabled(false);
+-        ((TextView) findViewById(R.id.selected_chart_slice)).setText(noDataMsg);
+-
+-        return new BarData(xValues, new ArrayList<BarDataSet>(Arrays.asList(set)));
+-    }
+-
+     /**
+-     *
+-     * @param accountTypeList
+-     * @return {@code false} if no data present, {@code true} otherwise
++     * Calculates the earliest and latest transaction's timestamps of the specified account types
++     * @param accountTypeList account's types which will be processed
++     * @return {@code false} if no data available, {@code true} otherwise
+      */
+     private boolean calculateEarliestAndLatestTimestamps(List<AccountType> accountTypeList) {
+         for (AccountType type : accountTypeList) {
+@@ -179,7 +175,7 @@ private boolean calculateEarliestAndLatestTimestamps(List<AccountType> accountTy
+             }
+         }
+ 
+-        if (mEarliestTimestampsMap.isEmpty()) {
++        if (mEarliestTimestampsMap.isEmpty() && mLatestTimestampsMap.isEmpty()) {
+             return false;
+         }
+ 
+@@ -188,10 +184,46 @@ private boolean calculateEarliestAndLatestTimestamps(List<AccountType> accountTy
+         Collections.sort(timestamps);
+         mEarliestTransactionTimestamp = timestamps.get(0);
+         mLatestTransactionTimestamp = timestamps.get(timestamps.size() - 1);
+-
+         return true;
+     }
+ 
++    /**
++     * Returns a map with an account type as key and correspond accounts UIDs as value
++     * @param accountTypeList account's types which will be used as keys
++     * @return
++     */
++    private Map<AccountType, List<String>> getAccountMap(List<AccountType> accountTypeList) {
++        Map<AccountType, List<String>> accountMap = new HashMap<AccountType, List<String>>();
++        for (AccountType accountType : accountTypeList) {
++            List<String> accountUIDList = new ArrayList<String>();
++            for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
++                if (account.getAccountType() == accountType && !account.isPlaceholderAccount()) {
++                    accountUIDList.add(account.getUID());
++                }
++                accountMap.put(accountType, accountUIDList);
++            }
++        }
++        return accountMap;
++    }
++
++    /**
++     * Returns a data object that represents situation when no user data available
++     * @return a {@code BarData} instance for situation when no user data available
++     */
++    private BarData getEmptyData() {
++        ArrayList<String> xValues = new ArrayList<String>();
++        ArrayList<BarEntry> yValues = new ArrayList<BarEntry>();
++        for (int i = 0; i < NO_DATA_BAR_COUNTS; i++) {
++            xValues.add("");
++            yValues.add(new BarEntry(i % 2 == 0 ? 5f : 4.5f, i));
++        }
++        BarDataSet set = new BarDataSet(yValues, getResources().getString(R.string.label_chart_no_data));
++        set.setDrawValues(false);
++        set.setColor(NO_DATA_COLOR);
++
++        return new BarData(xValues, new ArrayList<BarDataSet>(Arrays.asList(set)));
++    }
++
+     @Override
+     public boolean onCreateOptionsMenu(Menu menu) {
+         getSupportMenuInflater().inflate(R.menu.chart_actions, menu);
+@@ -212,22 +244,21 @@ public boolean onPrepareOptionsMenu(Menu menu) {
+     @Override
+     public boolean onOptionsItemSelected(MenuItem item) {
+         switch (item.getItemId()) {
+-            case R.id.menu_toggle_legend: {
++            case R.id.menu_toggle_legend:
+                 mChart.getLegend().setEnabled(!mChart.getLegend().isEnabled());
+                 mChart.invalidate();
+                 break;
+-            }
+-            case R.id.menu_percentage_mode: {
++
++            case R.id.menu_percentage_mode:
+                 mTotalPercentageMode = !mTotalPercentageMode;
+                 int msgId = mTotalPercentageMode ? R.string.toast_chart_percentage_mode_total
+                         : R.string.toast_chart_percentage_mode_current_bar;
+                 Toast.makeText(this, msgId, Toast.LENGTH_LONG).show();
+                 break;
+-            }
+-            case android.R.id.home: {
++
++            case android.R.id.home:
+                 finish();
+                 break;
+-            }
+         }
+         return true;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/ChartReportActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/ChartReportActivity.java
+index b68eab09..2eb47065 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/ChartReportActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/ChartReportActivity.java
+@@ -1,3 +1,19 @@
++/*
++ * Copyright (c) 2015 Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
+ package org.gnucash.android.ui.chart;
+ 
+ import android.content.Intent;
+@@ -8,6 +24,7 @@
+ import org.gnucash.android.ui.passcode.PassLockActivity;
+ 
+ /**
++ * Allows to select chart by type
+  *
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  */
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
+index ca05bff8..e75bb8ae 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
+@@ -1,3 +1,19 @@
++/*
++ * Copyright (c) 2015 Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
+ package org.gnucash.android.ui.chart;
+ 
+ import android.graphics.Color;
+@@ -35,6 +51,7 @@
+ import java.util.Map;
+ 
+ /**
++ * Activity used for drawing a line chart
+  *
+  * @author Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+  */
+@@ -42,19 +59,21 @@
+ 
+     private static final String TAG = "LineChartActivity";
+     private static final String X_AXIS_PATTERN = "MMM YY";
+-
++    private static final String SELECTED_VALUE_PATTERN = "%s - %.2f (%.2f %%)";
++    private static final int ANIMATION_DURATION = 3000;
++    private static final int NO_DATA_COLOR = Color.GRAY;
++    private static final int NO_DATA_BAR_COUNTS = 5;
+     private static final int[] COLORS = {
+             Color.parseColor("#68F1AF"), Color.parseColor("#cc1f09"), Color.parseColor("#EE8600"),
+             Color.parseColor("#1469EB"), Color.parseColor("#B304AD"),
+     };
+-
+     private static final int[] FILL_COLORS = {
+             Color.parseColor("#008000"), Color.parseColor("#FF0000"), Color.parseColor("#BE6B00"),
+             Color.parseColor("#0065FF"), Color.parseColor("#8F038A"),
+     };
+ 
+     private LineChart mChart;
+-    private AccountsDbAdapter mAccountsDbAdapter;
++    private AccountsDbAdapter mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+     private Map<AccountType, Long> mEarliestTimestampsMap = new HashMap<AccountType, Long>();
+     private Map<AccountType, Long> mLatestTimestampsMap = new HashMap<AccountType, Long>();
+     private long mEarliestTransactionTimestamp;
+@@ -68,39 +87,40 @@ protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         getSupportActionBar().setTitle(R.string.title_line_chart);
+ 
+-        mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+-
+         mChart = new LineChart(this);
+         ((LinearLayout) findViewById(R.id.chart)).addView(mChart);
+         mChart.setOnChartValueSelectedListener(this);
+         mChart.setDescription("");
+         mChart.getAxisRight().setEnabled(false);
+-        mChart.setData(getDataSet(new ArrayList<AccountType>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE))));
++
++        // below we can add/remove displayed account's types
++        mChart.setData(getData(new ArrayList<AccountType>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE))));
+ 
+         Legend legend = mChart.getLegend();
+         legend.setPosition(Legend.LegendPosition.RIGHT_OF_CHART_INSIDE);
+         legend.setForm(Legend.LegendForm.CIRCLE);
+ 
+-        if (mChartDataPresent) {
+-            mChart.animateX(3000);
++        if (!mChartDataPresent) {
++            mChart.getAxisLeft().setAxisMaxValue(10);
++            mChart.getAxisLeft().setDrawLabels(false);
++            mChart.getXAxis().setDrawLabels(false);
++            mChart.setTouchEnabled(false);
++            ((TextView) findViewById(R.id.selected_chart_slice)).setText(getResources().getString(R.string.label_chart_no_data));
++        } else {
++            mChart.animateX(ANIMATION_DURATION);
+         }
+         mChart.invalidate();
+     }
+ 
+-    private LineData getDataSet(List<AccountType> accountTypes) {
+-        setEarliestAndLatestTimestamps(accountTypes);
+-
+-        if (mEarliestTransactionTimestamp == 0) {
+-            if (mLatestTransactionTimestamp == 0) {
+-                return getEmptyDataSet();
+-            }
+-            for (Map.Entry<AccountType, Long> entry : mEarliestTimestampsMap.entrySet()) {
+-                if (entry.getValue() == 0) {
+-                    accountTypes.remove(entry.getKey());
+-                }
+-            }
+-            Log.w(TAG, accountTypes.toString());
+-            setEarliestAndLatestTimestamps(accountTypes);
++    /**
++     * Returns a data object that represents a user data of the specified account types
++     * @param accountTypeList account's types which will be displayed
++     * @return a {@code LineData} instance that represents a user data
++     */
++    private LineData getData(List<AccountType> accountTypeList) {
++        if (!calculateEarliestAndLatestTimestamps(accountTypeList)) {
++            mChartDataPresent = false;
++            return getEmptyData();
+         }
+ 
+         LocalDate startDate = new LocalDate(mEarliestTransactionTimestamp).withDayOfMonth(1);
+@@ -113,7 +133,7 @@ private LineData getDataSet(List<AccountType> accountTypes) {
+         }
+ 
+         ArrayList<LineDataSet> dataSets = new ArrayList<LineDataSet>();
+-        for (AccountType accountType : accountTypes) {
++        for (AccountType accountType : accountTypeList) {
+             LineDataSet set = new LineDataSet(getEntryList(accountType), accountType.toString());
+             set.setDrawFilled(true);
+             set.setLineWidth(2);
+@@ -126,30 +146,31 @@ private LineData getDataSet(List<AccountType> accountTypes) {
+         return new LineData(xValues, dataSets);
+     }
+ 
+-    private LineData getEmptyDataSet() {
+-        mChartDataPresent = false;
+-
++    /**
++     * Returns a data object that represents situation when no user data available
++     * @return a {@code LineData} instance for situation when no user data available
++     */
++    private LineData getEmptyData() {
+         ArrayList<String> xValues = new ArrayList<String>();
+         ArrayList<Entry> yValues = new ArrayList<Entry>();
+-        for (int i = 0; i < 5; i++) {
++        for (int i = 0; i < NO_DATA_BAR_COUNTS; i++) {
+             xValues.add("");
+             yValues.add(new Entry(i % 2 == 0 ? 5f : 4.5f, i));
+         }
+         LineDataSet set = new LineDataSet(yValues, getResources().getString(R.string.label_chart_no_data));
+         set.setDrawFilled(true);
+         set.setDrawValues(false);
+-        set.setColor(Color.GRAY);
+-        set.setFillColor(Color.GRAY);
+-
+-        mChart.getAxisLeft().setAxisMaxValue(10);
+-        mChart.getAxisLeft().setDrawLabels(false);
+-        mChart.getXAxis().setDrawLabels(false);
+-        mChart.setTouchEnabled(false);
+-        ((TextView) findViewById(R.id.selected_chart_slice)).setText(getResources().getString(R.string.label_chart_no_data));
++        set.setColor(NO_DATA_COLOR);
++        set.setFillColor(NO_DATA_COLOR);
+ 
+         return new LineData(xValues, new ArrayList<LineDataSet>(Arrays.asList(set)));
+     }
+ 
++    /**
++     * Returns entries which represent a user data of the specified account type
++     * @param accountType account's type which user data will be processed
++     * @return entries which represent a user data
++     */
+     private ArrayList<Entry> getEntryList(AccountType accountType) {
+         List<String> accountUIDList = new ArrayList<String>();
+         for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+@@ -179,28 +200,46 @@ private LineData getEmptyDataSet() {
+         return values;
+     }
+ 
+-    private void setEarliestAndLatestTimestamps(List<AccountType> accountTypeList) {
+-        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
+-        mEarliestTimestampsMap.clear();
+-        mLatestTimestampsMap.clear();
++    /**
++     * Calculates the earliest and latest transaction's timestamps of the specified account types
++     * @param accountTypeList account's types which will be processed
++     * @return {@code false} if no data available, {@code true} otherwise
++     */
++    private boolean calculateEarliestAndLatestTimestamps(List<AccountType> accountTypeList) {
+         for (AccountType type : accountTypeList) {
+-            mEarliestTimestampsMap.put(type, transactionsDbAdapter.getTimestampOfEarliestTransaction(type));
+-            mLatestTimestampsMap.put(type, transactionsDbAdapter.getTimestampOfLatestTransaction(type));
++            long earliest = TransactionsDbAdapter.getInstance().getTimestampOfEarliestTransaction(type);
++            long latest = TransactionsDbAdapter.getInstance().getTimestampOfLatestTransaction(type);
++            if (earliest > 0 && latest > 0) {
++                mEarliestTimestampsMap.put(type, earliest);
++                mLatestTimestampsMap.put(type, latest);
++            } else {
++                accountTypeList.remove(type);
++            }
++        }
++
++        if (mEarliestTimestampsMap.isEmpty() && mLatestTimestampsMap.isEmpty()) {
++            return false;
+         }
+ 
+         List<Long> timestamps = new ArrayList<Long>(mEarliestTimestampsMap.values());
+         timestamps.addAll(mLatestTimestampsMap.values());
+         Collections.sort(timestamps);
+-        Log.d(TAG, "X-axis timestamps list: " + timestamps.toString());
+         mEarliestTransactionTimestamp = timestamps.get(0);
+         mLatestTransactionTimestamp = timestamps.get(timestamps.size() - 1);
++        return true;
+     }
+ 
++    /**
++     * Returns a difference in months between the global earliest timestamp and the earliest
++     * transaction's timestamp of the specified account type
++     * @param accountType the account type
++     * @return the difference in months
++     */
+     private int getXAxisOffset(AccountType accountType) {
+         return Months.monthsBetween(
+                 new LocalDate(mEarliestTransactionTimestamp).withDayOfMonth(1),
+                 new LocalDate(mEarliestTimestampsMap.get(accountType)).withDayOfMonth(1)
+-                ).getMonths();
++        ).getMonths();
+     }
+ 
+     @Override
+@@ -223,12 +262,12 @@ public boolean onPrepareOptionsMenu(Menu menu) {
+     @Override
+     public boolean onOptionsItemSelected(MenuItem item) {
+         switch (item.getItemId()) {
+-            case R.id.menu_toggle_legend: {
++            case R.id.menu_toggle_legend:
+                 mChart.getLegend().setEnabled(!mChart.getLegend().isEnabled());
+                 mChart.invalidate();
+                 break;
+-            }
+-            case R.id.menu_toggle_average_lines: {
++
++            case R.id.menu_toggle_average_lines:
+                 if (mChart.getAxisLeft().getLimitLines().isEmpty()) {
+                     for (LineDataSet set : mChart.getData().getDataSets()) {
+                         LimitLine line = new LimitLine(set.getYValueSum() / set.getEntryCount(), set.getLabel());
+@@ -239,14 +278,12 @@ public boolean onOptionsItemSelected(MenuItem item) {
+                 } else {
+                     mChart.getAxisLeft().removeAllLimitLines();
+                 }
+-
+                 mChart.invalidate();
+                 break;
+-            }
+-            case android.R.id.home: {
++
++            case android.R.id.home:
+                 finish();
+                 break;
+-            }
+         }
+         return true;
+     }
+@@ -254,9 +291,11 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     @Override
+     public void onValueSelected(Entry e, int dataSetIndex, Highlight h) {
+         if (e == null) return;
++        String label = mChart.getData().getXVals().get(e.getXIndex());
++        double value = e.getVal();
++        double sum = mChart.getData().getDataSetByIndex(dataSetIndex).getYValueSum();
+         ((TextView) findViewById(R.id.selected_chart_slice))
+-                .setText(mChart.getData().getXVals().get(e.getXIndex()) + " - " + e.getVal()
+-                        + " (" + String.format("%.2f", (e.getVal() / mChart.getData().getDataSetByIndex(dataSetIndex).getYValueSum()) * 100) + " %)");
++                .setText(String.format(SELECTED_VALUE_PATTERN, label, value, value / sum * 100));
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
+index deb78192..2d5a1d4c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/PieChartActivity.java
+@@ -23,7 +23,6 @@
+ import android.graphics.drawable.Drawable;
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+-import android.util.Log;
+ import android.view.View;
+ import android.widget.AdapterView;
+ import android.widget.AdapterView.OnItemSelectedListener;
+@@ -160,7 +159,7 @@ private void setData(boolean forCurrentMonth) {
+         mChart.highlightValues(null);
+         mChart.clear();
+ 
+-        mChart.setData(getPieData(forCurrentMonth));
++        mChart.setData(getData(forCurrentMonth));
+         if (mChartDataPresent) {
+             mChart.animateXY(ANIMATION_DURATION, ANIMATION_DURATION);
+         }
+@@ -178,7 +177,7 @@ private void setData(boolean forCurrentMonth) {
+      * @param forCurrentMonth sets data only for current month if {@code true}, otherwise for all time
+      * @return {@code PieData} instance
+      */
+-    private PieData getPieData(boolean forCurrentMonth) {
++    private PieData getData(boolean forCurrentMonth) {
+         List<Account> accountList = mAccountsDbAdapter.getSimpleAccountList(
+                 AccountEntry.COLUMN_TYPE + " = ? AND " + AccountEntry.COLUMN_PLACEHOLDER + " = ?",
+                 new String[]{ mAccountType.name(), "0" }, null);
+@@ -186,13 +185,14 @@ private PieData getPieData(boolean forCurrentMonth) {
+         for (Account account : accountList) {
+             uidList.add(account.getUID());
+         }
+-        double sum = mAccountsDbAdapter.getAccountsBalance(uidList, -1, -1).absolute().asDouble();
++        double sum;
+         if (forCurrentMonth) {
+             long start = mChartDate.dayOfMonth().withMinimumValue().millisOfDay().withMinimumValue().toDate().getTime();
+             long end = mChartDate.dayOfMonth().withMaximumValue().millisOfDay().withMaximumValue().toDate().getTime();
+             sum = mAccountsDbAdapter.getAccountsBalance(uidList, start, end).absolute().asDouble();
++        } else {
++            sum = mAccountsDbAdapter.getAccountsBalance(uidList, -1, -1).absolute().asDouble();
+         }
+-        Log.w("Tag", "Total Balance " + sum);
+ 
+         double otherSlice = 0;
+         PieDataSet dataSet = new PieDataSet(null, "");
+@@ -212,14 +212,12 @@ private PieData getPieData(boolean forCurrentMonth) {
+                     balance = mAccountsDbAdapter.getAccountBalance(account.getUID()).absolute().asDouble();
+                 }
+ 
+-                Log.w("Tag", "Percent = " + balance / sum * 100);
+                 if (balance / sum * 100 > mSlicePercentThreshold) {
+                     dataSet.addEntry(new Entry((float) balance, dataSet.getEntryCount()));
+                     dataSet.addColor(COLORS[(dataSet.getEntryCount() - 1) % COLORS.length]);
+                     names.add(account.getName());
+                 } else {
+                     otherSlice += balance;
+-                    Log.w("Tag", "Other = " + otherSlice);
+                 }
+             }
+         }

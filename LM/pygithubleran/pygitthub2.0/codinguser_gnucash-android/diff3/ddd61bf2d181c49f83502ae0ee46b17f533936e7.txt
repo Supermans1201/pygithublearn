@@ -1,0 +1,3585 @@
+From ddd61bf2d181c49f83502ae0ee46b17f533936e7 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 14 Aug 2015 01:27:01 +0200
+Subject: [PATCH] Started work on adding commodities and prices to the database
+
+---
+ .../gnucash/android/db/CommoditiesDbAdapter.java   |   22 +
+ .../org/gnucash/android/db/DatabaseHelper.java     |  154 +-
+ .../org/gnucash/android/db/DatabaseSchema.java     |   55 +
+ .../org/gnucash/android/db/PricesDbAdapter.java    |   18 +
+ .../android/importer/CommoditiesXmlHandler.java    |   46 +
+ .../java/org/gnucash/android/model/Commodity.java  |   76 +
+ .../main/java/org/gnucash/android/model/Price.java |   73 +
+ app/src/main/res/raw/iso_4217_currencies.xml       | 3014 ++++++++++++++++++++
+ 8 files changed, 3453 insertions(+), 5 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+ create mode 100644 app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+ create mode 100644 app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+ create mode 100644 app/src/main/java/org/gnucash/android/model/Commodity.java
+ create mode 100644 app/src/main/java/org/gnucash/android/model/Price.java
+ create mode 100644 app/src/main/res/raw/iso_4217_currencies.xml
+
+diff --git a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+new file mode 100644
+index 00000000..06dca519
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+@@ -0,0 +1,22 @@
++package org.gnucash.android.db;
++
++import android.database.sqlite.SQLiteDatabase;
++import static org.gnucash.android.db.DatabaseSchema.CommodityEntry;
++
++/**
++ * Database adapter for {@link org.gnucash.android.model.Commodity}
++ */
++public class CommoditiesDbAdapter extends DatabaseAdapter {
++    /**
++     * Opens the database adapter with an existing database
++     *
++     * @param db        SQLiteDatabase object
++     */
++    public CommoditiesDbAdapter(SQLiteDatabase db) {
++        super(db, CommodityEntry.TABLE_NAME);
++    }
++
++
++
++
++}
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index a4648673..c0a0d90d 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -29,18 +29,28 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.export.Exporter;
++import org.gnucash.android.importer.CommoditiesXmlHandler;
++import org.gnucash.android.importer.GncXmlHandler;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Transaction;
++import org.xml.sax.InputSource;
++import org.xml.sax.SAXException;
++import org.xml.sax.XMLReader;
+ 
++import java.io.BufferedInputStream;
+ import java.io.File;
++import java.io.IOException;
++import java.io.InputStream;
+ import java.math.BigDecimal;
+ import java.sql.Timestamp;
+ 
+-import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
+-import static org.gnucash.android.db.DatabaseSchema.ScheduledActionEntry;
+-import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
+-import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.parsers.SAXParser;
++import javax.xml.parsers.SAXParserFactory;
++
++import static org.gnucash.android.db.DatabaseSchema.*;
+ /**
+  * Helper class for managing the SQLite database.
+  * Creates the database and handles upgrades
+@@ -120,7 +130,7 @@
+     public static final String SCHEDULED_ACTIONS_TABLE_CREATE = "CREATE TABLE " + ScheduledActionEntry.TABLE_NAME + " ("
+             + ScheduledActionEntry._ID                   + " integer primary key autoincrement, "
+             + ScheduledActionEntry.COLUMN_UID            + " varchar(255) not null UNIQUE, "
+-            + ScheduledActionEntry.COLUMN_ACTION_UID    + " varchar(255) not null, "
++            + ScheduledActionEntry.COLUMN_ACTION_UID     + " varchar(255) not null, "
+             + ScheduledActionEntry.COLUMN_TYPE           + " varchar(255) not null, "
+             + ScheduledActionEntry.COLUMN_PERIOD         + " integer not null, "
+             + ScheduledActionEntry.COLUMN_LAST_RUN       + " integer default 0, "
+@@ -134,6 +144,37 @@
+             + ScheduledActionEntry.COLUMN_MODIFIED_AT    + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+             + ");" + createUpdatedAtTrigger(ScheduledActionEntry.TABLE_NAME);
+ 
++    public static final String COMMODITIES_TABLE_CREATE = "CREATE TABLE " + DatabaseSchema.CommodityEntry.TABLE_NAME + " ("
++            + CommodityEntry._ID                + " integer primary key autoincrement, "
++            + CommodityEntry.COLUMN_UID         + " varchar(255) not null UNIQUE, "
++            + CommodityEntry.COLUMN_NAMESPACE   + " varchar(255) not null default " + Commodity.Namespace.ISO4217.name() + ", "
++            + CommodityEntry.COLUMN_FULLNAME    + " varchar(255) not null, "
++            + CommodityEntry.COLUMN_MNEMONIC    + " varchar(255) not null, "
++            + CommodityEntry.COLUMN_CUSIP       + " varchar(255), "
++            + CommodityEntry.COLUMN_FRACTION    + " integer not null, "
++            + CommodityEntry.COLUMN_QUOTE_FLAG  + " integer not null, "
++            + CommodityEntry.COLUMN_CREATED_AT  + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++            + CommodityEntry.COLUMN_MODIFIED_AT + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
++            + ");" + createUpdatedAtTrigger(CommodityEntry.TABLE_NAME);
++
++    /**
++     * SQL statement to create the commodity prices table
++     */
++    private static final String PRICES_TABLE_CREATE = "CREATE TABLE " + PriceEntry.TABLE_NAME + " ("
++            + PriceEntry._ID                    + " integer primary key autoincrement, "
++            + PriceEntry.COLUMN_UID             + " varchar(255) not null UNIQUE, "
++            + PriceEntry.COLUMN_COMMODITY_UID 	+ " varchar(255) not null, "
++            + PriceEntry.COLUMN_CURRENCY_UID    + " varchar(255) not null, "
++            + PriceEntry.COLUMN_TYPE            + " varchar(255), "
++            + PriceEntry.COLUMN_DATE 	        + " TIMESTAMP not null, "
++            + PriceEntry.COLUMN_SOURCE          + " text, "
++            + PriceEntry.COLUMN_VALUE_NUM       + " integer not null, "
++            + PriceEntry.COLUMN_VALUE_DENOM     + " integer not null, "
++            + PriceEntry.COLUMN_CREATED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++            + PriceEntry.COLUMN_MODIFIED_AT     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++            + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_COMMODITY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + "), "
++            + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_CURRENCY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") "
++            + ");" + createUpdatedAtTrigger(PriceEntry.TABLE_NAME);
+ 
+     /**
+ 	 * Constructor
+@@ -258,6 +299,72 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+         }
+ 	}
+ 
++
++    /**
++     * Upgrades the database from version 8 to version 9.
++     * <p>This migration accomplishes the following:
++     *  <ul>
++     *      <li>Adds a commodities table to the database</li>
++     *  </ul>
++     * </p>
++     * @param db SQLite Database to be upgraded
++     * @return New database version (9) if upgrade successful, old version (8) if unsuccessful
++     */
++    private int upgradeDbToVersion9(SQLiteDatabase db){
++        Log.i(LOG_TAG, "Upgrading database to version 8");
++        int oldVersion = 8;
++
++        db.beginTransaction();
++        try {
++            String createCommoditiesSql = "CREATE TABLE " + DatabaseSchema.CommodityEntry.TABLE_NAME + " ("
++                    + CommodityEntry._ID                + " integer primary key autoincrement, "
++                    + CommodityEntry.COLUMN_UID         + " varchar(255) not null UNIQUE, "
++                    + CommodityEntry.COLUMN_NAMESPACE   + " varchar(255) not null default " + Commodity.Namespace.ISO4217.name() + ", "
++                    + CommodityEntry.COLUMN_FULLNAME    + " varchar(255) not null, "
++                    + CommodityEntry.COLUMN_MNEMONIC    + " varchar(255) not null, "
++                    + CommodityEntry.COLUMN_CUSIP       + " varchar(255), "
++                    + CommodityEntry.COLUMN_FRACTION    + " integer not null, "
++                    + CommodityEntry.COLUMN_QUOTE_FLAG  + " integer not null, "
++                    + CommodityEntry.COLUMN_CREATED_AT  + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++                    + CommodityEntry.COLUMN_MODIFIED_AT + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
++                    + ");" + createUpdatedAtTrigger(CommodityEntry.TABLE_NAME);
++            db.execSQL(createCommoditiesSql);
++            try {
++                importCommodities(db);
++            } catch (SAXException | ParserConfigurationException | IOException e) {
++                Log.e(LOG_TAG, "Error loading currencies into the database");
++                e.printStackTrace();
++                throw new RuntimeException(e);
++            }
++
++            String createPricesSql = "CREATE TABLE " + PriceEntry.TABLE_NAME + " ("
++                    + PriceEntry._ID                    + " integer primary key autoincrement, "
++                    + PriceEntry.COLUMN_UID             + " varchar(255) not null UNIQUE, "
++                    + PriceEntry.COLUMN_COMMODITY_UID 	+ " varchar(255) not null, "
++                    + PriceEntry.COLUMN_CURRENCY_UID    + " varchar(255) not null, "
++                    + PriceEntry.COLUMN_TYPE            + " varchar(255), "
++                    + PriceEntry.COLUMN_DATE 	        + " TIMESTAMP not null, "
++                    + PriceEntry.COLUMN_SOURCE          + " text, "
++                    + PriceEntry.COLUMN_VALUE_NUM       + " integer not null, "
++                    + PriceEntry.COLUMN_VALUE_DENOM     + " integer not null, "
++                    + PriceEntry.COLUMN_CREATED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++                    + PriceEntry.COLUMN_MODIFIED_AT     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++                    + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_COMMODITY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + "), "
++                    + "FOREIGN KEY (" 	+ PriceEntry.COLUMN_CURRENCY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") "
++                    + ");" + createUpdatedAtTrigger(PriceEntry.TABLE_NAME);
++            db.execSQL(createPricesSql);
++            //TODO: add migrations here
++
++
++
++            db.setTransactionSuccessful();
++            oldVersion = 9;
++        } finally {
++            db.endTransaction();
++        }
++        return oldVersion;
++    }
++
+     /**
+      * Upgrades the database from version 7 to version 8.
+      * <p>This migration accomplishes the following:
+@@ -790,6 +897,8 @@ private void createDatabaseTables(SQLiteDatabase db) {
+         db.execSQL(TRANSACTIONS_TABLE_CREATE);
+         db.execSQL(SPLITS_TABLE_CREATE);
+         db.execSQL(SCHEDULED_ACTIONS_TABLE_CREATE);
++        db.execSQL(COMMODITIES_TABLE_CREATE);
++        db.execSQL(PRICES_TABLE_CREATE);
+ 
+         String createAccountUidIndex = "CREATE UNIQUE INDEX '" + AccountEntry.INDEX_UID + "' ON "
+                 + AccountEntry.TABLE_NAME + "(" + AccountEntry.COLUMN_UID + ")";
+@@ -803,11 +912,46 @@ private void createDatabaseTables(SQLiteDatabase db) {
+         String createScheduledEventUidIndex = "CREATE UNIQUE INDEX '" + ScheduledActionEntry.INDEX_UID
+                 +"' ON " + ScheduledActionEntry.TABLE_NAME + "(" + ScheduledActionEntry.COLUMN_UID + ")";
+ 
++        String createCommodityUidIndex = "CREATE UNIQUE INDEX '" + CommodityEntry.INDEX_UID
++                +"' ON " + CommodityEntry.TABLE_NAME + "(" + CommodityEntry.COLUMN_UID + ")";
++
++        String createPriceUidIndex = "CREATE UNIQUE INDEX '" + PriceEntry.INDEX_UID
++                +"' ON " + PriceEntry.TABLE_NAME + "(" + PriceEntry.COLUMN_UID + ")";
++
+         db.execSQL(createAccountUidIndex);
+         db.execSQL(createTransactionUidIndex);
+         db.execSQL(createSplitUidIndex);
+         db.execSQL(createScheduledEventUidIndex);
++        db.execSQL(createCommodityUidIndex);
++        db.execSQL(createPriceUidIndex);
++
++        try {
++            importCommodities(db);
++        } catch (SAXException | ParserConfigurationException | IOException e) {
++            Log.e(LOG_TAG, "Error loading currencies into the database");
++            e.printStackTrace();
++            throw new RuntimeException(e);
++        }
+     }
+ 
++    /**
++     * Imports commodities into the database from XML resource file
++     */
++    private void importCommodities(SQLiteDatabase db) throws SAXException, ParserConfigurationException, IOException {
++        SAXParserFactory spf = SAXParserFactory.newInstance();
++        SAXParser sp = spf.newSAXParser();
++        XMLReader xr = sp.getXMLReader();
++
++        InputStream commoditiesInputStream = GnuCashApplication.getAppContext().getResources()
++                .openRawResource(R.raw.iso_4217_currencies);
++        BufferedInputStream bos = new BufferedInputStream(commoditiesInputStream);
++
++        /** Create handler to handle XML Tags ( extends DefaultHandler ) */
++
++        CommoditiesXmlHandler handler = new CommoditiesXmlHandler(db);
++
++        xr.setContentHandler(handler);
++        xr.parse(new InputSource(bos));
++    }
+ 
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 08073819..12848b2d 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -117,4 +117,59 @@ private DatabaseSchema(){}
+ 
+         public static final String INDEX_UID            = "scheduled_action_uid_index";
+     }
++
++    public static abstract class CommodityEntry implements CommonColumns {
++        public static final String TABLE_NAME           = "commodities";
++
++        /**
++         * The namespace field denotes the namespace for this commodity,
++         * either a currency or symbol from a quote source
++         */
++        public static final String COLUMN_NAMESPACE     = "namespace";
++
++        /**
++         * The fullname is the official full name of the currency
++         */
++        public static final String COLUMN_FULLNAME      = "fullname";
++
++        /**
++         * The mnemonic is the official abbreviated designation for the currency
++         */
++        public static final String COLUMN_MNEMONIC      = "mnemonic";
++
++
++        /**
++         * The fraction is the number of sub-units that the basic commodity can be divided into
++         */
++        public static final String COLUMN_FRACTION      = "fraction";
++
++        /**
++         * A CUSIP is a nine-character alphanumeric code that identifies a North American financial security
++         * for the purposes of facilitating clearing and settlement of trades
++         */
++        public static final String COLUMN_CUSIP         = "cusip";
++
++        /**
++         * TRUE if prices are to be downloaded for this commodity from a quote source
++         */
++        public static final String COLUMN_QUOTE_FLAG    = "quote_flag";
++
++        public static final String INDEX_UID = "commodities_uid_index";
++    }
++
++
++    public static abstract class PriceEntry implements CommonColumns {
++        public static final String TABLE_NAME = "prices";
++
++        public static final String COLUMN_COMMODITY_UID = "commodity_guid";
++        public static final String COLUMN_CURRENCY_UID  = "currency_guid";
++        public static final String COLUMN_DATE          = "date";
++        public static final String COLUMN_SOURCE        = "source";
++        public static final String COLUMN_TYPE          = "type";
++        public static final String COLUMN_VALUE_NUM     = "value_num";
++        public static final String COLUMN_VALUE_DENOM   = "value_denom";
++
++        public static final String INDEX_UID = "prices_uid_index";
++
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+new file mode 100644
+index 00000000..f7105ff7
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+@@ -0,0 +1,18 @@
++package org.gnucash.android.db;
++
++import android.database.sqlite.SQLiteDatabase;
++import static org.gnucash.android.db.DatabaseSchema.PriceEntry;
++
++/**
++ * Database adapter for prices
++ */
++public class PricesDbAdapter extends DatabaseAdapter {
++    /**
++     * Opens the database adapter with an existing database
++     *
++     * @param db        SQLiteDatabase object
++     */
++    public PricesDbAdapter(SQLiteDatabase db) {
++        super(db, PriceEntry.TABLE_NAME);
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+new file mode 100644
+index 00000000..254faa50
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+@@ -0,0 +1,46 @@
++package org.gnucash.android.importer;
++
++import android.database.sqlite.SQLiteDatabase;
++
++import org.gnucash.android.db.CommoditiesDbAdapter;
++import org.gnucash.android.model.Commodity;
++import org.xml.sax.Attributes;
++import org.xml.sax.SAXException;
++import org.xml.sax.helpers.DefaultHandler;
++
++import java.util.List;
++
++/**
++ * XML stream handler for parsing currencies to add to the database
++ */
++public class CommoditiesXmlHandler extends DefaultHandler {
++
++    private List<Commodity> mCommodities;
++
++    private CommoditiesDbAdapter mCommoditiesDbAdapter;
++
++    public CommoditiesXmlHandler(SQLiteDatabase db){
++        //TODO: initialize adapter
++    }
++
++    @Override
++    public void startElement(String uri, String localName, String qName, Attributes attributes) throws SAXException {
++        String isoCode      = attributes.getValue("isocode");
++        String fullname     = attributes.getValue("fullname");
++        String namespace    = attributes.getValue("namespace");
++        String cusip        = attributes.getValue("exchange-code");
++        String smallestFraction = attributes.getValue("smallest-fraction");
++
++
++        Commodity commodity = new Commodity(fullname, isoCode, Integer.parseInt(smallestFraction));
++        commodity.setNamespace(Commodity.Namespace.valueOf(namespace));
++        commodity.setCusip(cusip);
++
++        mCommodities.add(commodity);
++    }
++
++    @Override
++    public void endDocument() throws SAXException {
++        //TODO: bulk add commodities
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/model/Commodity.java b/app/src/main/java/org/gnucash/android/model/Commodity.java
+new file mode 100644
+index 00000000..de605dec
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/model/Commodity.java
+@@ -0,0 +1,76 @@
++package org.gnucash.android.model;
++
++/**
++ * Commodities are the currencies used in the application.
++ * At the moment only ISO4217 currencies are supported
++ */
++public class Commodity extends BaseModel {
++    public enum Namespace { ISO4217 } //Namespace for commodities
++
++    private Namespace mNamespace = Namespace.ISO4217;
++    private String mMnemonic;
++    private String mFullname;
++    private String mCusip;
++    private int mFraction;
++    private int mQuoteFlag;
++
++    /**
++     * Create a new commodity
++     * @param fullname Official full name of the currency
++     * @param mnemonic Official abbreviated designation for the currency
++     * @param fraction Number of sub-units that the basic commodity can be divided into
++     */
++    public Commodity(String fullname, String mnemonic, int fraction){
++        this.mFullname = fullname;
++        this.mMnemonic = mnemonic;
++        this.mFraction = fraction;
++    }
++
++    public Namespace getNamespace() {
++        return mNamespace;
++    }
++
++    public void setNamespace(Namespace namespace) {
++        this.mNamespace = namespace;
++    }
++
++    public String getMnemonic() {
++        return mMnemonic;
++    }
++
++    public void setMnemonic(String mMnemonic) {
++        this.mMnemonic = mMnemonic;
++    }
++
++    public String getFullname() {
++        return mFullname;
++    }
++
++    public void setFullname(String mFullname) {
++        this.mFullname = mFullname;
++    }
++
++    public String getCusip() {
++        return mCusip;
++    }
++
++    public void setCusip(String mCusip) {
++        this.mCusip = mCusip;
++    }
++
++    public int getFraction() {
++        return mFraction;
++    }
++
++    public void setFraction(int fraction) {
++        this.mFraction = fraction;
++    }
++
++    public int getQuoteFlag() {
++        return mQuoteFlag;
++    }
++
++    public void setQuoteFlag(int quoteFlag) {
++        this.mQuoteFlag = quoteFlag;
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/model/Price.java b/app/src/main/java/org/gnucash/android/model/Price.java
+new file mode 100644
+index 00000000..8ab74ac3
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/model/Price.java
+@@ -0,0 +1,73 @@
++package org.gnucash.android.model;
++
++import java.sql.Timestamp;
++
++/**
++ * Model for commodity prices
++ */
++public class Price extends BaseModel {
++
++    private String mCommodityUID;
++    private String mCurrencyUID;
++    private Timestamp mDate;
++    private String mSource;
++    private String mType;
++    private int mValueNum;
++    private int mValueDenom;
++
++    public String getCommodityUID() {
++        return mCommodityUID;
++    }
++
++    public void setCommodityUID(String mCommodityUID) {
++        this.mCommodityUID = mCommodityUID;
++    }
++
++    public String getCurrencyUID() {
++        return mCurrencyUID;
++    }
++
++    public void setCurrencyUID(String currencyUID) {
++        this.mCurrencyUID = currencyUID;
++    }
++
++    public Timestamp getDate() {
++        return mDate;
++    }
++
++    public void setDate(Timestamp date) {
++        this.mDate = date;
++    }
++
++    public String getSource() {
++        return mSource;
++    }
++
++    public void setSource(String source) {
++        this.mSource = source;
++    }
++
++    public String getType() {
++        return mType;
++    }
++
++    public void setType(String type) {
++        this.mType = type;
++    }
++
++    public int getValueNum() {
++        return mValueNum;
++    }
++
++    public void setValueNum(int valueNum) {
++        this.mValueNum = valueNum;
++    }
++
++    public int getValueDenom() {
++        return mValueDenom;
++    }
++
++    public void setValueDenom(int valueDenom) {
++        this.mValueDenom = valueDenom;
++    }
++}
+diff --git a/app/src/main/res/raw/iso_4217_currencies.xml b/app/src/main/res/raw/iso_4217_currencies.xml
+new file mode 100644
+index 00000000..e7492ea1
+--- /dev/null
++++ b/app/src/main/res/raw/iso_4217_currencies.xml
+@@ -0,0 +1,3014 @@
++<?xml version="1.0" encoding="utf-8" ?>
++<!-- currency descriptions for ISO4217 currencies.
++
++  This file is not currently used at runtime.  It's used to generate
++  the contents of iso-4217-currencies.c.
++
++  You can find Currency Information from the following sites:
++    http://www.evertype.com/standards/iso4217/iso4217-en.html
++    http://www.xe.com/iso4217.htm
++    http://www.thefinancials.com/vortex/CurrencyFormats.html
++  But currently used was
++    http://en.wikipedia.org/wiki/ISO4217 and relatives and the official at
++    http://www.iso.org/iso/support/faqs/faqs_widely_used_standards/widely_used_standards_other/currency_codes/currency_codes_list-1.htm
++
++  Learned from some bugs (543061, 564450), please keep in mind:
++  If there are no coins for subunits, subunits might still be in use on the paper
++
++  Format:
++  <currency
++    isocode
++    fullname
++    unitname*
++    partname*
++    namespace
++    exchange-code
++    parts-per-unit*
++    smallest-fraction
++    local-symbol
++  />
++  planned extensions: replace-date, by-ISO, frozen-rate [x old : 1 new]
++
++  where * means currently unused;
++  fullname should be the same as in /usr/share/xml/iso-codes/iso_4217.xml from package iso-codes
++  exchange-code is stored in ISIN/CUSIP;
++  see iso-currencies-to-c for details and recent changes.
++  Sort order by ISO codes for simpler maintainance
++
++
++  File source: https://github.com/Gnucash/gnucash/blob/master/src/engine/iso-4217-currencies.xml
++-->
++
++
++<currencylist>
++    <!-- "ADF" - "Andorran Franc"
++      2002-01-01 "FRF" 1  ;; = 1/1 French Franc replaced by EUR
++    -->
++    <currency
++        isocode="ADF"
++        fullname="Andorran Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="950"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "ADP" - "Andorran Peseta"
++      2002-01-01 "ESP" 1 ;; = 1/1 Spanish Peseta replaced by EUR
++    -->
++    <currency
++        isocode="ADP"
++        fullname="Andorran Peseta"
++        unitname="peseta"
++        partname="centimo"
++        namespace="ISO4217"
++        exchange-code="724"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "AED" - "UAE Dirham"
++      There is also an arabic symbol for "Dhs"
++    -->
++    <currency
++        isocode="AED"
++        fullname="UAE Dirham"
++        unitname="dirham"
++        partname="fil"
++        namespace="ISO4217"
++        exchange-code="784"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Dhs"
++        />
++    <!-- "AFA" - "Afghani"
++      through 2003-01-02 "AFN" 1000
++    -->
++    <currency
++        isocode="AFA"
++        fullname="Afghani"
++        unitname="afghani"
++        partname="pul"
++        namespace="ISO4217"
++        exchange-code="004"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "AFN" - "Afghani"
++    -->
++    <currency
++        isocode="AFN"
++        fullname="Afghani"
++        unitname="afghani"
++        partname="pul"
++        namespace="ISO4217"
++        exchange-code="971"
++        parts-per-unit="1"
++        smallest-fraction="1"
++        local-symbol=""
++        />
++    <!-- "ALL" - "Lek"
++    -->
++    <currency
++        isocode="ALL"
++        fullname="Lek"
++        unitname="lek"
++        partname="qindarka"
++        namespace="ISO4217"
++        exchange-code="008"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "AMD" - "Armenian Dram"
++    -->
++    <currency
++        isocode="AMD"
++        fullname="Armenian Dram"
++        unitname="dram"
++        partname="Luma"
++        namespace="ISO4217"
++        exchange-code="051"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="."
++        />
++    <!-- "ANG" - "Netherlands Antillian Guilder"
++      through 2010-10 ???
++    -->
++    <currency
++        isocode="ANG"
++        fullname="Netherlands Antillian Guilder"
++        unitname="guilder"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="532"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="NA"
++        />
++    <!-- "AOA" - "Kwanza"
++    -->
++    <currency
++        isocode="AOA"
++        fullname="Kwanza"
++        unitname="kwanza"
++        partname="cntimos"
++        namespace="ISO4217"
++        exchange-code="973"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Kz"
++        />
++    <!-- "AON" - "Angola New Kwanza"
++      1995-07-01 "AOR" 1000
++    -->
++    <currency
++        isocode="AON"
++        fullname="Angola New Kwanza"
++        unitname="new kwanza"
++        partname="lwei"
++        namespace="ISO4217"
++        exchange-code="024"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "AOR" - "Angola Kwanza Reajustado"
++      2000-02-01 "AOA" 1000000
++    -->
++    <currency
++        isocode="AOR"
++        fullname="Angola Kwanza Reajustado"
++        unitname="reajustado kwanza"
++        partname="centimos"
++        namespace="ISO4217"
++        exchange-code="982"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "ARA" - "Argentine Austral"
++      1992-01-01 "ARS" 10000
++    -->
++    <currency
++        isocode="ARA"
++        fullname="Argentine Austral"
++        unitname="austral"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="XXX"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "ARS" - "Argentine Peso"
++    -->
++    <currency
++        isocode="ARS"
++        fullname="Argentine Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="032"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "ATS" - "Austrian Schilling"
++      2002-01-01 "EUR" 13.7603
++    -->
++    <currency
++        isocode="ATS"
++        fullname="Austrian Schilling"
++        unitname="shilling"
++        partname="groschen"
++        namespace="ISO4217"
++        exchange-code="040"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="S"
++        />
++    <!-- "AUD" - "Australian Dollar"
++    -->
++    <currency
++        isocode="AUD"
++        fullname="Australian Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="036"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$"
++        />
++    <!-- "AWG" - "Aruban Guilder"
++      ""
++    -->
++    <currency
++        isocode="AWG"
++        fullname="Aruban Guilder"
++        unitname="florin"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="533"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Afl."
++        />
++    <!-- "AZM" - "Azerbaijanian Manat"
++      2006-01-01 "AZN" 5000
++    -->
++    <currency
++        isocode="AZM"
++        fullname="Azerbaijanian Manat"
++        unitname="manat"
++        partname="qpik"
++        namespace="ISO4217"
++        exchange-code="031"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "AZN" - "Azerbaijanian Manat"
++      "m" should be  a 90 rotated  sign, but currently not encoded in Unicode
++    -->
++    <currency
++        isocode="AZN"
++        fullname="Azerbaijanian Manat"
++        unitname="manat"
++        partname="qpik"
++        namespace="ISO4217"
++        exchange-code="944"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="m"
++        />
++    <!-- "BAD" - "Bosnia and Herzegovina Dinar"
++      1998-06-22 "BAM" 100 ;; there was a revaluation 1994-08: 10000:1
++    -->
++    <currency
++        isocode="BAD"
++        fullname="Bosnia and Herzegovina Dinar"
++        unitname="B.H. dinar"
++        partname="para"
++        namespace="ISO4217"
++        exchange-code="070"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "BAM" - "Convertible Marks"
++    -->
++    <currency
++        isocode="BAM"
++        fullname="Convertible Marks"
++        unitname="B.H. mark"
++        partname="fening"
++        namespace="ISO4217"
++        exchange-code="977"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="KM"
++        />
++    <!-- "BBD" - "Barbados Dollar"
++    -->
++    <currency
++        isocode="BBD"
++        fullname="Barbados Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="052"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Bds$"
++        />
++    <!-- "BDT" - "Taka"
++    -->
++    <currency
++        isocode="BDT"
++        fullname="Taka"
++        unitname="taka"
++        partname="paisa"
++        namespace="ISO4217"
++        exchange-code="050"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "BEF" - "Belgian Franc"
++      2002-01-01 "EUR" 40.3399
++    -->
++    <currency
++        isocode="BEF"
++        fullname="Belgian Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="056"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="fr."
++        />
++    <!-- "BGL" - "Bulgarian Lev A/99"
++      1999-07-05 "BGN" 1000
++    -->
++    <currency
++        isocode="BGL"
++        fullname="Bulgarian Lev A/99"
++        unitname="lev"
++        partname="stotinki"
++        namespace="ISO4217"
++        exchange-code="100"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "BGN" - "Bulgarian Lev"
++      scheduled replacement: 2012-01-01 "EUR" 1.95583 (=DEM)
++    -->
++    <currency
++        isocode="BGN"
++        fullname="Bulgarian Lev"
++        unitname="lev"
++        partname="stotinki"
++        namespace="ISO4217"
++        exchange-code="975"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "BHD" - "Bahraini Dinar"
++      ar:..
++    -->
++    <currency
++        isocode="BHD"
++        fullname="Bahraini Dinar"
++        unitname="dinar"
++        partname="fil"
++        namespace="ISO4217"
++        exchange-code="048"
++        parts-per-unit="1000"
++        smallest-fraction="1000"
++        local-symbol="BD"
++        />
++    <!-- "BIF" - "Burundi Franc"
++    -->
++    <currency
++        isocode="BIF"
++        fullname="Burundi Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="108"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="FBu"
++        />
++    <!-- "BMD" - "Bermudian Dollar"
++    -->
++    <currency
++        isocode="BMD"
++        fullname="Bermudian Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="060"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="BD$"
++        />
++    <!-- "BND" - "Brunei Dollar"
++    -->
++    <currency
++        isocode="BND"
++        fullname="Brunei Dollar"
++        unitname="dollar"
++        partname="sen"
++        namespace="ISO4217"
++        exchange-code="096"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="B$"
++        />
++    <!-- "BOB" - "Boliviano"
++    -->
++    <currency
++        isocode="BOB"
++        fullname="Boliviano"
++        unitname="boliviano"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="068"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Bs."
++        />
++    <!-- "BOV" - "Mvdol"
++      Mantenimiento de Valor respecto al Dlar
++    -->
++    <currency
++        isocode="BOV"
++        fullname="Mvdol"
++        unitname="mvdol"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="984"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "BRE" - "Brazilian Cruzeiro"
++      1993-08-01 "BRR" 1000
++    -->
++    <currency
++        isocode="BRE"
++        fullname="Brazilian Cruzeiro"
++        unitname="cruzeiro"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="076"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "BRL" - "Brazilian Real"
++    -->
++    <currency
++        isocode="BRL"
++        fullname="Brazilian Real"
++        unitname="real"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="986"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="R$"
++        />
++    <!-- "BRR" - "Brazilian Cruzeiro Real"
++      1994-07-01 "BRL" 2750
++    -->
++    <currency
++        isocode="BRR"
++        fullname="Brazilian Cruzeiro Real"
++        unitname="cruzeiro"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="987"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "BSD" - "Bahamian Dollar"
++    -->
++    <currency
++        isocode="BSD"
++        fullname="Bahamian Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="044"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="B$"
++        />
++    <!-- "BTN" - "Ngultrum"
++    -->
++    <currency
++        isocode="BTN"
++        fullname="Ngultrum"
++        unitname="ngultrum"
++        partname="chetrum"
++        namespace="ISO4217"
++        exchange-code="064"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Nu."
++        />
++    <!-- "BWP" - "Pula"
++    -->
++    <currency
++        isocode="BWP"
++        fullname="Pula"
++        unitname="pula"
++        partname="thebe"
++        namespace="ISO4217"
++        exchange-code="072"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="P"
++        />
++    <!-- "BYB" - "Belarussian Rouble"
++      2000-01-01 "BYR" 1000
++    -->
++    <currency
++        isocode="BYB"
++        fullname="Belarussian Rouble"
++        unitname="ruble"
++        partname="kapeyka"
++        namespace="ISO4217"
++        exchange-code=""
++        parts-per-unit="100"
++        smallest-fraction="1"
++        local-symbol=""
++        />
++    <!-- "BYR" - "Belarussian Ruble"
++    -->
++    <currency
++        isocode="BYR"
++        fullname="Belarussian Ruble"
++        unitname="ruble"
++        partname="ruble"
++        namespace="ISO4217"
++        exchange-code="974"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol="Br"
++        />
++    <!-- "BZD" - "Belize Dollar"
++    -->
++    <currency
++        isocode="BZD"
++        fullname="Belize Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="084"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="BZ$"
++        />
++    <!-- "CAD" - "Canadian Dollar"
++    -->
++    <currency
++        isocode="CAD"
++        fullname="Canadian Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="124"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="C$"
++        />
++    <!-- "CDF" - "Franc Congolais"
++    -->
++    <currency
++        isocode="CDF"
++        fullname="Franc Congolais"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="976"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="FC"
++        />
++    <!-- "CHE" - "WIR Euro"
++      complementary currency by WIR Wirtschaftsring-Genossenschaft
++    -->
++    <currency
++        isocode="CHE"
++        fullname="WIR Euro"
++        unitname="euro"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="974"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "CHF" - "Swiss Franc"
++    -->
++    <currency
++        isocode="CHF"
++        fullname="Swiss Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="756"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="SFr."
++        />
++    <!-- "CHW" - "WIR Franc"
++      complementary currency by WIR Wirtschaftsring-Genossenschaft
++    -->
++    <currency
++        isocode="CHW"
++        fullname="WIR Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="948"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "CLF" - "Unidades de fomento"
++      international secured loans; decimals not defined but required for conversion as of 2011-03-18 1 CLF = 21,560.19 CLP
++    -->
++    <currency
++        isocode="CLF"
++        fullname="Unidades de fomento"
++        unitname="UF"
++        partname=""
++        namespace="ISO4217"
++        exchange-code="990"
++        parts-per-unit="10000"
++        smallest-fraction="10000"
++        local-symbol=""
++        />
++    <!-- "CLP" - "Chilean Peso"
++      "$" should have 2 strokes
++    -->
++    <currency
++        isocode="CLP"
++        fullname="Chilean Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="152"
++        parts-per-unit="100"
++        smallest-fraction="1"
++        local-symbol="$"
++        />
++    <!-- "CNY" - "Yuan Renminbi"
++      locale-symbol has been changed from  to CN following a discussion on bug 727466
++    -->
++    <currency
++        isocode="CNY"
++        fullname="Yuan Renminbi"
++        unitname="renminbi"
++        partname="fen"
++        namespace="ISO4217"
++        exchange-code="156"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="CN"
++        />
++    <!-- "COP" - "Colombian Peso"
++    -->
++    <currency
++        isocode="COP"
++        fullname="Colombian Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="170"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$"
++        />
++    <!-- "COU" - "Unidad de Valor Real"
++    -->
++    <currency
++        isocode="COU"
++        fullname="Unidad de Valor Real"
++        unitname="UVR"
++        partname="???"
++        namespace="ISO4217"
++        exchange-code="970"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "CRC" - "Costa Rican Colon"
++    -->
++    <currency
++        isocode="CRC"
++        fullname="Costa Rican Colon"
++        unitname="colon"
++        partname="centimo"
++        namespace="ISO4217"
++        exchange-code="188"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "CUP" - "Cuban Peso"
++    -->
++    <currency
++        isocode="CUP"
++        fullname="Cuban Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="192"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$MN"
++        />
++    <!-- "CUC" - "Cuban Convertible Peso"
++    -->
++    <currency
++        isocode="CUC"
++        fullname="Cuban Convertible Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="931"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="CUC$"
++        />
++    <!-- "CVE" - "Cape Verde Escudo"
++    -->
++    <currency
++        isocode="CVE"
++        fullname="Cape Verde Escudo"
++        unitname="escudo"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="132"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Esc"
++        />
++    <!-- "CYP" - "Cyprus Pound"
++      2008-01-01 "EUR" 0.585274
++    -->
++    <currency
++        isocode="CYP"
++        fullname="Cyprus Pound"
++        unitname="pound"
++        partname="pence"
++        namespace="ISO4217"
++        exchange-code="196"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "CZK" - "Czech Koruna"
++    -->
++    <currency
++        isocode="CZK"
++        fullname="Czech Koruna"
++        unitname="koruna"
++        partname="haleru"
++        namespace="ISO4217"
++        exchange-code="203"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="K"
++        />
++    <!-- "DEM" - "Deutsche Mark"
++      2002-01-01 "EUR" 1.95583
++    -->
++    <currency
++        isocode="DEM"
++        fullname="Deutsche Mark"
++        unitname="deutschemark"
++        partname="pfennig"
++        namespace="ISO4217"
++        exchange-code="280"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="DM"
++        />
++    <!-- "DJF" - "Djibouti Franc"
++    -->
++    <currency
++        isocode="DJF"
++        fullname="Djibouti Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="262"
++        parts-per-unit="100"
++        smallest-fraction="1"
++        local-symbol="Fdj"
++        />
++    <!-- "DKK" - "Danish Krone"
++    -->
++    <currency
++        isocode="DKK"
++        fullname="Danish Krone"
++        unitname="krone"
++        partname="re"
++        namespace="ISO4217"
++        exchange-code="208"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="kr"
++        />
++    <!-- "DOP" - "Dominican Peso"
++    -->
++    <currency
++        isocode="DOP"
++        fullname="Dominican Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="214"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="RD$"
++        />
++    <!-- "DZD" - "Algerian Dinar"
++      ar.: 	
++    -->
++    <currency
++        isocode="DZD"
++        fullname="Algerian Dinar"
++        unitname="dinar"
++        partname="santeem"
++        namespace="ISO4217"
++        exchange-code="012"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="DA"
++        />
++    <!-- "ECS" - "Ecuador Sucre"
++      2000-09-15 "USD" 25000
++    -->
++    <currency
++        isocode="ECS"
++        fullname="Ecuador Sucre"
++        unitname="sucre"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="218"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="S/."
++        />
++    <!-- "EEK" - "Kroon"
++      2011-01-01 "EUR" 15.6466
++    -->
++    <currency
++        isocode="EEK"
++        fullname="Kroon"
++        unitname="kroon"
++        partname="sent"
++        namespace="ISO4217"
++        exchange-code="233"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="kr"
++        />
++    <!-- "EGP" - "Egyptian Pound"
++      ar.:. maleem=0.001 E for accounting?
++    -->
++    <currency
++        isocode="EGP"
++        fullname="Egyptian Pound"
++        unitname="pound"
++        partname="qirsh"
++        namespace="ISO4217"
++        exchange-code="818"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="E"
++        />
++    <!-- "ERN" - "Nakfa"
++    -->
++    <currency
++        isocode="ERN"
++        fullname="Nakfa"
++        unitname="nakfa"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="232"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Nfa"
++        />
++    <!-- "ESP" - "Spanish Peseta"
++      2002-01-01 "EUR" 166.386
++    -->
++    <currency
++        isocode="ESP"
++        fullname="Spanish Peseta"
++        unitname="peseta"
++        partname="centimo"
++        namespace="ISO4217"
++        exchange-code="724"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "ETB" - "Ethiopian Birr"
++    -->
++    <currency
++        isocode="ETB"
++        fullname="Ethiopian Birr"
++        unitname="birr"
++        partname="santim"
++        namespace="ISO4217"
++        exchange-code="230"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Br"
++        />
++    <!-- "EUR" - "Euro"
++    -->
++    <currency
++        isocode="EUR"
++        fullname="Euro"
++        unitname="euro"
++        partname="euro-cent"
++        namespace="ISO4217"
++        exchange-code="978"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "FIM" - "Finnish Markka"
++      2002-01-01 "EUR" 5.94573
++    -->
++    <currency
++        isocode="FIM"
++        fullname="Finnish Markka"
++        unitname="markka"
++        partname="penni"
++        namespace="ISO4217"
++        exchange-code="246"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="mk"
++        />
++    <!-- "FJD" - "Fiji Dollar"
++    -->
++    <currency
++        isocode="FJD"
++        fullname="Fiji Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="242"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="FJ$"
++        />
++    <!-- "FKP" - "Falkland Islands Pound"
++    -->
++    <currency
++        isocode="FKP"
++        fullname="Falkland Islands Pound"
++        unitname="pound"
++        partname="pence"
++        namespace="ISO4217"
++        exchange-code="238"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="FK"
++        />
++    <!-- "FRF" - "French Franc"
++      2002-01-01 "EUR" 6.55957
++    -->
++    <currency
++        isocode="FRF"
++        fullname="French Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="250"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "GBP" - "Pound Sterling"
++    -->
++    <currency
++        isocode="GBP"
++        fullname="Pound Sterling"
++        unitname="pound"
++        partname="pence"
++        namespace="ISO4217"
++        exchange-code="826"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "GEL" - "Lari"
++    -->
++    <currency
++        isocode="GEL"
++        fullname="Lari"
++        unitname="lari"
++        partname="tetri"
++        namespace="ISO4217"
++        exchange-code="981"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "GHC" - "Cedi"
++      2007-07-01 "GHS" 10000
++    -->
++    <currency
++        isocode="GHC"
++        fullname="Cedi"
++        unitname="cedi"
++        partname="pesewa"
++        namespace="ISO4217"
++        exchange-code="288"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "GHS" - "Ghana Cedi"
++    -->
++    <currency
++        isocode="GHS"
++        fullname="Ghana Cedi"
++        unitname="cedi"
++        partname="pesewa"
++        namespace="ISO4217"
++        exchange-code="936"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="GH"
++        />
++    <!-- "GIP" - "Gibraltar Pound"
++    -->
++    <currency
++        isocode="GIP"
++        fullname="Gibraltar Pound"
++        unitname="pound"
++        partname="pence"
++        namespace="ISO4217"
++        exchange-code="292"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "GMD" - "Dalasi"
++    -->
++    <currency
++        isocode="GMD"
++        fullname="Dalasi"
++        unitname="dalasi"
++        partname="butut"
++        namespace="ISO4217"
++        exchange-code="270"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="D"
++        />
++    <!-- "GNF" - "Guinea Franc"
++    -->
++    <currency
++        isocode="GNF"
++        fullname="Guinea Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="324"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="FG"
++        />
++    <!-- "GRD" - "Greek Drachma"
++      2002-01-01 "EUR" 340.750
++    -->
++    <currency
++        isocode="GRD"
++        fullname="Greek Drachma"
++        unitname="drachma"
++        partname="lepta"
++        namespace="ISO4217"
++        exchange-code="200"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="."
++        />
++    <!-- "GTQ" - "Quetzal"
++    -->
++    <currency
++        isocode="GTQ"
++        fullname="Quetzal"
++        unitname="quetzal"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="320"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Q"
++        />
++    <!-- "GWP" - "Guinea-Bissau Peso"
++      1997-01-01 "XOF" 65
++    -->
++    <currency
++        isocode="GWP"
++        fullname="Guinea-Bissau Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="624"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "GYD" - "Guyana Dollar"
++    -->
++    <currency
++        isocode="GYD"
++        fullname="Guyana Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="328"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="G$"
++        />
++    <!-- "HKD" - "Hong Kong Dollar"
++    -->
++    <currency
++        isocode="HKD"
++        fullname="Hong Kong Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="344"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="HK$"
++        />
++    <!-- "HNL" - "Lempira"
++    -->
++    <currency
++        isocode="HNL"
++        fullname="Lempira"
++        unitname="lempira"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="340"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="L"
++        />
++    <!-- "HRK" - "Croatian Kuna"
++    -->
++    <currency
++        isocode="HRK"
++        fullname="Croatian Kuna"
++        unitname="kuna"
++        partname="lipa"
++        namespace="ISO4217"
++        exchange-code="191"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="kn"
++        />
++    <!-- "HTG" - "Gourde"
++    -->
++    <currency
++        isocode="HTG"
++        fullname="Gourde"
++        unitname="gourde"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="332"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="G"
++        />
++    <!-- "HUF" - "Forint"
++    -->
++    <currency
++        isocode="HUF"
++        fullname="Forint"
++        unitname="forint"
++        partname="fillr"
++        namespace="ISO4217"
++        exchange-code="348"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol="Ft"
++        />
++    <!-- "IDR" - "Rupiah"
++    -->
++    <currency
++        isocode="IDR"
++        fullname="Rupiah"
++        unitname="rupiah"
++        partname="sen"
++        namespace="ISO4217"
++        exchange-code="360"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol="Rp"
++        />
++    <!-- "IEP" - "Irish Pound"
++      2002-01-01 "EUR" 0.787564
++    -->
++    <currency
++        isocode="IEP"
++        fullname="Irish Pound"
++        unitname="punt"
++        partname="pingin"
++        namespace="ISO4217"
++        exchange-code="372"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "ILS" - "New Israeli Sheqel"
++    -->
++    <currency
++        isocode="ILS"
++        fullname="New Israeli Sheqel"
++        unitname="new shekel"
++        partname="agora"
++        namespace="ISO4217"
++        exchange-code="376"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "INR" - "Indian Rupee"
++    -->
++    <currency
++        isocode="INR"
++        fullname="Indian Rupee"
++        unitname="rupee"
++        partname="paisa"
++        namespace="ISO4217"
++        exchange-code="356"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "IQD" - "Iraqi Dinar"
++    -->
++    <currency
++        isocode="IQD"
++        fullname="Iraqi Dinar"
++        unitname="dinar"
++        partname="fil"
++        namespace="ISO4217"
++        exchange-code="368"
++        parts-per-unit="1000"
++        smallest-fraction="1000"
++        local-symbol="."
++        />
++    <!-- "IRR" - "Iranian Rial"
++    -->
++    <currency
++        isocode="IRR"
++        fullname="Iranian Rial"
++        unitname="rial"
++        partname="dinar"
++        namespace="ISO4217"
++        exchange-code="364"
++        parts-per-unit="1"
++        smallest-fraction="1"
++        local-symbol=""
++        />
++    <!-- "ISK" - "Iceland Krona"
++    -->
++    <currency
++        isocode="ISK"
++        fullname="Iceland Krona"
++        unitname="krona"
++        partname="aur"
++        namespace="ISO4217"
++        exchange-code="352"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol="kr"
++        />
++    <!-- "ITL" - "Italian Lira"
++      2002-01-01 "EUR" 1936.27
++    -->
++    <currency
++        isocode="ITL"
++        fullname="Italian Lira"
++        unitname="lira"
++        partname="lira"
++        namespace="ISO4217"
++        exchange-code="380"
++        parts-per-unit="1"
++        smallest-fraction="1"
++        local-symbol=""
++        />
++    <!-- "JMD" - "Jamaican Dollar"
++    -->
++    <currency
++        isocode="JMD"
++        fullname="Jamaican Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="388"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="J$"
++        />
++    <!-- "JOD" - "Jordanian Dinar"
++    -->
++    <currency
++        isocode="JOD"
++        fullname="Jordanian Dinar"
++        unitname="dinar"
++        partname="fil"
++        namespace="ISO4217"
++        exchange-code="400"
++        parts-per-unit="1000"
++        smallest-fraction="1000"
++        local-symbol="JD"
++        />
++    <!-- "JPY" - "Yen"
++    -->
++    <currency
++        isocode="JPY"
++        fullname="Yen"
++        unitname="yen"
++        partname="sen"
++        namespace="ISO4217"
++        exchange-code="392"
++        parts-per-unit="100"
++        smallest-fraction="1"
++        local-symbol="JP"
++        />
++    <!-- "KES" - "Kenyan Shilling"
++    -->
++    <currency
++        isocode="KES"
++        fullname="Kenyan Shilling"
++        unitname="shilling"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="404"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Ksh"
++        />
++    <!-- "KGS" - "Som"
++    -->
++    <currency
++        isocode="KGS"
++        fullname="Som"
++        unitname="som"
++        partname="tyiyn"
++        namespace="ISO4217"
++        exchange-code="417"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "KHR" - "Riel"
++    -->
++    <currency
++        isocode="KHR"
++        fullname="Riel"
++        unitname="riel"
++        partname="sen"
++        namespace="ISO4217"
++        exchange-code="116"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "KMF" - "Comoro Franc"
++    -->
++    <currency
++        isocode="KMF"
++        fullname="Comoro Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="174"
++        parts-per-unit="100"
++        smallest-fraction="1"
++        local-symbol="FC"
++        />
++    <!-- "KPW" - "North Korean Won"
++    -->
++    <currency
++        isocode="KPW"
++        fullname="North Korean Won"
++        unitname="won"
++        partname="chon"
++        namespace="ISO4217"
++        exchange-code="408"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "KRW" - "Won"
++    -->
++    <currency
++        isocode="KRW"
++        fullname="Won"
++        unitname="won"
++        partname="chon"
++        namespace="ISO4217"
++        exchange-code="410"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "KWD" - "Kuwaiti Dinar"
++    -->
++    <currency
++        isocode="KWD"
++        fullname="Kuwaiti Dinar"
++        unitname="dinar"
++        partname="fils"
++        namespace="ISO4217"
++        exchange-code="414"
++        parts-per-unit="1000"
++        smallest-fraction="1000"
++        local-symbol="."
++        />
++    <!-- "KYD" - "Cayman Islands Dollar"
++    -->
++    <currency
++        isocode="KYD"
++        fullname="Cayman Islands Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="136"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="CI$"
++        />
++    <!-- "KZT" - "Tenge"
++    -->
++    <currency
++        isocode="KZT"
++        fullname="Tenge"
++        unitname="tenge"
++        partname="tiyn"
++        namespace="ISO4217"
++        exchange-code="398"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "LAK" - "Kip"
++    -->
++    <currency
++        isocode="LAK"
++        fullname="Kip"
++        unitname="kip"
++        partname="att"
++        namespace="ISO4217"
++        exchange-code="418"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "LBP" - "Lebanese Pound"
++    -->
++    <currency
++        isocode="LBP"
++        fullname="Lebanese Pound"
++        unitname="pound"
++        partname="piastre"
++        namespace="ISO4217"
++        exchange-code="422"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="."
++        />
++    <!-- "LKR" - "Sri Lanka Rupee"
++    -->
++    <currency
++        isocode="LKR"
++        fullname="Sri Lanka Rupee"
++        unitname="rupee"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="144"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "LRD" - "Liberian Dollar"
++    -->
++    <currency
++        isocode="LRD"
++        fullname="Liberian Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="430"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="L$"
++        />
++    <!-- "LSL" - "Loti"
++    -->
++    <currency
++        isocode="LSL"
++        fullname="Loti"
++        unitname="loti"
++        partname="sente"
++        namespace="ISO4217"
++        exchange-code="426"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="M"
++        />
++    <!-- "LTL" - "Lithuanian Litas"
++    -->
++    <currency
++        isocode="LTL"
++        fullname="Lithuanian Litas"
++        unitname="litas"
++        partname="centas"
++        namespace="ISO4217"
++        exchange-code="440"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Lt"
++        />
++    <!-- "LUF" - "Luxembourg Franc"
++      2002-01-01 "EUR" 40.3399
++    -->
++    <currency
++        isocode="LUF"
++        fullname="Luxembourg Franc"
++        unitname="frang"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="442"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Flux"
++        />
++    <!-- "LVL" - "Latvian Lats"
++      Valid from 2. may 2009. till 31. december 2013, now "EUR" 0.702804
++    -->
++    <currency
++        isocode="LVL"
++        fullname="Latvian Lats"
++        unitname="lats"
++        partname="santms"
++        namespace="ISO4217"
++        exchange-code="428"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Ls"
++        />
++    <!-- "LYD" - "Libyan Dinar"
++    -->
++    <currency
++        isocode="LYD"
++        fullname="Libyan Dinar"
++        unitname="dinar"
++        partname="dirham"
++        namespace="ISO4217"
++        exchange-code="434"
++        parts-per-unit="1000"
++        smallest-fraction="1000"
++        local-symbol="."
++        />
++    <!-- "MAD" - "Moroccan Dirham"
++    -->
++    <currency
++        isocode="MAD"
++        fullname="Moroccan Dirham"
++        unitname="dirham"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="504"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="."
++        />
++    <!-- "MDL" - "Moldovan Leu"
++    -->
++    <currency
++        isocode="MDL"
++        fullname="Moldovan Leu"
++        unitname="leu"
++        partname="ban"
++        namespace="ISO4217"
++        exchange-code="498"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "MGA" - "Malagasy Ariary"
++    -->
++    <currency
++        isocode="MGA"
++        fullname="Malagasy Ariary"
++        unitname="ariary"
++        partname="iraimbilanja"
++        namespace="ISO4217"
++        exchange-code="969"
++        parts-per-unit="5"
++        smallest-fraction="5"
++        local-symbol=""
++        />
++    <!-- "MGF" - "Malagasy Franc"
++      2003-07-31 "MGA" 5
++    -->
++    <currency
++        isocode="MGF"
++        fullname="Malagasy Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="450"
++        parts-per-unit="500"
++        smallest-fraction="500"
++        local-symbol=""
++        />
++    <!-- "MKD" - "Denar"
++    -->
++    <currency
++        isocode="MKD"
++        fullname="Denar"
++        unitname="denar"
++        partname="deni"
++        namespace="ISO4217"
++        exchange-code="807"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "MLF" - "Mali Franc"
++      1984-07-01 "XOF" 2
++    -->
++    <currency
++        isocode="MLF"
++        fullname="Mali Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="466"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "MMK" - "Kyat"
++    -->
++    <currency
++        isocode="MMK"
++        fullname="Kyat"
++        unitname="kyat"
++        partname="pya"
++        namespace="ISO4217"
++        exchange-code="104"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="K"
++        />
++    <!-- "MNT" - "Tugrik"
++    -->
++    <currency
++        isocode="MNT"
++        fullname="Tugrik"
++        unitname="tugrik"
++        partname="mongo"
++        namespace="ISO4217"
++        exchange-code="496"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "MOP" - "Pataca"
++    -->
++    <currency
++        isocode="MOP"
++        fullname="Pataca"
++        unitname="pataca"
++        partname="avo"
++        namespace="ISO4217"
++        exchange-code="446"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="MOP$"
++        />
++    <!-- "MRO" - "Ouguiya"
++    -->
++    <currency
++        isocode="MRO"
++        fullname="Ouguiya"
++        unitname="ouguiya"
++        partname="khoum"
++        namespace="ISO4217"
++        exchange-code="478"
++        parts-per-unit="5"
++        smallest-fraction="5"
++        local-symbol="UM"
++        />
++    <!-- "MTL" - "Maltese Lira"
++      2008-01-01 "EUR" 0.4293
++    -->
++    <currency
++        isocode="MTL"
++        fullname="Maltese Lira"
++        unitname="lira"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="470"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Lm"
++        />
++    <!-- "MUR" - "Mauritius Rupee"
++    -->
++    <currency
++        isocode="MUR"
++        fullname="Mauritius Rupee"
++        unitname="rupee"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="480"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="R"
++        />
++    <!-- "MVR" - "Rufiyaa"
++    -->
++    <currency
++        isocode="MVR"
++        fullname="Rufiyaa"
++        unitname="rufiyaa"
++        partname="laari"
++        namespace="ISO4217"
++        exchange-code="462"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="."
++        />
++    <!-- "MWK" - "Kwacha"
++    -->
++    <currency
++        isocode="MWK"
++        fullname="Kwacha"
++        unitname="kwacha"
++        partname="tambala"
++        namespace="ISO4217"
++        exchange-code="454"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="MK"
++        />
++    <!-- "MXN" - "Mexican Peso"
++      since Jan 1993 (1000 MXP = 1 MXN)
++    -->
++    <currency
++        isocode="MXN"
++        fullname="Mexican Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="484"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Mex$"
++        />
++    <!-- "MXV" - "Mexican Unidad de Inversion (UDI)"
++      fund index based; used for credits, not subject to inflation
++    -->
++    <currency
++        isocode="MXV"
++        fullname="Mexican Unidad de Inversion (UDI)"
++        unitname="UDI"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="979"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "MYR" - "Malaysian Ringgit"
++    -->
++    <currency
++        isocode="MYR"
++        fullname="Malaysian Ringgit"
++        unitname="ringgit"
++        partname="sen"
++        namespace="ISO4217"
++        exchange-code="458"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="RM"
++        />
++    <!-- "MZM" - "Mozambique Metical"
++      2006-07-01 "MZN" 1000
++    -->
++    <currency
++        isocode="MZM"
++        fullname="Mozambique Metical"
++        unitname="metical"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="508"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "MZN" - "Metical"
++    -->
++    <currency
++        isocode="MZN"
++        fullname="Metical"
++        unitname="metical"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="943"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="MTn"
++        />
++    <!-- "NAD" - "Namibia Dollar"
++    -->
++    <currency
++        isocode="NAD"
++        fullname="Namibia Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="516"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="N$"
++        />
++    <!-- "NGN" - "Naira"
++    -->
++    <currency
++        isocode="NGN"
++        fullname="Naira"
++        unitname="naira"
++        partname="kobo"
++        namespace="ISO4217"
++        exchange-code="566"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "NIC" - "Nicaraguan Cordoba"
++      1990-10-13 "NIO" 5000000
++    -->
++    <currency
++        isocode="NIC"
++        fullname="Nicaraguan Cordoba"
++        unitname="cordoba"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="558"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "NIO" - "Cordoba Oro"
++    -->
++    <currency
++        isocode="NIO"
++        fullname="Cordoba Oro"
++        unitname="cordoba"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="558"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="C$"
++        />
++    <!-- "NLG" - "Netherlands Guilder"
++      2002-01-01 "EUR" 2.20371
++    -->
++    <currency
++        isocode="NLG"
++        fullname="Netherlands Guilder"
++        unitname="guilder"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="528"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "NOK" - "Norwegian Krone"
++    -->
++    <currency
++        isocode="NOK"
++        fullname="Norwegian Krone"
++        unitname="krone"
++        partname="ore"
++        namespace="ISO4217"
++        exchange-code="578"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="kr"
++        />
++    <!-- "NPR" - "Nepalese Rupee"
++    -->
++    <currency
++        isocode="NPR"
++        fullname="Nepalese Rupee"
++        unitname="rupee"
++        partname="paise"
++        namespace="ISO4217"
++        exchange-code="524"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "NZD" - "New Zealand Dollar"
++    -->
++    <currency
++        isocode="NZD"
++        fullname="New Zealand Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="554"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="NZ$"
++        />
++    <!-- "OMR" - "Rial Omani"
++    -->
++    <currency
++        isocode="OMR"
++        fullname="Rial Omani"
++        unitname="rial"
++        partname="baisa"
++        namespace="ISO4217"
++        exchange-code="512"
++        parts-per-unit="1000"
++        smallest-fraction="1000"
++        local-symbol=".."
++        />
++    <!-- "PAB" - "Balboa"
++    -->
++    <currency
++        isocode="PAB"
++        fullname="Balboa"
++        unitname="balboa"
++        partname="centsimo"
++        namespace="ISO4217"
++        exchange-code="590"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "PEN" - "Nuevo Sol"
++    -->
++    <currency
++        isocode="PEN"
++        fullname="Nuevo Sol"
++        unitname="nuevo sol"
++        partname="centimo"
++        namespace="ISO4217"
++        exchange-code="604"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="S/."
++        />
++    <!-- "PGK" - "Kina"
++    -->
++    <currency
++        isocode="PGK"
++        fullname="Kina"
++        unitname="kina"
++        partname="toea"
++        namespace="ISO4217"
++        exchange-code="598"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="K"
++        />
++    <!-- "PHP" - "Philippine Peso"
++    -->
++    <currency
++        isocode="PHP"
++        fullname="Philippine Peso"
++        unitname="peso"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="608"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "PKR" - "Pakistan Rupee"
++    -->
++    <currency
++        isocode="PKR"
++        fullname="Pakistan Rupee"
++        unitname="rupee"
++        partname="paisa"
++        namespace="ISO4217"
++        exchange-code="586"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Rs"
++        />
++    <!-- "PLN" - "Zloty"
++    -->
++    <currency
++        isocode="PLN"
++        fullname="Zloty"
++        unitname="zloty"
++        partname="grosz"
++        namespace="ISO4217"
++        exchange-code="985"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="z"
++        />
++    <!-- "PTE" - "Portuguese Escudo"
++      2002-01-01 "EUR" 200.482
++    -->
++    <currency
++        isocode="PTE"
++        fullname="Portuguese Escudo"
++        unitname="escudo"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="620"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$"
++        />
++    <!-- "PYG" - "Guarani"
++      scheduled revaluation 2011
++    -->
++    <currency
++        isocode="PYG"
++        fullname="Guarani"
++        unitname="guarani"
++        partname="centimo"
++        namespace="ISO4217"
++        exchange-code="600"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "QAR" - "Qatari Rial"
++    -->
++    <currency
++        isocode="QAR"
++        fullname="Qatari Rial"
++        unitname="rial"
++        partname="dirham"
++        namespace="ISO4217"
++        exchange-code="634"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="."
++        />
++    <!-- "ROL" - "Romanian Old Leu"
++      2005-07-01 "RON" 10000
++    -->
++    <currency
++        isocode="ROL"
++        fullname="Romanian Old Leu"
++        unitname="leu"
++        partname="ban"
++        namespace="ISO4217"
++        exchange-code="642"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "RON" - "New Leu"
++      scheduled 2012..14: EUR
++    -->
++    <currency
++        isocode="RON"
++        fullname="New Leu"
++        unitname="leu"
++        partname="ban"
++        namespace="ISO4217"
++        exchange-code="946"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "RSD" - "Serbian Dinar"
++    -->
++    <currency
++        isocode="RSD"
++        fullname="Serbian Dinar"
++        unitname="dinar"
++        partname="para"
++        namespace="ISO4217"
++        exchange-code="941"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "RUB" - "Russian Rouble"
++      RUR: 1998-01-1 "RUB" 1000; see bug #393185
++    -->
++    <currency
++        isocode="RUB"
++        fullname="Russian Rouble"
++        unitname="rouble"
++        partname="kopek"
++        namespace="ISO4217"
++        exchange-code="643"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "RWF" - "Rwanda Franc"
++    -->
++    <currency
++        isocode="RWF"
++        fullname="Rwanda Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="646"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="RF"
++        />
++    <!-- "SAR" - "Saudi Riyal"
++    -->
++    <currency
++        isocode="SAR"
++        fullname="Saudi Riyal"
++        unitname="riyal"
++        partname="halala"
++        namespace="ISO4217"
++        exchange-code="682"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="."
++        />
++    <!-- "SBD" - "Solomon Islands Dollar"
++    -->
++    <currency
++        isocode="SBD"
++        fullname="Solomon Islands Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="090"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="SI$"
++        />
++    <!-- "SCR" - "Seychelles Rupee"
++    -->
++    <currency
++        isocode="SCR"
++        fullname="Seychelles Rupee"
++        unitname="rupee"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="690"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="SR"
++        />
++    <!-- "SDD" - "Sudanese Dinar"
++      2007-07-01 "SDG" 100, reunite with South
++    -->
++    <currency
++        isocode="SDD"
++        fullname="Sudanese Dinar"
++        unitname="dinar"
++        partname="piastre"
++        namespace="ISO4217"
++        exchange-code="736"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "SDG" - "Sudanese Pound"
++    -->
++    <currency
++        isocode="SDG"
++        fullname="Sudanese Pound"
++        unitname="pound"
++        partname="qirsh"
++        namespace="ISO4217"
++        exchange-code="938"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "SDP" - "Sudanese Pound"
++      1992-01-01 "SDD" 10, but only in the North
++    -->
++    <currency
++        isocode="SDP"
++        fullname="Sudanese Pound"
++        unitname="pound"
++        partname="piastre"
++        namespace="ISO4217"
++        exchange-code="736"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "SEK" - "Swedish Krona"
++    -->
++    <currency
++        isocode="SEK"
++        fullname="Swedish Krona"
++        unitname="krona"
++        partname="ore"
++        namespace="ISO4217"
++        exchange-code="752"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="kr"
++        />
++    <!-- "SGD" - "Singapore Dollar"
++    -->
++    <currency
++        isocode="SGD"
++        fullname="Singapore Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="702"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="S$"
++        />
++    <!-- "SHP" - "Saint Helena Pound"
++    -->
++    <currency
++        isocode="SHP"
++        fullname="Saint Helena Pound"
++        unitname="pound"
++        partname="penny"
++        namespace="ISO4217"
++        exchange-code="654"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "SIT" - "Slovenian Tolar"
++      2007-01-01 "EUR" 239.640
++    -->
++    <currency
++        isocode="SIT"
++        fullname="Slovenian Tolar"
++        unitname="tolar"
++        partname="stotin"
++        namespace="ISO4217"
++        exchange-code="705"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "SKK" - "Slovak Koruna"
++      2009-01-01 "EUR" 30.126
++    -->
++    <currency
++        isocode="SKK"
++        fullname="Slovak Koruna"
++        unitname="koruna"
++        partname="halier"
++        namespace="ISO4217"
++        exchange-code="703"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "SLL" - "Leone"
++    -->
++    <currency
++        isocode="SLL"
++        fullname="Leone"
++        unitname="leone"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="694"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Le"
++        />
++    <!-- "SOS" - "Somali Shilling"
++    -->
++    <currency
++        isocode="SOS"
++        fullname="Somali Shilling"
++        unitname="shilling"
++        partname="centisimi"
++        namespace="ISO4217"
++        exchange-code="706"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="SoSh"
++        />
++    <!-- "SRD" - "Surinam Dollar"
++    -->
++    <currency
++        isocode="SRD"
++        fullname="Surinam Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="968"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$"
++        />
++    <!-- "SRG" - "Suriname Guilder"
++      2004-01-01 "SRD" 1000
++    -->
++    <currency
++        isocode="SRG"
++        fullname="Suriname Guilder"
++        unitname="guilder"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="740"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "STD" - "Dobra"
++    -->
++    <currency
++        isocode="STD"
++        fullname="Dobra"
++        unitname="dobra"
++        partname="centimo"
++        namespace="ISO4217"
++        exchange-code="678"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Db"
++        />
++    <!-- "SVC" - "El Salvador Colon"
++      2001-01-01 "USD" 8.75
++    -->
++    <currency
++        isocode="SVC"
++        fullname="El Salvador Colon"
++        unitname="colon"
++        partname="centavo"
++        namespace="ISO4217"
++        exchange-code="222"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "SYP" - "Syrian Pound"
++    -->
++    <currency
++        isocode="SYP"
++        fullname="Syrian Pound"
++        unitname="pound"
++        partname="qirsh"
++        namespace="ISO4217"
++        exchange-code="760"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "SZL" - "Lilangeni"
++    -->
++    <currency
++        isocode="SZL"
++        fullname="Lilangeni"
++        unitname="lilangeni"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="748"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="L"
++        />
++    <!-- "THB" - "Baht"
++    -->
++    <currency
++        isocode="THB"
++        fullname="Baht"
++        unitname="baht"
++        partname="satang"
++        namespace="ISO4217"
++        exchange-code="764"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "TJR" - "Tajik Rouble"
++      2002-11-01 "TJS" 1000
++    -->
++    <currency
++        isocode="TJR"
++        fullname="Tajik Rouble"
++        unitname="ruble"
++        partname="ruble"
++        namespace="ISO4217"
++        exchange-code="762"
++        parts-per-unit="1"
++        smallest-fraction="1"
++        local-symbol=""
++        />
++    <!-- "TJS" - "Somoni"
++    -->
++    <currency
++        isocode="TJS"
++        fullname="Somoni"
++        unitname="somoni"
++        partname="diram"
++        namespace="ISO4217"
++        exchange-code="972"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "TMM" - "Manat"
++      2009-01-01 "TMT" 5000
++    -->
++    <currency
++        isocode="TMM"
++        fullname="Manat"
++        unitname="manat"
++        partname="tenga"
++        namespace="ISO4217"
++        exchange-code="795"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "TMT" - "Manat"
++    -->
++    <currency
++        isocode="TMT"
++        fullname="Manat"
++        unitname="manat"
++        partname="tee"
++        namespace="ISO4217"
++        exchange-code="934"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="m"
++        />
++    <!-- "TND" - "Tunisian Dinar"
++    -->
++    <currency
++        isocode="TND"
++        fullname="Tunisian Dinar"
++        unitname="dinar"
++        partname="milim"
++        namespace="ISO4217"
++        exchange-code="788"
++        parts-per-unit="1000"
++        smallest-fraction="1000"
++        local-symbol="."
++        />
++    <!-- "TOP" - "Pa'anga"
++    -->
++    <currency
++        isocode="TOP"
++        fullname="Pa'anga"
++        unitname="Pa'anga"
++        partname="seniti"
++        namespace="ISO4217"
++        exchange-code="776"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="T$"
++        />
++    <!-- "TRY" - "Turkish Lira"
++    -->
++    <currency
++        isocode="TRY"
++        fullname="Turkish Lira"
++        unitname="lira"
++        partname="kuru"
++        namespace="ISO4217"
++        exchange-code="949"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "TTD" - "Trinidad and Tobago Dollar"
++    -->
++    <currency
++        isocode="TTD"
++        fullname="Trinidad and Tobago Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="780"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="TT$"
++        />
++    <!-- "TWD" - "New Taiwan Dollar"
++    -->
++    <currency
++        isocode="TWD"
++        fullname="New Taiwan Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="901"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="NT$"
++        />
++    <!-- "TZS" - "Tanzanian Shilling"
++    -->
++    <currency
++        isocode="TZS"
++        fullname="Tanzanian Shilling"
++        unitname="shilling"
++        partname="senti"
++        namespace="ISO4217"
++        exchange-code="834"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="/"
++        />
++    <!-- "UAH" - "Hryvnia"
++    -->
++    <currency
++        isocode="UAH"
++        fullname="Hryvnia"
++        unitname="hryvnia"
++        partname="kopiyka"
++        namespace="ISO4217"
++        exchange-code="980"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "UGX" - "Uganda Shilling"
++    -->
++    <currency
++        isocode="UGX"
++        fullname="Uganda Shilling"
++        unitname="shilling"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="800"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="USh"
++        />
++    <!-- "USD" - "US Dollar"
++    -->
++    <currency
++        isocode="USD"
++        fullname="US Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="840"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$"
++        />
++    <!-- "USN" - "US Dollar (Next day)"
++      funds code
++    -->
++    <currency
++        isocode="USN"
++        fullname="US Dollar (Next day)"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="997"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$n"
++        />
++    <!-- "USS" - "US Dollar (Same day)"
++      funds code
++    -->
++    <currency
++        isocode="USS"
++        fullname="US Dollar (Same day)"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="998"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$s"
++        />
++    <!-- "UYI" - "Uruguay Peso en Unidades Indexadas"
++    -->
++    <currency
++        isocode="UYI"
++        fullname="Uruguay Peso en Unidades Indexadas"
++        unitname="UI"
++        partname="centesimo"
++        namespace="ISO4217"
++        exchange-code="940"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="UI"
++        />
++    <!-- "UYU" - "Peso Uruguayo"
++    -->
++    <currency
++        isocode="UYU"
++        fullname="Peso Uruguayo"
++        unitname="peso"
++        partname="centesimo"
++        namespace="ISO4217"
++        exchange-code="858"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="$U"
++        />
++    <!-- "UZS" - "Uzbekistan Sum"
++    -->
++    <currency
++        isocode="UZS"
++        fullname="Uzbekistan Sum"
++        unitname="som"
++        partname="tiyin"
++        namespace="ISO4217"
++        exchange-code="860"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="som"
++        />
++    <!-- "VEB" - "Venezuela Bolvar"
++      2008-01-01 "VEF" 1000
++    -->
++    <currency
++        isocode="VEB"
++        fullname="Venezuela Bolvar"
++        unitname="bolivar"
++        partname="centimo"
++        namespace="ISO4217"
++        exchange-code="862"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "VEF" - "Bolivar Fuerte"
++    -->
++    <currency
++        isocode="VEF"
++        fullname="Bolivar Fuerte"
++        unitname="bolivar"
++        partname="centimo"
++        namespace="ISO4217"
++        exchange-code="937"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Bs."
++        />
++    <!-- "VND" - "Dong"
++    -->
++    <currency
++        isocode="VND"
++        fullname="Dong"
++        unitname="ng"
++        partname="xu"
++        namespace="ISO4217"
++        exchange-code="704"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "VUV" - "Vatu"
++    -->
++    <currency
++        isocode="VUV"
++        fullname="Vatu"
++        unitname="vatu"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="548"
++        parts-per-unit="1"
++        smallest-fraction="1"
++        local-symbol="Vt"
++        />
++    <!-- "WST" - "Tala"
++    -->
++    <currency
++        isocode="WST"
++        fullname="Tala"
++        unitname="tala"
++        partname="sene"
++        namespace="ISO4217"
++        exchange-code="882"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="WS$"
++        />
++    <!-- "YER" - "Yemeni Rial"
++    -->
++    <currency
++        isocode="YER"
++        fullname="Yemeni Rial"
++        unitname="riyal"
++        partname="fils"
++        namespace="ISO4217"
++        exchange-code="886"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Rl"
++        />
++    <!-- "YUM" - "Yugoslavian Dinar"
++      2003 replaced by RSD 1
++    -->
++    <currency
++        isocode="YUM"
++        fullname="Yugoslavian Dinar"
++        unitname="dinar"
++        partname="para"
++        namespace="ISO4217"
++        exchange-code="890"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "ZAR" - "Rand"
++    -->
++    <currency
++        isocode="ZAR"
++        fullname="Rand"
++        unitname="rand"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="710"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="R"
++        />
++    <!-- "ZMK" - "Kwacha (old)"
++      replaced by ZMW from 2013-01-01 onwards
++    -->
++    <currency
++        isocode="ZMK"
++        fullname="Kwacha (old)"
++        unitname="kwacha"
++        partname="ngwee"
++        namespace="ISO4217"
++        exchange-code="894"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="ZK"
++        />
++    <!-- "ZMW" - "Zambian Kwacha"
++      replaced ZMK from 2013-01-01 onwards
++    -->
++    <currency
++        isocode="ZMW"
++        fullname="Zambian Kwacha"
++        unitname="kwacha"
++        partname="ngwee"
++        namespace="ISO4217"
++        exchange-code="967"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="ZK"
++        />
++    <!-- "ZWD" - "Zimbabwe Dollar"
++      2006-08-01 "ZWN" 1000, 2008-08-01 "ZWR" 10000000000, 2009-02-01 "ZWD" 1000000000000
++    -->
++    <currency
++        isocode="ZWD"
++        fullname="Zimbabwe Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="716"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "ZWL" - "Zimbabwe Dollar"
++      2009-04 suspended for at least 1 year
++    -->
++    <currency
++        isocode="ZWL"
++        fullname="Zimbabwe Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="716"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="Z.$"
++        />
++
++    <!-- multinational -->
++    <!-- "XAF" - "CFA Franc BEAC"
++      Banque des tats de l'Afrique Centrale
++    -->
++    <currency
++        isocode="XAF"
++        fullname="CFA Franc BEAC"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="950"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- XB* should be replaced by EUR, if I am right -->
++    <!-- "XCD" - "East Caribbean Dollar"
++      Organisation of Eastern Caribbean States
++    -->
++    <currency
++        isocode="XCD"
++        fullname="East Caribbean Dollar"
++        unitname="dollar"
++        partname="cent"
++        namespace="ISO4217"
++        exchange-code="951"
++        parts-per-unit="100"
++        smallest-fraction="100"
++        local-symbol="EC$"
++        />
++    <!-- "XDR" - "SDR"
++      International Monetary Funds Special Drawing Rights
++    -->
++    <currency
++        isocode="XDR"
++        fullname="SDR"
++        unitname="SDR"
++        partname="SDR"
++        namespace="ISO4217"
++        exchange-code="960"
++        parts-per-unit="1"
++        smallest-fraction="1"
++        local-symbol=""
++        />
++    <!-- "XFO" - "Gold-Franc"
++      Bank for International Settlements
++    -->
++    <currency
++        isocode="XFO"
++        fullname="Gold-Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="nil"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "XFU" - "UIC-Franc"
++      Union Internationale des Chemins de fer
++    -->
++    <currency
++        isocode="XFU"
++        fullname="UIC-Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="nil"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "XOF" - "CFA Franc BCEAO"
++      Banque Centrale des tats de l'Afrique de l'Ouest
++    -->
++    <currency
++        isocode="XOF"
++        fullname="CFA Franc BCEAO"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="952"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "XPF" - "CFP Franc"
++      Communaut Financire du Pacifique
++    -->
++    <currency
++        isocode="XPF"
++        fullname="CFP Franc"
++        unitname="franc"
++        partname="centime"
++        namespace="ISO4217"
++        exchange-code="953"
++        parts-per-unit="1"
++        smallest-fraction="100"
++        local-symbol=""
++        />
++    <!-- "XTS" - "Code for testing purposes"
++      Code reserved for testing purposes
++    -->
++    <currency
++        isocode="XTS"
++        fullname="Code for testing purposes"
++        unitname="TEST"
++        partname="test"
++        namespace="ISO4217"
++        exchange-code="963"
++        parts-per-unit="1"
++        smallest-fraction="1000000"
++        local-symbol=""
++        />
++    <!-- "XXX" - "No currency"
++    -->
++    <currency
++        isocode="XXX"
++        fullname="No currency"
++        unitname=""
++        partname=""
++        namespace="ISO4217"
++        exchange-code="999"
++        parts-per-unit="1"
++        smallest-fraction="1000000"
++        local-symbol=""
++        />
++
++    <!-- precious metals -->
++    <!-- "XAG" - "Silver"
++    -->
++    <currency
++        isocode="XAG"
++        fullname="Silver"
++        unitname="ounce"
++        partname="ounce"
++        namespace="ISO4217"
++        exchange-code="961"
++        parts-per-unit="1"
++        smallest-fraction="1000000"
++        local-symbol=""
++        />
++    <!-- "XAU" - "Gold"
++    -->
++    <currency
++        isocode="XAU"
++        fullname="Gold"
++        unitname="ounce"
++        partname="ounce"
++        namespace="ISO4217"
++        exchange-code="959"
++        parts-per-unit="1"
++        smallest-fraction="1000000"
++        local-symbol=""
++        />
++    <!-- "XPD" - "Palladium"
++    -->
++    <currency
++        isocode="XPD"
++        fullname="Palladium"
++        unitname="ounce"
++        partname="ounce"
++        namespace="ISO4217"
++        exchange-code="964"
++        parts-per-unit="1"
++        smallest-fraction="1000000"
++        local-symbol=""
++        />
++    <!-- "XPT" - "Platinum"
++    -->
++    <currency
++        isocode="XPT"
++        fullname="Platinum"
++        unitname="ounce"
++        partname="ounce"
++        namespace="ISO4217"
++        exchange-code="962"
++        parts-per-unit="1"
++        smallest-fraction="1000000"
++        local-symbol=""
++        />
++</currencylist>
+\ No newline at end of file

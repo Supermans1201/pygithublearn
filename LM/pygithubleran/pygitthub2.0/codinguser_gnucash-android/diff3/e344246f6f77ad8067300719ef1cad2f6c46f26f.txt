@@ -1,0 +1,227 @@
+From e344246f6f77ad8067300719ef1cad2f6c46f26f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Thu, 29 Dec 2016 17:24:28 +0100
+Subject: [PATCH] Always inform the user if sending to the export target fails
+
+Errors were logged to Logcat, but the process always ended as succesful.
+
+Also fixes https://github.com/codinguser/gnucash-android/issues/616
+(There were some cases that 1a76361 didn't fix)
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 77 +++++++++-------------
+ .../java/org/gnucash/android/export/Exporter.java  |  2 +-
+ .../android/test/unit/export/BackupTest.java       |  2 +-
+ 3 files changed, 32 insertions(+), 49 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 086104c5..fc809afb 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -35,7 +35,6 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ import com.dropbox.sync.android.DbxAccountManager;
+-import com.dropbox.sync.android.DbxException;
+ import com.dropbox.sync.android.DbxFile;
+ import com.dropbox.sync.android.DbxFileSystem;
+ import com.dropbox.sync.android.DbxPath;
+@@ -165,9 +164,13 @@ public void run() {
+             return false;
+         }
+ 
+-        moveToTarget();
+-
+-        return false;
++        try {
++            moveToTarget();
++        } catch (Exporter.ExporterException e) {
++            Crashlytics.log(Log.ERROR, TAG, "Error sending exported files to target: " + e.getMessage());
++            return false;
++        }
++        return true;
+     }
+ 
+     /**
+@@ -253,7 +256,7 @@ private Exporter getExporter() {
+         }
+     }
+ 
+-    private void moveToTarget() {
++    private void moveToTarget() throws Exporter.ExporterException {
+         switch (mExportParams.getExportTarget()) {
+             case SHARING:
+                 List<String> sdCardExportedFiles = moveExportToSDCard();
+@@ -275,10 +278,13 @@ private void moveToTarget() {
+             case SD_CARD:
+                 moveExportToSDCard();
+                 break;
++
++            default:
++                throw new Exporter.ExporterException(mExportParams, "Invalid target");
+         }
+     }
+ 
+-    private void moveExportToGoogleDrive(){
++    private void moveExportToGoogleDrive() throws Exporter.ExporterException {
+         Log.i(TAG, "Moving exported file to Google Drive");
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+         googleApiClient.blockingConnect();
+@@ -286,8 +292,8 @@ private void moveExportToGoogleDrive(){
+         DriveApi.DriveContentsResult driveContentsResult =
+                 Drive.DriveApi.newDriveContents(googleApiClient).await(1, TimeUnit.MINUTES);
+         if (!driveContentsResult.getStatus().isSuccess()) {
+-            Log.e(TAG, "Error while trying to create new file contents");
+-            return;
++            throw new Exporter.ExporterException(mExportParams,
++                    "Error while trying to create new file contents");
+         }
+         final DriveContents driveContents = driveContentsResult.getDriveContents();
+         DriveFolder.DriveFileResult driveFileResult = null;
+@@ -320,22 +326,19 @@ private void moveExportToGoogleDrive(){
+                                                 .await(1, TimeUnit.MINUTES);
+             }
+         } catch (IOException e) {
+-            Crashlytics.logException(e);
+-            Log.e(TAG, e.getMessage());
++            throw new Exporter.ExporterException(mExportParams, e);
+         }
+ 
+         if (driveFileResult == null)
+-            return;
++            throw new Exporter.ExporterException(mExportParams, "No result received");
+ 
+-        if (!driveFileResult.getStatus().isSuccess()) {
+-            Log.e(TAG, "Error creating file in Google Drive");
+-            showToastFromNonUiThread("Couldn't create the file in Google Drive", Toast.LENGTH_LONG);
+-        } else {
+-            Log.i(TAG, "Created file with id: " + driveFileResult.getDriveFile().getDriveId());
+-        }
++        if (!driveFileResult.getStatus().isSuccess())
++            throw new Exporter.ExporterException(mExportParams, "Error creating file in Google Drive");
++
++        Log.i(TAG, "Created file with id: " + driveFileResult.getDriveFile().getDriveId());
+     }
+ 
+-    private void moveExportToDropbox() {
++    private void moveExportToDropbox() throws Exporter.ExporterException {
+         Log.i(TAG, "Copying exported file to DropBox");
+         String dropboxAppKey = mContext.getString(R.string.dropbox_app_key, BackupPreferenceFragment.DROPBOX_APP_KEY);
+         String dropboxAppSecret = mContext.getString(R.string.dropbox_app_secret, BackupPreferenceFragment.DROPBOX_APP_SECRET);
+@@ -350,13 +353,8 @@ private void moveExportToDropbox() {
+                 dbExportFile.writeFromExistingFile(exportedFile, false);
+                 exportedFile.delete();
+             }
+-        } catch (DbxException.Unauthorized unauthorized) {
+-            Crashlytics.logException(unauthorized);
+-            Log.e(TAG, unauthorized.getMessage());
+-            throw new Exporter.ExporterException(mExportParams);
+         } catch (IOException e) {
+-            Crashlytics.logException(e);
+-            Log.e(TAG, e.getMessage());
++            throw new Exporter.ExporterException(mExportParams);
+         } finally {
+             if (dbExportFile != null) {
+                 dbExportFile.close();
+@@ -364,16 +362,15 @@ private void moveExportToDropbox() {
+         }
+     }
+ 
+-    private void moveExportToOwnCloud() {
++    private void moveExportToOwnCloud() throws Exporter.ExporterException {
+         Log.i(TAG, "Copying exported file to ownCloud");
+ 
+         SharedPreferences mPrefs = mContext.getSharedPreferences(mContext.getString(R.string.owncloud_pref), Context.MODE_PRIVATE);
+ 
+         Boolean mOC_sync = mPrefs.getBoolean(mContext.getString(R.string.owncloud_sync), false);
+ 
+-        if(!mOC_sync){
+-            Log.e(TAG, "ownCloud not enabled.");
+-            return;
++        if (!mOC_sync) {
++            throw new Exporter.ExporterException(mExportParams, "ownCloud not enabled.");
+         }
+ 
+         String mOC_server = mPrefs.getString(mContext.getString(R.string.key_owncloud_server), null);
+@@ -391,7 +388,7 @@ private void moveExportToOwnCloud() {
+             RemoteOperationResult dirResult = new CreateRemoteFolderOperation(
+                     mOC_dir, true).execute(mClient);
+             if (!dirResult.isSuccess())
+-                Log.e(TAG, dirResult.getLogMessage(), dirResult.getException());
++                throw new Exporter.ExporterException(mExportParams, dirResult.getLogMessage());
+         }
+         for (String exportedFilePath : mExportedFiles) {
+             String remotePath = mOC_dir + FileUtils.PATH_SEPARATOR + stripPathPart(exportedFilePath);
+@@ -401,10 +398,9 @@ private void moveExportToOwnCloud() {
+                     exportedFilePath, remotePath, mimeType).execute(mClient);
+ 
+             if (!result.isSuccess())
+-                Log.e(TAG, result.getLogMessage(), result.getException());
+-            else {
+-                new File(exportedFilePath).delete();
+-            }
++                throw new Exporter.ExporterException(mExportParams, result.getLogMessage());
++
++            new File(exportedFilePath).delete();
+         }
+     }
+ 
+@@ -413,7 +409,7 @@ private void moveExportToOwnCloud() {
+      * external storage, which is accessible to the user.
+      * @return The list of files moved to the SD card.
+      */
+-    private List<String> moveExportToSDCard() {
++    private List<String> moveExportToSDCard() throws Exporter.ExporterException {
+         Log.i(TAG, "Moving exported file to external storage");
+         new File(Exporter.getExportFolderPath(mExporter.mBookUID));
+         List<String> dstFiles = new ArrayList<>();
+@@ -424,8 +420,6 @@ private void moveExportToOwnCloud() {
+                 moveFile(src, dst);
+                 dstFiles.add(dst);
+             } catch (IOException e) {
+-                Crashlytics.logException(e);
+-                Log.e(TAG, e.getMessage());
+                 throw new Exporter.ExporterException(mExportParams, e);
+             }
+         }
+@@ -536,15 +530,4 @@ public void moveFile(String src, String dst) throws IOException {
+         }
+         srcFile.delete();
+     }
+-
+-    private void showToastFromNonUiThread(final String message, final int duration) {
+-        if (mContext instanceof Activity) {
+-            ((Activity) mContext).runOnUiThread(new Runnable() {
+-                @Override
+-                public void run() {
+-                    Toast.makeText(mContext, message, duration).show();
+-                }
+-            });
+-        }
+-    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 88afbaba..c79c9b42 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -254,7 +254,7 @@ public String getExportMimeType(){
+         return "text/plain";
+     }
+ 
+-    public static class ExporterException extends RuntimeException{
++    public static class ExporterException extends Exception {
+ 
+         public ExporterException(ExportParams params){
+             super("Failed to generate export with parameters:  " + params.toString());
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java b/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+index 712d515c..7c837a40 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/export/BackupTest.java
+@@ -62,7 +62,7 @@ public void shouldCreateBackup(){
+     }
+ 
+     @Test
+-    public void shouldCreateBackupFileName(){
++    public void shouldCreateBackupFileName() throws Exporter.ExporterException {
+         Exporter exporter = new GncXmlExporter(new ExportParams(ExportFormat.XML));
+         List<String> xmlFiles = exporter.generateExport();
+ 

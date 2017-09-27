@@ -1,0 +1,406 @@
+From 65f329f9781729683a5b59373687f07034cb8e1e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 23 Apr 2015 01:07:38 +0200
+Subject: [PATCH] Export and import Gnucash-desktop compatible XML for template
+ transactions and scheduled actions
+
+FIXME: The formatting of the amounts in XML seems to be wrong. Balances on the desktop are different.
+---
+ .../org/gnucash/android/db/DatabaseAdapter.java    |   2 +-
+ .../gnucash/android/export/xml/GncXmlExporter.java | 125 ++++++++++++++++++---
+ .../gnucash/android/export/xml/GncXmlHelper.java   |  21 ++--
+ .../gnucash/android/importer/GncXmlHandler.java    |  46 ++++++--
+ 4 files changed, 154 insertions(+), 40 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 0b0d34fb..c783ddd7 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -418,7 +418,7 @@ public boolean deleteRecord(@NonNull String uid){
+      * @return String value of the column entry
+      * @throws IllegalArgumentException if either the {@code recordUID} or {@code columnName} do not exist in the database
+      */
+-    protected String getAttribute(@NonNull String recordUID, @NonNull String columnName){
++    public String getAttribute(@NonNull String recordUID, @NonNull String columnName){
+         Cursor cursor = mDb.query(mTableName,
+                 new String[]{columnName},
+                 AccountEntry.COLUMN_UID + " = ?",
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index f5dd1322..0835a689 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -22,9 +22,12 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.TransactionType;
+@@ -39,8 +42,12 @@
+ import java.math.BigDecimal;
+ import java.sql.Timestamp;
+ import java.util.ArrayList;
++import java.util.Collection;
+ import java.util.Currency;
++import java.util.HashMap;
+ import java.util.List;
++import java.util.Map;
++import java.util.TreeMap;
+ import java.util.UUID;
+ import java.util.zip.GZIPOutputStream;
+ 
+@@ -57,6 +64,12 @@
+ public class GncXmlExporter extends Exporter{
+ 
+     /**
++     * Root account for template accounts
++     */
++    private Account mRootTemplateAccount;
++    private Map<String, Account> mTransactionToTemplateAccountMap = new TreeMap<>();
++
++    /**
+      * Construct a new exporter with export parameters
+      * @param params Parameters for the export
+      */
+@@ -180,6 +193,55 @@ private void exportAccounts(XmlSerializer xmlSerializer) throws IOException {
+     }
+ 
+     /**
++     * Exports template accounts
++     * <p>Template accounts are just dummy accounts created for use with template transactions</p>
++     * @param xmlSerializer XML serializer
++     * @param accountList List of template accounts
++     * @throws IOException if could not write XML to output stream
++     */
++    private void exportTemplateAccounts(XmlSerializer xmlSerializer, Collection<Account> accountList) throws IOException {
++        for (Account account : accountList) {
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_ACCOUNT);
++            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
++            // account name
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_NAME);
++            xmlSerializer.text(account.getName());
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_NAME);
++            // account guid
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_ACCT_ID);
++            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++            xmlSerializer.text(account.getUID());
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_ACCT_ID);
++            // account type
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_TYPE);
++            xmlSerializer.text(account.getAccountType().name());
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_TYPE);
++            // commodity
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_ACCOUNT_COMMODITY);
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
++            xmlSerializer.text("template");
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_ID);
++            String acctCurrencyCode = "template";
++            xmlSerializer.text(acctCurrencyCode);
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_ACCOUNT_COMMODITY);
++            // commodity scu
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SCU);
++            xmlSerializer.text("1");
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SCU);
++
++            if (account.getAccountType() != AccountType.ROOT && mRootTemplateAccount != null) {
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PARENT_UID);
++                xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++                xmlSerializer.text(mRootTemplateAccount.getUID());
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PARENT_UID);
++            }
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_ACCOUNT);
++        }
++    }
++
++    /**
+      * Serializes transactions from the database to XML
+      * @param xmlSerializer XML serializer
+      * @param exportTemplates Flag whether to export templates or normal transactions
+@@ -212,7 +274,25 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+         Currency trxCurrency;
+         int fractionDigits;
+         BigDecimal denom = new BigDecimal(100);
+-        String denomString = "100";
++        String denomString = "100"; //FIXME: Should this be currency dependent?
++
++        if (exportTemplates) {
++            mRootTemplateAccount = new Account("Template Root");
++            mRootTemplateAccount.setAccountType(AccountType.ROOT);
++            mTransactionToTemplateAccountMap.put(" ", mRootTemplateAccount);
++            while (cursor.moveToNext()) {
++                Account account = new Account(UUID.randomUUID().toString().replaceAll("-", ""));
++                account.setAccountType(AccountType.BANK);
++                String trnUID = cursor.getString(cursor.getColumnIndexOrThrow("trans_uid"));
++                mTransactionToTemplateAccountMap.put(trnUID, account);
++            }
++
++            exportTemplateAccounts(xmlSerializer, mTransactionToTemplateAccountMap.values());
++            //push cursor back to before the beginning
++            cursor.moveToFirst();
++            cursor.moveToPrevious();
++        }
++
+         while (cursor.moveToNext()){
+             String curTrxUID = cursor.getString(cursor.getColumnIndexOrThrow("trans_uid"));
+             if (!lastTrxUID.equals(curTrxUID)) { // new transaction starts
+@@ -332,7 +412,13 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             // account guid
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_ACCOUNT);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+-            String splitAccountUID = cursor.getString(cursor.getColumnIndexOrThrow("split_acct_uid"));
++            String splitAccountUID = null;
++            if (exportTemplates){
++                //get the UID of the template account
++                 splitAccountUID = mTransactionToTemplateAccountMap.get(curTrxUID).getUID();
++            } else {
++                splitAccountUID = cursor.getString(cursor.getColumnIndexOrThrow("split_acct_uid"));
++            }
+             xmlSerializer.text(splitAccountUID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_ACCOUNT);
+ 
+@@ -349,9 +435,9 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 List<String> slotKeys = new ArrayList<>();
+                 List<String> slotTypes = new ArrayList<>();
+                 List<String> slotValues = new ArrayList<>();
+-                slotKeys.add(GncXmlHelper.KEY_SPLIT_ACCOUNT);
++                slotKeys.add(GncXmlHelper.KEY_SPLIT_ACCOUNT_SLOT);
+                 slotTypes.add(GncXmlHelper.ATTR_VALUE_GUID);
+-                slotValues.add(splitAccountUID);
++                slotValues.add(cursor.getString(cursor.getColumnIndexOrThrow("split_acct_uid")));
+                 TransactionType type = TransactionType.valueOf(trxType);
+                 slotKeys.add(type == TransactionType.CREDIT ? GncXmlHelper.KEY_CREDIT_FORMULA : GncXmlHelper.KEY_DEBIT_FORMULA);
+                 slotTypes.add(GncXmlHelper.ATTR_VALUE_STRING);
+@@ -380,16 +466,26 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+      */
+     private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOException{
+         Cursor cursor = mScheduledActionDbAdapter.fetchAllRecords();
++
+         while (cursor.moveToNext()) {
++            String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
++
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SCHEDULED_ACTION);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_ID);
+-            String scheduledActionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_UID));
+-            xmlSerializer.attribute(null, GncXmlHelper.ATTR_VALUE_GUID, scheduledActionUID);
++            String nameUID = mTransactionToTemplateAccountMap.get(actionUID).getName();
++            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++            xmlSerializer.text(nameUID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_ID);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_NAME);
+-            //FIXME: Export the actual name of the transaction (and make sure to fix the import too, it relies on this ACTION_TYPE)
+-            xmlSerializer.text(cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TYPE)));
++
++            ScheduledAction.ActionType actionType = ScheduledAction.ActionType.valueOf(cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_TYPE)));
++            if (actionType == ScheduledAction.ActionType.TRANSACTION) {
++                String description = TransactionsDbAdapter.getInstance().getAttribute(actionUID, TransactionEntry.COLUMN_DESCRIPTION);
++                xmlSerializer.text(description);
++            } else {
++                xmlSerializer.text(actionType.name());
++            }
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_NAME);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_ENABLED);
+             boolean enabled = cursor.getShort(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ENABLED)) > 0;
+@@ -408,6 +504,7 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.text("0");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_ADVANCE_REMIND_DAYS);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_INSTANCE_COUNT);
++            String scheduledActionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_UID));
+             long instanceCount = mScheduledActionDbAdapter.getActionInstanceCount(scheduledActionUID);
+             xmlSerializer.text(Long.toString(instanceCount));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_INSTANCE_COUNT);
+@@ -445,14 +542,10 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_TAG);
+             }
+ 
+-            //FIXME: generate temporary template accounts to keep gnucash desktop happy
+-            //Ignoring GnuCash XML template account: <sx:templ-acct type="guid">2da76df09056540bb3a37e4a04547d82</sx:templ-acct>
+-
+-            String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
+-            xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_TEMPL_ACTION);
++            xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_TEMPL_ACCOUNT);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+-            xmlSerializer.text(actionUID);
+-            xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_TEMPL_ACTION);
++            xmlSerializer.text(mTransactionToTemplateAccountMap.get(actionUID).getUID());
++            xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_TEMPL_ACCOUNT);
+ 
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_SCHEDULE);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_RECURRENCE);
+@@ -561,7 +654,7 @@ public void generateExport(Writer writer) throws ExporterException{
+             exportTransactions(xmlSerializer, false);
+ 
+             //transaction templates
+-            //TODO: do not include this tag at all if there are not template transactions
++            //TODO: do not include this tag at all if there are no template transactions
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+             exportTransactions(xmlSerializer, true);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index dedcfcef..bc490ad5 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -93,7 +93,6 @@
+     public static final String TAG_SPLIT_QUANTITY   = "split:quantity";
+     public static final String TAG_SPLIT_SLOTS      = "split:slots";
+ 
+-    //TODO: Remove this in the future when scheduled transactions are improved
+     @Deprecated
+     public static final String TAG_RECURRENCE_PERIOD = "trn:recurrence_period";
+ 
+@@ -112,7 +111,7 @@
+     public static final String TAG_SX_NUM_OCCUR             = "sx:num-occur";
+     public static final String TAG_SX_REM_OCCUR             = "sx:rem-occur";
+     public static final String TAG_SX_TAG                   = "sx:tag";
+-    public static final String TAG_SX_TEMPL_ACTION          = "sx:templ-action"; //FIXME: This tag is unknown to GnuCash desktop. For full compat, we will need to fix it
++    public static final String TAG_SX_TEMPL_ACCOUNT         = "sx:templ-acct";
+     public static final String TAG_SX_SCHEDULE              = "sx:schedule";
+     public static final String TAG_RECURRENCE               = "gnc:recurrence";
+     public static final String TAG_RX_MULT                  = "recurrence:mult";
+@@ -125,15 +124,15 @@
+     public static final SimpleDateFormat TIME_FORMATTER = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US);
+     public static final SimpleDateFormat DATE_FORMATTER = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
+ 
+-    public static final String KEY_PLACEHOLDER      = "placeholder";
+-    public static final String KEY_COLOR            = "color";
+-    public static final String KEY_FAVORITE         = "favorite";
+-    public static final String KEY_NOTES            = "notes";
+-    public static final String KEY_EXPORTED         = "exported";
+-    public static final String KEY_SCHEDX_ACTION    = "sched-xaction";
+-    public static final String KEY_SPLIT_ACCOUNT    = "account";
+-    public static final String KEY_DEBIT_FORMULA    = "debit-formula";
+-    public static final String KEY_CREDIT_FORMULA   = "credit-formula";
++    public static final String KEY_PLACEHOLDER              = "placeholder";
++    public static final String KEY_COLOR                    = "color";
++    public static final String KEY_FAVORITE                 = "favorite";
++    public static final String KEY_NOTES                    = "notes";
++    public static final String KEY_EXPORTED                 = "exported";
++    public static final String KEY_SCHEDX_ACTION            = "sched-xaction";
++    public static final String KEY_SPLIT_ACCOUNT_SLOT       = "account";
++    public static final String KEY_DEBIT_FORMULA            = "debit-formula";
++    public static final String KEY_CREDIT_FORMULA           = "credit-formula";
+     public static final String KEY_FROM_SCHED_ACTION        = "from-sched-xaction";
+     public static final String KEY_DEFAULT_TRANSFER_ACCOUNT = "default_transfer_account";
+ 
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 00666a23..20f426dc 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -47,6 +47,7 @@
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Locale;
++import java.util.Map;
+ import java.util.Stack;
+ import java.util.regex.Pattern;
+ 
+@@ -90,6 +91,16 @@
+     List<Account> mAccountList;
+ 
+     /**
++     * List of all the template accounts found
++     */
++    List<Account> mTemplatAccountList;
++
++    /**
++     * Map of the tempate accounts to the template transactions UIDs
++     */
++    Map<String, String> mTemplateAccountToTransactionMap;
++
++    /**
+      * Account map for quick referencing from UID
+      */
+     HashMap<String, Account> mAccountMap;
+@@ -213,6 +224,9 @@ private void init(@Nullable SQLiteDatabase db) {
+         mTransactionList = new ArrayList<>();
+         mScheduledActionsList = new ArrayList<>();
+ 
++        mTemplatAccountList = new ArrayList<>();
++        mTemplateAccountToTransactionMap = new HashMap<>();
++
+         mAutoBalanceSplits = new ArrayList<>();
+     }
+ 
+@@ -338,7 +352,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     case GncXmlHelper.KEY_EXPORTED:
+                         mInExported = true;
+                         break;
+-                    case GncXmlHelper.KEY_SPLIT_ACCOUNT:
++                    case GncXmlHelper.KEY_SPLIT_ACCOUNT_SLOT:
+                         mInSplitAccountSlot = true;
+                         break;
+                     case GncXmlHelper.KEY_CREDIT_FORMULA:
+@@ -390,7 +404,9 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     }
+                 } else if (mInTemplates && mInSplitAccountSlot) {
+                     mSplit.setAccountUID(characterString);
++                    mInSplitAccountSlot = false;
+                 } else if (mInTemplates && mInCreditFormulaSlot) {
++                    //FIXME: Formatting of amounts is broken
+                     NumberFormat numberFormat = NumberFormat.getNumberInstance(Locale.GERMANY);
+                     try {
+                         Number number = numberFormat.parse(characterString);
+@@ -404,6 +420,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                         mInCreditFormulaSlot = false;
+                     }
+                 } else if (mInTemplates && mInDebitFormulaSlot) {
++                    //FIXME: Format of amount export is broken
+                     try {
+                         // TODO: test this. I do not have template transactions to test
+                         // Going through double to decimal will lose accuracy.
+@@ -486,12 +503,16 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 }
+                 break;
+             case GncXmlHelper.TAG_SPLIT_ACCOUNT:
+-                //the split amount uses the account currency
+-                Money amount = new Money(mQuantity, getCurrencyForAccount(characterString));
+-                //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
+-                mSplit.setType(mNegativeQuantity ? TransactionType.CREDIT : TransactionType.DEBIT);
+-                mSplit.setAmount(amount);
+-                mSplit.setAccountUID(characterString);
++                if (!mInTemplates) {
++                    //the split amount uses the account currency
++                    Money amount = new Money(mQuantity, getCurrencyForAccount(characterString));
++                    //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
++                    mSplit.setType(mNegativeQuantity ? TransactionType.CREDIT : TransactionType.DEBIT);
++                    mSplit.setAmount(amount);
++                    mSplit.setAccountUID(characterString);
++                } else {
++                    mTemplateAccountToTransactionMap.put(characterString, mTransaction.getUID());
++                }
+                 break;
+             case GncXmlHelper.TAG_TRN_SPLIT:
+                 mTransaction.addSplit(mSplit);
+@@ -520,9 +541,10 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 mScheduledAction.setUID(characterString);
+                 break;
+             case GncXmlHelper.TAG_SX_NAME:
+-                //FIXME: Do not rely on the type, rather lookup the SX_ID from previous tag to find action type
+-                ScheduledAction.ActionType type = ScheduledAction.ActionType.valueOf(characterString);
+-                mScheduledAction.setActionType(type);
++                if (characterString.equals(ScheduledAction.ActionType.BACKUP.name()))
++                    mScheduledAction.setActionType(ScheduledAction.ActionType.BACKUP);
++                else
++                    mScheduledAction.setActionType(ScheduledAction.ActionType.TRANSACTION);
+                 break;
+             case GncXmlHelper.TAG_SX_ENABLED:
+                 mScheduledAction.setEnabled(characterString.equals("y"));
+@@ -538,8 +560,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 periodType.setMultiplier(mRecurrenceMultiplier);
+                 mScheduledAction.setPeriod(periodType);
+                 break;
+-            case GncXmlHelper.TAG_SX_TEMPL_ACTION:
+-                mScheduledAction.setActionUID(characterString);
++            case GncXmlHelper.TAG_SX_TEMPL_ACCOUNT:
++                mScheduledAction.setActionUID(mTemplateAccountToTransactionMap.get(characterString));
+                 break;
+             case GncXmlHelper.TAG_SCHEDULED_ACTION:
+                 mScheduledActionsList.add(mScheduledAction);

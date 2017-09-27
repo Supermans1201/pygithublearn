@@ -1,0 +1,149 @@
+From ac76ec2adeabc31c8b394535cfaa6e718f07f460 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 6 Jan 2016 14:26:35 +0100
+Subject: [PATCH] Fix CI builds failing due to proguard enabled Make default
+ currency a global setting (and not per book)
+
+TODO: figure out how to enable & configure proguard properly
+---
+ app/build.gradle                                        |  2 +-
+ .../org/gnucash/android/app/GnuCashApplication.java     |  2 +-
+ .../android/db/adapter/BudgetAmountsDbAdapter.java      |  4 ++--
+ .../org/gnucash/android/db/adapter/DatabaseAdapter.java | 17 ++++++++++++++---
+ .../android/test/unit/db/AccountsDbAdapterTest.java     |  5 ++++-
+ build.gradle                                            |  2 +-
+ 6 files changed, 23 insertions(+), 9 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 1def8805..10e916a8 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -81,7 +81,7 @@ android {
+     buildTypes {
+         //todo re-enable proguard and test coverage
+         release {
+-            minifyEnabled true
++            //minifyEnabled true
+             shrinkResources true
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+             if (project.hasProperty("RELEASE_STORE_FILE")){
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index de9841fe..5dc0b6c0 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -295,7 +295,7 @@ public static String getDefaultCurrencyCode(){
+      * @see #getDefaultCurrencyCode()
+      */
+     public static void setDefaultCurrencyCode(@NonNull String currencyCode){
+-        PreferenceActivity.getActiveBookSharedPreferences(context).edit()
++        PreferenceManager.getDefaultSharedPreferences(context).edit()
+                 .putString(getAppContext().getString(R.string.key_default_currency), currencyCode)
+                 .apply();
+         Money.DEFAULT_CURRENCY_CODE = currencyCode;
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BudgetAmountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BudgetAmountsDbAdapter.java
+index a698659d..069168d5 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BudgetAmountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BudgetAmountsDbAdapter.java
+@@ -77,8 +77,8 @@ public BudgetAmount buildModelInstance(@NonNull Cursor cursor) {
+         stmt.bindString(2, budgetAmount.getAccountUID());
+         stmt.bindLong(3, budgetAmount.getAmount().getNumerator());
+         stmt.bindLong(4, budgetAmount.getAmount().getDenominator());
+-        stmt.bindLong(6, budgetAmount.getPeriodNum());
+-        stmt.bindString(7, budgetAmount.getUID());
++        stmt.bindLong(5, budgetAmount.getPeriodNum());
++        stmt.bindString(6, budgetAmount.getUID());
+ 
+         return stmt;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
+index 651b18c4..4022bd7a 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
+@@ -209,6 +209,13 @@ public boolean isOpen(){
+     public void addRecord(@NonNull final Model model){
+         addRecord(model, UpdateMethod.replace);
+     }
++
++    /**
++     * Add a model record to the database.
++     * <p>If unsure about which {@code updateMethod} to use, use {@link UpdateMethod#replace}</p>
++     * @param model Subclass of {@link BaseModel} to be added
++     * @param updateMethod Method to use for adding the record
++     */
+     public void addRecord(@NonNull final Model model, UpdateMethod updateMethod){
+         Log.d(LOG_TAG, String.format("Adding %s record to database: ", model.getClass().getSimpleName()));
+         switch(updateMethod){
+@@ -306,10 +313,8 @@ public long bulkAddRecords(@NonNull List<Model> modelList, UpdateMethod updateMe
+      * This statement can be executed to replace a record in the database.
+      * <p>If the {@link #mReplaceStatement} is null, subclasses should create a new statement and return.<br/>
+      * If it is not null, the previous bindings will be cleared and replaced with those from the model</p>
+-     * @param model Model whose attributes will be used as bindings
+      * @return SQLiteStatement for replacing a record in the database
+      */
+-
+     protected final @NonNull SQLiteStatement getReplaceStatement() {
+         SQLiteStatement stmt = mReplaceStatement;
+         if (stmt == null) {
+@@ -365,7 +370,13 @@ public long bulkAddRecords(@NonNull List<Model> modelList, UpdateMethod updateMe
+         return stmt;
+     }
+ 
+-    protected abstract @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Model Model);
++    /**
++     * Binds the values from the model the the SQL statement
++     * @param stmt SQL statement with placeholders
++     * @param model Model from which to read bind attributes
++     * @return SQL statement ready for execution
++     */
++    protected abstract @NonNull SQLiteStatement setBindings(@NonNull SQLiteStatement stmt, @NonNull final Model model);
+ 
+     /**
+      * Returns a model instance populated with data from the record with GUID {@code uid}
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index ed356eff..3361b82a 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -12,6 +12,7 @@
+ import org.gnucash.android.db.adapter.BudgetAmountsDbAdapter;
+ import org.gnucash.android.db.adapter.BudgetsDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
++import org.gnucash.android.db.adapter.DatabaseAdapter;
+ import org.gnucash.android.db.adapter.PricesDbAdapter;
+ import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.adapter.SplitsDbAdapter;
+@@ -34,6 +35,7 @@
+ import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+ import org.gnucash.android.test.unit.util.ShadowUserVoice;
+ import org.junit.After;
++import org.junit.Assert;
+ import org.junit.Before;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+@@ -436,12 +438,13 @@ public void editingAccountShouldNotDeleteTemplateSplits(){
+ 
+         mTransactionsDbAdapter.addRecord(transaction);
+         List<Transaction> transactions = mTransactionsDbAdapter.getAllRecords();
++        assertThat(transactions).hasSize(1);
+ 
+         assertThat(mTransactionsDbAdapter.getScheduledTransactionsForAccount(account.getUID())).hasSize(1);
+ 
+         //edit the account
+         account.setName("Edited account");
+-        mAccountsDbAdapter.addRecord(account);
++        mAccountsDbAdapter.addRecord(account, DatabaseAdapter.UpdateMethod.update);
+ 
+         assertThat(mTransactionsDbAdapter.getScheduledTransactionsForAccount(account.getUID())).hasSize(1);
+         assertThat(mSplitsDbAdapter.getSplitsForTransaction(transaction.getUID())).hasSize(2);
+diff --git a/build.gradle b/build.gradle
+index 8d339c5b..ab63b8ab 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -5,7 +5,7 @@ buildscript {
+ 	}
+ 	dependencies {
+ 		classpath 'com.android.tools.build:gradle:1.5.0'
+-		classpath 'io.fabric.tools:gradle:1.21.0'
++		classpath 'io.fabric.tools:gradle:1.21.2'
+ 	}
+ }
+ 

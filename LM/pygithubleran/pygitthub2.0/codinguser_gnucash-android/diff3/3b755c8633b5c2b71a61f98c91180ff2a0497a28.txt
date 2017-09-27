@@ -1,0 +1,309 @@
+From 3b755c8633b5c2b71a61f98c91180ff2a0497a28 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 17 Apr 2017 21:53:30 +0200
+Subject: [PATCH] Add support for hourly backups (previously hourly backups
+ were treated as monthly ones)
+
+Fixes #625
+---
+ CHANGELOG.md                                       |  1 +
+ .../java/org/gnucash/android/model/Budget.java     | 12 ++++++
+ .../java/org/gnucash/android/model/PeriodType.java | 19 ++++-----
+ .../java/org/gnucash/android/model/Recurrence.java | 45 +++++++++++++++++-----
+ .../org/gnucash/android/model/ScheduledAction.java |  6 +++
+ .../gnucash/android/ui/util/RecurrenceParser.java  | 15 +++++---
+ app/src/main/res/values/strings.xml                |  4 ++
+ 7 files changed, 76 insertions(+), 26 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ae3dbde9..0fd4986d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,7 @@ Change Log
+ ===============================================================================
+ Version 2.2.0 *(2017-05-xx)*
+ ----------------------------
++* Fixed #625: Hourly backups were being executed on a monthly basis
+ 
+ Version 2.1.6 *(2017-04-15)*
+ ----------------------------
+diff --git a/app/src/main/java/org/gnucash/android/model/Budget.java b/app/src/main/java/org/gnucash/android/model/Budget.java
+index add15128..3e1bdc27 100644
+--- a/app/src/main/java/org/gnucash/android/model/Budget.java
++++ b/app/src/main/java/org/gnucash/android/model/Budget.java
+@@ -204,6 +204,9 @@ public long getStartofCurrentPeriod(){
+         LocalDateTime localDate = new LocalDateTime();
+         int interval = mRecurrence.getMultiplier();
+         switch (mRecurrence.getPeriodType()){
++            case HOUR:
++                localDate = localDate.millisOfDay().withMinimumValue().plusHours(interval);
++                break;
+             case DAY:
+                 localDate = localDate.millisOfDay().withMinimumValue().plusDays(interval);
+                 break;
+@@ -228,6 +231,9 @@ public long getEndOfCurrentPeriod(){
+         LocalDateTime localDate = new LocalDateTime();
+         int interval = mRecurrence.getMultiplier();
+         switch (mRecurrence.getPeriodType()){
++            case HOUR:
++                localDate = localDate.millisOfDay().withMaximumValue().plusHours(interval);
++                break;
+             case DAY:
+                 localDate = localDate.millisOfDay().withMaximumValue().plusDays(interval);
+                 break;
+@@ -248,6 +254,9 @@ public long getStartOfPeriod(int periodNum){
+         LocalDateTime localDate = new LocalDateTime(mRecurrence.getPeriodStart().getTime());
+         int interval = mRecurrence.getMultiplier() * periodNum;
+         switch (mRecurrence.getPeriodType()){
++            case HOUR:
++                localDate = localDate.millisOfDay().withMinimumValue().plusHours(interval);
++                break;
+             case DAY:
+                 localDate = localDate.millisOfDay().withMinimumValue().plusDays(interval);
+                 break;
+@@ -273,6 +282,9 @@ public long getEndOfPeriod(int periodNum){
+         LocalDateTime localDate = new LocalDateTime();
+         int interval = mRecurrence.getMultiplier() * periodNum;
+         switch (mRecurrence.getPeriodType()){
++            case HOUR:
++                localDate = localDate.plusHours(interval);
++                break;
+             case DAY:
+                 localDate = localDate.millisOfDay().withMaximumValue().plusDays(interval);
+                 break;
+diff --git a/app/src/main/java/org/gnucash/android/model/PeriodType.java b/app/src/main/java/org/gnucash/android/model/PeriodType.java
+index 882620be..c7d11c47 100644
+--- a/app/src/main/java/org/gnucash/android/model/PeriodType.java
++++ b/app/src/main/java/org/gnucash/android/model/PeriodType.java
+@@ -26,7 +26,7 @@
+  * @see org.gnucash.android.model.ScheduledAction
+ */
+ public enum PeriodType {
+-    DAY, WEEK, MONTH, YEAR; // TODO: 22.10.2015 add support for hourly
++    HOUR, DAY, WEEK, MONTH, YEAR;
+ 
+ 
+     /**
+@@ -36,6 +36,8 @@
+      */
+     public String getFrequencyDescription() {
+         switch (this) {
++            case HOUR:
++                return "HOURLY";
+             case DAY:
+                 return "DAILY";
+             case WEEK:
+@@ -57,17 +59,10 @@ public String getFrequencyDescription() {
+      */
+     public String getByParts(long startTime){
+         String partString = "";
+-        switch (this){
+-            case DAY:
+-                break;
+-            case WEEK:
+-                String dayOfWeek = new SimpleDateFormat("E", Locale.US).format(new Date(startTime));
+-                //our parser only supports two-letter day names
+-                partString = "BYDAY=" + dayOfWeek.substring(0, dayOfWeek.length()-1).toUpperCase();
+-            case MONTH:
+-                break;
+-            case YEAR:
+-                break;
++        if (this == WEEK){
++            String dayOfWeek = new SimpleDateFormat("E", Locale.US).format(new Date(startTime));
++            //our parser only supports two-letter day names
++            partString = "BYDAY=" + dayOfWeek.substring(0, dayOfWeek.length()-1).toUpperCase();
+         }
+         return partString;
+     }
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index 9a5f94e8..769ea04b 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -24,6 +24,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ import org.joda.time.Days;
++import org.joda.time.Hours;
+ import org.joda.time.LocalDate;
+ import org.joda.time.LocalDateTime;
+ import org.joda.time.Months;
+@@ -114,6 +115,9 @@ public void setPeriodStart(Timestamp periodStart) {
+     public long getPeriod(){
+         long baseMillis = 0;
+         switch (mPeriodType){
++            case HOUR:
++                baseMillis = RecurrenceParser.HOUR_MILLIS;
++                break;
+             case DAY:
+                 baseMillis = RecurrenceParser.DAY_MILLIS;
+                 break;
+@@ -188,12 +192,15 @@ public String getRuleString(){
+      * @return Number of days left in period
+      */
+     public int getDaysLeftInCurrentPeriod(){
+-        LocalDate startDate = new LocalDate(System.currentTimeMillis());
++        LocalDateTime startDate = new LocalDateTime(System.currentTimeMillis());
+         int interval = mMultiplier - 1;
+-        LocalDate endDate = null;
++        LocalDateTime endDate = null;
+         switch (mPeriodType){
++            case HOUR:
++                endDate = new LocalDateTime(System.currentTimeMillis()).plusHours(interval);
++                break;
+             case DAY:
+-                endDate = new LocalDate(System.currentTimeMillis()).plusDays(interval);
++                endDate = new LocalDateTime(System.currentTimeMillis()).plusDays(interval);
+                 break;
+             case WEEK:
+                 endDate = startDate.dayOfWeek().withMaximumValue().plusWeeks(interval);
+@@ -216,14 +223,17 @@ public int getDaysLeftInCurrentPeriod(){
+      * @return Number of periods in this recurrence
+      */
+     public int getNumberOfPeriods(int numberOfPeriods) {
+-        LocalDate startDate = new LocalDate(mPeriodStart.getTime());
+-        LocalDate endDate;
++        LocalDateTime startDate = new LocalDateTime(mPeriodStart.getTime());
++        LocalDateTime endDate;
+         int interval = mMultiplier;
+         //// TODO: 15.08.2016 Why do we add the number of periods. maybe rename method or param
+         switch (mPeriodType){
+-
++            case HOUR: //this is not the droid you are looking for
++                endDate = startDate.plusHours(numberOfPeriods);
++                return Hours.hoursBetween(startDate, endDate).getHours();
+             case DAY:
+-                return 1;
++                endDate = startDate.plusDays(numberOfPeriods);
++                return Days.daysBetween(startDate, endDate).getDays();
+             case WEEK:
+                 endDate = startDate.dayOfWeek().withMaximumValue().plusWeeks(numberOfPeriods);
+                 return Weeks.weeksBetween(startDate, endDate).getWeeks() / interval;
+@@ -245,7 +255,9 @@ public int getNumberOfPeriods(int numberOfPeriods) {
+     public String getTextOfCurrentPeriod(int periodNum){
+         LocalDate startDate = new LocalDate(mPeriodStart.getTime());
+         switch (mPeriodType){
+-
++            case HOUR:
++                //nothing to see here. Just use default period designation
++                break;
+             case DAY:
+                 return startDate.dayOfWeek().getAsText();
+             case WEEK:
+@@ -294,6 +306,9 @@ public int getCount(){
+         int multiple = mMultiplier;
+         ReadablePeriod jodaPeriod;
+         switch (mPeriodType){
++            case HOUR:
++                jodaPeriod = Hours.hours(multiple);
++                break;
+             case DAY:
+                 jodaPeriod = Days.days(multiple);
+                 break;
+@@ -347,6 +362,9 @@ public void setPeriodEnd(int numberOfOccurences){
+         LocalDateTime endDate;
+         int occurrenceDuration = numberOfOccurences * mMultiplier;
+         switch (mPeriodType){
++            case HOUR:
++                endDate = localDate.plusHours(occurrenceDuration);
++                break;
+             case DAY:
+                 endDate = localDate.plusDays(occurrenceDuration);
+                 break;
+@@ -407,8 +425,9 @@ public void setMultiplier(int multiplier){
+      */
+     private String getFrequencyRepeatString(){
+         Resources res = GnuCashApplication.getAppContext().getResources();
+-        //todo: take multiplier into account here
+         switch (mPeriodType) {
++            case HOUR:
++                return res.getQuantityString(R.plurals.label_every_x_hours, mMultiplier, mMultiplier);
+             case DAY:
+                 return res.getQuantityString(R.plurals.label_every_x_days, mMultiplier, mMultiplier);
+             case WEEK:
+@@ -457,6 +476,14 @@ public static Recurrence fromLegacyPeriod(long period) {
+             return recurrence;
+         }
+ 
++        result = (int) (period/RecurrenceParser.HOUR_MILLIS);
++        if (result > 0) {
++            Recurrence recurrence = new Recurrence(PeriodType.HOUR);
++            recurrence.setMultiplier(result);
++            return recurrence;
++        }
++
++
+         return new Recurrence(PeriodType.DAY);
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+index b8f49219..8a743abd 100644
+--- a/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledAction.java
+@@ -152,6 +152,9 @@ public long getTimeOfLastSchedule(){
+ 
+         int factor = (mExecutionCount-1) * multiplier;
+         switch (mRecurrence.getPeriodType()){
++            case HOUR:
++                startTime = startTime.plusHours(factor);
++                break;
+             case DAY:
+                 startTime = startTime.plusDays(factor);
+                 break;
+@@ -214,6 +217,9 @@ private long computeNextScheduledExecutionTimeStartingAt(long startTime) {
+         int multiplier = mRecurrence.getMultiplier();
+         LocalDateTime nextScheduledExecution = LocalDateTime.fromDateFields(new Date(startTime));
+         switch (mRecurrence.getPeriodType()) {
++            case HOUR:
++                nextScheduledExecution = nextScheduledExecution.plusHours(multiplier);
++                break;
+             case DAY:
+                 nextScheduledExecution = nextScheduledExecution.plusDays(multiplier);
+                 break;
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index 2855b711..15e4346a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -39,11 +39,12 @@
+  */
+ public class RecurrenceParser {
+     public static final long SECOND_MILLIS  = 1000;
+-    public static final long MINUTE_MILLIS  = 60*SECOND_MILLIS;
+-    public static final long DAY_MILLIS     = 24*60*MINUTE_MILLIS;
+-    public static final long WEEK_MILLIS    = 7*DAY_MILLIS;
+-    public static final long MONTH_MILLIS   = 30*DAY_MILLIS;
+-    public static final long YEAR_MILLIS    = 12*MONTH_MILLIS;
++    public static final long MINUTE_MILLIS  = 60 * SECOND_MILLIS;
++    public static final long HOUR_MILLIS    = 60 * MINUTE_MILLIS;
++    public static final long DAY_MILLIS     = 24 * 60 * MINUTE_MILLIS;
++    public static final long WEEK_MILLIS    = 7 * DAY_MILLIS;
++    public static final long MONTH_MILLIS   = 30 * DAY_MILLIS;
++    public static final long YEAR_MILLIS    = 12 * MONTH_MILLIS;
+ 
+     /**
+      * Parse an {@link EventRecurrence} into a {@link Recurrence} object
+@@ -56,6 +57,10 @@ public static Recurrence parse(EventRecurrence eventRecurrence){
+ 
+         PeriodType periodType;
+         switch(eventRecurrence.freq){
++            case EventRecurrence.HOURLY:
++                periodType = PeriodType.HOUR;
++                break;
++
+             case EventRecurrence.DAILY:
+                 periodType = PeriodType.DAY;
+                 break;
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index f4706ec2..dc73d2f3 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -318,6 +318,10 @@
+     <string name="owncloud_server_ok">OC server OK</string>
+     <string name="owncloud_user_ok">OC username/password OK</string>
+     <string name="owncloud_dir_ok">Dir name OK</string>
++    <plurals name="label_every_x_hours">
++        <item quantity="one">Hourly</item>
++        <item quantity="other">Every %d hours</item>
++    </plurals>
+     <plurals name="label_every_x_days">
+         <item quantity="one">Daily</item>
+         <item quantity="other">Every %d days</item>

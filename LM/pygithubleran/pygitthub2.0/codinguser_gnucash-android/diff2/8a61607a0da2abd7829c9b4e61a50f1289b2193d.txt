@@ -1,0 +1,136 @@
+From 8a61607a0da2abd7829c9b4e61a50f1289b2193d Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 4 Feb 2016 15:36:53 +0100
+Subject: [PATCH] Fix: computation of imbalance amount in split editor for
+ Liabilities
+
+Fixes #462
+Hide split button when in single-entry mode
+Upgrade android build tools version to 23.0.2 and android gradle tools to 1.5.0
+---
+ CHANGELOG.md                                       |  2 ++
+ app/build.gradle                                   |  4 ++--
+ .../ui/transaction/SplitEditorFragment.java        | 24 ++++++++++++++++------
+ .../ui/transaction/TransactionFormFragment.java    |  1 +
+ build.gradle                                       |  2 +-
+ 5 files changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b25d65d9..d46dbcac 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,8 @@ Change Log
+ Version 2.0.6 *(2016-02-29)*
+ ----------------------------
+ * Fixed: Saving transaction gets slower with increase in size of database
++* Fixed: Imbalance amount wrongly computed in split editor (for some accounts)
++* Fixed: Amount text boxes in split editor sometimes do not get focus
+ * Fixed: Crash when creating a new transaction with no transfer account
+ 
+ Version 2.0.5 *(2015-12-12)*
+diff --git a/app/build.gradle b/app/build.gradle
+index 1a8df8fc..b5fac63f 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -5,7 +5,7 @@ apply plugin: 'io.fabric'
+ 
+ def versionMajor = 2
+ def versionMinor = 0
+-def versionPatch = 5
++def versionPatch = 6
+ def versionBuild = 0
+ 
+ def buildTime() {
+@@ -21,7 +21,7 @@ def gitSha() {
+ 
+ android {
+     compileSdkVersion 23
+-    buildToolsVersion "23.0.1"
++    buildToolsVersion "23.0.2"
+     defaultConfig {
+         applicationId "org.gnucash.android"
+         testApplicationId 'org.gnucash.android.test'
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+index a45fcb6f..143bec10 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2014 - 2016 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -43,8 +43,6 @@
+ import android.widget.TextView;
+ import android.widget.Toast;
+ 
+-import com.crashlytics.android.Crashlytics;
+-
+ import net.objecthunter.exp4j.Expression;
+ import net.objecthunter.exp4j.ExpressionBuilder;
+ 
+@@ -443,14 +441,25 @@ public void afterTextChanged(Editable editable) {
+             for (View splitItem : mSplitItemViewList) {
+                 SplitViewHolder viewHolder = (SplitViewHolder) splitItem.getTag();
+                 BigDecimal amount = viewHolder.getAmountValue().abs();
++                long accountId = viewHolder.accountsSpinner.getSelectedItemId();
++                boolean hasDebitNormalBalance = AccountsDbAdapter.getInstance()
++                        .getAccountType(accountId).hasDebitNormalBalance();
++
+                 if (viewHolder.splitTypeSwitch.isChecked()) {
+-                    imbalance = imbalance.subtract(amount);
++                    if (hasDebitNormalBalance)
++                        imbalance = imbalance.add(amount);
++                    else
++                        imbalance = imbalance.subtract(amount);
+                 } else {
+-                    imbalance = imbalance.add(amount);
++                    if (hasDebitNormalBalance)
++                        imbalance = imbalance.subtract(amount);
++                    else
++                        imbalance = imbalance.add(amount);
+                 }
++
+             }
+ 
+-            TransactionsActivity.displayBalance(mImbalanceTextView, new Money(imbalance.negate(), mCommodity));
++            TransactionsActivity.displayBalance(mImbalanceTextView, new Money(imbalance, mCommodity));
+         }
+     }
+ 
+@@ -477,6 +486,9 @@ public void onItemSelected(AdapterView<?> parentView, View selectedItemView, int
+             AccountType accountType = mAccountsDbAdapter.getAccountType(id);
+             mTypeToggleButton.setAccountType(accountType);
+ 
++            //refresh the imbalance amount if we change the account
++            mImbalanceWatcher.afterTextChanged(null);
++
+             String fromCurrencyCode = mAccountsDbAdapter.getCurrencyCode(mAccountUID);
+             String targetCurrencyCode = mAccountsDbAdapter.getCurrencyCode(mAccountsDbAdapter.getUID(id));
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index fd4486d1..7b61c6bb 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -297,6 +297,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
+ 		if (!mUseDoubleEntry){
+ 			mDoubleEntryLayout.setVisibility(View.GONE);
++            mOpenSplitEditor.setVisibility(View.GONE);
+ 		}
+ 
+         mAccountUID = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
+diff --git a/build.gradle b/build.gradle
+index b2d2eee5..2fa480f7 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -4,7 +4,7 @@ buildscript {
+ 		jcenter()
+ 	}
+ 	dependencies {
+-		classpath 'com.android.tools.build:gradle:1.3.0'
++		classpath 'com.android.tools.build:gradle:1.5.0'
+ 		classpath 'io.fabric.tools:gradle:1.+'
+ 	}
+ }

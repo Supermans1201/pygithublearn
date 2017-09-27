@@ -1,0 +1,409 @@
+From 0575ebdabd15af7acfcdc105f47828f84abc0601 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 23 Apr 2015 11:13:02 +0200
+Subject: [PATCH] Fixed bugs in XML import and export
+
+Fixed: scheduled action dates not imported from XML
+Fixed: Scheduled service runs disabled scheduled actions
+Fixed: Incorrect amount export for template transaction splits
+
+Disclaimer: Importing template transaction amounts works on my machine
+(and in my locale!)
+---
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 11 ++++
+ .../gnucash/android/export/xml/GncXmlExporter.java | 41 +++++++-------
+ .../gnucash/android/export/xml/GncXmlHelper.java   | 40 +++++++++----
+ .../gnucash/android/importer/GncXmlHandler.java    | 66 +++++++++++++---------
+ .../gnucash/android/service/SchedulerService.java  |  3 +-
+ 5 files changed, 102 insertions(+), 59 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 76a28599..b6e03e1c 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -500,6 +500,17 @@ public long getAllTransactionsCount() {
+     }
+ 
+     /**
++     * Returns the number of template transactions in the database
++     * @return Number of template transactions
++     */
++    public long getTemplateTransactionsCount(){
++        String sql = "SELECT COUNT(*) FROM " + TransactionEntry.TABLE_NAME
++                + " WHERE " + TransactionEntry.COLUMN_TEMPLATE + "=1";
++        SQLiteStatement statement = mDb.compileStatement(sql);
++        return statement.simpleQueryForLong();
++    }
++
++    /**
+      * Returns a cursor to transactions whose name (UI: description) start with the <code>prefix</code>
+      * <p>This method is used for autocomplete suggestions when creating new transactions. <br/>
+      * The suggestions are either transactions which have at least one split with {@code accountUID} or templates.</p>
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 0835a689..aa56b82f 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -44,7 +44,6 @@
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Currency;
+-import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.TreeMap;
+@@ -327,18 +326,18 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 // date posted, time which user put on the transaction
+                 String strDate = GncXmlHelper.formatDate(cursor.getLong(cursor.getColumnIndexOrThrow("trans_time")));
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_DATE_POSTED);
+-                xmlSerializer.startTag(null, GncXmlHelper.TAG_DATE);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_TS_DATE);
+                 xmlSerializer.text(strDate);
+-                xmlSerializer.endTag(null, GncXmlHelper.TAG_DATE);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_TS_DATE);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_DATE_POSTED);
+ 
+                 // date entered, time when the transaction was actually created
+                 Timestamp timeEntered = Timestamp.valueOf(cursor.getString(cursor.getColumnIndexOrThrow("trans_date_posted")));
+                 String dateEntered = GncXmlHelper.formatDate(timeEntered.getTime());
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_DATE_ENTERED);
+-                xmlSerializer.startTag(null, GncXmlHelper.TAG_DATE);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_TS_DATE);
+                 xmlSerializer.text(dateEntered);
+-                xmlSerializer.endTag(null, GncXmlHelper.TAG_DATE);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_TS_DATE);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_DATE_ENTERED);
+ 
+                 // description
+@@ -396,11 +395,11 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RECONCILED_STATE);
+             // value, in the transaction's currency
+             String trxType = cursor.getString(cursor.getColumnIndexOrThrow("split_type"));
+-            BigDecimal value = new BigDecimal(cursor.getString(cursor.getColumnIndexOrThrow("split_amount")));
+-            value = value.multiply(denom);
++            BigDecimal splitAmount = new BigDecimal(cursor.getString(cursor.getColumnIndexOrThrow("split_amount")));
+             String strValue = "0";
+-            if (!exportTemplates) //when doing normal transaction export
+-                    strValue = (trxType.equals("CREDIT") ? "-" : "") + value.stripTrailingZeros().toPlainString() + "/" + denomString;
++            if (!exportTemplates) { //when doing normal transaction export
++                strValue = (trxType.equals("CREDIT") ? "-" : "") + splitAmount.multiply(denom).stripTrailingZeros().toPlainString() + "/" + denomString;
++            }
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_VALUE);
+             xmlSerializer.text(strValue);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SPLIT_VALUE);
+@@ -441,7 +440,7 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                 TransactionType type = TransactionType.valueOf(trxType);
+                 slotKeys.add(type == TransactionType.CREDIT ? GncXmlHelper.KEY_CREDIT_FORMULA : GncXmlHelper.KEY_DEBIT_FORMULA);
+                 slotTypes.add(GncXmlHelper.ATTR_VALUE_STRING);
+-                slotValues.add(GncXmlHelper.getNumberFormatForTemplateSplits().format(value.doubleValue())); //FIXME: Check the proper formatting of the amount string here
++                slotValues.add(GncXmlHelper.formatTemplateSplitAmount(splitAmount));
+ 
+                 exportSlots(xmlSerializer, slotKeys, slotTypes, slotValues);
+ 
+@@ -492,7 +491,7 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.text(enabled ? "y" : "n");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_ENABLED);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_AUTO_CREATE);
+-            xmlSerializer.text("y");
++            xmlSerializer.text("n"); //we do not want transactions auto-created on the desktop.
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_AUTO_CREATE);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_AUTO_CREATE_NOTIFY);
+             xmlSerializer.text("n"); //TODO: if we ever support notifying before creating a scheduled transaction, then update this
+@@ -510,8 +509,9 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_INSTANCE_COUNT);
+ 
+             //start date
+-            long startTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
+-            serializeDate(xmlSerializer, GncXmlHelper.TAG_SX_START, startTime);
++            String createdTimestamp = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_CREATED_AT));
++            long scheduleStartTime = Timestamp.valueOf(createdTimestamp).getTime();
++            serializeDate(xmlSerializer, GncXmlHelper.TAG_SX_START, scheduleStartTime);
+ 
+             long lastRunTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_LAST_RUN));
+             if (lastRunTime > 0){
+@@ -559,7 +559,8 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+             xmlSerializer.text(periodType.name().toLowerCase());
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RX_PERIOD_TYPE);
+ 
+-            serializeDate(xmlSerializer, GncXmlHelper.TAG_RX_START, startTime);
++            long recurrenceStartTime = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_START_TIME));
++            serializeDate(xmlSerializer, GncXmlHelper.TAG_RX_START, recurrenceStartTime);
+ 
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RECURRENCE);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_SCHEDULE);
+@@ -613,7 +614,7 @@ public void generateExport(Writer writer) throws ExporterException{
+             }
+             // book count
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_COUNT_DATA);
+-            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, "book");
++            xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, GncXmlHelper.ATTR_VALUE_BOOK);
+             xmlSerializer.text("1");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_COUNT_DATA);
+             // book
+@@ -654,11 +655,11 @@ public void generateExport(Writer writer) throws ExporterException{
+             exportTransactions(xmlSerializer, false);
+ 
+             //transaction templates
+-            //TODO: do not include this tag at all if there are no template transactions
+-            xmlSerializer.startTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+-            exportTransactions(xmlSerializer, true);
+-            xmlSerializer.endTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+-
++            if (mTransactionsDbAdapter.getTemplateTransactionsCount() > 0) {
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
++                exportTransactions(xmlSerializer, true);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
++            }
+             //scheduled actions
+             exportScheduledActions(xmlSerializer);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index bc490ad5..818e9923 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -17,6 +17,8 @@
+ 
+ package org.gnucash.android.export.xml;
+ 
++import android.support.annotation.NonNull;
++
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.TransactionType;
+@@ -39,7 +41,7 @@
+  * @author Yongxin Wang <fefe.wyx@gmail.com>
+  */
+ public abstract class GncXmlHelper {
+-    public static final String TAG_PREFIX           = "gnc:";
++    public static final String TAG_GNC_PREFIX       = "gnc:";
+ 
+     public static final String ATTR_KEY_CD_TYPE     = "cd:type";
+     public static final String ATTR_KEY_TYPE        = "type";
+@@ -77,7 +79,7 @@
+     public static final String TAG_TRX_ID           = "trn:id";
+     public static final String TAG_TRX_CURRENCY     = "trn:currency";
+     public static final String TAG_DATE_POSTED      = "trn:date-posted";
+-    public static final String TAG_DATE             = "ts:date";
++    public static final String TAG_TS_DATE          = "ts:date";
+     public static final String TAG_DATE_ENTERED     = "trn:date-entered";
+     public static final String TAG_TRN_DESCRIPTION  = "trn:description";
+     public static final String TAG_TRN_SPLITS       = "trn:splits";
+@@ -119,10 +121,10 @@
+     public static final String TAG_RX_START                 = "recurrence:start";
+ 
+ 
+-    public static final String RECURRENCE_VERSION   = "1.0.0";
+-    public static final String BOOK_VERSION         = "2.0.0";
+-    public static final SimpleDateFormat TIME_FORMATTER = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US);
+-    public static final SimpleDateFormat DATE_FORMATTER = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
++    public static final String RECURRENCE_VERSION           = "1.0.0";
++    public static final String BOOK_VERSION                 = "2.0.0";
++    public static final SimpleDateFormat TIME_FORMATTER     = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US);
++    public static final SimpleDateFormat DATE_FORMATTER     = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
+ 
+     public static final String KEY_PLACEHOLDER              = "placeholder";
+     public static final String KEY_COLOR                    = "color";
+@@ -168,11 +170,23 @@ public static String formatMoney(Split split){
+     }
+ 
+     /**
++     * Parses the amounts in template transaction splits
++     * <p>This makes the assumption that the amount uses comma (,) as decimal separators</p>
++     * @param amountString String value of the amount.
++     * @return BigDecimal representation of the amount
++     */
++    public static BigDecimal parseTemplateSplitAmount(@NonNull String amountString){
++        amountString = amountString.replaceAll("\\.", ""); //first remove periods (thousandths separator)
++        amountString = amountString.replaceAll(",", "."); //replace decimal separator (,) with periods
++        return new BigDecimal(amountString);
++    }
++
++    /**
+      * Parses amount strings from GnuCash XML into {@link java.math.BigDecimal}s
+      * @param amountString String containing the amount
+      * @return BigDecimal with numerical value
+      */
+-    public static BigDecimal parseMoney(String amountString) throws ParseException {
++    public static BigDecimal parseSplitAmount(String amountString) throws ParseException {
+         int pos = amountString.indexOf("/");
+         if (pos < 0)
+         {
+@@ -184,12 +198,14 @@ public static BigDecimal parseMoney(String amountString) throws ParseException {
+     }
+ 
+     /**
+-     * Returns a {@link java.text.NumberFormat} for parsing or writing amounts in template splits
+-     * @return NumberFormat object
++     * Format the amount in template splits.
++     * This format uses commas for decimal separation
++     * @param amount Amount to be formatted
++     * @return String representation of amount
+      */
+-    public static NumberFormat getNumberFormatForTemplateSplits(){
++    public static String formatTemplateSplitAmount(BigDecimal amount){
+         //TODO: Check if GnuCash desktop always using this formatting or if it is device locale specific
+-        return NumberFormat.getNumberInstance(Locale.GERMANY);
++        String value = amount.toPlainString();
++        return value.replaceAll("\\.", ",");
+     }
+-
+ }
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 20f426dc..9531ea68 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -1,6 +1,6 @@
+ /*
+  * Copyright (c) 2013 - 2015 Ngewi Fet <ngewif@gmail.com>
+- * Copyright (c) 2014 Yongxin Wang <fefe.wyx@gmail.com>
++ * Copyright (c) 2014 - 2015 Yongxin Wang <fefe.wyx@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -172,6 +172,7 @@
+     boolean mIsScheduledStart   = false;
+     boolean mIsScheduledEnd     = false;
+     boolean mIsLastRun          = false;
++    boolean mIsRecurrenceStart  = false;
+ 
+     /**
+      * Multiplier for the recurrence period type. e.g. period type of week and multiplier of 2 means bi-weekly
+@@ -268,6 +269,9 @@ public void startElement(String uri, String localName,
+             case GncXmlHelper.TAG_SX_LAST:
+                 mIsLastRun = true;
+                 break;
++            case GncXmlHelper.TAG_RX_START:
++                mIsRecurrenceStart = true;
++                break;
+         }
+     }
+ 
+@@ -406,21 +410,15 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     mSplit.setAccountUID(characterString);
+                     mInSplitAccountSlot = false;
+                 } else if (mInTemplates && mInCreditFormulaSlot) {
+-                    //FIXME: Formatting of amounts is broken
+-                    NumberFormat numberFormat = NumberFormat.getNumberInstance(Locale.GERMANY);
+                     try {
+-                        Number number = numberFormat.parse(characterString);
+-                        Money amount = new Money(new BigDecimal(number.doubleValue()), mTransaction.getCurrency());
++                        Money amount = new Money(GncXmlHelper.parseTemplateSplitAmount(characterString),
++                                mTransaction.getCurrency());
+                         mSplit.setAmount(amount.absolute());
+                         mSplit.setType(TransactionType.CREDIT);
+-                    } catch (ParseException e) {
+-                        Log.e(LOG_TAG, "Error parsing template split amount. " + e.getMessage());
+-                        e.printStackTrace();
+                     } finally {
+                         mInCreditFormulaSlot = false;
+                     }
+                 } else if (mInTemplates && mInDebitFormulaSlot) {
+-                    //FIXME: Format of amount export is broken
+                     try {
+                         // TODO: test this. I do not have template transactions to test
+                         // Going through double to decimal will lose accuracy.
+@@ -428,7 +426,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                         // from Android SDK Ddoc:
+                         //    new BigDecimal(0.1) is equal to 0.1000000000000000055511151231257827021181583404541015625. This happens as 0.1 cannot be represented exactly in binary.
+                         //    To generate a big decimal instance which is equivalent to 0.1 use the BigDecimal(String) constructor.
+-                        Money amount = new Money(new BigDecimal(characterString), mTransaction.getCurrency());
++                        Money amount = new Money(GncXmlHelper.parseTemplateSplitAmount(characterString),
++                                mTransaction.getCurrency());
+                         mSplit.setAmount(amount.absolute());
+                         mSplit.setType(TransactionType.DEBIT);
+                     } catch (NumberFormatException e) {
+@@ -446,7 +445,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_TRN_DESCRIPTION:
+                 mTransaction.setDescription(characterString);
+                 break;
+-            case GncXmlHelper.TAG_DATE:
++            case GncXmlHelper.TAG_TS_DATE:
+                 try {
+                     if (mIsDatePosted && mTransaction != null) {
+                         mTransaction.setTime(GncXmlHelper.parseDate(characterString));
+@@ -457,20 +456,6 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                         mTransaction.setCreatedTimestamp(timestamp);
+                         mIsDateEntered = false;
+                     }
+-                    if (mIsScheduledStart && mScheduledAction != null) {
+-                        mScheduledAction.setStartTime(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
+-                        mIsScheduledStart = false;
+-                    }
+-
+-                    if (mIsScheduledEnd && mScheduledAction != null) {
+-                        mScheduledAction.setEndTime(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
+-                        mIsScheduledEnd = false;
+-                    }
+-
+-                    if (mIsLastRun && mScheduledAction != null) {
+-                        mScheduledAction.setLastRun(GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime());
+-                        mIsLastRun = false;
+-                    }
+                 } catch (ParseException e) {
+                     e.printStackTrace();
+                     throw new SAXException("Unable to parse transaction time", e);
+@@ -496,7 +481,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     } else {
+                         mNegativeQuantity = false;
+                     }
+-                    mQuantity = GncXmlHelper.parseMoney(q);
++                    mQuantity = GncXmlHelper.parseSplitAmount(q);
+                 } catch (ParseException e) {
+                     e.printStackTrace();
+                     throw new SAXException("Unable to parse money", e);
+@@ -536,6 +521,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS:
+                 mInTemplates = false;
+                 break;
++
+             // ========================= PROCESSING SCHEDULED ACTIONS ==================================
+             case GncXmlHelper.TAG_SX_ID:
+                 mScheduledAction.setUID(characterString);
+@@ -560,6 +546,34 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 periodType.setMultiplier(mRecurrenceMultiplier);
+                 mScheduledAction.setPeriod(periodType);
+                 break;
++            case GncXmlHelper.TAG_GDATE:
++                try {
++                    long date = GncXmlHelper.DATE_FORMATTER.parse(characterString).getTime();
++                    if (mIsScheduledStart && mScheduledAction != null) {
++                        mScheduledAction.setCreatedTimestamp(new Timestamp(date));
++                        mIsScheduledStart = false;
++                    }
++
++                    if (mIsScheduledEnd && mScheduledAction != null) {
++                        mScheduledAction.setEndTime(date);
++                        mIsScheduledEnd = false;
++                    }
++
++                    if (mIsLastRun && mScheduledAction != null) {
++                        mScheduledAction.setLastRun(date);
++                        mIsLastRun = false;
++                    }
++
++                    if (mIsRecurrenceStart && mScheduledAction != null){
++                        mScheduledAction.setStartTime(date);
++                        mIsRecurrenceStart = false;
++                    }
++                } catch (ParseException e) {
++                    Log.e(LOG_TAG, e.getMessage());
++                    e.printStackTrace();
++                    throw new SAXException("Unable to parse scheduled action dates", e);
++                }
++                break;
+             case GncXmlHelper.TAG_SX_TEMPL_ACCOUNT:
+                 mScheduledAction.setActionUID(mTemplateAccountToTransactionMap.get(characterString));
+                 break;
+diff --git a/app/src/main/java/org/gnucash/android/service/SchedulerService.java b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+index 02b15d6b..e4a1d22d 100644
+--- a/app/src/main/java/org/gnucash/android/service/SchedulerService.java
++++ b/app/src/main/java/org/gnucash/android/service/SchedulerService.java
+@@ -76,7 +76,8 @@ protected void onHandleIntent(Intent intent) {
+                     || (scheduledAction.getExecutionCount() < scheduledAction.getTotalFrequency()) //or the number of scheduled runs
+                     || (endTime == 0 && scheduledAction.getTotalFrequency() == 0)) //or the action is to run forever
+                     && ((lastRun + period) <= now)  //one period has passed since last execution
+-                    && scheduledAction.getStartTime() <= now ){ //the start time has arrived
++                    && scheduledAction.getStartTime() <= now
++                    && scheduledAction.isEnabled()){ //the start time has arrived
+                 executeScheduledEvent(scheduledAction);
+             }
+         }

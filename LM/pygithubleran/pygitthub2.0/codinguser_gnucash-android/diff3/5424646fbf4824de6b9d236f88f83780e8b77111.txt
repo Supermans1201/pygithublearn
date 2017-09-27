@@ -1,0 +1,396 @@
+From 5424646fbf4824de6b9d236f88f83780e8b77111 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 18 Sep 2015 12:26:15 +0200
+Subject: [PATCH] Fixes saving of a new transaction using amount entered with
+ calculator
+
+Fixes parsing of amount quantities
+---
+ .../main/java/org/gnucash/android/model/Money.java |  5 ++
+ .../java/org/gnucash/android/ui/FormActivity.java  |  7 +-
+ .../ui/transaction/TransactionFormFragment.java    | 86 +++++++++++++++-------
+ ...CustomKeyboard.java => CalculatorKeyboard.java} | 58 ++++++---------
+ 4 files changed, 88 insertions(+), 68 deletions(-)
+ rename app/src/main/java/org/gnucash/android/ui/util/{CustomKeyboard.java => CalculatorKeyboard.java} (88%)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 81a06b7a..c7a66e47 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -285,6 +285,11 @@ public long getDenominator() {
+ 		throw new RuntimeException("Unsupported number of fraction digits " + getScale());
+ 	}
+ 
++	/**
++	 * Returns the scale (precision) used for the decimal places of this amount.
++	 * <p>The scale used depends on the currency</p>
++	 * @return Scale of amount as integer
++	 */
+ 	private int getScale() {
+ 		int scale = mCurrency.getDefaultFractionDigits();
+ 		if (scale < 0) {
+diff --git a/app/src/main/java/org/gnucash/android/ui/FormActivity.java b/app/src/main/java/org/gnucash/android/ui/FormActivity.java
+index ffbb5cae..b9b76eb9 100644
+--- a/app/src/main/java/org/gnucash/android/ui/FormActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/FormActivity.java
+@@ -26,7 +26,6 @@
+ import android.support.v7.app.AppCompatActivity;
+ import android.support.v7.widget.Toolbar;
+ import android.view.MenuItem;
+-import android.view.inputmethod.EditorInfo;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -35,7 +34,7 @@
+ import org.gnucash.android.ui.export.ExportFormFragment;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ import org.gnucash.android.ui.transaction.SplitEditorFragment;
+-import org.gnucash.android.ui.util.CustomKeyboard;
++import org.gnucash.android.ui.util.CalculatorKeyboard;
+ 
+ /**
+  * Activity for displaying forms in the application.
+@@ -47,7 +46,7 @@
+ 
+     private String mAccountUID;
+ 
+-    private CustomKeyboard mOnBackListener;
++    private CalculatorKeyboard mOnBackListener;
+ 
+     public enum FormType {ACCOUNT, TRANSACTION, EXPORT, SPLIT_EDITOR}
+ 
+@@ -179,7 +178,7 @@ private void showFormFragment(Fragment fragment){
+     }
+ 
+ 
+-    public void setOnBackListener(CustomKeyboard keyboard) {
++    public void setOnBackListener(CalculatorKeyboard keyboard) {
+         mOnBackListener = keyboard;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 9679a8b9..a48b4b12 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -20,6 +20,7 @@
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
++import android.content.res.Configuration;
+ import android.database.Cursor;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+@@ -56,9 +57,6 @@
+ import com.doomonafireball.betterpickers.recurrencepicker.EventRecurrenceFormatter;
+ import com.doomonafireball.betterpickers.recurrencepicker.RecurrencePickerDialog;
+ 
+-import net.objecthunter.exp4j.Expression;
+-import net.objecthunter.exp4j.ExpressionBuilder;
+-
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+@@ -74,10 +72,10 @@
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.transaction.dialog.TransferFundsDialogFragment;
+ import org.gnucash.android.ui.util.AmountInputFormatter;
++import org.gnucash.android.ui.util.CalculatorKeyboard;
+ import org.gnucash.android.ui.util.OnTransferFundsListener;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ import org.gnucash.android.ui.util.TransactionTypeSwitch;
+-import org.gnucash.android.ui.util.CustomKeyboard;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+@@ -215,10 +213,14 @@
+ 
+     private String mAccountUID;
+ 
+-    private List<Split> mSplitsList = new ArrayList<Split>();
++    private List<Split> mSplitsList = new ArrayList<>();
+ 
+     private boolean mEditMode = false;
+-    private CustomKeyboard mCalculatorKeyboard;
++
++    /**
++     * Custom calculator keyboard
++     */
++    private CalculatorKeyboard mCalculatorKeyboard;
+ 
+     /**
+      * Split quantity which will be set from the funds transfer dialog
+@@ -271,6 +273,12 @@ private void startTransferFunds() {
+     }
+ 
+     @Override
++    public void onConfigurationChanged(Configuration newConfig) {
++        super.onConfigurationChanged(newConfig);
++        initCalculatorKeyboard();
++    }
++
++    @Override
+ 	public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+ 		setHasOptionsMenu(true);
+@@ -340,12 +348,19 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+             mEditMode = true;
+ 		}
+ 
+-        mCalculatorKeyboard = new CustomKeyboard(getActivity(), R.id.calculator_keyboard, R.xml.calculator_keyboard);
++        initCalculatorKeyboard();
++	}
++
++    /**
++     * Initializes the calculator keyboard
++     */
++    private void initCalculatorKeyboard() {
++        mCalculatorKeyboard = new CalculatorKeyboard(getActivity(), R.id.calculator_keyboard, R.xml.calculator_keyboard);
+         mCalculatorKeyboard.setCurrency(Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountUID)));
+         mCalculatorKeyboard.registerEditText(R.id.input_transaction_amount);
+         // FIXME: decouple from FormActivity
+         ((FormActivity) getActivity()).setOnBackListener(mCalculatorKeyboard);
+-	}
++    }
+ 
+     /**
+      * Extension of SimpleCursorAdapter which is used to populate the fields for the list items
+@@ -636,15 +651,15 @@ public boolean onTouch(View v, MotionEvent event) {
+ 
+ 		mDateTextView.setOnClickListener(new View.OnClickListener() {
+ 
+-			@Override
+-			public void onClick(View v) {
+-				long dateMillis = 0;
+-				try {
+-					Date date = DATE_FORMATTER.parse(mDateTextView.getText().toString());
+-					dateMillis = date.getTime();
+-				} catch (ParseException e) {
+-					Log.e(getTag(), "Error converting input time to Date object");
+-				}
++            @Override
++            public void onClick(View v) {
++                long dateMillis = 0;
++                try {
++                    Date date = DATE_FORMATTER.parse(mDateTextView.getText().toString());
++                    dateMillis = date.getTime();
++                } catch (ParseException e) {
++                    Log.e(getTag(), "Error converting input time to Date object");
++                }
+                 Calendar calendar = Calendar.getInstance();
+                 calendar.setTimeInMillis(dateMillis);
+ 
+@@ -655,8 +670,8 @@ public void onClick(View v) {
+                         TransactionFormFragment.this,
+                         year, monthOfYear, dayOfMonth);
+                 datePickerDialog.show(getFragmentManager(), "date_picker_fragment");
+-			}
+-		});
++            }
++        });
+ 
+ 		mTimeTextView.setOnClickListener(new View.OnClickListener() {
+ 
+@@ -740,7 +755,7 @@ private void saveNewTransaction() {
+ 				mTime.get(Calendar.SECOND));
+ 		String description = mDescriptionEditText.getText().toString();
+ 		String notes = mNotesEditText.getText().toString();
+-		BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
++		BigDecimal amountBigd = new BigDecimal(mAmountEditText.getText().toString().replaceAll(",", ".").trim());
+ 
+ 		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID));
+ 		Money amount 	= new Money(amountBigd, currency).absolute();
+@@ -792,7 +807,8 @@ private void saveNewTransaction() {
+             } else {
+                 mTransaction = new Transaction(description);
+ 
+-                if (mSplitsList.isEmpty()) { //amount entered in the simple interface (not using splits Editor)
++                //****************** amount entered in the simple interface (not using splits Editor) ************************
++                if (mSplitsList.isEmpty()) {
+                     Split split = new Split(amount, mAccountUID);
+                     split.setType(mTransactionTypeButton.getTransactionType());
+                     mTransaction.addSplit(split);
+@@ -918,14 +934,17 @@ public boolean onOptionsItemSelected(MenuItem item) {
+                 return true;
+ 
+ 		case R.id.menu_save:
+-            if (mAmountEditText.getText().length() == 0) {
+-                Toast.makeText(getActivity(), R.string.toast_transanction_amount_required, Toast.LENGTH_SHORT).show();
+-            } else if (mUseDoubleEntry && mTransferAccountSpinner.getCount() == 0){
+-                Toast.makeText(getActivity(),
+-                        R.string.toast_disable_double_entry_to_save_transaction,
+-                        Toast.LENGTH_LONG).show();
+-            } else {
++            if (canSave()){
+                 saveNewTransaction();
++            } else {
++                if (mAmountEditText.getText().length() == 0) {
++                    Toast.makeText(getActivity(), R.string.toast_transanction_amount_required, Toast.LENGTH_SHORT).show();
++                }
++                if (mUseDoubleEntry && mTransferAccountSpinner.getCount() == 0){
++                    Toast.makeText(getActivity(),
++                            R.string.toast_disable_double_entry_to_save_transaction,
++                            Toast.LENGTH_LONG).show();
++                }
+             }
+ 			return true;
+ 
+@@ -935,6 +954,17 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	}
+ 
+     /**
++     * Checks if the pre-requisites for saving the transaction are fulfilled
++     * <p>The conditions checked are that a valid amount is entered and that a transfer account is set (where applicable)</p>
++     * @return {@code true} if the transaction can be saved, {@code false} otherwise
++     */
++    private boolean canSave(){
++        mCalculatorKeyboard.evaluateEditTextExpression(mAmountEditText);
++        return (mAmountEditText.getText().length() > 0 && mAmountEditText.getError() == null)
++                || (mUseDoubleEntry && mTransferAccountSpinner.getCount() == 0);
++    }
++
++    /**
+      * Called by the split editor fragment to notify of finished editing
+      * @param splitList List of splits produced in the fragment
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/CustomKeyboard.java b/app/src/main/java/org/gnucash/android/ui/util/CalculatorKeyboard.java
+similarity index 88%
+rename from app/src/main/java/org/gnucash/android/ui/util/CustomKeyboard.java
+rename to app/src/main/java/org/gnucash/android/ui/util/CalculatorKeyboard.java
+index 0774ce7b..97a4bded 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/CustomKeyboard.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/CalculatorKeyboard.java
+@@ -1,5 +1,10 @@
+ /**
+  * Copyright 2013 Maarten Pennings extended by SimplicityApks
++ *
++ * Modified by:
++ * Copyright 2015 lex Magaz Graa <rivaldi8@gmail.com>
++ * Copyright 2015 Ngewi Fet <ngewif@gmail.com>
++ *
+  * <p/>
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -23,6 +28,7 @@
+ import android.inputmethodservice.Keyboard;
+ import android.inputmethodservice.KeyboardView;
+ import android.inputmethodservice.KeyboardView.OnKeyboardActionListener;
++import android.support.annotation.LayoutRes;
+ import android.text.Editable;
+ import android.text.InputType;
+ import android.util.Log;
+@@ -64,10 +70,10 @@
+  * @author Maarten Pennings, extended by SimplicityApks
+  * @date 2012 December 23
+  */
+-public class CustomKeyboard {
++public class CalculatorKeyboard {
+ 
+     public static final int KEY_CODE_DECIMAL_SEPARATOR = 46;
+-    /** A link to the KeyboardView that is used to render this CustomKeyboard. */
++    /** A link to the KeyboardView that is used to render this CalculatorKeyboard. */
+     private KeyboardView mKeyboardView;
+     /** A link to the activity that hosts the {@link #mKeyboardView}. */
+     private Activity mHostActivity;
+@@ -156,13 +162,13 @@ public void onPress(int arg0) {
+      * Note that to enable EditText's to use this custom keyboard, call the {@link #registerEditText(int)}.
+      *
+      * @param host The hosting activity.
+-     * @param viewid The id of the KeyboardView.
+-     * @param layoutid The id of the xml file containing the keyboard layout.
++     * @param keyboardViewId The id of the KeyboardView.
++     * @param xmlLayoutResId The id of the xml file containing the keyboard layout.
+      */
+-    public CustomKeyboard(Activity host, int viewid, int layoutid) {
++    public CalculatorKeyboard(Activity host, int keyboardViewId, @LayoutRes int xmlLayoutResId) {
+         mHostActivity = host;
+-        mKeyboardView = (KeyboardView) mHostActivity.findViewById(viewid);
+-        Keyboard keyboard = new Keyboard(mHostActivity, layoutid);
++        mKeyboardView = (KeyboardView) mHostActivity.findViewById(keyboardViewId);
++        Keyboard keyboard = new Keyboard(mHostActivity, xmlLayoutResId);
+         for (Keyboard.Key key : keyboard.getKeys()) {
+             if (key.codes[0] == KEY_CODE_DECIMAL_SEPARATOR){
+                 key.label = mDecimalSeparator;
+@@ -176,12 +182,12 @@ public CustomKeyboard(Activity host, int viewid, int layoutid) {
+         mHostActivity.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+     }
+ 
+-    /** Returns whether the CustomKeyboard is visible. */
++    /** Returns whether the CalculatorKeyboard is visible. */
+     public boolean isCustomKeyboardVisible() {
+         return mKeyboardView.getVisibility() == View.VISIBLE;
+     }
+ 
+-    /** Make the CustomKeyboard visible, and hide the system keyboard for view v. */
++    /** Make the CalculatorKeyboard visible, and hide the system keyboard for view v. */
+     public void showCustomKeyboard(View v) {
+         if (v != null)
+             ((InputMethodManager) mHostActivity.getSystemService(Activity.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(v.getWindowToken(), 0);
+@@ -190,7 +196,7 @@ public void showCustomKeyboard(View v) {
+         mKeyboardView.setEnabled(true);
+     }
+ 
+-    /** Make the CustomKeyboard invisible. */
++    /** Make the CalculatorKeyboard invisible. */
+     public void hideCustomKeyboard() {
+         mKeyboardView.setVisibility(View.GONE);
+         mKeyboardView.setEnabled(false);
+@@ -230,30 +236,6 @@ public void onClick(View v) {
+         // Disable spell check (hex strings look like words to Android)
+         edittext.setInputType(edittext.getInputType() | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+ 
+-        /**
+-         * Try to show cursor the complicated way:
+-         * @source http://androidpadanam.wordpress.com/2013/05/29/customkeyboard-example/
+-         * fixes the cursor not movable bug
+-         */
+-
+-        //TODO: find a way to set this listener if the view doesn't already have one
+-        //e.g. when using the calculator in split editor
+-/*
+-        edittext.setOnTouchListener(new OnTouchListener() {
+-            @Override
+-            public boolean onTouch(View v, MotionEvent event) {
+-                if (!isCustomKeyboardVisible())
+-                    showCustomKeyboard(v);
+-
+-
+-                // XXX: Use dispatchTouchEvent()?
+-                edittext.onTouchEvent(event);               // Call native handler
+-
+-                return false;
+-            }
+-        });
+-*/
+-
+         // FIXME: for some reason, this prevents the text selection from working
+         edittext.setOnLongClickListener(new View.OnLongClickListener() {
+             @Override
+@@ -266,6 +248,10 @@ public boolean onLongClick(View v) {
+         });
+     }
+ 
++    /**
++     * Sets the currency to be used for this calculation
++     * @param currency Currency of the amount being computed
++     */
+     public void setCurrency(Currency currency){
+         this.mCurrency = currency;
+     }
+@@ -287,7 +273,7 @@ public boolean onBackPressed() {
+             return false;
+     }
+ 
+-    private void evaluateEditTextExpression(EditText editText) {
++    public void evaluateEditTextExpression(EditText editText) {
+         String amountText = editText.getText().toString();
+         amountText = amountText.replaceAll(",", ".");
+         if (amountText.trim().isEmpty())
+@@ -318,7 +304,7 @@ private void evaluateEditTextExpression(EditText editText) {
+             String resultString = formatter.format(result.doubleValue());
+ 
+             editText.setText(resultString);
+-            editText.setSelection(result.toPlainString().length());
++            editText.setSelection(resultString.length());
+         } else {
+             // FIXME: i18n
+             editText.setError("Invalid expression!");

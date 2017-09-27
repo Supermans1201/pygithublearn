@@ -1,0 +1,176 @@
+From 99dea00632c892fe94cac2c9f60011efd820e946 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 10 Apr 2015 21:41:44 +0200
+Subject: [PATCH] Auto-balance transactions during import
+
+Fixed: opening balances are deleted after export is completed
+Fixed: Regression - no backup created before deleting transactions
+
+Closes #302
+---
+ .../gnucash/android/export/ExportAsyncTask.java    | 29 ++++++++++++++++++----
+ .../gnucash/android/importer/GncXmlHandler.java    | 20 +++++++++++++++
+ .../org/gnucash/android/model/Transaction.java     | 29 +++++++++++++++++++++-
+ 3 files changed, 72 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index a932cfeb..82d21cb4 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -26,20 +26,20 @@
+ import android.os.AsyncTask;
+ import android.os.Build;
+ import android.preference.PreferenceManager;
+-import android.support.v4.app.Fragment;
+-import android.support.v4.app.FragmentActivity;
+ import android.util.Log;
+ import android.widget.Toast;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ofx.OfxExporter;
+ import org.gnucash.android.export.qif.QifExporter;
+ import org.gnucash.android.export.qif.QifHelper;
+ import org.gnucash.android.export.xml.GncXmlExporter;
++import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.transaction.TransactionsActivity;
+-import org.gnucash.android.ui.transaction.dialog.TransactionsDeleteConfirmationDialogFragment;
+ 
+ import java.io.BufferedReader;
+ import java.io.BufferedWriter;
+@@ -208,8 +208,7 @@ protected void onPostExecute(Boolean exportResult) {
+         }
+ 
+         if (mExportParams.shouldDeleteTransactionsAfterExport()) {
+-            //TODO: we delete with impunity here, make sure files are backed-up first
+-            TransactionsDbAdapter.getInstance().deleteAllRecords();
++            backupAndDeleteTransactions();
+ 
+             //now refresh the respective views
+             if (mContext instanceof AccountsActivity){
+@@ -226,6 +225,26 @@ protected void onPostExecute(Boolean exportResult) {
+     }
+ 
+     /**
++     * Backups of the database, saves opening balances (if necessary)
++     * and deletes all non-template transactions in the database.
++     */
++    private void backupAndDeleteTransactions(){
++        GncXmlExporter.createBackup(); //create backup before deleting everything
++        List<Transaction> openingBalances = new ArrayList<Transaction>();
++        boolean preserveOpeningBalances = GnuCashApplication.shouldSaveOpeningBalances(false);
++        if (preserveOpeningBalances) {
++            openingBalances = AccountsDbAdapter.getInstance().getAllOpeningBalanceTransactions();
++        }
++
++        TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        transactionsDbAdapter.deleteAllNonTemplateTransactions();
++
++        if (preserveOpeningBalances) {
++            transactionsDbAdapter.bulkAddTransactions(openingBalances);
++        }
++    }
++
++    /**
+      * Starts an intent chooser to allow the user to select an activity to receive
+      * the exported OFX file
+      * @param path String path to the file on disk
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 76a9356d..1cc931cb 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -433,19 +433,25 @@ else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SPLIT_MEMO)){
+             mSplit.setMemo(characterString);
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SPLIT_VALUE)){
++            //the split amount uses the transaction currency, but in the db it will correctly use the account currency
+             Money amount = new Money(GncXmlHelper.parseMoney(characterString), mTransaction.getCurrency());
++
++            //this is intentional: GnuCash XML formats split amounts, credits are negative, debits are positive.
+             mSplit.setType(amount.isNegative() ? TransactionType.CREDIT : TransactionType.DEBIT);
+             mSplit.setAmount(amount.absolute());
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SPLIT_ACCOUNT)){
+             mSplit.setAccountUID(characterString);
++            mSplit.setAmount(mSplit.getAmount().withCurrency(getCurrencyForAccount(characterString)));
+         }
+         else if (qualifiedName.equals(GncXmlHelper.TAG_TRN_SPLIT)){
+             mTransaction.addSplit(mSplit);
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TRANSACTION)){
+             mTransaction.setTemplate(mInTemplates);
++            mTransaction.autoBalance();
+             mTransactionList.add(mTransaction);
++
+             if (mRecurrencePeriod > 0) { //if we find an old format recurrence period, parse it
+                 mTransaction.setTemplate(true);
+                 ScheduledAction scheduledAction = ScheduledAction.parseScheduledAction(mTransaction, mRecurrencePeriod);
+@@ -569,4 +575,18 @@ public void endDocument() throws SAXException {
+             mAccountsDbAdapter.endTransaction();
+         }
+     }
++
++    /**
++     * Returns the currency for an account which has been parsed (but not yet saved to the db)
++     * <p>This is used when parsing splits to assign the right currencies to the splits</p>
++     * @param accountUID GUID of the account
++     * @return Currency of the account
++     */
++    private Currency getCurrencyForAccount(String accountUID){
++        for (Account account : mAccountList) {
++            if (account.getUID().equals(accountUID))
++                return account.getCurrency();
++        }
++        return Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 1a699443..9520250c 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -159,6 +159,31 @@ private void initDefaults(){
+ 	}
+ 
+     /**
++     * Auto-balance the transaction by creating an imbalance split where necessary
++     * <p><b>Note:</b>If a transaction has splits with different currencies, not auto-balancing will be performed.</p>
++     */
++    public void autoBalance(){
++        //FIXME: when multiple currencies per transaction are supported
++        Currency lastCurrency = null;
++        for (Split split : mSplitList) {
++            Currency currentCurrency = split.getAmount().getCurrency();
++            if (lastCurrency == null)
++                lastCurrency = currentCurrency;
++            else if (lastCurrency != currentCurrency){
++                return;
++            }
++        }
++
++        Money imbalance = getImbalance();
++        if (!imbalance.isAmountZero()){
++            Currency currency = Currency.getInstance(mCurrencyCode);
++            Split split = new Split(imbalance.negate(),
++                    AccountsDbAdapter.getInstance().getOrCreateImbalanceAccountUID(currency));
++            mSplitList.add(split);
++        }
++    }
++
++    /**
+      * Returns list of splits for this transaction
+      * @return {@link java.util.List} of splits in the transaction
+      */
+@@ -236,7 +261,9 @@ public Money getImbalance(){
+ 
+     /**
+      * Computes the balance of the splits belonging to a particular account.
+-     * Only those splits which belong to the account will be considered.
++     * <p>Only those splits which belong to the account will be considered.
++     * If the {@code accountUID} is null, then the imbalance of the transaction is computed. This means that either
++     * zero is returned (for balanced transactions) or the imbalance amount will be returned.</p>
+      * @param accountUID Unique Identifier of the account
+      * @param splitList List of splits
+      * @return Money list of splits

@@ -1,0 +1,804 @@
+From 80de0325dbd48878731d9f8d67eb0069afb5eefb Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 21 Mar 2014 00:35:08 +0100
+Subject: [PATCH] - Fixed: Editing account modifies the transaction type of
+ transfer transactions - fixes #145 - Fixed: Bug causing double entry
+ transactions not to be considered equal - Fixed: Computation of account
+ balance did not properly consider double entries - Improved: Double entry
+ accounting is now activated by default - Improved: Restricted parent/child
+ account hierarchies relationships to those defined by GnuCash accounting
+ (see: http://code.gnucash.org/docs/C/gnucash-help/acct-types.html ) Some code
+ refactoring
+
+---
+ CHANGELOG.md                                       |  10 +
+ app/AndroidManifest.xml                            |   2 +-
+ app/pom.xml                                        |   2 +-
+ app/res/values-el/strings.xml                      |   2 +-
+ app/res/values/strings.xml                         |   2 +-
+ app/res/xml/fragment_account_preferences.xml       |   3 +-
+ app/res/xml/fragment_transaction_preferences.xml   |   1 +
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  40 ++--
+ app/src/org/gnucash/android/model/Account.java     |   4 +-
+ app/src/org/gnucash/android/model/Transaction.java |   9 +-
+ .../android/ui/account/AccountFormFragment.java    | 216 +++++++++++++++------
+ .../android/ui/account/AccountsActivity.java       |  26 +--
+ .../android/ui/account/AccountsListFragment.java   |   5 +-
+ .../ui/transaction/TransactionFormFragment.java    |   4 +-
+ integration-tests/pom.xml                          |   2 +-
+ pom.xml                                            |   2 +-
+ 16 files changed, 233 insertions(+), 97 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f152f304..a2850321 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,15 @@
+ Change Log
+ ===============================================================================
++Version 1.3.2 *(2014-03-28)*
++----------------------------
++* Fixed: Editing account modifies the transaction type of transfer transactions
++* Fixed: Bug causing double entry transactions not to be considered equal
++* Fixed: Computation of account balance did not properly consider double entries
++* Improved: Double-entry accounting is now activated by default
++* Improved: Restricted parent/child account hierarchies relationships to those defined by GnuCash accounting
++* Improved: Dutch translation
++* Improved: German translation
++
+ Version 1.3.1 *(2014-02-14)*
+ ----------------------------
+ * Fixed: Crash when bulk moving transactions
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index 9df9d16a..5dbebd33 100644
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -17,7 +17,7 @@
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+-    android:versionCode="26"
++    android:versionCode="27"
+     android:versionName="@string/app_version_name" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="15"/>
+diff --git a/app/pom.xml b/app/pom.xml
+index d52dd205..18da0ae5 100644
+--- a/app/pom.xml
++++ b/app/pom.xml
+@@ -22,7 +22,7 @@
+     <description>Gnucash Android companion application</description>
+ 
+     <parent>
+-        <version>1.3.0-SNAPSHOT</version>
++        <version>1.3.2-SNAPSHOT</version>
+         <groupId>org.gnucash.android</groupId>
+         <artifactId>gnucash-android-parent</artifactId>
+     </parent>
+diff --git a/app/res/values-el/strings.xml b/app/res/values-el/strings.xml
+index cf8f8295..f08e2dea 100644
+--- a/app/res/values-el/strings.xml
++++ b/app/res/values-el/strings.xml
+@@ -405,7 +405,7 @@
+     <string name="menu_scheduled_transactions"> </string>
+     <string name="msg_confirm_create_default_accounts_first_run">GnuCash Android.  ! \n   
+            ,         GnuCash. \n\n     
+-             '     .
++             \'     .
+     </string>
+     <string-array name="recurrence_period_strings">
+         <item></item>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 57dc1fd8..43a8fbd7 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -17,7 +17,7 @@
+ 
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="app_name">GnuCash</string>
+-    <string name="app_version_name">1.3.1</string>
++    <string name="app_version_name">1.3.2</string>
+     <string name="title_add_account">Create Account</string>
+     <string name="title_edit_account">Edit Account</string>
+     <string name="info_details">Info</string>
+diff --git a/app/res/xml/fragment_account_preferences.xml b/app/res/xml/fragment_account_preferences.xml
+index 6272ebb2..d74b59eb 100644
+--- a/app/res/xml/fragment_account_preferences.xml
++++ b/app/res/xml/fragment_account_preferences.xml
+@@ -7,7 +7,8 @@
+                     android:dialogTitle="@string/title_choose_currency"
+                     android:title="@string/title_default_currency"
+                     android:entries="@array/currency_names"
+-                    android:entryValues="@array/currency_codes"/>
++                    android:entryValues="@array/currency_codes"
++                    android:defaultValue="USD"/>
+     <Preference android:key="@string/key_import_accounts"
+                 android:summary="@string/summary_import_accounts"
+                 android:title="@string/title_import_accounts" />
+diff --git a/app/res/xml/fragment_transaction_preferences.xml b/app/res/xml/fragment_transaction_preferences.xml
+index e1670ccd..f8c7f19b 100644
+--- a/app/res/xml/fragment_transaction_preferences.xml
++++ b/app/res/xml/fragment_transaction_preferences.xml
+@@ -23,6 +23,7 @@
+                     android:summary="@string/summary_default_transaction_type"/>
+     <CheckBoxPreference android:summary="@string/summary_use_double_entry"
+                         android:key="@string/key_use_double_entry"
++                        android:defaultValue="true"
+                         android:title="@string/title_use_double_entry"/>
+     <Preference android:key="@string/key_delete_all_transactions"
+                 android:summary="@string/summary_delete_all_transactions"
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 0e83043d..bb91f66c 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -22,6 +22,7 @@
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Account.AccountType;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.model.Transaction.TransactionType;
+ 
+ import android.content.ContentValues;
+ import android.content.Context;
+@@ -84,11 +85,8 @@ public long addAccount(Account account){
+ 		if ((rowId = getAccountID(account.getUID())) > 0){
+ 			//if account already exists, then just update
+ 			Log.d(TAG, "Updating existing account");
+-			int rowsAffected = mDb.update(DatabaseHelper.ACCOUNTS_TABLE_NAME, contentValues,
++			mDb.update(DatabaseHelper.ACCOUNTS_TABLE_NAME, contentValues,
+                     DatabaseHelper.KEY_ROW_ID + " = " + rowId, null);
+-            if (rowsAffected == 1){
+-                updateAccount(rowId, DatabaseHelper.KEY_FULL_NAME, getFullyQualifiedAccountName(rowId));
+-            }
+ 		} else {
+ 			Log.d(TAG, "Adding new account to db");
+ 			rowId = mDb.insert(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, contentValues);
+@@ -99,7 +97,20 @@ public long addAccount(Account account){
+             //update the fully qualified account name
+             updateAccount(rowId, DatabaseHelper.KEY_FULL_NAME, getFullyQualifiedAccountName(rowId));
+ 			for (Transaction t : account.getTransactions()) {
+-				mTransactionsAdapter.addTransaction(t);
++                //FIXME: This is a hack until actual splits are implemented
++                if (t.getDoubleEntryAccountUID().equals(account.getUID())){
++                    Transaction trx = new Transaction(t,false);
++//                    trx.setAmount(trx.getAmount().negate());
++                    if (trx.getType() == TransactionType.DEBIT) {
++                        trx.setType(TransactionType.CREDIT);
++                    } else {
++                        trx.setType(TransactionType.DEBIT);
++                    }
++
++                    mTransactionsAdapter.addTransaction(trx);
++                }
++                else
++				    mTransactionsAdapter.addTransaction(t);
+ 			}
+ 		}
+ 		return rowId;
+@@ -147,7 +158,7 @@ public boolean destructiveDeleteAccount(long rowId){
+ 		//first remove all transactions for the account
+ 		Cursor c = mTransactionsAdapter.fetchAllTransactionsForAccount(rowId);
+ 		if (c == null)
+-			return result; 
++			return false;
+ 		
+ 		while (c.moveToNext()){
+ 			long id = c.getLong(DatabaseAdapter.COLUMN_ROW_ID);
+@@ -210,7 +221,7 @@ public boolean transactionPreservingDelete(long accountId, long accountReassignI
+      */
+     public boolean recursiveDestructiveDelete(long accountId){
+         Log.d(TAG, "Delete account with rowId with its transactions and sub-accounts: " + accountId);
+-        boolean result = true;
++        boolean result = false;
+ 
+         List<Long> subAccountIds = getSubAccountIds(accountId);
+         for (long subAccountId : subAccountIds) {
+@@ -425,7 +436,7 @@ public String getName(long accountID) {
+ 		while (it.hasNext()){
+ 			Account account = it.next();
+ 			
+-			if (account.hasUnexportedTransactions() == false)
++			if (!account.hasUnexportedTransactions())
+ 				it.remove();
+ 		}
+ 		return accountsList;
+@@ -440,13 +451,12 @@ public String getName(long accountID) {
+ 	public Cursor fetchAllRecords(){
+ 		Log.v(TAG, "Fetching all accounts from db");
+         String selection =  DatabaseHelper.KEY_TYPE + " != ?" ;
+-		Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++        return mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
+                 null,
+                 selection,
+                 new String[]{AccountType.ROOT.name()},
+                 null, null,
+                 DatabaseHelper.KEY_NAME + " ASC");
+-		return cursor;
+ 	}
+ 
+     /**
+@@ -489,10 +499,9 @@ public boolean deleteRecord(long rowId) {
+ 	 */
+ 	public Cursor fetchAccounts(String condition){
+ 		Log.v(TAG, "Fetching all accounts from db where " + condition);
+-		Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
+-				null, condition, null, null, null, 
+-				DatabaseHelper.KEY_NAME + " ASC");
+-		return cursor;
++        return mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                null, condition, null, null, null,
++                DatabaseHelper.KEY_NAME + " ASC");
+ 	}
+ 
+     /**
+@@ -612,10 +621,9 @@ public Cursor fetchRecentAccounts(int numberOfRecents){
+     public Cursor fetchFavoriteAccounts(){
+         Log.v(TAG, "Fetching favorite accounts from db");
+         String condition = DatabaseHelper.KEY_FAVORITE + " = 1";
+-        Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++        return mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
+                 null, condition, null, null, null,
+                 DatabaseHelper.KEY_NAME + " ASC");
+-        return cursor;
+     }
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/model/Account.java b/app/src/org/gnucash/android/model/Account.java
+index bb003df4..4a854cf4 100644
+--- a/app/src/org/gnucash/android/model/Account.java
++++ b/app/src/org/gnucash/android/model/Account.java
+@@ -51,7 +51,7 @@
+         ^             anchor for start of string
+         #             the literal #
+         (             start of group
+-        ?:            indicate a non-capturing group that doesn't generate backreferences
++        ?:            indicate a non-capturing group that doesn't generate back-references
+         [0-9a-fA-F]   hexadecimal digit
+         {3}           three times
+         )             end of group
+@@ -357,7 +357,7 @@ public int getTransactionCount(){
+ 	 */
+ 	public boolean hasUnexportedTransactions(){
+ 		for (Transaction transaction : mTransactionsList) {
+-			if (transaction.isExported() == false)
++			if (!transaction.isExported())
+ 				return true;			
+ 		}
+ 		return false;
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index 98a30b42..68bbe725 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -169,10 +169,12 @@ public Transaction(Money amount, String name, TransactionType type){
+     /**
+      * Copy constructor.
+      * Creates a new transaction object which is a clone of the parameter.
+-     * <p><b>Note:</b> The unique ID of the transaction is not cloned, but a new one is generated.</p>
++     * <p><b>Note:</b> The unique ID of the transaction is not cloned if the parameter <code>generateNewUID</code>,
++     * is set to false. Otherwise, a new one is generated.</p>
+      * @param transaction Transaction to be cloned
++     * @param generateNewUID Flag to determine if new UID should be assigned or not
+      */
+-    public Transaction(Transaction transaction){
++    public Transaction(Transaction transaction, boolean generateNewUID){
+         initDefaults();
+         setName(transaction.getName());
+         setDescription(transaction.getDescription());
+@@ -182,6 +184,9 @@ public Transaction(Transaction transaction){
+         setDoubleEntryAccountUID(transaction.getDoubleEntryAccountUID());
+         setExported(transaction.isExported());
+         setTime(transaction.getTimeMillis());
++        if (!generateNewUID){
++            setUID(transaction.getUID());
++        }
+     }
+ 
+ 	/**
+diff --git a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+index 3551a85c..f8a7aaee 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -16,50 +16,44 @@
+ 
+ package org.gnucash.android.ui.account;
+ 
+-import java.util.Arrays;
+-import java.util.Currency;
+-import java.util.List;
+-
+ import android.app.Activity;
++import android.content.Context;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.content.res.Resources;
+ import android.content.res.TypedArray;
++import android.database.Cursor;
+ import android.graphics.Color;
++import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.FragmentManager;
+-import org.gnucash.android.R;
+-import org.gnucash.android.model.Account;
+-import org.gnucash.android.model.Money;
+-import org.gnucash.android.db.AccountsDbAdapter;
+-import org.gnucash.android.db.DatabaseHelper;
+-import org.gnucash.android.ui.UxArgument;
+-import org.gnucash.android.ui.colorpicker.ColorPickerDialog;
+-import org.gnucash.android.ui.colorpicker.ColorPickerSwatch;
+-import org.gnucash.android.ui.colorpicker.ColorSquare;
+-
+-import android.content.Context;
+-import android.database.Cursor;
+-import android.os.Bundle;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.view.inputmethod.InputMethodManager;
+-import android.widget.ArrayAdapter;
+-import android.widget.CheckBox;
+-import android.widget.CompoundButton;
++import android.widget.*;
+ import android.widget.CompoundButton.OnCheckedChangeListener;
+-import android.widget.EditText;
+-import android.widget.Spinner;
+-import android.widget.Toast;
+-
+ import com.actionbarsherlock.app.SherlockFragment;
+ import com.actionbarsherlock.view.Menu;
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
++import org.gnucash.android.R;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.ui.UxArgument;
++import org.gnucash.android.ui.colorpicker.ColorPickerDialog;
++import org.gnucash.android.ui.colorpicker.ColorPickerSwatch;
++import org.gnucash.android.ui.colorpicker.ColorSquare;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Currency;
++import java.util.List;
++
+ /**
+  * Fragment used for creating and editing accounts
+  * @author Ngewi Fet <ngewif@gmail.com>
+@@ -97,7 +91,14 @@
+ 	 * This is used if we are editing an account instead of creating one
+ 	 */
+ 	private long mSelectedAccountId = 0;
+-	
++
++    /**
++     * Database ID of the parent account
++     * This value is set to the parent account of the transaction being edited or
++     * the account in which a new sub-account is being created
++     */
++    private long mParentAccountId = -1;
++
+ 	/**
+ 	 * Reference to account object which will be created at end of dialog
+ 	 */
+@@ -202,7 +203,7 @@ public void onCreate(Bundle savedInstanceState) {
+         }
+ 
+         SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+-        mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
++        mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), true);
+ 	}
+ 	
+ 	/**
+@@ -218,6 +219,19 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 		mNameEditText.requestFocus();
+ 
+         mAccountTypeSpinner = (Spinner) view.findViewById(R.id.input_account_type_spinner);
++        mAccountTypeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
++            @Override
++            public void onItemSelected(AdapterView<?> parentView, View selectedItemView, int position, long id) {
++                loadParentAccountList(getSelectedAccountType());
++                setParentAccountSelection(mParentAccountId);
++            }
++
++            @Override
++            public void onNothingSelected(AdapterView<?> adapterView) {
++                //nothing to see here, move along
++            }
++        });
++
+         mPlaceholderCheckBox = (CheckBox) view.findViewById(R.id.checkbox_placeholder_account);
+ 
+ 		mParentAccountSpinner = (Spinner) view.findViewById(R.id.input_parent_account);
+@@ -276,9 +290,8 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         }
+ 
+         //need to load the cursor adapters for the spinners before initializing the views
+-        loadParentAccountList();
+         loadAccountTypesList();
+-        loadDefaultTransferAccoutList();
++        loadDefaultTransferAccountList();
+         setDefaultTransferAccountInputsVisible(mUseDoubleEntry);
+ 
+         if (mAccount != null){
+@@ -286,6 +299,8 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         } else {
+             initializeViews();
+         }
++
++
+ 	}
+ 
+     /**
+@@ -297,12 +312,14 @@ private void initializeViewsWithAccount(Account account){
+         if (account == null)
+             throw new IllegalArgumentException("Account cannot be null");
+ 
++        loadParentAccountList(account.getAccountType());
++        mParentAccountId = mAccountsDbAdapter.getAccountID(account.getParentUID());
++        setParentAccountSelection(mParentAccountId);
++
+         String currencyCode = account.getCurrency().getCurrencyCode();
+         setSelectedCurrency(currencyCode);
+ 
+         mNameEditText.setText(account.getName());
+-        long parentAccountId = mAccountsDbAdapter.getAccountID(account.getParentUID());
+-        setParentAccountSelection(parentAccountId);
+ 
+         if (mUseDoubleEntry) {
+             long doubleDefaultAccountId = mAccountsDbAdapter.getAccountID(account.getDefaultTransferAccountUID());
+@@ -321,19 +338,23 @@ private void initializeViewsWithAccount(Account account){
+     private void initializeViews(){
+         setSelectedCurrency(Money.DEFAULT_CURRENCY_CODE);
+         mColorSquare.setBackgroundColor(Color.LTGRAY);
+-        long parentAccountId = getArguments().getLong(UxArgument.PARENT_ACCOUNT_ID);
+-        setParentAccountSelection(parentAccountId);
++        mParentAccountId = getArguments().getLong(UxArgument.PARENT_ACCOUNT_ID);
+ 
+-        /* This snippet causes the child account to default to same color as parent. Not sure if we want that
+ 
+-        if (parentAccountId > 0) {
+-            //child accounts by default have same type as the parent
+-            setAccountTypeSelection(mAccountsDbAdapter.getAccountType(parentAccountId));
+-            String colorHex = mAccountsDbAdapter.getAccountColorCode(parentAccountId);
+-            initializeColorSquarePreview(colorHex);
+-            mSelectedColor = colorHex;
++        if (mParentAccountId > 0) {
++            Account.AccountType parentAccountType = mAccountsDbAdapter.getAccountType(mParentAccountId);
++            setAccountTypeSelection(parentAccountType);
++            loadParentAccountList(parentAccountType);
++            setParentAccountSelection(mParentAccountId);
++//            String colorHex = mAccountsDbAdapter.getAccountColorCode(parentAccountId);
++//            initializeColorSquarePreview(colorHex);
++//            mSelectedColor = colorHex;
+         }
+-        */
++
++        //this must be called after changing account type
++        //because changing account type reloads list of eligible parent accounts
++
++
+     }
+ 
+     /**
+@@ -392,7 +413,14 @@ private void setParentAccountSelection(long parentAccountId){
+ 
+         for (int pos = 0; pos < mParentAccountCursorAdapter.getCount(); pos++) {
+             if (mParentAccountCursorAdapter.getItemId(pos) == parentAccountId){
+-                mParentAccountSpinner.setSelection(pos);
++                final int position = pos;
++                mParentAccountSpinner.postDelayed(new Runnable() {
++                    @Override
++                    public void run() {
++                        mParentAccountSpinner.setSelection(position);
++                    }
++                }, 100);
++//                mParentAccountSpinner.setSelection(pos, true);
+                 break;
+             }
+         }
+@@ -477,7 +505,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     /**
+      * Initializes the default transfer account spinner with eligible accounts
+      */
+-    private void loadDefaultTransferAccoutList(){
++    private void loadDefaultTransferAccountList(){
+         String condition = DatabaseHelper.KEY_ROW_ID + " != " + mSelectedAccountId
+                 + " AND " + DatabaseHelper.KEY_PLACEHOLDER + "=0"
+                 + " AND " + DatabaseHelper.KEY_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID() + "'";
+@@ -493,23 +521,32 @@ private void loadDefaultTransferAccoutList(){
+         mDefaultTransferAccountCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+                 android.R.layout.simple_spinner_item,
+                 defaultTransferAccountCursor);
+-        mParentAccountCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-        mDefaulTransferAccountSpinner.setAdapter(mParentAccountCursorAdapter);
++        mDefaultTransferAccountCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        mDefaulTransferAccountSpinner.setAdapter(mDefaultTransferAccountCursorAdapter);
+     }
+ 
+     /**
+-     * Loads the list of possible accounts which can be set as a parent account and initializes the spinner
++     * Loads the list of possible accounts which can be set as a parent account and initializes the spinner.
++     * The allowed parent accounts depends on the account type
++     * @param accountType AccountType of account whose allowed parent list is to be loaded
+      */
+-	private void loadParentAccountList(){
+-        String condition = null;
++	private void loadParentAccountList(Account.AccountType accountType){
++        String condition = DatabaseHelper.KEY_TYPE + " IN ("
++                + getAllowedParentAccountTypes(accountType) + ") ";
++
+         if (mAccount != null){  //if editing an account
+             // limit cyclic account hierarchies. Still technically possible since we don't forbid descendant accounts
+-            condition = "(" + DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " IS NULL "
++            condition += " AND (" + DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " IS NULL "
+                     + " OR " + DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " != '" + mAccount.getUID() + "')"
+-                    + " AND " + DatabaseHelper.KEY_ROW_ID + "!=" + mSelectedAccountId;
++                    + " AND " + DatabaseHelper.KEY_ROW_ID + " != " + mSelectedAccountId;
++
+             //TODO: Limit all descendants of the account to eliminate the possibility of cyclic hierarchy
+         }
+ 
++        //if we are reloading the list, close the previous cursor first
++        if (mParentAccountCursor != null)
++            mParentAccountCursor.close();
++
+ 		mParentAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(condition);
+ 		if (mParentAccountCursor == null || mParentAccountCursor.getCount() <= 0){
+             final View view = getView();
+@@ -526,6 +563,68 @@ private void loadParentAccountList(){
+ 	}
+ 
+     /**
++     * Returns a comma separated list of account types which can be parent accounts for the specified <code>type</code>.
++     * The strings in the list are the {@link org.gnucash.android.model.Account.AccountType#name()}s of the different types.
++     * @param type {@link org.gnucash.android.model.Account.AccountType}
++     * @return String comma separated list of account types
++     */
++    private String getAllowedParentAccountTypes(Account.AccountType type){
++
++        switch (type){
++            case EQUITY:
++                return "'" + Account.AccountType.EQUITY.name() + "'";
++
++            case INCOME:
++            case EXPENSE:
++                return "'" + Account.AccountType.EXPENSE + "', '" + Account.AccountType.INCOME + "', '"
++                        + Account.AccountType.ROOT + "'";
++
++            case CASH:
++            case BANK:
++            case CREDIT:
++            case ASSET:
++            case LIABILITY:
++            case PAYABLE:
++            case RECEIVABLE:
++            case CURRENCY:
++            case STOCK:
++            case MUTUAL: {
++                List<String> accountTypeStrings = getAccountTypeStringList();
++
++                accountTypeStrings.remove(Account.AccountType.EQUITY.name());
++                accountTypeStrings.remove(Account.AccountType.EXPENSE.name());
++                accountTypeStrings.remove(Account.AccountType.INCOME.name());
++
++                String result = "";
++                for (String accountTypeString : accountTypeStrings) {
++                    result += "'" + accountTypeString + "',";
++                }
++
++                //remove the last comma
++                return result.substring(0, result.length() - 1);
++
++            }
++
++            case ROOT:
++            default:
++                return Arrays.toString(Account.AccountType.values()).replaceAll("\\[|]", "");
++        }
++    }
++
++    /**
++     * Returns a list of all the available {@link org.gnucash.android.model.Account.AccountType}s as strings
++     * @return String list of all account types
++     */
++    private List<String> getAccountTypeStringList(){
++        String[] accountTypes = Arrays.toString(Account.AccountType.values()).replaceAll("\\[|]", "").split(",");
++        List<String> accountTypesList = new ArrayList<String>();
++        for (String accountType : accountTypes) {
++            accountTypesList.add(accountType.trim());
++        }
++
++        return accountTypesList;
++    }
++    /**
+      * Loads the list of account types into the account type selector spinner
+      */
+     private void loadAccountTypesList(){
+@@ -583,9 +682,8 @@ private void saveAccount() {
+ 				.getSelectedItemPosition());
+ 		mAccount.setCurrency(Currency.getInstance(curCode));
+ 
+-        int selectedAccountType = mAccountTypeSpinner.getSelectedItemPosition();
+-        String[] accountTypeEntries = getResources().getStringArray(R.array.account_type_entries);
+-        mAccount.setAccountType(Account.AccountType.valueOf(accountTypeEntries[selectedAccountType]));
++        Account.AccountType selectedAccountType = getSelectedAccountType();
++        mAccount.setAccountType(selectedAccountType);
+ 
+         mAccount.setPlaceHolderFlag(mPlaceholderCheckBox.isChecked());
+         mAccount.setColorCode(mSelectedColor);
+@@ -612,8 +710,18 @@ private void saveAccount() {
+ 
+ 		finishFragment();
+ 	}
+-	
+-	/**
++
++    /**
++     * Returns the currently selected account type in the spinner
++     * @return {@link org.gnucash.android.model.Account.AccountType} currently selected
++     */
++    private Account.AccountType getSelectedAccountType() {
++        int selectedAccountTypeIndex = mAccountTypeSpinner.getSelectedItemPosition();
++        String[] accountTypeEntries = getResources().getStringArray(R.array.account_type_entries);
++        return Account.AccountType.valueOf(accountTypeEntries[selectedAccountTypeIndex]);
++    }
++
++    /**
+ 	 * Retrieves the name of the account which has been entered in the EditText
+ 	 * @return
+ 	 */
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+index 9570b852..c83147fc 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -37,6 +37,7 @@
+ import android.support.v4.view.ViewPager;
+ import android.util.Log;
+ import android.util.SparseArray;
++import android.util.SparseIntArray;
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.widget.Toast;
+@@ -133,7 +134,7 @@
+     /**
+      * Map containing fragments for the different tabs
+      */
+-    private Map<Integer,Refreshable> mFragmentPageReferenceMap = new HashMap<Integer, Refreshable>();
++    private SparseArray<Refreshable> mFragmentPageReferenceMap = new SparseArray<Refreshable>();
+ 
+     /**
+      * ViewPager which manages the different tabs
+@@ -238,7 +239,10 @@ public void onCreate(Bundle savedInstanceState) {
+             PagerAdapter mPagerAdapter = new AccountViewPagerAdapter(getSupportFragmentManager());
+             mPager.setAdapter(mPagerAdapter);
+             titlePageIndicator.setViewPager(mPager);
+-            mPager.setCurrentItem(INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
++
++            SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(this);
++            int lastTabIndex = preferences.getInt(LAST_OPEN_TAB_INDEX, INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
++            mPager.setCurrentItem(lastTabIndex);
+         }
+ 
+ 	}
+@@ -247,19 +251,22 @@ public void onCreate(Bundle savedInstanceState) {
+      * Loads default setting for currency and performs app first-run initialization
+      */
+     private void init() {
+-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
++        PreferenceManager.setDefaultValues(this, R.xml.fragment_transaction_preferences, false);
++
+         Locale locale = Locale.getDefault();
+         //sometimes the locale en_UK is returned which causes a crash with Currency
+         if (locale.getCountry().equals("UK")) {
+             locale = new Locale(locale.getLanguage(), "GB");
+         }
++
+         String currencyCode;
++        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+         try { //there are some strange locales out there
+             currencyCode = prefs.getString(getString(R.string.key_default_currency),
+                     Currency.getInstance(locale).getCurrencyCode());
+         } catch (Exception e) {
+             Log.e(LOG_TAG, e.getMessage());
+-            currencyCode = "USD"; //just use USD and let the user choose
++            currencyCode = "USD";
+         }
+ 
+         Money.DEFAULT_CURRENCY_CODE = currencyCode;
+@@ -275,18 +282,15 @@ private void init() {
+ 
+     }
+ 
+-    @Override
++     @Override
+     protected void onResume() {
+         super.onResume();
+         TransactionsActivity.sLastTitleColor = -1;
+-        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(this);
+-        int lastTabIndex = preferences.getInt(LAST_OPEN_TAB_INDEX, INDEX_TOP_LEVEL_ACCOUNTS_FRAGMENT);
+-        mPager.setCurrentItem(lastTabIndex);
+     }
+ 
+     @Override
+-    protected void onStop() {
+-        super.onPause();
++    protected void onDestroy() {
++        super.onDestroy();
+         SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(this);
+         preferences.edit().putInt(LAST_OPEN_TAB_INDEX, mPager.getCurrentItem()).commit();
+     }
+@@ -471,7 +475,7 @@ public void onClick(DialogInterface dialogInterface, int i) {
+         });
+ 
+ 		mDefaultAccountsDialog = builder.create();
+-		mDefaultAccountsDialog.show();		
++		mDefaultAccountsDialog.show();
+ 	}
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
+index 5863897e..2e6fd37a 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -633,9 +633,8 @@ public Cursor loadInBackground() {
+             Cursor cursor;
+ 
+             if (mFilter != null){
+-                StringBuffer queryBuffer = new StringBuffer(DatabaseHelper.KEY_NAME)
+-                        .append(" LIKE '%").append(mFilter).append("%'");
+-                cursor = ((AccountsDbAdapter)mDatabaseAdapter).fetchAccounts(queryBuffer.toString());
++                cursor = ((AccountsDbAdapter)mDatabaseAdapter)
++                        .fetchAccounts(DatabaseHelper.KEY_NAME + " LIKE '%" + mFilter + "%'");
+             } else {
+                 if (mParentAccountId > 0)
+                     cursor = ((AccountsDbAdapter) mDatabaseAdapter).fetchSubAccounts(mParentAccountId);
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 251a920e..0c02bc20 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -213,7 +213,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		actionBar.setDisplayShowTitleEnabled(false);
+ 
+ 		SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+-		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
++		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), true);
+ 		if (!mUseDoubleEntry){
+ 			getView().findViewById(R.id.layout_double_entry).setVisibility(View.GONE);
+ 		}
+@@ -604,7 +604,7 @@ private void saveNewTransaction() {
+             long recurrencePeriodMillis = Long.parseLong(recurrenceOptions[recurrenceIndex]);
+             long firstRunMillis = System.currentTimeMillis() + recurrencePeriodMillis;
+ 
+-            Transaction recurringTransaction = new Transaction(mTransaction);
++            Transaction recurringTransaction = new Transaction(mTransaction, true);
+             recurringTransaction.setRecurrencePeriod(recurrencePeriodMillis);
+             long recurringTransactionId = mTransactionsDbAdapter.addTransaction(recurringTransaction);
+ 
+diff --git a/integration-tests/pom.xml b/integration-tests/pom.xml
+index 274c36a7..6c32e8fe 100644
+--- a/integration-tests/pom.xml
++++ b/integration-tests/pom.xml
+@@ -17,7 +17,7 @@
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+     <parent>
+-		<version>1.3.0-SNAPSHOT</version>
++		<version>1.3.2-SNAPSHOT</version>
+ 		<groupId>org.gnucash.android</groupId>
+ 		<artifactId>gnucash-android-parent</artifactId>
+ 	</parent>
+diff --git a/pom.xml b/pom.xml
+index 3752af57..3bb0faac 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -17,7 +17,7 @@
+ 
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+-	<version>1.3.0-SNAPSHOT</version>
++	<version>1.3.2-SNAPSHOT</version>
+     <groupId>org.gnucash.android</groupId>
+     <artifactId>gnucash-android-parent</artifactId>
+     <name>GnuCash Android parent</name>

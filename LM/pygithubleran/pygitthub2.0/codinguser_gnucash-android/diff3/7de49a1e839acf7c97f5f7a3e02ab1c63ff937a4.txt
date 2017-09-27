@@ -1,0 +1,287 @@
+From 7de49a1e839acf7c97f5f7a3e02ab1c63ff937a4 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 13 Nov 2015 00:33:34 +0100
+Subject: [PATCH] Remember last export destination
+
+Fix crash when importing amounts with very big precision
+Fix crash when parsing large split amounts
+Fix crash on some devices when searching
+Fix crash when saving with invalid amount
+Fixes #408
+---
+ .../java/org/gnucash/android/model/Commodity.java  | 15 +++------
+ .../main/java/org/gnucash/android/model/Money.java | 36 ++++++++++------------
+ .../main/java/org/gnucash/android/model/Split.java |  8 ++---
+ .../android/ui/account/AccountsListFragment.java   |  4 ++-
+ .../android/ui/export/ExportFormFragment.java      |  8 +++++
+ .../ui/transaction/TransactionFormFragment.java    |  6 ++++
+ .../android/ui/util/widget/CalculatorEditText.java |  2 +-
+ .../android/ui/util/widget/CalculatorKeyboard.java |  4 +++
+ .../res/layout/activity_transaction_detail.xml     |  1 +
+ .../main/res/layout/fragment_transaction_form.xml  |  2 ++
+ app/src/main/res/values/donottranslate.xml         |  1 +
+ 11 files changed, 50 insertions(+), 37 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/Commodity.java b/app/src/main/java/org/gnucash/android/model/Commodity.java
+index da0c39e2..13019221 100644
+--- a/app/src/main/java/org/gnucash/android/model/Commodity.java
++++ b/app/src/main/java/org/gnucash/android/model/Commodity.java
+@@ -164,17 +164,10 @@ public int getSmallestFraction() {
+      * @see #getSmallestFraction()
+      */
+     public int getSmallestFractionDigits(){
+-        switch (mSmallestFraction) {
+-            case 1:     return 0;
+-            case 10:    return 1;
+-            case 100:   return 2;
+-            case 1000:  return 3;
+-            case 10000: return 4;
+-            case 100000: return 5;
+-            case 1000000: return 6;
+-            default:
+-                return 2;
+-                //throw new UnsupportedOperationException("Invalid fraction digits in commodity with fraction: " + mSmallestFraction);
++        if (mSmallestFraction == 0){
++            return 0;
++        } else {
++            return Integer.numberOfTrailingZeros(mSmallestFraction);
+         }
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index a30b5675..6c5796b1 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -90,19 +90,19 @@ public static Money getZeroInstance(){
+ 		return sDefaultZero;
+     }
+ 
++	/**
++	 * Returns the {@link BigDecimal} from the {@code numerator} and {@code denominator}
++	 * @param numerator Number of the fraction
++	 * @param denominator Denominator of the fraction
++	 * @return BigDecimal representation of the number
++	 */
+ 	public static BigDecimal getBigDecimal(long numerator, long denominator) {
+ 		int scale;
+ 		if (numerator == 0 && denominator == 0) {
+ 			denominator = 1;
+ 		}
+-		switch ((int)denominator) {
+-			case 1: scale = 0; break;
+-			case 10: scale = 1; break;
+-			case 100: scale = 2; break;
+-			case 1000: scale = 3; break;
+-			default:
+-				throw new InvalidParameterException("invalid denominator " + denominator);
+-		}
++
++		scale = Integer.numberOfTrailingZeros((int)denominator);
+ 		return new BigDecimal(BigInteger.valueOf(numerator), scale);
+ 	}
+ 
+@@ -112,8 +112,8 @@ public static BigDecimal getBigDecimal(long numerator, long denominator) {
+ 	 * @param commodity Commodity of the money
+ 	 */
+ 	public Money(BigDecimal amount, Commodity commodity){
+-		this.mAmount = amount;
+ 		this.mCommodity = commodity;
++		setAmount(amount); //commodity has to be set first. Because we use it's scale
+ 	}
+ 
+ 	/**
+@@ -123,6 +123,7 @@ public Money(BigDecimal amount, Commodity commodity){
+ 	 * @param currencyCode Currency code as specified by ISO 4217
+ 	 */
+ 	public Money(String amount, String currencyCode){
++		//commodity has to be set first
+ 		mCommodity = Commodity.getInstance(currencyCode);
+ 		setAmount(amount);
+ 	}
+@@ -226,22 +227,17 @@ public long getNumerator() {
+ 	 * @return GnuCash format denominator
+ 	 */
+ 	public long getDenominator() {
+-		switch (getScale()) {
+-			case 0: return 1;
+-			case 1: return 10;
+-			case 2: return 100;
+-			case 3: return 1000;
+-			case 4: return 10000;
+-			case 5: return 100000;
+-			case 6: return 1000000; //I think GnuCash XML can have gold and silver with this denom
+-
++		int scale = getScale();
++		if (scale == 0){
++			return 0;
++		} else {
++			return Integer.numberOfTrailingZeros(scale);
+ 		}
+-		throw new RuntimeException("Unsupported number of fraction digits " + getScale());
+ 	}
+ 
+ 	/**
+ 	 * Returns the scale (precision) used for the decimal places of this amount.
+-	 * <p>The scale used depends on the currency</p>
++	 * <p>The scale used depends on the commodity</p>
+ 	 * @return Scale of amount as integer
+ 	 */
+ 	private int getScale() {
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 39b61906..5e19936c 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -336,11 +336,11 @@ public static Split parseSplit(String splitCsvString) {
+             }
+             return split;
+         } else {
+-            int valueNum = Integer.parseInt(tokens[1]);
+-            int valueDenom = Integer.parseInt(tokens[2]);
++            long valueNum = Long.parseLong(tokens[1]);
++            long valueDenom = Long.parseLong(tokens[2]);
+             String valueCurrencyCode = tokens[3];
+-            int quantityNum = Integer.parseInt(tokens[4]);
+-            int quantityDenom = Integer.parseInt(tokens[5]);
++            long quantityNum = Long.parseLong(tokens[4]);
++            long quantityDenom = Long.parseLong(tokens[5]);
+             String qtyCurrencyCode = tokens[6];
+ 
+             Money value = new Money(valueNum, valueDenom, valueCurrencyCode);
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 74deec21..a1623f23 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -49,6 +49,7 @@
+ import android.widget.TextView;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseSchema;
+@@ -256,8 +257,9 @@ public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+         else {
+             inflater.inflate(R.menu.account_actions, menu);
+             // Associate searchable configuration with the SearchView
++
+             SearchManager searchManager =
+-                    (SearchManager) getActivity().getSystemService(Context.SEARCH_SERVICE);
++                    (SearchManager) GnuCashApplication.getAppContext().getSystemService(Context.SEARCH_SERVICE);
+             mSearchView = (android.support.v7.widget.SearchView)
+                 MenuItemCompat.getActionView(menu.findItem(R.id.menu_search));
+             if (mSearchView == null)
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+index 45d707c1..410b48a7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+@@ -286,6 +286,11 @@ private void startExport(){
+ 		Log.i(TAG, "Commencing async export of transactions");
+ 		new ExportAsyncTask(getActivity()).execute(exportParameters);
+ 
++		int position = mDestinationSpinner.getSelectedItemPosition();
++		PreferenceManager.getDefaultSharedPreferences(getActivity())
++				.edit().putInt(getString(R.string.key_last_export_destination), position)
++				.apply();
++
+ 		// finish the activity will cause the progress dialog to be leaked
+ 		// which would throw an exception
+ 		//getActivity().finish();
+@@ -340,6 +345,9 @@ public void onNothingSelected(AdapterView<?> parent) {
+ 			}
+ 		});
+ 
++		int position = PreferenceManager.getDefaultSharedPreferences(getActivity())
++				.getInt(getString(R.string.key_last_export_destination), 0);
++		mDestinationSpinner.setSelection(position);
+ 
+ 		//**************** export start time bindings ******************
+ 		String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(getActivity())
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 430b233b..ed4c48f1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -726,6 +726,12 @@ private void saveNewTransaction() {
+ 		String notes = mNotesEditText.getText().toString();
+ 		BigDecimal amountBigd = mAmountEditText.getValue();
+ 
++        if (amountBigd == null){ //if for whatever reason we cannot process the amount
++            Toast.makeText(getActivity(), R.string.toast_transanction_amount_required,
++                    Toast.LENGTH_SHORT).show();
++            return;
++        }
++
+ 		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID));
+ 		Money amount 	= new Money(amountBigd, Commodity.getInstance(currency.getCurrencyCode())).absolute();
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+index 193d2f66..2b6bb455 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+@@ -322,7 +322,7 @@ public BigDecimal getValue(){
+             return null;
+         try { //catch any exceptions in the conversion e.g. if a string with only "-" is entered
+             return new BigDecimal(amountString);
+-        } catch (Exception e){
++        } catch (NumberFormatException e){
+             String msg = "Error parsing amount string " + amountString + " from CalculatorEditText";
+             Log.i(getClass().getSimpleName(), msg, e);
+             Crashlytics.log(msg);
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorKeyboard.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorKeyboard.java
+index 64bd1501..56368565 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorKeyboard.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorKeyboard.java
+@@ -77,6 +77,10 @@ public void onKey(int primaryCode, int[] keyCodes) {
+                 return;
+             */
+ 
++            if (!(focusCurrent instanceof CalculatorEditText)){
++                return;
++            }
++
+             CalculatorEditText calculatorEditText = (CalculatorEditText) focusCurrent;
+             Editable editable = calculatorEditText.getText();
+             int start = calculatorEditText.getSelectionStart();
+diff --git a/app/src/main/res/layout/activity_transaction_detail.xml b/app/src/main/res/layout/activity_transaction_detail.xml
+index 70af78a2..695f3bb5 100644
+--- a/app/src/main/res/layout/activity_transaction_detail.xml
++++ b/app/src/main/res/layout/activity_transaction_detail.xml
+@@ -64,6 +64,7 @@
+                     android:gravity="bottom"
+                     android:layout_gravity="bottom"
+                     android:maxLines="1"
++                    android:singleLine="true"
+                     android:ellipsize="start"
+                     android:textStyle="italic"
+                     android:textColor="@android:color/white"
+diff --git a/app/src/main/res/layout/fragment_transaction_form.xml b/app/src/main/res/layout/fragment_transaction_form.xml
+index dcb5b7eb..ec8f9004 100644
+--- a/app/src/main/res/layout/fragment_transaction_form.xml
++++ b/app/src/main/res/layout/fragment_transaction_form.xml
+@@ -41,6 +41,7 @@
+                     android:hint="@string/label_transaction_name"
+                     android:inputType="textCapSentences"
+                     android:imeOptions="actionNext"
++                    android:singleLine="true"
+                     android:nextFocusDown="@+id/input_transaction_amount"
+                     android:background="@android:color/transparent"
+                     android:textSize="22sp" />
+@@ -63,6 +64,7 @@
+                     android:layout_height="wrap_content"
+                     android:hint="@string/label_transaction_amount"
+                     android:inputType="none"
++                    android:singleLine="true"
+                     android:nextFocusDown="@+id/input_description"
+                     android:background="@android:color/transparent"
+                     android:textColor="@color/debit_red"
+diff --git a/app/src/main/res/values/donottranslate.xml b/app/src/main/res/values/donottranslate.xml
+index 41b86548..21340b27 100644
+--- a/app/src/main/res/values/donottranslate.xml
++++ b/app/src/main/res/values/donottranslate.xml
+@@ -29,6 +29,7 @@
+     <string name="key_report_currency" translatable="false">report_currency</string>
+     <string name="key_enable_crashlytics" translatable="false">enable_crashlytics</string>
+     <string name="key_use_account_color" translatable="false">use_account_color</string>
++    <string name="key_last_export_destination">last_export_destination</string>
+ 
+     <string-array name="key_transaction_type_values" translatable="false">
+         <item>CREDIT</item>

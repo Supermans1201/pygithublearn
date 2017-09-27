@@ -1,0 +1,1306 @@
+From 76121bad475b253eefc513ae76299a964ef14c8e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 19 Sep 2014 17:15:31 +0200
+Subject: [PATCH] Added ScheduledEvent database table, migration, and db
+ adapter Parse and save scheduled events to the database
+
+Code refactoring of database adapters to remove redundancies
+//TODO: Add service which regularly runs events
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  45 +++----
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  94 ++++++++-------
+ .../org/gnucash/android/db/DatabaseHelper.java     |  23 ++++
+ .../org/gnucash/android/db/DatabaseSchema.java     |  12 ++
+ .../android/db/ScheduledEventDbAdapter.java        | 133 +++++++++++++++++++++
+ .../org/gnucash/android/db/SplitsDbAdapter.java    |  31 +----
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  44 ++-----
+ .../org/gnucash/android/model/ScheduledEvent.java  |  55 +++++++--
+ .../org/gnucash/android/model/Transaction.java     |   2 +-
+ .../org/gnucash/android/ui/BaseDrawerActivity.java |   0
+ .../android/ui/account/AccountFormFragment.java    |  14 +--
+ .../android/ui/account/AccountsListFragment.java   |   6 +-
+ .../ui/transaction/TransactionFormFragment.java    |  86 +++++--------
+ .../ui/transaction/TransactionsActivity.java       |  10 +-
+ .../transaction/dialog/BulkMoveDialogFragment.java |   4 +-
+ .../dialog/SplitEditorDialogFragment.java          |   8 +-
+ .../gnucash/android/ui/util/RecurrenceParser.java  |  63 +++++++---
+ app/{ => src/main}/res/layout/drawer_list_item.xml |   0
+ .../main/res/layout/fragment_new_transaction.xml   |   5 -
+ .../android/test/ui/TransactionsActivityTest.java  |   2 +-
+ 20 files changed, 390 insertions(+), 247 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+ rename app/src/{ => main/java}/org/gnucash/android/model/ScheduledEvent.java (63%)
+ rename app/src/{ => main/java}/org/gnucash/android/ui/BaseDrawerActivity.java (100%)
+ rename app/src/{ => main/java}/org/gnucash/android/ui/util/RecurrenceParser.java (53%)
+ rename app/{ => src/main}/res/layout/drawer_list_item.xml (100%)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index b7a60b24..6a910024 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -221,7 +221,7 @@ public int updateAccount(long accountId, String columnKey, String newValue){
+ 	 * @return <code>true</code> if deletion was successful, <code>false</code> otherwise.
+ 	 */
+ 	public boolean destructiveDeleteAccount(long rowId){
+-        String accountUID = getAccountUID(rowId);
++        String accountUID = getUID(rowId);
+         if (getAccountType(accountUID) == AccountType.ROOT) {
+             // refuse to delete ROOT
+             return false;
+@@ -294,7 +294,7 @@ public boolean destructiveDeleteAccount(long rowId){
+                     + " FROM trans_split_acct WHERE "
+                     + AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID
+                     + " = ? )",
+-                    new String[]{getAccountUID(rowId)});
++                    new String[]{getUID(rowId)});
+             // delete empty transactions
+             // trans_split_acct is an inner joint, empty transactions will
+             // not be selected in this view
+@@ -346,7 +346,7 @@ public boolean transactionPreservingDelete(long accountId, long accountReassignI
+         mDb.update(SplitEntry.TABLE_NAME,
+                 contentValues,
+                 SplitEntry.COLUMN_ACCOUNT_UID + "=?",
+-                new String[]{getAccountUID(accountId)});
++                new String[]{getUID(accountId)});
+         return destructiveDeleteAccount(accountId);
+     }
+ 
+@@ -358,7 +358,7 @@ public boolean transactionPreservingDelete(long accountId, long accountReassignI
+      */
+     public boolean recursiveDestructiveDelete(long accountId){
+         Log.d(TAG, "Delete account with rowId with its transactions and sub-accounts: " + accountId);
+-        String accountUID = getAccountUID(accountId);
++        String accountUID = getUID(accountId);
+         List<String> descendantAccountUIDs = getDescendantAccountUIDs(accountUID, null, null);
+         mDb.beginTransaction();
+         try {
+@@ -462,7 +462,7 @@ public String getParentAccountUID(String uid){
+      * @see #getParentAccountUID(String)
+      */
+     public String getParentAccountUID(long id){
+-        return getParentAccountUID(getAccountUID(id));
++        return getParentAccountUID(getUID(id));
+     }
+ 
+ 	/**
+@@ -522,7 +522,7 @@ public String getAccountColorCode(long accountId){
+      * @return {@link AccountType} of the account
+      */
+     public AccountType getAccountType(long accountId){
+-        return getAccountType(getAccountUID(accountId));
++        return getAccountType(getUID(accountId));
+     }
+ 
+     /**
+@@ -815,7 +815,7 @@ public Cursor fetchAccountsOrderedByFullName(String where, String[] whereArgs) {
+      */
+     public Money getAccountBalance(long accountId){
+         Log.d(TAG, "Computing account balance for account ID " + accountId);
+-        String currencyCode = getCurrencyCode(accountId);
++        String currencyCode = getCurrencyCode(getUID(accountId));
+         Money balance = Money.createZeroInstance(currencyCode);
+ 
+         List<Long> subAccounts = getSubAccountIds(accountId);
+@@ -839,7 +839,7 @@ public Money getAccountBalance(long accountId){
+      */
+     public Money getAccountBalance(String accountUID){
+         Log.d(TAG, "Computing account balance for account ID " + accountUID);
+-        String currencyCode = mTransactionsAdapter.getCurrencyCode(accountUID);
++        String currencyCode = mTransactionsAdapter.getAccountCurrencyCode(accountUID);
+         boolean hasDebitNormalBalance = getAccountType(accountUID).hasDebitNormalBalance();
+         Money balance = Money.createZeroInstance(currencyCode);
+ 
+@@ -1047,32 +1047,21 @@ public int getTotalAccountCount() {
+ 	 */
+     @Override
+ 	public long getID(String accountUID){
+-		long id = -1;
+-		Cursor c = mDb.query(AccountEntry.TABLE_NAME,
+-				new String[]{AccountEntry._ID},
+-				AccountEntry.COLUMN_UID + "='" + accountUID + "'",
+-				null, null, null, null);
+-		if (c != null) {
+-            if (c.moveToFirst()) {
+-                id = c.getLong(c.getColumnIndexOrThrow(AccountEntry._ID));
+-            }
+-            c.close();
+-        }
+-		return id;
++		return getID(AccountEntry.TABLE_NAME, accountUID);
+ 	}
+ 
+     @Override
+     public String getUID(long id) {
+-        return getAccountUID(id);
++        return getUID(AccountEntry.TABLE_NAME, id);
+     }
+ 
+     /**
+ 	 * Returns currency code of account with database ID <code>id</code>
+-	 * @param id Record ID of the account to be removed
++	 * @param uid GUID of the account
+ 	 * @return Currency code of the account
+ 	 */
+-	public String getCurrencyCode(long id){
+-		return mTransactionsAdapter.getCurrencyCode(id);
++	public String getCurrencyCode(String uid){
++		return getAccountCurrencyCode(uid);
+ 	}
+ 
+     /**
+@@ -1169,7 +1158,7 @@ public String getAccountFullName(String accountUID) {
+      * @return Fully qualified (with parent hierarchy) account name
+      */
+     public String getFullyQualifiedAccountName(long accountId){
+-        return getFullyQualifiedAccountName(getAccountUID(accountId));
++        return getFullyQualifiedAccountName(getUID(accountId));
+     }
+ 
+     /**
+@@ -1196,7 +1185,7 @@ public boolean isPlaceholderAccount(String accountUID) {
+      * @return <code>true</code> if the account is a placeholder account, <code>false</code> otherwise
+      */
+     public boolean isPlaceholderAccount(long accountId){
+-        return isPlaceholderAccount(getAccountUID(accountId));
++        return isPlaceholderAccount(getUID(accountId));
+     }
+ 
+     /**
+@@ -1230,8 +1219,8 @@ public boolean isFavoriteAccount(long accountId){
+             SplitsDbAdapter splitsDbAdapter = mTransactionsAdapter.getSplitDbAdapter();
+             while (cursor.moveToNext()) {
+                 long id = cursor.getLong(cursor.getColumnIndexOrThrow(AccountEntry._ID));
+-                String accountUID = getAccountUID(id);
+-                String currencyCode = getCurrencyCode(id);
++                String accountUID = getUID(id);
++                String currencyCode = getCurrencyCode(accountUID);
+                 ArrayList<String> accountList = new ArrayList<String>();
+                 accountList.add(accountUID);
+                 Money balance = splitsDbAdapter.computeSplitBalance(accountList,
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index d5440c74..15332949 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -197,6 +197,54 @@ protected int deleteAllRecords(String tableName){
+     }
+ 
+     /**
++     * Returns the string unique ID (GUID) of a record in the database
++     * @param tableName Name of table where record is found
++     * @param uid GUID of the record
++     * @return Long record ID
++     */
++    protected long getID(String tableName, String uid){
++        if (uid == null)
++            return 0;
++
++        Cursor cursor = mDb.query(tableName,
++                new String[] {DatabaseSchema.CommonColumns._ID},
++                DatabaseSchema.CommonColumns.COLUMN_UID + " = ?",
++                new String[]{uid},
++                null, null, null);
++        long result = -1;
++        if (cursor != null){
++            if (cursor.moveToFirst()) {
++                Log.d(TAG, "Transaction already exists. Returning existing id");
++                result = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.CommonColumns._ID));
++            }
++            cursor.close();
++        }
++        return result;
++    }
++
++    /**
++     * Returns the string unique ID (GUID) of a record in the database
++     * @param tableName Name of table where record is found
++     * @param id long database record ID
++     * @return GUID of the record
++     */
++    protected String getUID(String tableName, long id){
++        Cursor cursor = mDb.query(tableName,
++                new String[]{DatabaseSchema.CommonColumns.COLUMN_UID},
++                DatabaseSchema.CommonColumns._ID + " = " + id,
++                null, null, null, null);
++
++        String uid = null;
++        if (cursor != null){
++            if (cursor.moveToFirst()) {
++                uid = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.CommonColumns.COLUMN_UID));
++            }
++            cursor.close();
++        }
++        return uid;
++    }
++
++    /**
+      * Retrieves record with id <code>rowId</code> from table
+      * @param rowId ID of record to be retrieved
+      * @return {@link Cursor} to record retrieved
+@@ -229,7 +277,7 @@ protected int deleteAllRecords(String tableName){
+      * @return Currency code of the account. "" if accountUID
+      *      does not exist in DB
+      */
+-    public String getCurrencyCode(String accountUID) {
++    public String getAccountCurrencyCode(String accountUID) {
+         Cursor cursor = mDb.query(DatabaseSchema.AccountEntry.TABLE_NAME,
+                 new String[] {DatabaseSchema.AccountEntry.COLUMN_CURRENCY},
+                 DatabaseSchema.AccountEntry.COLUMN_UID + "= ?",
+@@ -270,50 +318,6 @@ public AccountType getAccountType(String accountUID){
+     }
+ 
+     /**
+-     * Returns an account UID of the account with record id <code>accountRowID</code>
+-     * @param accountRowID Record ID of account as long parameter
+-     * @return String containing UID of account
+-     * @throws java.lang.IllegalArgumentException if accountRowID does not exist
+-     */
+-    public String getAccountUID(long accountRowID) {
+-        Cursor c = mDb.query(DatabaseSchema.AccountEntry.TABLE_NAME,
+-                new String[]{DatabaseSchema.AccountEntry.COLUMN_UID},
+-                DatabaseSchema.CommonColumns._ID + "=" + accountRowID,
+-                null, null, null, null);
+-        try {
+-            if (c.moveToFirst()) {
+-                return c.getString(0);
+-            } else {
+-                throw new IllegalArgumentException(String.format("account %d does not exist", accountRowID));
+-            }
+-        } finally {
+-            c.close();
+-        }
+-    }
+-
+-    /**
+-     * Returns the database row Id of the account with unique Identifier <code>accountUID</code>
+-     * @param accountUID Unique identifier of the account
+-     * @return Database row ID of the account
+-     * @throws java.lang.IllegalArgumentException if accountUID does not exist
+-     */
+-    public long getAccountID(String accountUID){
+-        Cursor c = mDb.query(DatabaseSchema.AccountEntry.TABLE_NAME,
+-                new String[]{DatabaseSchema.AccountEntry._ID},
+-                DatabaseSchema.AccountEntry.COLUMN_UID + "= ?",
+-                new String[]{accountUID}, null, null, null);
+-        try {
+-            if (c.moveToFirst()) {
+-                return c.getLong(0);
+-            } else {
+-                throw new IllegalArgumentException("account " + accountUID + " does not exist");
+-            }
+-        } finally {
+-            c.close();
+-        }
+-    }
+-
+-    /**
+      * Returns the database record ID of the entry
+      * @param uid GUID of the record
+      * @return Long database identifier of the record
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 90ebb7f4..0db65bde 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -103,6 +103,20 @@
+             + "UNIQUE (" 		+ SplitEntry.COLUMN_UID + ") "
+             + ");";
+ 
++
++    public static final String SCHEDULED_EVENTS_TABLE_CREATE = "CREATE TABLE " + ScheduledEventEntry.TABLE_NAME + " ("
++            + ScheduledEventEntry._ID                   + " integer primary key autoincrement, "
++            + ScheduledEventEntry.COLUMN_UID            + " varchar(255) not null, "
++            + ScheduledEventEntry.COLUMN_EVENT_UID      + " varchar(255) not null, "
++            + ScheduledEventEntry.COLUMN_TYPE           + " varchar(255) not null, "
++            + ScheduledEventEntry.COLUMN_PERIOD         + " integer not null, "
++            + ScheduledEventEntry.COLUMN_LAST_RUN       + " integer default 0, "
++            + ScheduledEventEntry.COLUMN_START_TIME     + " integer not null, "
++            + ScheduledEventEntry.COLUMN_END_TIME       + " integer default 0, "
++            + "UNIQUE (" 		+ ScheduledEventEntry.COLUMN_UID + ") "
++            + ");";
++
++
+     /**
+      * Context passed in for database upgrade. Keep reference so as to be able to display UI dialogs
+      */
+@@ -314,6 +328,13 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+                     db.endTransaction();
+                 }
+             }
++
++            if (oldVersion == 7 && newVersion >= 8){
++                Log.i(LOG_TAG, "Upgrading database to version 8");
++                Log.i(LOG_TAG, "Creating scheduled events table");
++
++                db.execSQL(SCHEDULED_EVENTS_TABLE_CREATE);
++            }
+ 		}
+ 
+         if (oldVersion != newVersion) {
+@@ -330,6 +351,7 @@ private void createDatabaseTables(SQLiteDatabase db) {
+         db.execSQL(ACCOUNTS_TABLE_CREATE);
+         db.execSQL(TRANSACTIONS_TABLE_CREATE);
+         db.execSQL(SPLITS_TABLE_CREATE);
++        db.execSQL(SCHEDULED_EVENTS_TABLE_CREATE);
+ 
+         String createAccountUidIndex = "CREATE UNIQUE INDEX '" + AccountEntry.INDEX_UID + "' ON "
+                 + AccountEntry.TABLE_NAME + "(" + AccountEntry.COLUMN_UID + ")";
+@@ -354,6 +376,7 @@ private void dropAllDatabaseTables(SQLiteDatabase db) {
+         db.execSQL("DROP TABLE IF EXISTS " + AccountEntry.TABLE_NAME);
+         db.execSQL("DROP TABLE IF EXISTS " + TransactionEntry.TABLE_NAME);
+         db.execSQL("DROP TABLE IF EXISTS " + SplitEntry.TABLE_NAME);
++        db.execSQL("DROP TABLE IF EXISTS " + ScheduledEventEntry.TABLE_NAME);
+     }
+ 
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 810d6cad..a4cd48a4 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -95,4 +95,16 @@ private DatabaseSchema(){}
+ 
+         public static final String INDEX_UID                    = "split_uid_index";
+     }
++
++    public static abstract class ScheduledEventEntry implements CommonColumns {
++        public static final String TABLE_NAME           = "scheduled_events";
++
++        public static final String COLUMN_TYPE          = "type";
++        public static final String COLUMN_EVENT_UID     = "event_uid";
++        public static final String COLUMN_START_TIME    = "start_time";
++        public static final String COLUMN_END_TIME      = "end_time";
++        public static final String COLUMN_LAST_RUN      = "last_run";
++        public static final String COLUMN_PERIOD        = "period";
++
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+new file mode 100644
+index 00000000..9cf66a5e
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledEventDbAdapter.java
+@@ -0,0 +1,133 @@
++/*
++ * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.gnucash.android.db;
++
++import android.content.ContentValues;
++import android.content.Context;
++import android.database.Cursor;
++import android.database.sqlite.SQLiteDatabase;
++import android.util.Log;
++import org.gnucash.android.db.DatabaseSchema.ScheduledEventEntry;
++import org.gnucash.android.model.ScheduledEvent;
++
++/**
++ * Database adapter for fetching/saving/modifying scheduled events
++ *
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
++public class ScheduledEventDbAdapter extends DatabaseAdapter {
++
++    public ScheduledEventDbAdapter(Context context){
++        super(context);
++    }
++
++    public ScheduledEventDbAdapter(SQLiteDatabase db){
++        super(db);
++    }
++
++    /**
++     * Adds a scheduled event to the database or replaces the existing entry if one with the same GUID exists
++     * @param scheduledEvent {@link org.gnucash.android.model.ScheduledEvent} to be added
++     * @return Database row ID of the newly created/replaced instance
++     */
++    public long addScheduledEvent(ScheduledEvent scheduledEvent){
++        ContentValues contentValues = new ContentValues();
++        contentValues.put(ScheduledEventEntry.COLUMN_UID,       scheduledEvent.getUID());
++        contentValues.put(ScheduledEventEntry.COLUMN_EVENT_UID, scheduledEvent.getEventUID());
++        contentValues.put(ScheduledEventEntry.COLUMN_PERIOD,    scheduledEvent.getPeriod());
++        contentValues.put(ScheduledEventEntry.COLUMN_START_TIME, scheduledEvent.getStartTime());
++        contentValues.put(ScheduledEventEntry.COLUMN_END_TIME,  scheduledEvent.getEndTime());
++        contentValues.put(ScheduledEventEntry.COLUMN_LAST_RUN,  scheduledEvent.getLastRun());
++        contentValues.put(ScheduledEventEntry.COLUMN_TYPE,      scheduledEvent.getEventType().name());
++
++        Log.d(TAG, "Replace scheduled event in the db");
++        return mDb.replace(ScheduledEventEntry.TABLE_NAME, null, contentValues);
++    }
++
++    /**
++     * Builds a {@link org.gnucash.android.model.ScheduledEvent} instance from a row to cursor in the database.
++     * The cursor should be already pointing to the right entry in the data set. It will not be modified in any way
++     * @param cursor Cursor pointing to data set
++     * @return ScheduledEvent object instance
++     */
++    private ScheduledEvent buildScheduledEventInstance(final Cursor cursor){
++        String uid      = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_UID));
++        String eventUid = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_EVENT_UID));
++        long period     = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_PERIOD));
++        long startTime  = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_START_TIME));
++        long endTime    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_END_TIME));
++        long lastRun    = cursor.getLong(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_LAST_RUN));
++        String typeString = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledEventEntry.COLUMN_TYPE));
++
++        ScheduledEvent event = new ScheduledEvent(ScheduledEvent.EventType.valueOf(typeString));
++        event.setPeriod(period);
++        event.setStartTime(startTime);
++        event.setEndTime(endTime);
++        event.setEventUID(eventUid);
++        event.setUID(uid);
++        event.setLastRun(lastRun);
++
++        return event;
++    }
++
++    /**
++     * Returns an instance of {@link org.gnucash.android.model.ScheduledEvent} from the database record
++     * @param uid GUID of event
++     * @return ScheduledEvent object instance
++     */
++    public ScheduledEvent getScheduledEvent(String uid){
++        Cursor cursor = fetchRecord(getID(uid));
++
++        ScheduledEvent scheduledEvent = null;
++        if (cursor != null) {
++            if (cursor.moveToFirst()) {
++                scheduledEvent = buildScheduledEventInstance(cursor);
++            }
++            cursor.close();
++        }
++        return scheduledEvent;
++    }
++
++    @Override
++    public Cursor fetchRecord(long rowId) {
++        return fetchRecord(ScheduledEventEntry.TABLE_NAME, rowId);
++    }
++
++    @Override
++    public Cursor fetchAllRecords() {
++        return fetchAllRecords(ScheduledEventEntry.TABLE_NAME);
++    }
++
++    @Override
++    public boolean deleteRecord(long rowId) {
++        return deleteRecord(ScheduledEventEntry.TABLE_NAME, rowId);
++    }
++
++    @Override
++    public int deleteAllRecords() {
++        return deleteAllRecords(ScheduledEventEntry.TABLE_NAME);
++    }
++
++    @Override
++    public long getID(String uid) {
++        return getID(ScheduledEventEntry.TABLE_NAME, uid);
++    }
++
++    @Override
++    public String getUID(long id) {
++        return getUID(ScheduledEventEntry.TABLE_NAME, id);
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index 604efa07..cb2a8403 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -132,7 +132,7 @@ public Split buildSplitInstance(Cursor cursor){
+         String transxUID    = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_TRANSACTION_UID));
+         String memo         = cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_MEMO));
+ 
+-        String currencyCode = getCurrencyCode(accountUID);
++        String currencyCode = getAccountCurrencyCode(accountUID);
+         Money amount = new Money(amountString, currencyCode);
+ 
+         Split split = new Split(amount, accountUID);
+@@ -181,7 +181,7 @@ public Split getSplit(long id){
+      */
+     public Money computeSplitBalance(String accountUID) {
+         Cursor cursor = fetchSplitsForAccount(accountUID);
+-        String currencyCode = getCurrencyCode(accountUID);
++        String currencyCode = getAccountCurrencyCode(accountUID);
+         Money splitSum = new Money("0", currencyCode);
+         AccountType accountType = getAccountType(accountUID);
+ 
+@@ -325,19 +325,7 @@ public Cursor fetchSplits(String where, String[] whereArgs, String sortOrder){
+      */
+     @Override
+     public long getID(String uid){
+-        Cursor cursor = mDb.query(SplitEntry.TABLE_NAME,
+-                new String[] {SplitEntry._ID},
+-                SplitEntry.COLUMN_UID + " = ?", new String[]{uid}, null, null, null);
+-        try {
+-            if (cursor.moveToFirst()) {
+-                Log.d(TAG, "Transaction already exists. Returning existing id");
+-                return cursor.getLong(cursor.getColumnIndexOrThrow(SplitEntry._ID));
+-            } else {
+-                throw new IllegalArgumentException("split " + uid + " does not exist");
+-            }
+-        } finally {
+-            cursor.close();
+-        }
++        return getID(SplitEntry.TABLE_NAME, uid);
+     }
+ 
+     /**
+@@ -347,18 +335,7 @@ public long getID(String uid){
+      */
+     @Override
+     public String getUID(long id){
+-        Cursor cursor = mDb.query(SplitEntry.TABLE_NAME,
+-                new String[]{SplitEntry.COLUMN_UID},
+-                SplitEntry._ID + " = " + id, null, null, null, null);
+-        try {
+-            if (cursor.moveToFirst()) {
+-                return cursor.getString(cursor.getColumnIndexOrThrow(SplitEntry.COLUMN_UID));
+-            } else {
+-                throw new IllegalArgumentException("split " + id + " does not exist");
+-            }
+-        } finally {
+-            cursor.close();
+-        }
++        return getUID(SplitEntry.TABLE_NAME, id);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 20cd411d..10ac4c72 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -268,7 +268,7 @@ public Cursor fetchAllRecurringTransactions(){
+ 	 * @return Cursor holding set of transactions for particular account
+ 	 */
+ 	public Cursor fetchAllTransactionsForAccount(long accountID){
+-		return fetchAllTransactionsForAccount(getAccountUID(accountID));
++		return fetchAllTransactionsForAccount(getUID(AccountEntry.TABLE_NAME, accountID));
+ 	}
+ 	
+ 	/**
+@@ -369,7 +369,7 @@ public Transaction buildTransactionInstance(Cursor c){
+         if (mDb.getVersion() < SPLITS_DB_VERSION){ //legacy, will be used once, when migrating the database
+             String accountUID = c.getString(c.getColumnIndexOrThrow(SplitEntry.COLUMN_ACCOUNT_UID));
+             String amountString = c.getString(c.getColumnIndexOrThrow(SplitEntry.COLUMN_AMOUNT));
+-            String currencyCode = getCurrencyCode(accountUID);
++            String currencyCode = getAccountCurrencyCode(accountUID);
+             Money amount = new Money(amountString, currencyCode);
+ 
+             Split split = new Split(amount.absolute(), accountUID);
+@@ -396,14 +396,14 @@ public Transaction buildTransactionInstance(Cursor c){
+ 
+ 	/**
+ 	 * Returns the currency code (ISO 4217) used by the account with id <code>accountId</code>
+-	 * If you do not have the database record Id, you can call {@link #getAccountID(String)} instead.
++	 * If you do not have the database record Id, you can call {@link #getID(String, String)}  instead.
+ 	 * @param accountId Database record id of the account 
+ 	 * @return Currency code of the account with Id <code>accountId</code>
+-	 * @see #getCurrencyCode(String)
++	 * @see #getAccountCurrencyCode(String)
+ 	 */
+-    public String getCurrencyCode(long accountId){
+-		String accountUID = getAccountUID(accountId);
+-		return getCurrencyCode(accountUID);
++	public String getAccountCurrencyCode(long accountId){
++		String accountUID = getUID(AccountEntry.TABLE_NAME, accountId);
++		return getAccountCurrencyCode(accountUID);
+ 	}
+ 
+     /**
+@@ -426,20 +426,8 @@ public Money getBalance(String transactionUID, String accountUID){
+      * @return String unique identifier of the transaction
+      */
+     @Override
+-    public String getUID(long transactionId) {
+-        Cursor c = mDb.query(TransactionEntry.TABLE_NAME,
+-                new String[]{TransactionEntry.COLUMN_UID},
+-                TransactionEntry._ID + "=" + transactionId,
+-                null, null, null, null);
+-        try {
+-            if (c.moveToFirst()) {
+-                return c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_UID));
+-            } else {
+-                throw new IllegalArgumentException("transacion " + transactionId + " does not exist");
+-            }
+-        } finally {
+-            c.close();
+-        }
++    public String getUID(long transactionId){
++        return getUID(TransactionEntry.TABLE_NAME, transactionId);
+     }
+ 
+ 	/**
+@@ -540,19 +528,7 @@ public long getAllTransactionsCount() {
+      */
+     @Override
+     public long getID(String transactionUID){
+-        Cursor c = mDb.query(TransactionEntry.TABLE_NAME,
+-                new String[]{TransactionEntry._ID},
+-                TransactionEntry.COLUMN_UID + "='" + transactionUID + "'",
+-                null, null, null, null);
+-        try {
+-            if (c.moveToFirst()) {
+-                return c.getLong(0);
+-            } else {
+-                throw new IllegalArgumentException("transaction " + transactionUID + " does not exist");
+-            }
+-        } finally {
+-            c.close();
+-        }
++        return getID(TransactionEntry.TABLE_NAME, transactionUID);
+     }
+ 
+     @Override
+diff --git a/app/src/org/gnucash/android/model/ScheduledEvent.java b/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+similarity index 63%
+rename from app/src/org/gnucash/android/model/ScheduledEvent.java
+rename to app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+index 93fa4796..ef2950e1 100644
+--- a/app/src/org/gnucash/android/model/ScheduledEvent.java
++++ b/app/src/main/java/org/gnucash/android/model/ScheduledEvent.java
+@@ -15,17 +15,23 @@
+  */
+ package org.gnucash.android.model;
+ 
++import org.gnucash.android.ui.util.RecurrenceParser;
++
++import java.text.SimpleDateFormat;
++import java.util.Date;
+ import java.util.UUID;
+ 
+ /**
+-* Represents a scheduled event which is stored in the database and run at regular period
++* Represents a scheduled event which is stored in the database and run at regular mPeriod
+ *
+ * @author Ngewi Fet <ngewif@gmail.com>
+ */
+ public class ScheduledEvent {
+-    public long period;
+-    public long startDate;
+-    public long endDate;
++
++
++    private long mPeriod;
++    private long mStartDate;
++    private long mEndDate;
+ 
+     /**
+      * Types of events which can be scheduled
+@@ -40,7 +46,7 @@
+     /**
+      * Next scheduled run of Event
+      */
+-    private long mNextRun;
++    private long mLastRun;
+ 
+     /**
+      * Unique ID of the template from which the recurring event will be executed.
+@@ -82,11 +88,42 @@ public void setEventUID(String eventUID) {
+         this.mEventUID = eventUID;
+     }
+ 
+-    public long getNextRun() {
+-        return mNextRun;
++    public long getLastRun() {
++        return mLastRun;
++    }
++
++    public void setLastRun(long nextRun) {
++        this.mLastRun = nextRun;
++    }
++
++    public long getPeriod() {
++        return mPeriod;
++    }
++
++    public void setPeriod(long period) {
++        this.mPeriod = period;
++    }
++
++    public long getStartTime() {
++        return mStartDate;
++    }
++
++    public void setStartTime(long startDate) {
++        this.mStartDate = startDate;
++    }
++
++    public long getEndTime() {
++        return mEndDate;
++    }
++
++    public void setEndTime(long endDate) {
++        this.mEndDate = endDate;
+     }
+ 
+-    public void setNextRun(long nextRun) {
+-        this.mNextRun = nextRun;
++    @Override
++    public String toString() {
++        SimpleDateFormat dateFormat = new SimpleDateFormat("dd.MM.yyyy");
++        return mEventType.name() + " recurring every " + mPeriod/ RecurrenceParser.DAY_MILLIS + " days starting on "
++                + dateFormat.format(new Date(mStartDate));
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 60678674..de592c1d 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -248,7 +248,7 @@ public Money getImbalance(){
+     public static Money computeBalance(String accountUID, List<Split> splitList) {
+         AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+         AccountType accountType = accountsDbAdapter.getAccountType(accountUID);
+-        String currencyCode = accountsDbAdapter.getCurrencyCode(accountUID);
++        String currencyCode = accountsDbAdapter.getAccountCurrencyCode(accountUID);
+ 
+         boolean isDebitAccount = accountType.hasDebitNormalBalance();
+         Money balance = Money.createZeroInstance(currencyCode);
+diff --git a/app/src/org/gnucash/android/ui/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
+similarity index 100%
+rename from app/src/org/gnucash/android/ui/BaseDrawerActivity.java
+rename to app/src/main/java/org/gnucash/android/ui/BaseDrawerActivity.java
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index cc7aae0c..8c512a04 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -306,11 +306,8 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             getSherlockActivity().getSupportActionBar().setTitle(R.string.title_edit_account);
+         }
+         mRootAccountUID = mAccountsDbAdapter.getGnuCashRootAccountUID();
+-        if (mRootAccountUID == null) {
+-            mRootAccountId = -1;
+-        } else {
+-            mRootAccountId = mAccountsDbAdapter.getAccountID(mRootAccountUID);
+-        }
++        mRootAccountId = mAccountsDbAdapter.getID(mRootAccountUID);
++
+         //need to load the cursor adapters for the spinners before initializing the views
+         loadAccountTypesList();
+         loadDefaultTransferAccountList();
+@@ -353,8 +350,7 @@ private void initializeViewsWithAccount(Account account){
+         mNameEditText.setText(account.getName());
+ 
+         if (mUseDoubleEntry) {
+-            String defaultTransferUID = account.getDefaultTransferAccountUID();
+-            long doubleDefaultAccountId = (defaultTransferUID == null ? -1 : mAccountsDbAdapter.getAccountID(defaultTransferUID));
++            long doubleDefaultAccountId = mAccountsDbAdapter.getID(account.getDefaultTransferAccountUID());
+             setDefaultTransferAccountSelection(doubleDefaultAccountId);
+         }
+ 
+@@ -716,7 +712,7 @@ private void saveAccount() {
+         String newParentAccountUID;
+ 		if (mParentCheckBox.isChecked()) {
+             newParentAccountId = mParentAccountSpinner.getSelectedItemId();
+-            newParentAccountUID = mAccountsDbAdapter.getAccountUID(newParentAccountId);
++            newParentAccountUID = mAccountsDbAdapter.getUID(newParentAccountId);
+             mAccount.setParentUID(newParentAccountUID);
+         } else {
+             //need to do this explicitly in case user removes parent account
+@@ -727,7 +723,7 @@ private void saveAccount() {
+ 
+         if (mDefaultTransferAccountCheckBox.isChecked()){
+             long id = mDefaulTransferAccountSpinner.getSelectedItemId();
+-            mAccount.setDefaultTransferAccountUID(mAccountsDbAdapter.getAccountUID(id));
++            mAccount.setDefaultTransferAccountUID(mAccountsDbAdapter.getUID(id));
+         } else {
+             //explicitly set in case of removal of default account
+             mAccount.setDefaultTransferAccountUID(null);
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 574a63cd..e182f927 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -267,7 +267,7 @@ public void onListItemClick(ListView listView, View view, int position, long id)
+             listView.setItemChecked(position, true);
+             return;
+         }
+-        mAccountSelectedListener.accountSelected(mAccountsDbAdapter.getAccountUID(id));
++        mAccountSelectedListener.accountSelected(mAccountsDbAdapter.getUID(id));
+     }
+ 
+     @Override
+@@ -333,7 +333,7 @@ protected void deleteAccount(long rowId, boolean deleteSubAccounts) {
+      */
+     public void showConfirmationDialog(long id) {
+         DeleteConfirmationDialogFragment alertFragment =
+-                DeleteConfirmationDialogFragment.newInstance(R.string.title_confirm_delete, mAccountsDbAdapter.getAccountUID(id));
++                DeleteConfirmationDialogFragment.newInstance(R.string.title_confirm_delete, mAccountsDbAdapter.getUID(id));
+         alertFragment.setTargetFragment(this, 0);
+         alertFragment.show(getSherlockActivity().getSupportFragmentManager(), "dialog");
+     }
+@@ -440,7 +440,7 @@ public void onDestroy() {
+     public void openCreateOrEditActivity(long accountId){
+         Intent editAccountIntent = new Intent(AccountsListFragment.this.getActivity(), AccountsActivity.class);
+         editAccountIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+-        editAccountIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountsDbAdapter.getAccountUID(accountId));
++        editAccountIntent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountsDbAdapter.getUID(accountId));
+         startActivityForResult(editAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 434a43a0..2d736334 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -38,6 +38,7 @@
+ import org.gnucash.android.ui.transaction.dialog.TimePickerDialogFragment;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.util.AmountInputFormatter;
++import org.gnucash.android.ui.util.RecurrenceParser;
+ import org.gnucash.android.ui.util.TransactionTypeToggleButton;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+@@ -178,11 +179,6 @@
+      */
+     AccountType mAccountType;
+ 
+-    /**
+-     * Spinner for marking the transaction as a recurring transaction
+-     */
+-    Spinner mRecurringTransactionSpinner;
+-
+     TextView mRecurrenceTextView;
+ 
+     private String mRecurrenceRule;
+@@ -213,7 +209,6 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 		mDoubleAccountSpinner   = (Spinner) v.findViewById(R.id.input_double_entry_accounts_spinner);
+         mOpenSplitsButton       = (Button) v.findViewById(R.id.btn_open_splits);
+         mRecurrenceTextView     = (TextView) v.findViewById(R.id.input_recurrence);
+-        mRecurringTransactionSpinner = (Spinner) v.findViewById(R.id.input_recurring_transaction_spinner);
+ 		return v;
+ 	}
+ 
+@@ -237,11 +232,6 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		mAccountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+         mAccountType = mAccountsDbAdapter.getAccountType(mAccountUID);
+ 
+-        ArrayAdapter<CharSequence> recurrenceAdapter = ArrayAdapter.createFromResource(getActivity(),
+-                R.array.recurrence_period_strings, android.R.layout.simple_spinner_item);
+-        recurrenceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-        mRecurringTransactionSpinner.setAdapter(recurrenceAdapter);
+-
+         String transactionUID = getArguments().getString(UxArgument.SELECTED_TRANSACTION_UID);
+ 		mTransactionsDbAdapter = GnuCashApplication.getTransactionDbAdapter();
+ 		if (transactionUID != null)
+@@ -260,7 +250,7 @@ public void onItemSelected(AdapterView<?> adapterView, View view, int position,
+                 if (mSplitsList.size() == 2){ //when handling simple transfer to one account
+                     for (Split split : mSplitsList) {
+                         if (!split.getAccountUID().equals(mAccountUID)){
+-                            split.setAccountUID(mAccountsDbAdapter.getAccountUID(id));
++                            split.setAccountUID(mAccountsDbAdapter.getUID(id));
+                         }
+                         // else case is handled when saving the transactions
+                     }
+@@ -373,7 +363,7 @@ private void initializeViewsWithTransaction(){
+             for (Split split : mTransaction.getSplits()) {
+                 //two splits, one belongs to this account and the other to another account
+                 if (mUseDoubleEntry && !split.getAccountUID().equals(mAccountUID)) {
+-                    setSelectedTransferAccount(mAccountsDbAdapter.getAccountID(split.getAccountUID()));
++                    setSelectedTransferAccount(mAccountsDbAdapter.getID(split.getAccountUID()));
+                 }
+             }
+         } else {
+@@ -382,11 +372,9 @@ private void initializeViewsWithTransaction(){
+             }
+         }
+ 
+-		String currencyCode = mTransactionsDbAdapter.getCurrencyCode(mAccountUID);
++		String currencyCode = mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID);
+ 		Currency accountCurrency = Currency.getInstance(currencyCode);
+ 		mCurrencyTextView.setText(accountCurrency.getSymbol());
+-
+-        setSelectedRecurrenceOption();
+         if (mMultiCurrency) {
+             enableControls(false);
+         }
+@@ -426,7 +414,7 @@ private void initalizeViews() {
+ 
+ 		String code = Money.DEFAULT_CURRENCY_CODE;
+ 		if (mAccountUID != null){
+-			code = mTransactionsDbAdapter.getCurrencyCode(mAccountUID);
++			code = mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID);
+ 		}
+ 		Currency accountCurrency = Currency.getInstance(code);
+ 		mCurrencyTextView.setText(accountCurrency.getSymbol());
+@@ -441,26 +429,6 @@ private void initalizeViews() {
+ 	}
+ 
+     /**
+-     * Initializes the recurrence spinner to the appropriate value from the transaction.
+-     * This is only used when the transaction is a recurrence transaction
+-     */
+-    private void setSelectedRecurrenceOption() {
+-        //init recurrence options
+-        final long recurrencePeriod = mTransaction.getRecurrencePeriod();
+-        if (recurrencePeriod > 0){
+-            String[] recurrenceOptions = getResources().getStringArray(R.array.key_recurrence_period_millis);
+-
+-            int selectionIndex = 0;
+-            for (String recurrenceOption : recurrenceOptions) {
+-                if (recurrencePeriod == Long.parseLong(recurrenceOption))
+-                    break;
+-                selectionIndex++;
+-            }
+-            mRecurringTransactionSpinner.setSelection(selectionIndex);
+-        }
+-    }
+-
+-    /**
+      * Updates the list of possible transfer accounts.
+      * Only accounts with the same currency can be transferred to
+      */
+@@ -610,7 +578,7 @@ public void run() {
+ 
+     /**
+      * Callback when the account in the navigation bar is changed by the user
+-     * @param newAccountId Database record ID of the newly selected account
++     * @param newAccountUID GUID of the newly selected account
+      */
+     public void onAccountChanged(long newAccountId) {
+         if (mMultiCurrency) {
+@@ -622,7 +590,7 @@ public void onAccountChanged(long newAccountId) {
+         Currency currency = Currency.getInstance(currencyCode);
+         mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
+ 
+-        mAccountType = accountsDbAdapter.getAccountType(newAccountId);
++        mAccountType = accountsDbAdapter.getAccountType(newAccountUID);
+         mTransactionTypeButton.setAccountType(mAccountType);
+ 
+         updateTransferAccountsList();
+@@ -645,7 +613,7 @@ private void saveNewTransaction() {
+ 		BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
+ 
+ 		String accountUID 	= ((TransactionsActivity) getSherlockActivity()).getCurrentAccountUID();
+-		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getCurrencyCode(accountUID));
++		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(accountUID));
+ 		Money amount 	= new Money(amountBigd, currency).absolute();
+ 
+         //capture any edits which were done directly (not using split editor)
+@@ -695,7 +663,7 @@ private void saveNewTransaction() {
+                 String transferAcctUID;
+                 if (mUseDoubleEntry) {
+                     long transferAcctId = mDoubleAccountSpinner.getSelectedItemId();
+-                    transferAcctUID = mAccountsDbAdapter.getAccountUID(transferAcctId);
++                    transferAcctUID = mAccountsDbAdapter.getUID(transferAcctId);
+                     mTransaction.addSplit(split.createPair(transferAcctUID));
+                 } else {
+                       //TODO: enable this when we can hide certain accounts from the user
+@@ -705,7 +673,7 @@ private void saveNewTransaction() {
+                 mTransaction.setSplits(mSplitsList);
+             }
+ 		}
+-        mTransaction.setCurrencyCode(mAccountsDbAdapter.getCurrencyCode(mAccountUID));
++        mTransaction.setCurrencyCode(mAccountsDbAdapter.getAccountCurrencyCode(mAccountUID));
+ 		mTransaction.setTime(cal.getTimeInMillis());
+ 		mTransaction.setNote(notes);
+ 
+@@ -727,20 +695,28 @@ private void saveNewTransaction() {
+      * @see #saveNewTransaction()
+      */
+     private void scheduleRecurringTransaction() {
+-        //set up recurring transaction if requested
+-        int recurrenceIndex = mRecurringTransactionSpinner.getSelectedItemPosition();
+-        if (recurrenceIndex != 0) {
+-            String[] recurrenceOptions = getResources().getStringArray(R.array.key_recurrence_period_millis);
+-            long recurrencePeriodMillis = Long.parseLong(recurrenceOptions[recurrenceIndex]);
+-            Transaction recurringTransaction;
+-            if (mTransaction.getRecurrencePeriod() > 0) //if we are editing the recurring transaction itself...
+-                recurringTransaction = mTransaction;
+-            else
+-                recurringTransaction = new Transaction(mTransaction, true);
+-
+-            recurringTransaction.setRecurrencePeriod(recurrencePeriodMillis);
+-            mTransactionsDbAdapter.scheduleTransaction(recurringTransaction);
++        List<ScheduledEvent> events = RecurrenceParser.parse(mEventRecurrence, ScheduledEvent.EventType.TRANSACTION);
++        Transaction recurringTransaction;
++        if (mTransaction.getRecurrencePeriod() > 0) //if we are editing the recurring transaction itself...
++            recurringTransaction = mTransaction;
++        else {
++            recurringTransaction = new Transaction(mTransaction, true);
++            mTransactionsDbAdapter.addTransaction(recurringTransaction);
++            //value does not matter, just should be > 0 to mark as a recurring transaction
++            recurringTransaction.setRecurrencePeriod(RecurrenceParser.DAY_MILLIS);
++        }
++        mTransactionsDbAdapter.addTransaction(recurringTransaction);
++
++        ScheduledEventDbAdapter scheduledEventDbAdapter = new ScheduledEventDbAdapter(getActivity());
++        Toast.makeText(getActivity(), "Found " + events.size() + " events", Toast.LENGTH_LONG).show();
++        for (ScheduledEvent event : events) {
++            scheduledEventDbAdapter.addScheduledEvent(event);
++            event.setEventUID(recurringTransaction.getUID());
++            scheduledEventDbAdapter.addScheduledEvent(event);
++
++            Log.d("TransactionFormFragment", event.toString());
+         }
++        scheduledEventDbAdapter.close();
+     }
+ 
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 038592de..cd5b720e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -141,14 +141,14 @@
+ 
+ 		  @Override
+ 		  public boolean onNavigationItemSelected(int position, long itemId) {
+-            mAccountUID = mAccountsDbAdapter.getAccountUID(itemId);
++            mAccountUID = mAccountsDbAdapter.getUID(itemId);
+             FragmentManager fragmentManager = getSupportFragmentManager();
+ 
+ 		    //inform new accounts fragment that account was changed
+ 		    TransactionFormFragment newTransactionsFragment = (TransactionFormFragment) fragmentManager
+ 					.findFragmentByTag(FRAGMENT_NEW_TRANSACTION);
+ 		    if (newTransactionsFragment != null){
+-		    	newTransactionsFragment.onAccountChanged(itemId);
++		    	newTransactionsFragment.onAccountChanged(mAccountUID);
+ 		    	//if we do not return, the transactions list fragment could also be found (although it's not visible)
+ 		    	return true;
+ 		    }
+@@ -335,14 +335,14 @@ protected void onResume() {
+     private void setTitleIndicatorColor() {
+         //Basically, if we are in a top level account, use the default title color.
+         //but propagate a parent account's title color to children who don't have own color
+-        String colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountsDbAdapter.getAccountID(mAccountUID));
++        String colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountsDbAdapter.getID(mAccountUID));
+         int iColor = -1;
+         if (colorCode != null){
+             iColor = Color.parseColor(colorCode);
+         } else {
+             String accountUID = mAccountUID;
+             while ((accountUID = mAccountsDbAdapter.getParentAccountUID(accountUID)) != null) {
+-                colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountsDbAdapter.getAccountID(accountUID));
++                colorCode = mAccountsDbAdapter.getAccountColorCode(mAccountsDbAdapter.getID(accountUID));
+                 if (colorCode != null) {
+                     iColor = Color.parseColor(colorCode);
+                     break;
+@@ -436,7 +436,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 
+             case R.id.menu_favorite_account:
+                 AccountsDbAdapter accountsDbAdapter = GnuCashApplication.getAccountsDbAdapter();
+-                long accountId = accountsDbAdapter.getAccountID(mAccountUID);
++                long accountId = accountsDbAdapter.getID(mAccountUID);
+                 boolean isFavorite = accountsDbAdapter.isFavoriteAccount(accountId);
+                 //toggle favorite preference
+                 accountsDbAdapter.updateAccount(accountId, DatabaseSchema.AccountEntry.COLUMN_FAVORITE, isFavorite ? "0" : "1");
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+index 39bc0750..dc688ae6 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+@@ -143,12 +143,12 @@ public void onClick(View v) {
+ 				
+ 				long dstAccountId = mDestinationAccountSpinner.getSelectedItemId();
+ 				TransactionsDbAdapter trxnAdapter = GnuCashApplication.getTransactionDbAdapter();
+-				if (!trxnAdapter.getCurrencyCode(dstAccountId).equals(trxnAdapter.getCurrencyCode(mOriginAccountUID))){
++				if (!trxnAdapter.getAccountCurrencyCode(dstAccountId).equals(trxnAdapter.getAccountCurrencyCode(mOriginAccountUID))){
+ 					Toast.makeText(getActivity(), R.string.toast_incompatible_currency, Toast.LENGTH_LONG).show();
+ 					return;
+ 				}
+                 String srcAccountUID    = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
+-                String dstAccountUID    = trxnAdapter.getAccountUID(dstAccountId);
++                String dstAccountUID    = mAccountsDbAdapter.getUID(dstAccountId);
+ 				for (long trxnId : mTransactionIds) {
+ 					trxnAdapter.moveTransaction(trxnAdapter.getUID(trxnId), srcAccountUID, dstAccountUID);
+ 				}
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index aa218e70..4f1bee04 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -127,7 +127,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             //aha! there are some splits. Let's load those instead
+             loadSplitViews(splitList);
+         } else {
+-            final Currency currency = Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountUID));
++            final Currency currency = Currency.getInstance(mAccountsDbAdapter.getAccountCurrencyCode(mAccountUID));
+             Split split = new Split(new Money(mBaseAmount, currency), mAccountUID);
+             AccountType accountType = mAccountsDbAdapter.getAccountType(mAccountUID);
+             TransactionType transactionType = Transaction.getTypeForBalance(accountType, mBaseAmount.signum() < 0);
+@@ -245,7 +245,7 @@ public void onClick(View view) {
+             splitMemoEditText.setText(split.getMemo());
+             splitUidTextView.setText(split.getUID());
+             String splitAccountUID = split.getAccountUID();
+-            setSelectedTransferAccount(mAccountsDbAdapter.getAccountID(splitAccountUID), accountsSpinner);
++            setSelectedTransferAccount(mAccountsDbAdapter.getID(splitAccountUID), accountsSpinner);
+             splitTypeButton.setAccountType(mAccountsDbAdapter.getAccountType(splitAccountUID));
+             splitTypeButton.setChecked(split.getType());
+         }
+@@ -336,8 +336,8 @@ public void onClick(View view) {
+             TransactionTypeToggleButton splitTypeButton = (TransactionTypeToggleButton) splitView.findViewById(R.id.btn_split_type);
+ 
+             BigDecimal amountBigDecimal = TransactionFormFragment.parseInputToDecimal(splitAmountEditText.getText().toString());
+-            String currencyCode = mAccountsDbAdapter.getCurrencyCode(accountsSpinner.getSelectedItemId());
+-            String accountUID = mAccountsDbAdapter.getAccountUID(accountsSpinner.getSelectedItemId());
++            String accountUID = mAccountsDbAdapter.getUID(accountsSpinner.getSelectedItemId());
++            String currencyCode = mAccountsDbAdapter.getCurrencyCode(accountUID);
+             Money amount = new Money(amountBigDecimal, Currency.getInstance(currencyCode));
+             Split split = new Split(amount, accountUID);
+             split.setMemo(splitMemoEditText.getText().toString());
+diff --git a/app/src/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+similarity index 53%
+rename from app/src/org/gnucash/android/ui/util/RecurrenceParser.java
+rename to app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index 98789a67..8c57a6f8 100644
+--- a/app/src/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -1,3 +1,19 @@
++/*
++ * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
+ package org.gnucash.android.ui.util;
+ 
+ import android.text.format.Time;
+@@ -9,9 +25,10 @@
+ import java.util.List;
+ 
+ /**
+- * Date: 01.08.2014
++ * Parses {@link com.doomonafireball.betterpickers.recurrencepicker.EventRecurrence}s to generate
++ * {@link org.gnucash.android.model.ScheduledEvent}s
+  *
+- * @author Ngewi
++ * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class RecurrenceParser {
+     public static final long SECOND_MILLIS  = 1000;
+@@ -22,7 +39,15 @@
+     public static final long YEAR_MILLIS    = 12*MONTH_MILLIS;
+ 
+ 
+-    public static List<ScheduledEvent> parse(EventRecurrence eventRecurrence){
++    /**
++     * Parses an event recurrence to produce {@link org.gnucash.android.model.ScheduledEvent}s for each recurrence.
++     * <p>Each {@link org.gnucash.android.model.ScheduledEvent} represents just one simple repeating schedule, e.g. every Monday.
++     * If there are multiple schedules in the recurrence e.g. every Monday and Tuesday, then two ScheduledEvents will be generated</p>
++     * @param eventRecurrence Event recurrence pattern obtained from dialog
++     * @param eventType Type of event recurrence
++     * @return List of ScheduledEvents
++     */
++    public static List<ScheduledEvent> parse(EventRecurrence eventRecurrence, ScheduledEvent.EventType eventType){
+         long period = 0;
+         List<ScheduledEvent> scheduledEventList = new ArrayList<ScheduledEvent>();
+         switch(eventRecurrence.freq){
+@@ -31,18 +56,18 @@
+                 break;
+ 
+             case EventRecurrence.WEEKLY: {
+-                period = WEEK_MILLIS * eventRecurrence.interval;
++                period = WEEK_MILLIS;
+                 for (int day : eventRecurrence.byday) {
+-                    ScheduledEvent scheduledEvent = new ScheduledEvent(ScheduledEvent.EventType.TRANSACTION);
+-                    scheduledEvent.period = WEEK_MILLIS;
++                    ScheduledEvent scheduledEvent = new ScheduledEvent(eventType);
++                    scheduledEvent.setPeriod(period);
+ 
+-                    scheduledEvent.startDate = nextDayOfWeek(day).getTimeInMillis();
++                    scheduledEvent.setStartTime(nextDayOfWeek(day).getTimeInMillis());
+                     if (eventRecurrence.until != null && eventRecurrence.until.length() > 0) {
+                         Time endTime = new Time();
+                         endTime.parse(eventRecurrence.until);
+-                        scheduledEvent.endDate = endTime.toMillis(false);
++                        scheduledEvent.setEndTime(endTime.toMillis(false));
+                     } else if (eventRecurrence.count > 0){
+-                        scheduledEvent.endDate = scheduledEvent.startDate + (scheduledEvent.period*eventRecurrence.count);
++                        scheduledEvent.setEndTime(scheduledEvent.getStartTime() + (scheduledEvent.getPeriod() * eventRecurrence.count));
+                     }
+                     scheduledEventList.add(scheduledEvent);
+                 }
+@@ -50,17 +75,17 @@
+             break;
+ 
+             case EventRecurrence.MONTHLY: {
+-                ScheduledEvent event = new ScheduledEvent(ScheduledEvent.EventType.TRANSACTION);
+-                event.period = MONTH_MILLIS;
++                ScheduledEvent event = new ScheduledEvent(eventType);
++                event.setPeriod(MONTH_MILLIS);
+                 Calendar now = Calendar.getInstance();
+                 now.add(Calendar.MONTH, 1);
+-                event.startDate = now.getTimeInMillis();
++                event.setStartTime(now.getTimeInMillis());
+                 if (eventRecurrence.until != null && eventRecurrence.until.length() > 0) {
+                     Time endTime = new Time();
+                     endTime.parse(eventRecurrence.until);
+-                    event.endDate = endTime.toMillis(false);
++                    event.setEndTime(endTime.toMillis(false));
+                 } else if (eventRecurrence.count > 0){
+-                    event.endDate = event.startDate + (event.period*eventRecurrence.count);
++                    event.setEndTime(event.getStartTime() + (event.getPeriod()*eventRecurrence.count));
+                 }
+ 
+                 scheduledEventList.add(event);
+@@ -68,17 +93,17 @@
+                 break;
+ 
+             case EventRecurrence.YEARLY: {
+-                ScheduledEvent event = new ScheduledEvent(ScheduledEvent.EventType.TRANSACTION);
+-                event.period = YEAR_MILLIS;
++                ScheduledEvent event = new ScheduledEvent(eventType);
++                event.setPeriod(YEAR_MILLIS);
+                 Calendar now = Calendar.getInstance();
+                 now.add(Calendar.YEAR, 1);
+-                event.startDate = now.getTimeInMillis();
++                event.setStartTime(now.getTimeInMillis());
+                 if (eventRecurrence.until != null && eventRecurrence.until.length() > 0) {
+                     Time endTime = new Time();
+                     endTime.parse(eventRecurrence.until);
+-                    event.endDate = endTime.toMillis(false);
++                    event.setEndTime(endTime.toMillis(false));
+                 } else if (eventRecurrence.count > 0){
+-                    event.endDate = event.startDate + (event.period*eventRecurrence.count);
++                    event.setEndTime(event.getStartTime() + (event.getPeriod()*eventRecurrence.count));
+                 }
+                 scheduledEventList.add(event);
+             }
+diff --git a/app/res/layout/drawer_list_item.xml b/app/src/main/res/layout/drawer_list_item.xml
+similarity index 100%
+rename from app/res/layout/drawer_list_item.xml
+rename to app/src/main/res/layout/drawer_list_item.xml
+diff --git a/app/src/main/res/layout/fragment_new_transaction.xml b/app/src/main/res/layout/fragment_new_transaction.xml
+index 99af8237..756b609e 100644
+--- a/app/src/main/res/layout/fragment_new_transaction.xml
++++ b/app/src/main/res/layout/fragment_new_transaction.xml
+@@ -174,11 +174,6 @@
+                       android:text="Not scheduled"
+                       style="@style/Dropdown.TextView" />
+ 
+-            <Spinner android:id="@+id/input_recurring_transaction_spinner"
+-                     android:layout_width="match_parent"
+-                     android:layout_height="wrap_content"
+-                     android:layout_marginBottom="@dimen/dialog_padding"
+-                    />
+         </LinearLayout>
+ 	</LinearLayout>
+ </ScrollView>
+\ No newline at end of file
+diff --git a/integration-tests/src/main/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/integration-tests/src/main/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 569772eb..a7b047b3 100644
+--- a/integration-tests/src/main/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/integration-tests/src/main/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -167,7 +167,7 @@ public void testAddTransactionShouldRequireAmount(){
+ 		boolean toastFound = mSolo.waitForText(toastAmountRequired);
+         assertTrue(toastFound);
+ 
+-		int afterCount = mTransactionsDbAdapter.getTransactionsCount(mTransactionsDbAdapter.getAccountID(DUMMY_ACCOUNT_UID));
++		int afterCount = adapter.getTransactionsCount(adapter.getID(DUMMY_ACCOUNT_UID));
+ 		assertEquals(beforeCount, afterCount);
+ 
+         mSolo.goBack();

@@ -1,0 +1,154 @@
+From 79cc370ea5db95e1189d11d397c0e54ab179c132 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 14 Apr 2015 17:03:58 +0200
+Subject: [PATCH] GnuCash Android will always have a root account (even when
+ manually creating accounts)
+
+A root account is now automatically generated if there isn't one when creating an account
+Only the root account can have it's parent account set to NULL
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java     | 19 ++++++++++---------
+ .../android/ui/account/AccountFormFragment.java       |  6 +++---
+ .../ui/transaction/TransactionFormFragment.java       |  2 +-
+ .../ui/transaction/dialog/BulkMoveDialogFragment.java |  2 +-
+ .../transaction/dialog/SplitEditorDialogFragment.java |  4 ++--
+ 5 files changed, 17 insertions(+), 16 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 1618dcc5..673acca8 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -103,11 +103,12 @@ public long addAccount(Account account){
+         }
+         contentValues.put(AccountEntry.COLUMN_FAVORITE,     account.isFavorite() ? 1 : 0);
+         contentValues.put(AccountEntry.COLUMN_FULL_NAME,    account.getFullName());
+-        if (account.getParentUID() != null) {
+-            contentValues.put(AccountEntry.COLUMN_PARENT_ACCOUNT_UID, account.getParentUID());
+-        } else {
+-            contentValues.putNull(AccountEntry.COLUMN_PARENT_ACCOUNT_UID);
++        String parentAccountUID = account.getParentUID();
++        if (parentAccountUID == null && account.getAccountType() != AccountType.ROOT) {
++            parentAccountUID = getOrCreateGnuCashRootAccountUID();
+         }
++        contentValues.put(AccountEntry.COLUMN_PARENT_ACCOUNT_UID, parentAccountUID);
++
+         if (account.getDefaultTransferAccountUID() != null) {
+             contentValues.put(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID, account.getDefaultTransferAccountUID());
+         } else {
+@@ -629,7 +630,7 @@ public String createAccountHierarchy(String fullName, AccountType accountType) {
+             throw new IllegalArgumentException("fullName cannot be empty");
+         }
+         String[] tokens = fullName.trim().split(ACCOUNT_NAME_SEPARATOR);
+-        String uid = getGnuCashRootAccountUID();
++        String uid = getOrCreateGnuCashRootAccountUID();
+         String parentName = "";
+         ArrayList<Account> accountsList = new ArrayList<Account>();
+         for (String token : tokens) {
+@@ -914,7 +915,7 @@ public Cursor fetchTopLevelAccounts() {
+                         + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ?) AND "
+                         + AccountEntry.COLUMN_HIDDEN + " = 0 AND "
+                         + AccountEntry.COLUMN_TYPE + " != ?",
+-                new String[]{"" + getGnuCashRootAccountUID(), AccountType.ROOT.name()}, null);
++                new String[]{"" + getOrCreateGnuCashRootAccountUID(), AccountType.ROOT.name()}, null);
+     }
+ 
+     /**
+@@ -951,12 +952,12 @@ public Cursor fetchFavoriteAccounts(){
+     }
+ 
+     /**
+-     * Returns the GnuCash ROOT account UID.
++     * Returns the GnuCash ROOT account UID if one exists (or creates one if necessary).
+      * <p>In GnuCash desktop account structure, there is a root account (which is not visible in the UI) from which
+      * other top level accounts derive. GnuCash Android also enforces a ROOT account now</p>
+      * @return Unique ID of the GnuCash root account.
+      */
+-    public String getGnuCashRootAccountUID() {
++    public String getOrCreateGnuCashRootAccountUID() {
+         Cursor cursor = fetchAccounts(AccountEntry.COLUMN_TYPE + "= ?",
+                 new String[]{AccountType.ROOT.name()}, null);
+         try {
+@@ -1073,7 +1074,7 @@ public String getFullyQualifiedAccountName(String accountUID){
+         String accountName = getAccountName(accountUID);
+         String parentAccountUID = getParentAccountUID(accountUID);
+ 
+-        if (parentAccountUID == null || parentAccountUID.equalsIgnoreCase(getGnuCashRootAccountUID())){
++        if (parentAccountUID == null || parentAccountUID.equalsIgnoreCase(getOrCreateGnuCashRootAccountUID())){
+             return accountName;
+         }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index b49d5ad7..e09c97bf 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -317,7 +317,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+             getSherlockActivity().getSupportActionBar().setTitle(R.string.title_edit_account);
+         }
+ 
+-        mRootAccountUID = mAccountsDbAdapter.getGnuCashRootAccountUID();
++        mRootAccountUID = mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID();
+         if (mRootAccountUID != null)
+             mRootAccountId = mAccountsDbAdapter.getID(mRootAccountUID);
+ 
+@@ -539,7 +539,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     private void loadDefaultTransferAccountList(){
+         String condition = DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountUID + "' "
+                 + " AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + "=0"
+-                + " AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID() + "'";
++                + " AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID() + "'";
+ 
+         //using whereArgs (2nd parameter) would produce safer sql,
+         // however we get an exception because mAccountUID can be null, or the root account may be null as well
+@@ -567,7 +567,7 @@ private void loadParentAccountList(AccountType accountType){
+ 
+         if (mAccount != null){  //if editing an account
+             mDescendantAccountUIDs = mAccountsDbAdapter.getDescendantAccountUIDs(mAccount.getUID(), null, null);
+-            String rootAccountUID = mAccountsDbAdapter.getGnuCashRootAccountUID();
++            String rootAccountUID = mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID();
+             List<String> descendantAccountUIDs = new ArrayList<String>(mDescendantAccountUIDs);
+             if (rootAccountUID != null)
+                 descendantAccountUIDs.add(rootAccountUID);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 8d2b1342..63eb0c3b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -500,7 +500,7 @@ private void updateTransferAccountsList(){
+ 
+ 		String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountUID
+                             + "' AND " + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountUID)
+-                            + "' AND ")) + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
++                            + "' AND ")) + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID()
+                             + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                             + ")";
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+index 465743f5..fa0b0ddb 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+@@ -110,7 +110,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		Cursor cursor = accountsDbAdapter.fetchAccountsOrderedByFullName(conditions,
+                 new String[]{mOriginAccountUID,
+                         accountsDbAdapter.getCurrencyCode(mOriginAccountUID),
+-                        "" + accountsDbAdapter.getGnuCashRootAccountUID()
++                        "" + accountsDbAdapter.getOrCreateGnuCashRootAccountUID()
+                 });
+ 
+ 		SimpleCursorAdapter mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+index 0f9f0b71..d4207e2b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorDialogFragment.java
+@@ -206,11 +206,11 @@ private void initArgs() {
+ 
+         String conditions = "(" //+ AccountEntry._ID + " != " + mAccountId + " AND "
+                 + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = ? AND "))
+-                + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID() + "' AND "
++                + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID() + "' AND "
+                 + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                 + ")";
+         mCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions,
+-                mMultiCurrency ? new String[]{"" + mAccountsDbAdapter.getGnuCashRootAccountUID()} :
++                mMultiCurrency ? new String[]{"" + mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID()} :
+                         new String[]{mAccountsDbAdapter.getCurrencyCode(mAccountUID)}
+         );
+     }

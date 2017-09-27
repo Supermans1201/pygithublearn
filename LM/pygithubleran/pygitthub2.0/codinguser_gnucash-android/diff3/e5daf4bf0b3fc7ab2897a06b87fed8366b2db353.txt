@@ -1,0 +1,685 @@
+From e5daf4bf0b3fc7ab2897a06b87fed8366b2db353 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 25 Aug 2016 09:58:39 +0200
+Subject: [PATCH] Fixes #553 - Crash when adding a widget to the homescreen
+ Closes #551 - Adds the book name to the export file name
+
+Make the Exporter work on specific databases, and not only use the currently active databased. This fixes a bug where the only the default database is exported by the ScheduledActionsService, which leads to the wrong data being exported when handling scheduled actions from other books.
+Update unit tests - fix some Recurrence tests
+Implement #toString() for Commodity
+---
+ .../android/test/ui/ExportTransactionsTest.java    |  2 +-
+ .../org/gnucash/android/test/ui/MultiBookTest.java |  1 +
+ .../org/gnucash/android/db/MigrationHelper.java    |  1 +
+ .../gnucash/android/db/adapter/BooksDbAdapter.java | 19 +-------
+ .../gnucash/android/export/ExportAsyncTask.java    | 10 ++--
+ .../java/org/gnucash/android/export/Exporter.java  | 54 +++++++++++++++++-----
+ .../gnucash/android/export/ofx/OfxExporter.java    | 11 +++++
+ .../gnucash/android/export/qif/QifExporter.java    | 17 ++++++-
+ .../gnucash/android/export/xml/GncXmlExporter.java | 18 +++++---
+ .../java/org/gnucash/android/model/Commodity.java  |  9 ++++
+ .../java/org/gnucash/android/model/Recurrence.java | 25 +++++-----
+ .../android/service/ScheduledActionService.java    |  3 ++
+ .../ui/homescreen/WidgetConfigurationActivity.java |  2 +
+ .../ui/settings/BackupPreferenceFragment.java      |  5 +-
+ .../test/unit/db/AccountsDbAdapterTest.java        | 14 +++---
+ .../android/test/unit/model/RecurrenceTest.java    | 27 ++++++-----
+ .../unit/service/ScheduledActionServiceTest.java   |  3 +-
+ 17 files changed, 140 insertions(+), 81 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index 47b67dc8..ed52133e 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -200,7 +200,7 @@ public void testExport(ExportFormat format){
+ 			}
+ 		}
+ 
+-		File folder = new File(Exporter.getExportFolderPath());
++		File folder = new File(Exporter.getExportFolderPath(BooksDbAdapter.getInstance().getActiveBookUID()));
+ 		folder.mkdirs();
+ 		assertThat(folder).exists();
+ 
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
+index 86e19576..02809a01 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/MultiBookTest.java
+@@ -101,6 +101,7 @@ public void creatingNewAccounts_shouldCreatedNewBook(){
+ 
+         assertThat(mBooksDbAdapter.getRecordsCount()).isEqualTo(booksCount+1);
+ 
++        //// TODO: 25.08.2016 Delete all books before the start of this test
+         Book activeBook = mBooksDbAdapter.getRecord(mBooksDbAdapter.getActiveBookUID());
+         assertThat(activeBook.getDisplayName()).isEqualTo("Book " + (booksCount+1));
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 9bbc01f6..fa9519eb 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -1438,6 +1438,7 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+             db.endTransaction();
+         }
+ 
++        //TODO: Move old files from old export folders into new book-specific export folders
+ 
+         //Migrate book-specific preferences away from shared preferences
+         Log.d(LOG_TAG, "Migrating shared preferences into book preferences");
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index 75b763ca..799f4ea3 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -124,23 +124,6 @@ public boolean isActive(String bookUID){
+     }
+ 
+     /**
+-     * Returns the root account GUID of the current active book
+-     * @return GUID of the root account
+-     */
+-    public @NonNull String getActiveRootAccountUID(){
+-        Cursor cursor = mDb.query(mTableName, new String[]{BookEntry.COLUMN_ROOT_GUID},
+-                BookEntry.COLUMN_ACTIVE + "= 1", null, null, null, null, "1");
+-        try{
+-            if (cursor.moveToFirst()){
+-                return cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_ROOT_GUID));
+-            }
+-        } finally {
+-            cursor.close();
+-        }
+-        return null;
+-    }
+-
+-    /**
+      * Returns the GUID of the current active book
+      * @return GUID of the active book
+      */
+@@ -149,7 +132,7 @@ public boolean isActive(String bookUID){
+                 BookEntry.COLUMN_ACTIVE + "= 1", null, null, null, null, "1");
+         try{
+             if (cursor.getCount() == 0)
+-                throw new RuntimeException("There is no active book in the app. This should NEVER happen!");
++                throw new RuntimeException("There is no active book in the app. This should NEVER happen, fix your bugs!");
+             cursor.moveToFirst();
+             return cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_UID));
+         } finally {
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index c6284887..cf762681 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -145,16 +145,16 @@ protected Boolean doInBackground(ExportParams... params) {
+ 
+         switch (mExportParams.getExportFormat()) {
+                 case QIF:
+-                    mExporter = new QifExporter(mExportParams);
++                    mExporter = new QifExporter(mExportParams, mDb);
+                     break;
+ 
+                 case OFX:
+-                    mExporter = new OfxExporter(mExportParams);
++                    mExporter = new OfxExporter(mExportParams, mDb);
+                     break;
+ 
+                 case XML:
+                 default:
+-                    mExporter = new GncXmlExporter(mExportParams);
++                    mExporter = new GncXmlExporter(mExportParams, mDb);
+                     break;
+         }
+ 
+@@ -414,11 +414,11 @@ private void moveExportToOwnCloud() {
+      */
+     private List<String> moveExportToSDCard() {
+         Log.i(TAG, "Moving exported file to external storage");
+-        new File(Exporter.getExportFolderPath());
++        new File(Exporter.getExportFolderPath(mExporter.mBookUID));
+         List<String> dstFiles = new ArrayList<>();
+ 
+         for (String src: mExportedFiles) {
+-            String dst = Exporter.getExportFolderPath() + stripPathPart(src);
++            String dst = Exporter.getExportFolderPath(mExporter.mBookUID) + stripPathPart(src);
+             try {
+                 moveFile(src, dst);
+                 dstFiles.add(dst);
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 34c26f7b..88afbaba 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -27,6 +27,7 @@
+ 
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.BudgetAmountsDbAdapter;
+@@ -37,6 +38,7 @@
+ import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.adapter.SplitsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
++import org.gnucash.android.model.Book;
+ 
+ import java.io.File;
+ import java.text.ParseException;
+@@ -93,6 +95,16 @@
+     protected final Context mContext;
+     private String mExportCacheFilePath;
+ 
++    /**
++     * Database being currently exported
++     */
++    protected final SQLiteDatabase mDb;
++
++    /**
++     * GUID of the book being exported
++     */
++    protected String mBookUID;
++
+     public Exporter(ExportParams params, SQLiteDatabase db) {
+         this.mExportParams = params;
+         mContext = GnuCashApplication.getAppContext();
+@@ -104,8 +116,9 @@ public Exporter(ExportParams params, SQLiteDatabase db) {
+             mCommoditiesDbAdapter   = CommoditiesDbAdapter.getInstance();
+             mBudgetsDbAdapter       = BudgetsDbAdapter.getInstance();
+             mScheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
+-
++            mDb = GnuCashApplication.getActiveDb();
+         } else {
++            mDb = db;
+             mSplitsDbAdapter        = new SplitsDbAdapter(db);
+             mTransactionsDbAdapter  = new TransactionsDbAdapter(db, mSplitsDbAdapter);
+             mAccountsDbAdapter      = new AccountsDbAdapter(db, mTransactionsDbAdapter);
+@@ -116,6 +129,7 @@ public Exporter(ExportParams params, SQLiteDatabase db) {
+             mScheduledActionDbAdapter = new ScheduledActionDbAdapter(db, recurrenceDbAdapter);
+         }
+ 
++        mBookUID = new File(mDb.getPath()).getName(); //this depends on the database file always having the name of the book GUID
+         mExportCacheFilePath = null;
+         mCacheDir = new File(mContext.getCacheDir(), params.getExportFormat().name());
+         mCacheDir.mkdir();
+@@ -123,17 +137,29 @@ public Exporter(ExportParams params, SQLiteDatabase db) {
+     }
+ 
+     /**
++     * Strings a string of any characters not allowed in a file name.
++     * All unallowed characters are replaced with an underscore
++     * @param inputName Raw file name input
++     * @return Sanitized file name
++     */
++    public static String sanitizeFilename(String inputName) {
++        return inputName.replaceAll("[^a-zA-Z0-9-_\\.]", "_");
++    }
++
++    /**
+      * Builds a file name based on the current time stamp for the exported file
++     * @param format Format to use when exporting
++     * @param bookName Name of the book being exported. This name will be included in the generated file name
+      * @return String containing the file name
+      */
+-    public static String buildExportFilename(ExportFormat format) {
++    public static String buildExportFilename(ExportFormat format, String bookName) {
+         return EXPORT_FILENAME_DATE_FORMAT.format(new Date(System.currentTimeMillis()))
+-                + "_gnucash_export" + format.getExtension();
++                + "_gnucash_export_" + sanitizeFilename(bookName) + format.getExtension();
+     }
+ 
+     /**
+      * Parses the name of an export file and returns the date of export
+-     * @param filename Export file name generated by {@link #buildExportFilename(ExportFormat)}
++     * @param filename Export file name generated by {@link #buildExportFilename(ExportFormat,String)}
+      * @return Date in milliseconds
+      */
+     public static long getExportTime(String filename){
+@@ -184,19 +210,21 @@ protected String getExportCacheFilePath(){
+             String cachePath = mCacheDir.getAbsolutePath();
+             if (!cachePath.endsWith("/"))
+                 cachePath += "/";
+-            mExportCacheFilePath = cachePath + buildExportFilename(mExportParams.getExportFormat());
++            String bookName = BooksDbAdapter.getInstance().getAttribute(mBookUID, DatabaseSchema.BookEntry.COLUMN_DISPLAY_NAME);
++            mExportCacheFilePath = cachePath + buildExportFilename(mExportParams.getExportFormat(), bookName);
+         }
+ 
+         return mExportCacheFilePath;
+     }
+ 
+     /**
+-     * Returns that path to the export folder for the currently active book.
++     * Returns that path to the export folder for the book with GUID {@code bookUID}.
+      * This is the folder where exports like QIF and OFX will be saved for access by external programs
++     * @param bookUID GUID of the book being exported. Each book has its own export path
+      * @return Absolute path to export folder for active book
+      */
+-    public static String getExportFolderPath(){
+-        String path = BASE_FOLDER_PATH + "/" + BooksDbAdapter.getInstance().getActiveBookUID() + "/exports/";
++    public static String getExportFolderPath(String bookUID){
++        String path = BASE_FOLDER_PATH + "/" + bookUID + "/exports/";
+         File file = new File(path);
+         if (!file.exists())
+             file.mkdirs();
+@@ -204,11 +232,13 @@ public static String getExportFolderPath(){
+     }
+ 
+     /**
+-     * Returns the path to the backups folder for the currently active book
+-     * @return Absolute path to backup folder for active book
++     * Returns the path to the backups folder for the book with GUID {@code bookUID}
++     * Each book has its own backup path
++     *
++     * @return Absolute path to backup folder for the book
+      */
+-    public static String getBackupFolderPath(){
+-        String path = BASE_FOLDER_PATH + "/" + BooksDbAdapter.getInstance().getActiveBookUID() + "/backups/";
++    public static String getBackupFolderPath(String bookUID){
++        String path = BASE_FOLDER_PATH + "/" + bookUID + "/backups/";
+         File file = new File(path);
+         if (!file.exists())
+             file.mkdirs();
+diff --git a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+index 367d0549..c7babfdb 100644
+--- a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -17,6 +17,7 @@
+ 
+ package org.gnucash.android.export.ofx;
+ 
++import android.database.sqlite.SQLiteDatabase;
+ import android.preference.PreferenceManager;
+ import android.util.Log;
+ 
+@@ -77,6 +78,16 @@ public OfxExporter(ExportParams params) {
+ 	}
+ 
+     /**
++     * Overloaded constructor. Initializes the export parameters and the database to export
++     * @param params Export options
++     * @param db SQLiteDatabase to export
++     */
++    public OfxExporter(ExportParams params, SQLiteDatabase db){
++        super(params, db);
++        LOG_TAG = "OfxExporter";
++    }
++
++    /**
+ 	 * Converts all expenses into OFX XML format and adds them to the XML document
+ 	 * @param doc DOM document of the OFX expenses.
+ 	 * @param parent Parent node for all expenses in report
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index 6bbea48a..7b25d0cb 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -18,6 +18,7 @@
+ 
+ import android.content.ContentValues;
+ import android.database.Cursor;
++import android.database.sqlite.SQLiteDatabase;
+ 
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+@@ -50,9 +51,23 @@
+  * @author Yongxin Wang <fefe.wyx@gmail.com>
+  */
+ public class QifExporter extends Exporter{
++    /**
++     * Initialize the exporter
++     * @param params Export options
++     */
+     public QifExporter(ExportParams params){
+         super(params, null);
+-        LOG_TAG = "QifExporter";
++        LOG_TAG = "OfxExporter";
++    }
++
++    /**
++     * Initialize the exporter
++     * @param params Options for export
++     * @param db SQLiteDatabase to export
++     */
++    public QifExporter(ExportParams params, SQLiteDatabase db){
++        super(params, db);
++        LOG_TAG = "OfxExporter";
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index cd3cc5ef..7a3105ab 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -23,6 +23,8 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.RecurrenceDbAdapter;
+@@ -33,6 +35,7 @@
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.BaseModel;
++import org.gnucash.android.model.Book;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Budget;
+ import org.gnucash.android.model.BudgetAmount;
+@@ -900,12 +903,13 @@ public String getExportMimeType(){
+     }
+ 
+     /**
+-     * Creates a backup of current database contents to the directory {@link Exporter#getBackupFolderPath()}
++     * Creates a backup of current database contents to the directory {@link Exporter#getBackupFolderPath(String)}
+      * @return {@code true} if backup was successful, {@code false} otherwise
+      */
+     public static boolean createBackup(){
+         try {
+-            FileOutputStream fileOutputStream = new FileOutputStream(getBackupFilePath());
++            String bookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++            FileOutputStream fileOutputStream = new FileOutputStream(getBackupFilePath(bookUID));
+             BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
+             GZIPOutputStream gzipOutputStream = new GZIPOutputStream(bufferedOutputStream);
+             OutputStreamWriter writer = new OutputStreamWriter(gzipOutputStream);
+@@ -922,12 +926,14 @@ public static boolean createBackup(){
+     }
+ 
+     /**
+-     * Returns the full path of a file to make database backup.
++     * Returns the full path of a file to make database backup of the specified book
+      * Backups are done in XML format and are zipped (with ".zip" extension).
++     * @param bookUID GUID of the book
+      * @return the file path for backups of the database.
+-     * @see #getBackupFolderPath()
++     * @see #getBackupFolderPath(String)
+      */
+-    private static String getBackupFilePath(){
+-        return Exporter.getBackupFolderPath() + buildExportFilename(ExportFormat.XML) + ".zip";
++    private static String getBackupFilePath(String bookUID){
++        Book book = BooksDbAdapter.getInstance().getRecord(bookUID);
++        return Exporter.getBackupFolderPath(book.getUID()) + buildExportFilename(ExportFormat.XML, book.getDisplayName()) + ".zip";
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Commodity.java b/app/src/main/java/org/gnucash/android/model/Commodity.java
+index fb2d7ac2..7fa13698 100644
+--- a/app/src/main/java/org/gnucash/android/model/Commodity.java
++++ b/app/src/main/java/org/gnucash/android/model/Commodity.java
+@@ -190,6 +190,15 @@ public void setQuoteFlag(int quoteFlag) {
+         this.mQuoteFlag = quoteFlag;
+     }
+ 
++    @Override
++    /**
++     * Returns the full name of the currency, or the currency code if there is no full name
++     * @return String representation of the commodity
++     */
++    public String toString() {
++        return mFullname == null || mFullname.isEmpty() ? mMnemonic : mFullname;
++    }
++
+     /**
+      * Overrides {@link BaseModel#equals(Object)} to compare only the currency codes of the commodity.
+      * <p>Two commodities are considered equal if they have the same currency code</p>
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index c6340159..2b1c4169 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -22,9 +22,9 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.ui.util.RecurrenceParser;
++import org.joda.time.DateTime;
+ import org.joda.time.Days;
+ import org.joda.time.LocalDate;
+-import org.joda.time.LocalDateTime;
+ import org.joda.time.Months;
+ import org.joda.time.Weeks;
+ import org.joda.time.Years;
+@@ -32,7 +32,6 @@
+ import java.sql.Timestamp;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+-import java.util.Locale;
+ 
+ /**
+  * Model for recurrences in the database
+@@ -275,8 +274,8 @@ public int getCount(){
+             return -1;
+ 
+         int count = 0;
+-        LocalDate startDate = new LocalDate(mPeriodStart.getTime());
+-        LocalDate endDate = new LocalDate(mPeriodEnd.getTime());
++        DateTime startDate = new DateTime(mPeriodStart.getTime());
++        DateTime endDate = new DateTime(mPeriodEnd.getTime());
+         switch (mPeriodType){
+             case DAY:
+                 count = Days.daysBetween(startDate, endDate).getDays();
+@@ -300,27 +299,25 @@ public int getCount(){
+      * @param numberOfOccurences Number of occurences from the start time
+      */
+     public void setPeriodEnd(int numberOfOccurences){
+-        LocalDateTime localDate = new LocalDateTime(mPeriodStart.getTime());
+-        LocalDateTime endDate;
++        DateTime localDate = new DateTime(mPeriodStart.getTime());
++        DateTime endDate;
+         int occurrenceDuration = numberOfOccurences * mPeriodType.getMultiplier();
+         switch (mPeriodType){
+             case DAY:
+-                endDate = localDate.dayOfWeek().getLocalDateTime().plusDays(occurrenceDuration);
++                endDate = localDate.plusDays(occurrenceDuration);
+                 break;
+             case WEEK:
+-                endDate = localDate.dayOfWeek().getLocalDateTime().plusWeeks(occurrenceDuration);
++                endDate = localDate.plusWeeks(occurrenceDuration);
+                 break;
++            default:
+             case MONTH:
+-                endDate = localDate.dayOfMonth().getLocalDateTime().plusMonths(occurrenceDuration);
++                endDate = localDate.plusMonths(occurrenceDuration);
+                 break;
+             case YEAR:
+-                endDate = localDate.monthOfYear().getLocalDateTime().plusYears(occurrenceDuration);
+-                break;
+-            default: //default to monthly
+-                endDate = localDate.dayOfMonth().getLocalDateTime().plusMonths(occurrenceDuration);
++                endDate = localDate.plusYears(occurrenceDuration);
+                 break;
+         }
+-        mPeriodEnd = new Timestamp(endDate.toDate().getTime());
++        mPeriodEnd = new Timestamp(endDate.getMillis());
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index 0d55b9fa..535c3b62 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -21,6 +21,7 @@
+ import android.content.Intent;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.PowerManager;
++import android.support.annotation.VisibleForTesting;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+@@ -96,6 +97,7 @@ protected void onHandleIntent(Intent intent) {
+      * @param scheduledActions List of scheduled actions
+      */
+     //made public static for testing. Do not call these methods directly
++    @VisibleForTesting
+     public static void processScheduledActions(List<ScheduledAction> scheduledActions, SQLiteDatabase db) {
+         for (ScheduledAction scheduledAction : scheduledActions) {
+ 
+@@ -118,6 +120,7 @@ public static void processScheduledActions(List<ScheduledAction> scheduledAction
+      * @param scheduledAction ScheduledEvent to be executed
+      */
+     //made public static for testing. Do not call directly
++    @VisibleForTesting
+     public static void executeScheduledEvent(ScheduledAction scheduledAction, SQLiteDatabase db){
+         Log.i(LOG_TAG, "Executing scheduled action: " + scheduledAction.toString());
+         int executionCount = scheduledAction.getExecutionCount();
+diff --git a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+index f2d40c54..eb13294f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/homescreen/WidgetConfigurationActivity.java
+@@ -80,6 +80,8 @@ public void onCreate(Bundle savedInstanceState) {
+ 		}
+ 
+         SimpleCursorAdapter cursorAdapter = new QualifiedAccountNameCursorAdapter(this, cursor);
++		//without this line, the app crashes when a user tries to select an account
++		cursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+ 		mAccountsSpinner.setAdapter(cursorAdapter);
+ 		
+ 		bindListeners();
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index 94754584..b262a157 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -46,6 +46,7 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.importer.ImportAsyncTask;
+@@ -352,7 +353,8 @@ public void onConnectionFailed(ConnectionResult connectionResult) {
+ 	 */
+ 	private void restoreBackup() {
+ 		Log.i("Settings", "Opening GnuCash XML backups for restore");
+-		File[] backupFiles = new File(Exporter.getBackupFolderPath()).listFiles();
++		String bookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++		File[] backupFiles = new File(Exporter.getBackupFolderPath(bookUID)).listFiles();
+ 		if (backupFiles == null || backupFiles.length == 0){
+ 			android.support.v7.app.AlertDialog.Builder builder = new android.support.v7.app.AlertDialog.Builder(getActivity())
+ 					.setTitle("No backups found")
+@@ -364,7 +366,6 @@ public void onClick(DialogInterface dialog, int which) {
+ 						}
+ 					});
+ 			builder.create().show();
+-			Exporter.getBackupFolderPath(); //creates the directory
+ 			return;
+ 		}
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index 1b9f6384..243c3bd0 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -15,7 +15,9 @@
+  */
+ package org.gnucash.android.test.unit.db;
+ 
++import android.content.Context;
+ import android.database.sqlite.SQLiteDatabase;
++import android.support.v7.preference.PreferenceManager;
+ 
+ import org.assertj.core.data.Index;
+ import org.gnucash.android.BuildConfig;
+@@ -498,10 +500,7 @@ public void shouldSetDefaultTransferColumnToNull_WhenTheAccountIsDeleted(){
+      * Opening an XML file should set the default currency to that used by the most accounts in the file
+      */
+     @Test
+-    public void importingXml_shouldSetDefaultCurrency(){
+-        String expectedCode = GnuCashApplication.getDefaultCurrencyCode();
+-        Commodity expectedDefaultCommodity = CommoditiesDbAdapter.getInstance().getCommodity(expectedCode);
+-
++    public void importingXml_shouldSetDefaultCurrencyFromXml(){
+         GnuCashApplication.setDefaultCurrencyCode("JPY");
+ 
+         assertThat(GnuCashApplication.getDefaultCurrencyCode()).isEqualTo("JPY");
+@@ -511,10 +510,11 @@ public void importingXml_shouldSetDefaultCurrency(){
+         loadDefaultAccounts();
+ 
+         assertThat(GnuCashApplication.getDefaultCurrencyCode()).isNotEqualTo("JPY");
+-        assertThat(GnuCashApplication.getDefaultCurrencyCode()).isEqualTo(expectedCode);
+-        assertThat(Commodity.DEFAULT_COMMODITY).isEqualTo(expectedDefaultCommodity);
++        //the book has USD occuring most often and this will be used as the default currency
++        assertThat(GnuCashApplication.getDefaultCurrencyCode()).isEqualTo("USD");
++        assertThat(Commodity.DEFAULT_COMMODITY).isEqualTo(Commodity.USD);
+ 
+-        System.out.println("Default currency is now: " + expectedCode);
++        System.out.println("Default currency is now: " + Commodity.DEFAULT_COMMODITY);
+     }
+ 
+     /**
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/RecurrenceTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/RecurrenceTest.java
+index 9af46e5f..d5cd10af 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/RecurrenceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/RecurrenceTest.java
+@@ -18,10 +18,10 @@
+ 
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.Recurrence;
++import org.joda.time.DateTime;
+ import org.junit.Test;
+ 
+ import java.sql.Timestamp;
+-import java.util.Calendar;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
+@@ -33,14 +33,13 @@
+     @Test
+     public void settingCount_shouldComputeCorrectEndTime(){
+         Recurrence recurrence = new Recurrence(PeriodType.MONTH);
+-        Calendar cal = Calendar.getInstance();
+-        cal.set(2015, Calendar.OCTOBER, 5);
+ 
+-        recurrence.setPeriodStart(new Timestamp(cal.getTimeInMillis()));
++        DateTime startTime = new DateTime(2015, 10, 5, 0, 0);
++        recurrence.setPeriodStart(new Timestamp(startTime.getMillis()));
+         recurrence.setPeriodEnd(3);
+ 
+-        cal.set(2016, Calendar.JANUARY, 5);
+-        assertThat(recurrence.getPeriodEnd().getTime()).isEqualTo(cal.getTimeInMillis());
++        DateTime expectedEndtime = new DateTime(2016, 1, 5, 0, 0);
++        assertThat(recurrence.getPeriodEnd().getTime()).isEqualTo(expectedEndtime.getMillis());
+     }
+ 
+     /**
+@@ -49,12 +48,12 @@ public void settingCount_shouldComputeCorrectEndTime(){
+     @Test
+     public void testRecurrenceCountComputation(){
+         Recurrence recurrence = new Recurrence(PeriodType.MONTH);
+-        Calendar cal = Calendar.getInstance();
+-        cal.set(2015, Calendar.OCTOBER, 5);
+ 
+-        recurrence.setPeriodStart(new Timestamp(cal.getTimeInMillis()));
+-        cal.set(2016, Calendar.AUGUST, 5);
+-        recurrence.setPeriodEnd(new Timestamp(cal.getTimeInMillis()));
++        DateTime start = new DateTime(2015, 10, 5, 0, 0);
++        recurrence.setPeriodStart(new Timestamp(start.getMillis()));
++
++        DateTime end = new DateTime(2016, 8, 5, 0, 0);
++        recurrence.setPeriodEnd(new Timestamp(end.getMillis()));
+ 
+         assertThat(recurrence.getCount()).isEqualTo(10);
+     }
+@@ -67,9 +66,9 @@ public void testRecurrenceCountComputation(){
+     @Test
+     public void notSettingEndDate_shouldReturnSpecialCountValue() {
+         Recurrence recurrence = new Recurrence(PeriodType.MONTH);
+-        Calendar cal = Calendar.getInstance();
+-        cal.set(2015, Calendar.OCTOBER, 5);
+-        recurrence.setPeriodStart(new Timestamp(cal.getTimeInMillis()));
++
++        DateTime start = new DateTime(2015, 10, 5, 0, 0);
++        recurrence.setPeriodStart(new Timestamp(start.getMillis()));
+ 
+         assertThat(recurrence.getCount()).isEqualTo(-1);
+     }
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 858934d2..a5dcda2b 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -21,6 +21,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.db.adapter.DatabaseAdapter;
+ import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
+@@ -282,7 +283,7 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+         backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
+         scheduledBackup.setTag(backupParams.toCsv());
+ 
+-        File backupFolder = new File(Exporter.getBackupFolderPath());
++        File backupFolder = new File(Exporter.getBackupFolderPath(BooksDbAdapter.getInstance().getActiveBookUID()));
+         assertThat(backupFolder).exists();
+         assertThat(backupFolder.listFiles()).isEmpty();
+ 

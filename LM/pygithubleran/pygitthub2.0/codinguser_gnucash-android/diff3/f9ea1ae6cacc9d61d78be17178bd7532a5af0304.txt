@@ -1,0 +1,352 @@
+From f9ea1ae6cacc9d61d78be17178bd7532a5af0304 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 22 Apr 2017 19:47:07 +0200
+Subject: [PATCH] Allow changing the Save As.. file path during export  (Save
+ As dialog can now be opened as often as desired)
+
+Improve display of export destination - make export targets more descriptive
+Restart scheduled service alarms to account for new execution period
+---
+ app/build.gradle                                   |  1 +
+ .../org/gnucash/android/db/MigrationHelper.java    | 24 ++++++++++++---
+ .../org/gnucash/android/export/ExportParams.java   | 13 +++++++-
+ .../android/service/ScheduledActionService.java    |  4 ++-
+ .../android/ui/export/ExportFormFragment.java      | 36 ++++++++++++++++------
+ .../transaction/ScheduledActionsListFragment.java  |  7 ++++-
+ .../gnucash/android/ui/util/RecurrenceParser.java  |  4 ++-
+ .../android/ui/util/widget/ReselectSpinner.java    | 23 ++++++++++----
+ app/src/main/res/layout/fragment_export_form.xml   |  2 +-
+ .../main/res/layout/list_item_scheduled_trxn.xml   |  1 +
+ app/src/main/res/values/strings.xml                |  2 ++
+ 11 files changed, 92 insertions(+), 25 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index cc3d9d78..3cde90a6 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -85,6 +85,7 @@ android {
+         }
+         debug {
+             debuggable true
++            minifyEnabled false
+ //            testCoverageEnabled true
+             signingConfig signingConfigs.debug
+         }
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 2db4a7ad..20fe9053 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -1468,6 +1468,18 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+                 .putBoolean(keyUseCompactView, useCompactTrnView)
+                 .apply();
+ 
++        rescheduleServiceAlarm();
++
++
++        return oldVersion;
++    }
++
++    /**
++     * Cancel the existing alarm for the scheduled service and restarts/reschedules the service
++     */
++    private static void rescheduleServiceAlarm() {
++        Context context = GnuCashApplication.getAppContext();
++
+         //cancel the existing pending intent so that the alarm can be rescheduled
+         Intent alarmIntent = new Intent(context, ScheduledActionService.class);
+         PendingIntent pendingIntent = PendingIntent.getService(context, 0, alarmIntent, PendingIntent.FLAG_NO_CREATE);
+@@ -1477,9 +1489,7 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+             pendingIntent.cancel();
+         }
+ 
+-        GnuCashApplication.startScheduledActionExecutionService(GnuCashApplication.getAppContext());
+-
+-        return oldVersion;
++        GnuCashApplication.startScheduledActionExecutionService(context);
+     }
+ 
+     /**
+@@ -1509,6 +1519,9 @@ private static void moveDirectory(File srcDir, File dstDir) throws IOException {
+             }
+         }
+ 
++        if (srcDir.listFiles() == null) //nothing to see here, move along
++            return;
++
+         for (File src : srcDir.listFiles()){
+             if (src.isDirectory()){
+                 File dst = new File(dstDir, src.getName());
+@@ -1583,7 +1596,7 @@ public void run() {
+      * @return New database version, 14 if migration succeeds, 13 otherwise
+      */
+     static int upgradeDbToVersion15(SQLiteDatabase db) {
+-        Log.i(DatabaseHelper.LOG_TAG, "Upgrading database to version 14");
++        Log.i(DatabaseHelper.LOG_TAG, "Upgrading database to version 15");
+         int dbVersion = 14;
+ 
+         db.beginTransaction();
+@@ -1602,6 +1615,9 @@ static int upgradeDbToVersion15(SQLiteDatabase db) {
+         } finally {
+             db.endTransaction();
+         }
++
++        //the default interval has been changed from daily to hourly with this release. So reschedule alarm
++        rescheduleServiceAlarm();
+         return dbVersion;
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index 836faa79..90c4e422 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -37,7 +37,18 @@
+      * Options for the destination of the exported transctions file.
+      * It could be stored on the {@link #SD_CARD} or exported through another program via {@link #SHARING}
+      */
+-    public enum ExportTarget {SD_CARD, SHARING, DROPBOX, GOOGLE_DRIVE, OWNCLOUD, URI}
++    public enum ExportTarget {SD_CARD("SD Card"), SHARING("External Service"),
++        DROPBOX("Dropbox"), GOOGLE_DRIVE("Google Drive"), OWNCLOUD("ownCloud"),
++        URI("Sync Service");
++        private String mDescription;
++        ExportTarget(String description){
++            mDescription = description;
++        }
++
++        public String getDescription(){
++            return mDescription;
++        }
++    }
+ 
+     /**
+      * Format to use for the exported transactions
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index b6efb3f4..5c247037 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -181,13 +181,15 @@ private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase
+         ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
+         // HACK: the tag isn't updated with the new date, so set the correct by hand
+         params.setExportStartTime(new Timestamp(scheduledAction.getLastRunTime()));
++        Boolean result = false;
+         try {
+             //wait for async task to finish before we proceed (we are holding a wake lock)
+-            new ExportAsyncTask(GnuCashApplication.getAppContext(), db).execute(params).get();
++            result = new ExportAsyncTask(GnuCashApplication.getAppContext(), db).execute(params).get();
+         } catch (InterruptedException | ExecutionException e) {
+             Crashlytics.logException(e);
+             Log.e(LOG_TAG, e.getMessage());
+         }
++        Log.i(LOG_TAG, "Backup/export did not occur. There might have beeen no new transactions to export or it might have crashed");
+         return 1;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+index 6395cdfc..1939c865 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+@@ -138,6 +138,7 @@
+ 	@BindView(R.id.radio_qif_format) RadioButton mQifRadioButton;
+ 	@BindView(R.id.radio_xml_format) RadioButton mXmlRadioButton;
+ 
++	@BindView(R.id.recurrence_options) View mRecurrenceOptionsView;
+ 	/**
+ 	 * Event recurrence options
+ 	 */
+@@ -321,19 +322,19 @@ private void bindViewListeners(){
+ 		mDestinationSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+ 			@Override
+ 			public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+-				View recurrenceOptionsView = getView().findViewById(R.id.recurrence_options);
++				if (view == null) //the item selection is fired twice by the Android framework. Ignore the first one
++					return;
+ 				switch (position) {
+ 					case 0:
+ 						mExportTarget = ExportParams.ExportTarget.URI;
+-						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						mRecurrenceOptionsView.setVisibility(View.VISIBLE);
+ 						if (mExportUri != null)
+-							mTargetUriTextView.setText(mExportUri.toString());
+-						else
+-							selectExportFile();
++							setExportUriText(mExportUri.toString());
++						selectExportFile();
+ 						break;
+ 					case 1: //DROPBOX
+-						mTargetUriTextView.setText("Export to /Apps/GnuCash folder on Dropbox");
+-						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						setExportUriText(getString(R.string.label_dropbox_export_destination));
++						mRecurrenceOptionsView.setVisibility(View.VISIBLE);
+ 						mExportTarget = ExportParams.ExportTarget.DROPBOX;
+ 						String dropboxAppKey = getString(R.string.dropbox_app_key, BackupPreferenceFragment.DROPBOX_APP_KEY);
+ 						String dropboxAppSecret = getString(R.string.dropbox_app_secret, BackupPreferenceFragment.DROPBOX_APP_SECRET);
+@@ -343,8 +344,8 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 						}
+ 						break;
+ 					case 2:
+-						mTargetUriTextView.setText("");
+-						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						setExportUriText(null);
++						mRecurrenceOptionsView.setVisibility(View.VISIBLE);
+ 						mExportTarget = ExportParams.ExportTarget.OWNCLOUD;
+ 						if(!(PreferenceManager.getDefaultSharedPreferences(getActivity())
+ 								.getBoolean(getString(R.string.key_owncloud_sync), false))) {
+@@ -353,8 +354,9 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 						}
+ 						break;
+ 					case 3:
++						setExportUriText(getString(R.string.label_select_destination_after_export));
+ 						mExportTarget = ExportParams.ExportTarget.SHARING;
+-						recurrenceOptionsView.setVisibility(View.GONE);
++						mRecurrenceOptionsView.setVisibility(View.GONE);
+ 						break;
+ 
+ 					default:
+@@ -479,6 +481,20 @@ public void onClick(View view) {
+ 	}
+ 
+ 	/**
++	 * Display the file path of the file where the export will be saved
++	 * @param filepath Path to export file. If {@code null}, the view will be hidden and nothing displayed
++	 */
++	private void setExportUriText(String filepath){
++		if (filepath == null){
++			mTargetUriTextView.setVisibility(View.GONE);
++			mTargetUriTextView.setText("");
++		} else {
++			mTargetUriTextView.setText(filepath);
++			mTargetUriTextView.setVisibility(View.VISIBLE);
++		}
++	}
++
++	/**
+ 	 * Open a chooser for user to pick a file to export to
+ 	 */
+ 	private void selectExportFile() {
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
+index ccff3c1b..08379fa3 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
+@@ -22,6 +22,7 @@
+ import android.content.res.Resources;
+ import android.database.Cursor;
+ import android.graphics.Rect;
++import android.net.Uri;
+ import android.os.Build;
+ import android.os.Bundle;
+ import android.support.v4.app.Fragment;
+@@ -561,9 +562,13 @@ public void bindView(View view, Context context, Cursor cursor) {
+ 
+             TextView primaryTextView = (TextView) view.findViewById(R.id.primary_text);
+             ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
++            String exportDestination = params.getExportTarget().getDescription();
++            if (params.getExportTarget() == ExportParams.ExportTarget.URI){
++                exportDestination = exportDestination + " (" + Uri.parse(params.getExportLocation()).getHost() + ")";
++            }
+             primaryTextView.setText(params.getExportFormat().name() + " "
+                     + scheduledAction.getActionType().name().toLowerCase() + " to "
+-                    + params.getExportTarget().name().toLowerCase());
++                    + exportDestination);
+ 
+             view.findViewById(R.id.right_text).setVisibility(View.GONE);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index 15e4346a..4fbe5d8e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -38,10 +38,12 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class RecurrenceParser {
++    //these are time millisecond constants which are used for scheduled actions.
++    //they may not be calendar accurate, but they serve the purpose for scheduling approximate time for background service execution
+     public static final long SECOND_MILLIS  = 1000;
+     public static final long MINUTE_MILLIS  = 60 * SECOND_MILLIS;
+     public static final long HOUR_MILLIS    = 60 * MINUTE_MILLIS;
+-    public static final long DAY_MILLIS     = 24 * 60 * MINUTE_MILLIS;
++    public static final long DAY_MILLIS     = 24 * HOUR_MILLIS;
+     public static final long WEEK_MILLIS    = 7 * DAY_MILLIS;
+     public static final long MONTH_MILLIS   = 30 * DAY_MILLIS;
+     public static final long YEAR_MILLIS    = 12 * MONTH_MILLIS;
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/ReselectSpinner.java b/app/src/main/java/org/gnucash/android/ui/util/widget/ReselectSpinner.java
+index dc32ef8b..cf03b65b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/ReselectSpinner.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/ReselectSpinner.java
+@@ -1,15 +1,25 @@
+ package org.gnucash.android.ui.util.widget;
+ 
+ import android.content.Context;
++import android.support.v7.widget.AppCompatSpinner;
+ import android.util.AttributeSet;
+-import android.widget.Spinner;
++import android.view.View;
++import android.widget.AdapterView;
++
++import org.gnucash.android.ui.export.ExportFormFragment;
+ 
+ /**
+  * Spinner which fires OnItemSelectedListener even when an item is reselected.
+  * Normal Spinners only fire item selected notifications when the selected item changes.
+- * <p>This is used in {@code ReportsActivity} for the time range</p>
++ * <p>This is used in {@code ReportsActivity} for the time range and in the {@link ExportFormFragment}</p>
++ * <p>It could happen that the selected item is fired twice especially if the item is the first in the list.
++ * The Android system does this internally. In order to capture the first one, check whether the view parameter
++ * of {@link android.widget.AdapterView.OnItemSelectedListener#onItemSelected(AdapterView, View, int, long)} is null.
++ * That would represent the first call during initialization of the views. This call can be ignored.
++ * See {@link ExportFormFragment#bindViewListeners()} for an example
++ * </p>
+  */
+-public class ReselectSpinner extends Spinner {
++public class ReselectSpinner extends AppCompatSpinner {
+     public ReselectSpinner(Context context) {
+         super(context);
+     }
+@@ -26,9 +36,10 @@ public ReselectSpinner(Context context, AttributeSet attrs, int defStyleAttr) {
+     public void setSelection(int position) {
+         boolean sameSelected = getSelectedItemPosition() == position;
+         super.setSelection(position);
+-        if (position == 5 && sameSelected){
+-            getOnItemSelectedListener().onItemSelected(this, getSelectedView(), position, getSelectedItemId());
++        if (sameSelected){
++            OnItemSelectedListener listener = getOnItemSelectedListener();
++            if (listener != null)
++                listener.onItemSelected(this, getSelectedView(), position, getSelectedItemId());
+         }
+-        super.setSelection(position);
+     }
+ }
+diff --git a/app/src/main/res/layout/fragment_export_form.xml b/app/src/main/res/layout/fragment_export_form.xml
+index 8621e375..162b3f58 100644
+--- a/app/src/main/res/layout/fragment_export_form.xml
++++ b/app/src/main/res/layout/fragment_export_form.xml
+@@ -42,7 +42,7 @@
+                 android:gravity="center_vertical"
+                 style="@style/TextAppearance.EditTransaction_Small" />
+ 
+-            <Spinner android:id="@+id/spinner_export_destination"
++            <org.gnucash.android.ui.util.widget.ReselectSpinner android:id="@+id/spinner_export_destination"
+                 android:layout_marginLeft="15dp"
+                 android:layout_height="?android:attr/listPreferredItemHeight"
+                 android:layout_width="match_parent" />
+diff --git a/app/src/main/res/layout/list_item_scheduled_trxn.xml b/app/src/main/res/layout/list_item_scheduled_trxn.xml
+index abb47f83..bc93895e 100644
+--- a/app/src/main/res/layout/list_item_scheduled_trxn.xml
++++ b/app/src/main/res/layout/list_item_scheduled_trxn.xml
+@@ -45,6 +45,7 @@
+             android:ellipsize="end"
+             android:text="@string/label_transaction_name"
+             style="@style/ListItemText"
++            android:textSize="15sp"
+             />
+ 
+         <TextView
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 212bd33e..47bf9569 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -503,4 +503,6 @@
+     <string name="msg_no_backups_to_restore_from">There are no existing backup files to restore from</string>
+     <!-- This is the filename for default backups. So use only simple characters and no spaces. Do not change the extension -->
+     <string name="label_backup_filename">gnucash_android_backup.gnca</string>
++    <string name="label_select_destination_after_export">Select the destination after export is complete</string>
++    <string name="label_dropbox_export_destination">Export to \'/Apps/GnuCash Android/\' folder on Dropbox</string>
+ </resources>

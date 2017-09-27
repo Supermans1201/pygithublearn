@@ -1,0 +1,672 @@
+From 18deae45bab60e4c4139280a819bcb626e3a317d Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 18 Jul 2012 15:12:19 +0200
+Subject: [PATCH] Added a Money class implementation for representing money in
+ transactions
+
+---
+ .../src/org/gnucash/android/data/Account.java      |  37 +++-
+ .../src/org/gnucash/android/data/Money.java        | 238 +++++++++++++++++++++
+ .../src/org/gnucash/android/data/Transaction.java  |  38 ++--
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |   4 +-
+ .../org/gnucash/android/db/DatabaseAdapter.java    |   1 +
+ .../src/org/gnucash/android/db/DatabaseHelper.java |  14 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  35 ++-
+ .../ui/transactions/NewTransactionFragment.java    |   7 +-
+ 8 files changed, 346 insertions(+), 28 deletions(-)
+ create mode 100644 GnucashMobile/src/org/gnucash/android/data/Money.java
+
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index c457025b..edcdc5d5 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -26,7 +26,9 @@
+ 
+ import java.math.BigDecimal;
+ import java.util.ArrayList;
++import java.util.Currency;
+ import java.util.List;
++import java.util.Locale;
+ import java.util.UUID;
+ 
+ import org.w3c.dom.Document;
+@@ -55,6 +57,8 @@
+ 	 */
+ 	private String mName;
+ 	
++	private Currency mCurrency; 
++	
+ 	private AccountType mAccountType = AccountType.CHECKING;
+ 	
+ 	/**
+@@ -69,8 +73,16 @@
+ 	public Account(String name) {
+ 		setName(name);
+ 		this.mUID = generateUID();
++		this.mCurrency = Currency.getInstance(Locale.getDefault());
+ 	}
+ 
++	public Account(String name, Currency currency){
++		setName(name);
++		this.mUID = generateUID();
++		this.mCurrency = currency;
++	}
++	
++	
+ 	/**
+ 	 * Sets the name of the account
+ 	 * @param name String name of the account
+@@ -95,6 +107,12 @@ public String getName() {
+ 	 */
+ 	protected String generateUID(){
+ 		String uuid = UUID.randomUUID().toString();
++		
++		if (mName == null || mName.length() == 0){
++			//if we do not have a name, return pure random
++			return uuid.substring(0, 22);
++		}
++		
+ 		uuid = uuid.substring(uuid.lastIndexOf("-"));
+ 		String name = mName.toLowerCase().replace(" ", "-");
+ 		if (name.length() > 9)
+@@ -142,6 +160,7 @@ public void setAccountType(AccountType mAccountType) {
+ 	 */
+ 	public void addTransaction(Transaction transaction){
+ 		transaction.setAccountUID(getUID());
++		transaction.setCurrency(mCurrency);
+ 		mTransactionsList.add(transaction);
+ 	}
+ 	
+@@ -202,11 +221,27 @@ public boolean hasUnexportedTransactions(){
+ 	public BigDecimal getBalance(){
+ 		BigDecimal balance = new BigDecimal(0);
+ 		for (Transaction transx : mTransactionsList) {
+-			balance.add(transx.getAmount());		}
++			balance.add(transx.getAmount().asBigDecimal());		}
+ 		return balance;
+ 	}
+ 	
+ 	/**
++	 * @return the mCurrency
++	 */
++	public Currency getCurrency() {
++		return mCurrency;
++	}
++
++	/**
++	 * @param mCurrency the mCurrency to set
++	 */
++	public void setCurrency(Currency mCurrency) {		
++		this.mCurrency = mCurrency;
++		//TODO: Maybe at some time t, this method should convert all 
++		//transaction values to the corresponding value in the new currency
++	}
++
++	/**
+ 	 * Converts this account's transactions into XML and adds them to the DOM document
+ 	 * @param doc XML DOM document for the OFX data
+ 	 * @param parent Node to which to add this account's transactions
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Money.java b/GnucashMobile/src/org/gnucash/android/data/Money.java
+new file mode 100644
+index 00000000..1146a768
+--- /dev/null
++++ b/GnucashMobile/src/org/gnucash/android/data/Money.java
+@@ -0,0 +1,238 @@
++/*
++ * Written By: Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 Ngewi Fet
++ *
++ * This file is part of Gnucash for Android
++ * 
++ * Gnucash for Android is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of
++ * the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, contact:
++ *
++ * Free Software Foundation           Voice:  +1-617-542-5942
++ * 51 Franklin Street, Fifth Floor    Fax:    +1-617-542-2652
++ * Boston, MA  02110-1301,  USA       gnu@gnu.org
++ */
++
++package org.gnucash.android.data;
++
++import java.math.BigDecimal;
++import java.math.MathContext;
++import java.math.RoundingMode;
++import java.text.DecimalFormat;
++import java.text.NumberFormat;
++import java.util.Currency;
++import java.util.Locale;
++
++/**
++ * Money represents a money amount and a corresponding currency.
++ * Money internally uses {@link BigDecimal} to represent the amounts, which enables it 
++ * to maintain high precision afforded by BigDecimal. Money objects are immutable and
++ * most operations return new Money objects.
++ * 
++ * @author Ngewi Fet<ngewif@gmail.com>
++ *
++ */
++public class Money implements Comparable<Money>{
++
++	private Currency mCurrency;
++	private BigDecimal mAmount;
++	
++	private static final RoundingMode DEFAULT_ROUNDING_MODE = RoundingMode.HALF_EVEN;
++	private static final int DEFAULT_DECIMAL_PLACES = 2;
++	
++	protected RoundingMode ROUNDING_MODE = DEFAULT_ROUNDING_MODE;
++	protected int DECIMAL_PLACES = DEFAULT_DECIMAL_PLACES;
++	
++	public Money() {
++		init();
++	}
++	
++	public Money(BigDecimal amount, Currency currency){		
++		this.mAmount = amount;
++		this.mCurrency = currency;
++	}
++	
++	public Money(BigDecimal amount, Currency currency, MathContext context){
++		setAmount(amount);
++		setCurrency(currency);
++		ROUNDING_MODE = context.getRoundingMode();
++		DECIMAL_PLACES = context.getPrecision();
++	}
++	
++	public Money(String amount){
++		init();
++		setAmount(amount);
++	}
++	
++	public Money(double amount){
++		init();
++		setAmount(amount);
++	}
++	
++	private void init(){
++		mCurrency = Currency.getInstance(Locale.getDefault());
++		mAmount = new BigDecimal(0).setScale(DEFAULT_DECIMAL_PLACES, DEFAULT_ROUNDING_MODE);
++	}
++
++	/**
++	 * @return the mCurrency
++	 */
++	public Currency getCurrency() {
++		return mCurrency;
++	}
++
++	/**
++	 * @param mCurrency the mCurrency to set
++	 */
++	public Money setCurrency(Currency currency) {
++		//TODO: Do a conversion of the value as well in the future
++		return new Money(mAmount, currency);
++	}
++
++	/**
++	 * @return the mAmount
++	 */
++	public BigDecimal asBigDecimal() {
++		return mAmount;
++	}
++	
++	public double asDouble(){
++		return mAmount.doubleValue();
++	}
++	
++	public String asString(){
++		return mAmount.toPlainString();
++	}
++	
++	public String formattedString(Locale locale){
++		DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(locale);			
++		return formatter.format(asDouble());
++	}
++	
++	public Money negate(){
++		return new Money(mAmount.negate(), mCurrency);
++	}
++	
++	/**
++	 * @param amount the mAmount to set
++	 */
++	public Money setAmount(BigDecimal amount) {		
++		return new Money(amount.setScale(DECIMAL_PLACES, ROUNDING_MODE), mCurrency);
++	}
++	
++	public Money setAmount(String amount){
++		return setAmount(new BigDecimal(amount));
++	}
++	
++	public Money setAmount(double amount){
++		return setAmount(new BigDecimal(amount));
++	}
++	
++	public Money add(Money money){
++		if (!mCurrency.equals(money.mCurrency))
++			throw new IllegalArgumentException("Only Money with same currency can be added");
++		
++		Money result = new Money();
++		BigDecimal bigD = mAmount.add(money.mAmount);
++		result.setAmount(bigD);
++		return result;
++	}
++
++	public Money subtract(Money money){
++		if (!mCurrency.equals(money.mCurrency))
++			throw new IllegalArgumentException("Operation can only be performed on money with same currency");
++		Money result = new Money();
++		BigDecimal bigD = mAmount.subtract(money.mAmount);
++		result.setAmount(bigD);
++		return result;
++	}
++	
++	public Money divide(Money divisor){
++		if (!mCurrency.equals(divisor.mCurrency))
++			throw new IllegalArgumentException("Operation can only be performed on money with same currency");
++		Money result = new Money();
++		BigDecimal bigD = mAmount.divide(divisor.mAmount);
++		result.setAmount(bigD);
++		return result;
++	}
++	
++	public Money divide(int divisor){
++		Money moneyDiv = new Money(new BigDecimal(divisor), mCurrency);
++		return divide(moneyDiv);
++	}
++	
++	public Money multiply(Money money){
++		if (!mCurrency.equals(money.mCurrency))
++			throw new IllegalArgumentException("Operation can only be performed on money with same currency");
++		Money result = new Money();
++		BigDecimal bigD = mAmount.multiply(money.mAmount);
++		result.setAmount(bigD);
++		return result;
++	}
++	
++	public Money multiply(int factor){
++		Money moneyFactor = new Money(new BigDecimal(factor), mCurrency);
++		return multiply(moneyFactor);
++	}
++	
++	public boolean isNegative(){
++		return mAmount.compareTo(new BigDecimal(0)) == -1;
++	}
++	
++	public String toPlainString(){
++		return mAmount.setScale(DECIMAL_PLACES, ROUNDING_MODE).toPlainString();
++	}
++	
++	@Override
++	public String toString() {
++		return mAmount.setScale(DECIMAL_PLACES, ROUNDING_MODE).toPlainString() + " " + mCurrency.getCurrencyCode();
++	}
++		
++	@Override
++	public int hashCode() {
++		final int prime = 31;
++		int result = 1;
++		result = prime * result + ((mAmount == null) ? 0 : mAmount.hashCode());
++		result = prime * result
++				+ ((mCurrency == null) ? 0 : mCurrency.hashCode());
++		return result;
++	}
++
++	@Override
++	public boolean equals(Object obj) {
++		if (this == obj)
++			return true;
++		if (obj == null)
++			return false;
++		if (getClass() != obj.getClass())
++			return false;
++		Money other = (Money) obj;
++		if (mAmount == null) {
++			if (other.mAmount != null)
++				return false;
++		} else if (!mAmount.equals(other.mAmount))
++			return false;
++		if (mCurrency == null) {
++			if (other.mCurrency != null)
++				return false;
++		} else if (!mCurrency.equals(other.mCurrency))
++			return false;
++		return true;
++	}
++
++	@Override
++	public int compareTo(Money another) {
++		if (!mCurrency.equals(another.mCurrency))
++			throw new IllegalArgumentException("Cannot compare different currencies yet");
++		return mAmount.compareTo(another.mAmount);
++	}
++}
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index 5f43b1dc..4bc01db4 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -25,9 +25,9 @@
+ package org.gnucash.android.data;
+ 
+ import java.math.BigDecimal;
+-import java.math.RoundingMode;
+ import java.text.DecimalFormat;
+ import java.text.NumberFormat;
++import java.util.Currency;
+ import java.util.Date;
+ import java.util.UUID;
+ 
+@@ -36,7 +36,7 @@
+ 
+ /**
+  * Data model representation of a transaction
+- * @author ngewif
++ * @author Ngewi Fet <ngewif@gmail.com>
+  *
+  */
+ public class Transaction {
+@@ -46,7 +46,7 @@
+ 	 */
+ 	public enum TransactionType {DEBIT, CREDIT};
+ 	
+-	private BigDecimal mAmount;
++	private Money mAmount;
+ 	private String mTransactionUID;
+ 	private String mName;
+ 	private String mDescription = "";
+@@ -61,7 +61,7 @@
+ 	 * @param amount Amount for the transaction
+ 	 * @param name Name of the transaction
+ 	 */
+-	public Transaction(BigDecimal amount, String name) {
++	public Transaction(Money amount, String name) {
+ 		initDefaults();		
+ 		setName(name);
+ 		setAmount(amount); //takes care of setting the type for us
+@@ -92,7 +92,7 @@ public Transaction(String amount, String name) {
+ 	 * @param name Name of the transaction
+ 	 * @param type Type of transaction
+ 	 */
+-	public Transaction(BigDecimal amount, String name, TransactionType type){
++	public Transaction(Money amount, String name, TransactionType type){
+ 		initDefaults();
+ 		setAmount(amount);		
+ 		this.mType = type;
+@@ -103,7 +103,7 @@ public Transaction(BigDecimal amount, String name, TransactionType type){
+ 	 * Initializes the different fields to their default values.
+ 	 */
+ 	private void initDefaults(){
+-		setAmount(new BigDecimal(0));
++		setAmount(new Money());
+ 		this.mTimestamp = System.currentTimeMillis();
+ 		this.mType = TransactionType.DEBIT;
+ 		mTransactionUID = UUID.randomUUID().toString();
+@@ -114,10 +114,9 @@ private void initDefaults(){
+ 	 * Set the amount of this transaction
+ 	 * @param mAmount Amount of the transaction
+ 	 */
+-	public void setAmount(BigDecimal amount) {
++	public void setAmount(Money amount) {
+ 		this.mAmount = amount;
+-		this.mAmount.setScale(2, RoundingMode.HALF_EVEN);
+-		mType = amount.doubleValue() < 0 ? TransactionType.DEBIT : TransactionType.CREDIT; 
++		mType = amount.isNegative() ? TransactionType.DEBIT : TransactionType.CREDIT; 
+ 	}
+ 
+ 	/**
+@@ -125,20 +124,31 @@ public void setAmount(BigDecimal amount) {
+ 	 * @param mAmount Amount of the transaction
+ 	 */
+ 	public void setAmount(String amount) {
+-		this.mAmount = new BigDecimal(amount);
+-		this.mAmount = mAmount.setScale(2, RoundingMode.HALF_EVEN);
+-		mType = this.mAmount.doubleValue() < 0 ? TransactionType.DEBIT : TransactionType.CREDIT; 
++		this.mAmount = new Money(amount);
++	}
++	
++	public void setAmount(String amount, String currencyCode){
++		this.mAmount = new Money(new BigDecimal(amount),
++								 Currency.getInstance(currencyCode));
+ 	}
+ 	
+ 	public void setAmount(double amount){
+-		setAmount(new BigDecimal(amount));
++		setAmount(new Money(amount));
++	}
++	
++	public void setCurrency(Currency currency){		
++		mAmount.setCurrency(currency);
++	}
++	
++	public void setAmount(double amount, Currency currency){
++		this.mAmount = new Money(new BigDecimal(amount), currency);
+ 	}
+ 	
+ 	/**
+ 	 * Returns the amount involved in this transaction
+ 	 * @return Amount in the transaction
+ 	 */
+-	public BigDecimal getAmount() {
++	public Money getAmount() {
+ 		return mAmount;
+ 	}
+ 	
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index fd69c5c6..f2042347 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -25,6 +25,7 @@
+ package org.gnucash.android.db;
+ 
+ import java.util.ArrayList;
++import java.util.Currency;
+ import java.util.Iterator;
+ import java.util.List;
+ 
+@@ -77,6 +78,7 @@ public long addAccount(Account account){
+ 		contentValues.put(DatabaseHelper.KEY_NAME, account.getName());
+ 		contentValues.put(DatabaseHelper.KEY_TYPE, account.getAccountType().name());
+ 		contentValues.put(DatabaseHelper.KEY_UID, account.getUID());
++		contentValues.put(DatabaseHelper.KEY_CURRENCY_CODE, account.getCurrency().getCurrencyCode());
+ 		
+ 		long rowId = -1;
+ 		if ((rowId = fetchAccountWithUID(account.getUID())) > 0){
+@@ -157,7 +159,7 @@ public Account buildAccountInstance(Cursor c){
+ 		account.setUID(uid);
+ 		account.setAccountType(AccountType.valueOf(c.getString(DatabaseAdapter.COLUMN_TYPE)));
+ 		account.setTransactions(mTransactionsAdapter.getAllTransactionsForAccount(uid));
+-		
++		account.setCurrency(Currency.getInstance(c.getString(DatabaseAdapter.COLUMN_CURRENCY_CODE)));
+ 		return account;
+ 	}
+ 		
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
+index 89079963..44cf7327 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -49,6 +49,7 @@
+ 	public static final int COLUMN_UID 	= 1;
+ 	public static final int COLUMN_NAME = 2;
+ 	public static final int COLUMN_TYPE = 3;
++	public static final int COLUMN_CURRENCY_CODE = 4;
+ 	
+ 	public static final int COLUMN_AMOUNT 		= 4;
+ 	public static final int COLUMN_DESCRIPTION 	= 5;
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+index 6d94154a..a52f071c 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -34,17 +34,18 @@
+ 	private static final String TAG = "DatabaseHelper";
+ 	
+ 	private static final String DATABASE_NAME = "gnucash_db";
+-	private static final int DATABASE_VERSION = 3;
++	private static final int DATABASE_VERSION = 1;
+ 	
+-	public static final String ACCOUNTS_TABLE_NAME = "accounts";
+-	public static final String TRANSACTIONS_TABLE_NAME = "transactions";
++	public static final String ACCOUNTS_TABLE_NAME 		= "accounts";
++	public static final String TRANSACTIONS_TABLE_NAME 	= "transactions";
+ 	
+ 	public static final String KEY_ROW_ID 	= "_id";
+ 	public static final String KEY_NAME 	= "name";
+ 	public static final String KEY_UID 		= "uid";
+ 	public static final String KEY_TYPE 	= "type";
++	public static final String KEY_CURRENCY_CODE = "currency_code";
+ 	
+-	public static final String KEY_AMOUNT 	= "amount";
++	public static final String KEY_AMOUNT 		= "amount";
+ 	public static final String KEY_ACCOUNT_UID 	= "account_uid";
+ 	public static final String KEY_DESCRIPTION 	= "description";
+ 	public static final String KEY_TIMESTAMP 	= "timestamp";
+@@ -57,7 +58,8 @@
+ 			+ KEY_ROW_ID + " integer primary key autoincrement, "
+ 			+ KEY_UID 	+ " varchar(255) not null, "
+ 			+ KEY_NAME 	+ " varchar(255) not null, "
+-			+ KEY_TYPE 	+ " varchar(255));";
++			+ KEY_TYPE 	+ " varchar(255), "
++			+ KEY_CURRENCY_CODE + " varchar(255));";
+ 	
+ 	private static final String TRANSACTIONS_TABLE_CREATE = "create table " + TRANSACTIONS_TABLE_NAME + " ("
+ 			+ KEY_ROW_ID + " integer primary key autoincrement, "
+@@ -90,12 +92,14 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 				+ " which will destroy all old data");
+ 		
+ 		if (oldVersion < newVersion){
++			/*
+ 			Log.i("DatabaseHelper", "Upgrading database to version " + newVersion);
+ 			if (oldVersion == 1 && newVersion == 2){				
+ 				String addColumnSql = "ALTER TABLE " + TRANSACTIONS_TABLE_NAME + 
+ 									" ADD COLUMN " + KEY_EXPORTED + " tinyint default 0";
+ 				db.execSQL(addColumnSql);
+ 			}
++			*/
+ 		} else {
+ 			Log.i(TAG, "Cannot downgrade database.");
+ 			/*
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 71fced26..7cdfd0ee 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -24,10 +24,13 @@
+ 
+ package org.gnucash.android.db;
+ 
++import java.math.BigDecimal;
+ import java.util.ArrayList;
++import java.util.Currency;
+ import java.util.List;
+ 
+ import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Money;
+ import org.gnucash.android.data.Transaction;
+ 
+ import android.content.ContentValues;
+@@ -151,7 +154,7 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+ 		Cursor c = fetchAllTransactionsForAccount(accountUID);
+ 		ArrayList<Transaction> transactionsList = new ArrayList<Transaction>();
+ 		
+-		if (c == null || (c.getCount() < 0))
++		if (c == null || (c.getCount() <= 0))
+ 			return transactionsList;
+ 		
+ 		while (c.moveToNext()) {
+@@ -167,16 +170,39 @@ public Cursor fetchAllTransactionsForAccount(long accountID){
+ 	 * @param c Cursor pointing to transaction record in database
+ 	 * @return {@link Transaction} object constructed from database record
+ 	 */
+-	public Transaction buildTransactionInstance(Cursor c){
+-		Transaction transaction = new Transaction(c.getString(DatabaseAdapter.COLUMN_AMOUNT), 
++	public Transaction buildTransactionInstance(Cursor c){		
++		String accountUID = c.getString(DatabaseAdapter.COLUMN_ACCOUNT_UID);
++		Currency currency = Currency.getInstance(getCurrencyCode(accountUID));
++		String amount = c.getString(DatabaseAdapter.COLUMN_AMOUNT);
++		Transaction transaction = new Transaction(new Money(new BigDecimal(amount), currency), 
+ 				c.getString(DatabaseAdapter.COLUMN_NAME));
+ 		transaction.setUID(c.getString(DatabaseAdapter.COLUMN_UID));
+-		transaction.setAccountUID(c.getString(DatabaseAdapter.COLUMN_ACCOUNT_UID));
++		transaction.setAccountUID(accountUID);
+ 		transaction.setTime(c.getLong(DatabaseAdapter.COLUMN_TIMESTAMP));
+ 		transaction.setDescription(c.getString(DatabaseAdapter.COLUMN_DESCRIPTION));
+ 		transaction.setExported(c.getInt(DatabaseAdapter.COLUMN_EXPORTED) == 1);
++				
+ 		return transaction;
+ 	}
++
++	/**
++	 * @param accountUID
++	 * @return
++	 */
++	protected String getCurrencyCode(String accountUID) {
++		Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
++				new String[] {DatabaseHelper.KEY_CURRENCY_CODE}, 
++				DatabaseHelper.KEY_UID + "= '" + accountUID + "'", 
++				null, null, null, null);
++		
++		if (cursor == null || cursor.getCount() <= 0)
++			return "";
++					
++		cursor.moveToNext();
++		String currencyCode = cursor.getString(0);
++		cursor.close();
++		return currencyCode;
++	}
+ 	
+ 	/**
+ 	 * Deletes transaction record with id <code>rowId</code>
+@@ -223,7 +249,6 @@ public int moveTranscation(long rowId, long accountId){
+ 				DatabaseHelper.KEY_ROW_ID + "=" + rowId, 
+ 				null);
+ 	}
+-
+ 	
+ 	/**
+ 	 * Returns the number of transactions belonging to account with id <code>accountId</code>
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index 9636ef60..b05529e7 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -36,6 +36,7 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Money;
+ import org.gnucash.android.data.Transaction;
+ import org.gnucash.android.data.Transaction.TransactionType;
+ import org.gnucash.android.db.AccountsDbAdapter;
+@@ -267,7 +268,8 @@ private void saveNewTransaction() {
+ 		String name = mNameEditText.getText().toString();
+ 		String description = mDescriptionEditText.getText().toString();
+ 		String amountString = mAmountEditText.getText().toString();
+-		BigDecimal amount = new BigDecimal(stripCurrencyFormatting(amountString)).divide(new BigDecimal(100));		
++		BigDecimal amountBigd = new BigDecimal(stripCurrencyFormatting(amountString)).divide(new BigDecimal(100));
++		
+ 		Calendar cal = new GregorianCalendar(
+ 				mDate.get(Calendar.YEAR), 
+ 				mDate.get(Calendar.MONTH), 
+@@ -278,6 +280,7 @@ private void saveNewTransaction() {
+ 		
+ 		long accountID = mAccountsSpinner.getSelectedItemId();
+ 		Account account = mAccountsDbAdapter.getAccount(accountID);
++		Money amount = new Money(amountBigd, account.getCurrency());
+ 		String type = mTransactionTypeButton.getText().toString();
+ 		
+ 		if (mTransaction != null){
+@@ -387,7 +390,7 @@ public void afterTextChanged(Editable s) {
+ 			if (cleanString.length() == 0)
+ 				return;
+ 			
+-			BigDecimal amount = new BigDecimal(cleanString).divide(new BigDecimal(100), 2, RoundingMode.HALF_EVEN);
++			BigDecimal amount = new BigDecimal(cleanString).setScale(2, RoundingMode.HALF_EVEN).divide(new BigDecimal(100), 2, RoundingMode.HALF_EVEN);
+ 			if (mTransactionTypeButton.isChecked() && amount.doubleValue() > 0) 
+ 				amount = amount.negate();
+ 			DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance();

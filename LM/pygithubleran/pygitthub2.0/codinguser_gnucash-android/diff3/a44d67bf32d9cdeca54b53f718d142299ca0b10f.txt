@@ -1,0 +1,109 @@
+From 589e74fdc3014d73091ed1a3ebecb0c2e16257aa Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 1 Sep 2015 10:23:52 +0800
+Subject: [PATCH] Show correct fraction format in QIF export
+
+also fixed typo which will cause an error when export
+---
+ app/fabric.properties                              |  3 +++
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  3 ++-
+ .../java/org/gnucash/android/export/Exporter.java  |  5 +++++
+ .../gnucash/android/export/qif/QifExporter.java    | 25 +++++++++++++++++++---
+ 4 files changed, 32 insertions(+), 4 deletions(-)
+ create mode 100644 app/fabric.properties
+
+diff --git a/app/fabric.properties b/app/fabric.properties
+new file mode 100644
+index 00000000..4b281333
+--- /dev/null
++++ b/app/fabric.properties
+@@ -0,0 +1,3 @@
++#Contains API Secret used to validate your application. Commit to internal source control; avoid making secret public.
++#Tue Sep 01 09:38:21 CST 2015
++apiSecret=bd4e83a9a4c35fbf1fbe8d9ccce9443eebb9d5835605f9d06767850e0f1e5b22
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 44d7e21f..e42f8745 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -107,7 +107,8 @@ private void createTempView() {
+                         + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_QUANTITY_NUM + " AS "
+                         + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_QUANTITY_NUM + " , "
+                         + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_QUANTITY_DENOM + " AS "
+-                        + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_QUANTITY_DENOM + " , "                        + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_MEMO + " AS "
++                        + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_QUANTITY_DENOM + " , "
++                        + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_MEMO + " AS "
+                         + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_MEMO + " , "
+                         + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID + " AS "
+                         + AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID + " , "
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 29ce1e79..c51fe5fc 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -20,6 +20,7 @@
+ import android.content.Context;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.Environment;
++import android.support.annotation.NonNull;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+@@ -192,6 +193,10 @@ public ExporterException(ExportParams params){
+             super("Failed to generate " + params.getExportFormat().toString());
+         }
+ 
++        public ExporterException(@NonNull ExportParams params, @NonNull String msg) {
++            super("Failed to generate " + params.getExportFormat().toString() + "-" + msg);
++        }
++
+         public ExporterException(ExportParams params, Throwable throwable){
+             super("Failed to generate " + params.getExportFormat().toString() +"-"+ throwable.getMessage(),
+                     throwable);
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index 8b1c2d9a..346c5745 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -56,7 +56,7 @@ public void generateExport(Writer writer) throws ExporterException {
+                             TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_TIMESTAMP + " AS trans_time",
+                             TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_DESCRIPTION + " AS trans_desc",
+                             SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_QUANTITY_NUM + " AS split_quantity_num",
+-                            SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_QUANTITY_DENOM + " AS split_quantity_denum",
++                            SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_QUANTITY_DENOM + " AS split_quantity_denom",
+                             SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_TYPE + " AS split_type",
+                             SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_MEMO + " AS split_memo",
+                             "trans_extra_info.trans_acct_balance AS trans_acct_balance",
+@@ -158,14 +158,33 @@ public void generateExport(Writer writer) throws ExporterException {
+                     }
+                     String splitType = cursor.getString(cursor.getColumnIndexOrThrow("split_type"));
+                     Double quantity_num = cursor.getDouble(cursor.getColumnIndexOrThrow("split_quantity_num"));
+-                    Double quantity_denom = cursor.getDouble(cursor.getColumnIndexOrThrow("split_quantity_denom"));
++                    int quantity_denom = cursor.getInt(cursor.getColumnIndexOrThrow("split_quantity_denom"));
++                    int precision = 0;
++                    switch (quantity_denom) {
++                        case 0: // will sometimes happen for zero values
++                            break;
++                        case 1:
++                            precision = 0;
++                            break;
++                        case 10:
++                            precision = 1;
++                            break;
++                        case 100:
++                            precision = 2;
++                            break;
++                        case 1000:
++                            precision = 3;
++                            break;
++                        default:
++                            throw new ExporterException(mParameters, "split quantity has illegal denominator: "+ quantity_denom);
++                    }
+                     Double quantity = 0.0;
+                     if (quantity_denom != 0) {
+                         quantity = quantity_num / quantity_denom;
+                     }
+                     writer.append(QifHelper.SPLIT_AMOUNT_PREFIX)
+                             .append(splitType.equals("DEBIT") ? "-" : "")
+-                            .append(String.format("%f", quantity))
++                            .append(String.format("%." + precision + "f", quantity))
+                             .append(newLine);
+                 }
+                 if (!currentTransactionUID.equals("")) {

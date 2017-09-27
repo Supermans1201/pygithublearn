@@ -1,0 +1,465 @@
+From f68079c5482712a14dc7ccfe97bc0ff03b4c48ea Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 8 Sep 2015 00:55:11 +0800
+Subject: [PATCH 1/4] export depend on last export time for qif
+
+---
+ .../main/java/org/gnucash/android/db/DatabaseAdapter.java   |  2 ++
+ .../java/org/gnucash/android/export/qif/QifExporter.java    | 13 ++++++++++++-
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index e42f8745..de53fc1f 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -82,6 +82,8 @@ private void createTempView() {
+         // create a temporary view, combining accounts, transactions and splits, as this is often used
+         // in the queries
+         mDb.execSQL("CREATE TEMP VIEW IF NOT EXISTS trans_split_acct AS SELECT "
++                        + TransactionEntry.TABLE_NAME + "." + CommonColumns.COLUMN_MODIFIED_AT + " AS "
++                        + TransactionEntry.TABLE_NAME + "_" + CommonColumns.COLUMN_MODIFIED_AT + " , "
+                         + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " AS "
+                         + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID + " , "
+                         + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_DESCRIPTION + " AS "
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index 346c5745..aae3a496 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -18,15 +18,19 @@
+ 
+ import android.content.ContentValues;
+ import android.database.Cursor;
++import android.preference.PreferenceManager;
+ 
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
++import org.gnucash.android.model.Transaction;
+ 
+ import java.io.IOException;
+ import java.io.Writer;
+ import java.math.BigDecimal;
++import java.sql.Timestamp;
+ import java.util.Currency;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
+@@ -50,6 +54,8 @@ public void generateExport(Writer writer) throws ExporterException {
+         final String newLine = "\n";
+         TransactionsDbAdapter transactionsDbAdapter = mTransactionsDbAdapter;
+         try {
++            final String zeroTimeStamp = new Timestamp(0).toString();
++            String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(mContext).getString("qif_last_export", zeroTimeStamp);
+             Cursor cursor = transactionsDbAdapter.fetchTransactionsWithSplitsWithTransactionAccount(
+                     new String[]{
+                             TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID + " AS trans_uid",
+@@ -77,7 +83,8 @@ public void generateExport(Writer writer) throws ExporterException {
+                             "trans_split_count == 1 )" +
+                             (
+                             mParameters.shouldExportAllTransactions() ?
+-                                    "" : " AND " + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_EXPORTED + "== 0"
++                                    //"" : " AND " + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_EXPORTED + "== 0"
++                                    "" : " AND " + TransactionEntry.TABLE_NAME + "_" + DatabaseSchema.CommonColumns.COLUMN_MODIFIED_AT + " > \"" + lastExportTimeStamp + "\""
+                             ),
+                     null,
+                     // trans_time ASC : put transactions in time order
+@@ -203,5 +210,9 @@ public void generateExport(Writer writer) throws ExporterException {
+         {
+             throw new ExporterException(mParameters, e);
+         }
++
++        /// export successful
++        String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
++        PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString("qif_last_export", timeStamp).apply();
+     }
+ }
+
+From d76ad4063579c95b9ea4cf5f7936a7c5ec07be10 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 8 Sep 2015 23:26:34 +0800
+Subject: [PATCH 2/4] export ofx based on export time
+
+---
+ app/src/main/java/org/gnucash/android/export/Exporter.java     |  8 ++++++++
+ .../main/java/org/gnucash/android/export/ofx/OfxExporter.java  |  5 +++++
+ .../main/java/org/gnucash/android/export/qif/QifExporter.java  |  5 ++---
+ app/src/main/java/org/gnucash/android/model/Account.java       | 10 ++++++++--
+ app/src/main/java/org/gnucash/android/model/BaseModel.java     |  2 +-
+ 5 files changed, 24 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index c51fe5fc..94703e7f 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -35,6 +35,7 @@
+ import java.io.File;
+ import java.io.FileFilter;
+ import java.io.Writer;
++import java.sql.Timestamp;
+ import java.text.ParseException;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+@@ -74,6 +75,13 @@
+     protected ExportParams mParameters;
+ 
+     private static final SimpleDateFormat EXPORT_FILENAME_DATE_FORMAT = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US);
++
++    /**
++     * last export time in preferences
++     */
++    public static final String PREF_LAST_EXPORT_TIME = "last_export_time";
++
++    public static final String TIMESTAMP_ZERO = new Timestamp(0).toString();
+     /**
+      * Adapter for retrieving accounts to export
+      * Subclasses should close this object when they are done with exporting
+diff --git a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+index 1f46581d..ff9b144e 100644
+--- a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -37,6 +37,7 @@
+ import java.io.IOException;
+ import java.io.StringWriter;
+ import java.io.Writer;
++import java.sql.Timestamp;
+ import java.util.List;
+ 
+ import javax.xml.parsers.DocumentBuilder;
+@@ -131,10 +132,13 @@ public String generateExport() throws ExporterException {
+         boolean useXmlHeader = PreferenceManager.getDefaultSharedPreferences(mContext)
+                 .getBoolean(mContext.getString(R.string.key_xml_ofx_header), false);
+ 
++        String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
++
+         StringWriter stringWriter = new StringWriter();
+         //if we want SGML OFX headers, write first to string and then prepend header
+         if (useXmlHeader){
+             write(document, stringWriter, false);
++            PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+             return stringWriter.toString();
+         } else {
+             Node ofxNode = document.getElementsByTagName("OFX").item(0);
+@@ -144,6 +148,7 @@ public String generateExport() throws ExporterException {
+             StringBuffer stringBuffer = new StringBuffer(OfxHelper.OFX_SGML_HEADER);
+             stringBuffer.append('\n');
+             stringBuffer.append(stringWriter.toString());
++            PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+             return stringBuffer.toString();
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index aae3a496..2de23b82 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -54,8 +54,7 @@ public void generateExport(Writer writer) throws ExporterException {
+         final String newLine = "\n";
+         TransactionsDbAdapter transactionsDbAdapter = mTransactionsDbAdapter;
+         try {
+-            final String zeroTimeStamp = new Timestamp(0).toString();
+-            String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(mContext).getString("qif_last_export", zeroTimeStamp);
++            String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(mContext).getString(Exporter.PREF_LAST_EXPORT_TIME, Exporter.TIMESTAMP_ZERO);
+             Cursor cursor = transactionsDbAdapter.fetchTransactionsWithSplitsWithTransactionAccount(
+                     new String[]{
+                             TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID + " AS trans_uid",
+@@ -213,6 +212,6 @@ public void generateExport(Writer writer) throws ExporterException {
+ 
+         /// export successful
+         String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
+-        PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString("qif_last_export", timeStamp).apply();
++        PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index 465855dd..635eddf4 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -17,12 +17,17 @@
+ package org.gnucash.android.model;
+ 
+ 
++import android.preference.PreferenceManager;
++
+ import org.gnucash.android.BuildConfig;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.CommoditiesDbAdapter;
++import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.ofx.OfxHelper;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ 
++import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.List;
+@@ -520,9 +525,10 @@ public void toOfx(Document doc, Element parent, boolean exportAllTransactions){
+ 		Element bankTransactionsList = doc.createElement(OfxHelper.TAG_BANK_TRANSACTION_LIST);
+ 		bankTransactionsList.appendChild(dtstart);
+ 		bankTransactionsList.appendChild(dtend);
+-		
++
++		Timestamp lastExportedTimestamp = Timestamp.valueOf(PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext()).getString(Exporter.PREF_LAST_EXPORT_TIME, Exporter.TIMESTAMP_ZERO));
+ 		for (Transaction transaction : mTransactionsList) {
+-			if (!exportAllTransactions && transaction.isExported())
++			if (!exportAllTransactions && /*transaction.isExported()*/ transaction.getModifiedTimestamp().before(lastExportedTimestamp))
+ 				continue;
+             bankTransactionsList.appendChild(transaction.toOFX(doc, getUID()));
+ 		}		
+diff --git a/app/src/main/java/org/gnucash/android/model/BaseModel.java b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+index eff68b1f..224f1d54 100644
+--- a/app/src/main/java/org/gnucash/android/model/BaseModel.java
++++ b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+@@ -74,7 +74,7 @@ public void setUID(String uid) {
+         this.mUID = uid;
+     }
+ 
+-    /**
++    /**8
+      * Returns the timestamp when this model entry was created in the database
+      * @return Timestamp of creation of model
+      */
+
+From ca8d93744dd49a3da0dfa31b0a45daf4f7f263f5 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 9 Sep 2015 21:11:19 +0800
+Subject: [PATCH 3/4] set last export time when import xml
+
+---
+ .../main/java/org/gnucash/android/importer/GncXmlImporter.java    | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index bd80e2c5..43ea7c61 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -17,8 +17,11 @@
+ package org.gnucash.android.importer;
+ 
+ import android.database.sqlite.SQLiteDatabase;
++import android.preference.PreferenceManager;
+ import android.util.Log;
+ 
++import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.export.Exporter;
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+ import org.xml.sax.XMLReader;
+@@ -27,6 +30,7 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.PushbackInputStream;
++import java.sql.Timestamp;
+ import java.util.zip.GZIPInputStream;
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+@@ -88,6 +92,10 @@ public static void parse(InputStream gncXmlInputStream) throws ParserConfigurati
+         long startTime = System.nanoTime();
+         xr.parse(new InputSource(bos));
+         long endTime = System.nanoTime();
++
++        String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
++        PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext()).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
++
+         Log.d(GncXmlImporter.class.getSimpleName(), String.format("%d ns spent on importing the file", endTime-startTime));
+     }
+ }
+
+From ca4026684096e6c889c4f09828cc6048a81a49cb Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 9 Sep 2015 15:59:08 +0200
+Subject: [PATCH 4/4] Fixed: AccountsActivity tests failing
+
+Fixed: crash when destroying transactions activity
+---
+ .../android/test/ui/AccountsActivityTest.java      |  5 +-
+ .../android/test/ui/TransactionsActivityTest.java  |  2 +-
+ .../ui/transaction/TransactionsActivity.java       | 55 +++++++++++-----------
+ 3 files changed, 32 insertions(+), 30 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 1bd4f43b..28197be1 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -59,6 +59,7 @@
+ import static android.support.test.espresso.Espresso.openActionBarOverflowOrOptionsMenu;
+ import static android.support.test.espresso.action.ViewActions.clearText;
+ import static android.support.test.espresso.action.ViewActions.click;
++import static android.support.test.espresso.action.ViewActions.closeSoftKeyboard;
+ import static android.support.test.espresso.action.ViewActions.longClick;
+ import static android.support.test.espresso.action.ViewActions.scrollTo;
+ import static android.support.test.espresso.action.ViewActions.swipeRight;
+@@ -183,8 +184,8 @@ public void testCreateAccount(){
+         onView(allOf(isDisplayed(), withId(R.id.fab_create_account))).perform(click());
+ 
+         String NEW_ACCOUNT_NAME = "A New Account";
+-        onView(withId(R.id.input_account_name)).perform(typeText(NEW_ACCOUNT_NAME));
+-        Espresso.closeSoftKeyboard();
++        onView(withId(R.id.input_account_name)).perform(typeText(NEW_ACCOUNT_NAME), closeSoftKeyboard());
++        sleep(1000);
+         onView(withId(R.id.checkbox_placeholder_account))
+                 .check(matches(isNotChecked()))
+                 .perform(click());
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 8e0fe400..c1af3db6 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -185,7 +185,7 @@ public void testAddTransactionShouldRequireAmount(){
+ 				.perform(typeText("Lunch"));
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+-		onView(withText(R.string.title_create_account)).check(matches(isDisplayed()));
++		onView(withText(R.string.title_add_transaction)).check(matches(isDisplayed()));
+ 
+ 		assertToastDisplayed(R.string.toast_transanction_amount_required);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 02f09828..8fb130ed 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -61,6 +61,9 @@
+ 
+ import java.math.BigDecimal;
+ 
++import butterknife.Bind;
++import butterknife.ButterKnife;
++
+ /**
+  * Activity for displaying, creating and editing transactions
+  * @author Ngewi Fet <ngewif@gmail.com>
+@@ -103,18 +106,27 @@
+      */
+     private Cursor mAccountsCursor = null;
+ 
+-    private ViewPager mViewPager;
++    @Bind(R.id.pager) ViewPager mViewPager;
++    @Bind(R.id.spinner_toolbar) Spinner mToolbarSpinner;
++    @Bind(R.id.tab_layout) TabLayout mTabLayout;
++    @Bind(R.id.transactions_sum) TextView mSumTextView;
++    @Bind(R.id.fab_create_transaction) FloatingActionButton mCreateFloatingButton;
+ 
+     private SparseArray<Refreshable> mFragmentPageReferenceMap = new SparseArray<>();
+ 
++    /**
++     * Flag for determining is the currently displayed account is a placeholder account or not.
++     * This will determine if the transactions tab is displayed or not
++     */
++    private boolean mIsPlaceholderAccount;
+ 
+ 	private AdapterView.OnItemSelectedListener mTransactionListNavigationListener = new AdapterView.OnItemSelectedListener() {
+ 
+         @Override
+         public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+             mAccountUID = mAccountsDbAdapter.getUID(id);
+-
+-            if (isPlaceHolderAccount()){
++            mIsPlaceholderAccount = mAccountsDbAdapter.isPlaceholderAccount(mAccountUID);
++            if (mIsPlaceholderAccount){
+                 if (mTabLayout.getTabCount() > 1)
+                     mTabLayout.removeTabAt(1);
+             } else {
+@@ -130,10 +142,9 @@ public void onNothingSelected(AdapterView<?> parent) {
+             //nothing to see here, move along
+         }
+ 	};
++
+     private PagerAdapter mPagerAdapter;
+-    private Spinner mToolbarSpinner;
+-    private TabLayout mTabLayout;
+-    private TextView mSumTextView;
++
+ 
+ 
+     /**
+@@ -147,7 +158,7 @@ public AccountViewPagerAdapter(FragmentManager fm){
+ 
+         @Override
+         public Fragment getItem(int i) {
+-            if (isPlaceHolderAccount()){
++            if (mIsPlaceholderAccount){
+                 Fragment transactionsListFragment = prepareSubAccountsListFragment();
+                 mFragmentPageReferenceMap.put(i, (Refreshable) transactionsListFragment);
+                 return transactionsListFragment;
+@@ -177,7 +188,7 @@ public void destroyItem(ViewGroup container, int position, Object object) {
+ 
+         @Override
+         public CharSequence getPageTitle(int position) {
+-            if (isPlaceHolderAccount())
++            if (mIsPlaceholderAccount)
+                 return getString(R.string.section_header_subaccounts);
+ 
+             switch (position){
+@@ -192,7 +203,7 @@ public CharSequence getPageTitle(int position) {
+ 
+         @Override
+         public int getCount() {
+-            if (isPlaceHolderAccount())
++            if (mIsPlaceholderAccount)
+                 return 1;
+             else
+                 return DEFAULT_NUM_PAGES;
+@@ -225,14 +236,6 @@ private TransactionsListFragment prepareTransactionsListFragment(){
+     }
+ 
+     /**
+-     * Returns <code>true</code> is the current account is a placeholder account, <code>false</code> otherwise.
+-     * @return <code>true</code> is the current account is a placeholder account, <code>false</code> otherwise.
+-     */
+-    private boolean isPlaceHolderAccount(){
+-        return mAccountsDbAdapter.isPlaceholderAccount(mAccountUID);
+-    }
+-
+-    /**
+      * Refreshes the fragments currently in the transactions activity
+      */
+     @Override
+@@ -263,16 +266,15 @@ protected void onCreate(Bundle savedInstanceState) {
+         setSupportActionBar(toolbar);
+         getSupportActionBar().setDisplayShowTitleEnabled(false);
+ 
+-        mSumTextView = (TextView) findViewById(R.id.transactions_sum);
+-
+-        mViewPager = (ViewPager) findViewById(R.id.pager);
++        ButterKnife.bind(this);
+ 
+ 		mAccountUID = getIntent().getStringExtra(UxArgument.SELECTED_ACCOUNT_UID);
+         mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+ 
+-        mTabLayout = (TabLayout) findViewById(R.id.tab_layout);
++        mIsPlaceholderAccount = mAccountsDbAdapter.isPlaceholderAccount(mAccountUID);
++
+         mTabLayout.addTab(mTabLayout.newTab().setText(R.string.section_header_subaccounts));
+-        if (!isPlaceHolderAccount()) {
++        if (!mIsPlaceholderAccount) {
+             mTabLayout.addTab(mTabLayout.newTab().setText(R.string.section_header_transactions), true);
+         }
+ 
+@@ -301,17 +303,17 @@ public void onTabReselected(TabLayout.Tab tab) {
+             }
+         });
+ 
+-        FloatingActionButton createTransactionFAB = (FloatingActionButton) findViewById(R.id.fab_create_transaction);
+-        createTransactionFAB.setOnClickListener(new View.OnClickListener() {
++        mCreateFloatingButton.setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View v) {
+-                switch (mViewPager.getCurrentItem()){
++                switch (mViewPager.getCurrentItem()) {
+                     case INDEX_SUB_ACCOUNTS_FRAGMENT:
+                         Intent addAccountIntent = new Intent(TransactionsActivity.this, FormActivity.class);
+                         addAccountIntent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+                         addAccountIntent.putExtra(UxArgument.FORM_TYPE, FormActivity.FormType.ACCOUNT_FORM.name());
+                         addAccountIntent.putExtra(UxArgument.PARENT_ACCOUNT_UID, mAccountUID);
+-                        startActivityForResult(addAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);;
++                        startActivityForResult(addAccountIntent, AccountsActivity.REQUEST_EDIT_ACCOUNT);
++                        ;
+                         break;
+ 
+                     case INDEX_TRANSACTIONS_FRAGMENT:
+@@ -357,7 +359,6 @@ private void setupActionBarNavigation() {
+         SpinnerAdapter mSpinnerAdapter = new QualifiedAccountNameCursorAdapter(
+                 getSupportActionBar().getThemedContext(), mAccountsCursor);
+ 
+-        mToolbarSpinner = (Spinner) findViewById(R.id.spinner_toolbar);
+         mToolbarSpinner.setAdapter(mSpinnerAdapter);
+         mToolbarSpinner.setOnItemSelectedListener(mTransactionListNavigationListener);
+         getSupportActionBar().setDisplayHomeAsUpEnabled(true);

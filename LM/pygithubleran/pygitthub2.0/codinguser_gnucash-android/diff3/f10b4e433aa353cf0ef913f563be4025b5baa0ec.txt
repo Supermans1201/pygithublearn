@@ -1,0 +1,139 @@
+From f10b4e433aa353cf0ef913f563be4025b5baa0ec Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 5 Feb 2016 12:45:03 +0100
+Subject: [PATCH] Fixes crash when account is deleted which was set as default
+ transfer account
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 30 ++++++++++++++++++---
+ .../org/gnucash/android/db/DatabaseHelper.java     |  1 +
+ .../test/unit/db/AccountsDbAdapterTest.java        | 31 ++++++++++++++++++++++
+ 3 files changed, 59 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 7da4727b..3298281c 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -97,7 +97,6 @@ public static AccountsDbAdapter getInstance(){
+ 	 * Adds an account to the database. 
+ 	 * If an account already exists in the database with the same GUID, it is replaced.
+ 	 * @param account {@link Account} to be inserted to database
+-	 * @return Database row ID of the inserted account
+ 	 */
+     @Override
+ 	public void addRecord(@NonNull Account account){
+@@ -200,7 +199,8 @@ protected SQLiteStatement compileReplaceStatement(@NonNull final Account account
+         }
+         if (account.getDefaultTransferAccountUID() != null) {
+             mReplaceStatement.bindString(14, account.getDefaultTransferAccountUID());
+-        }
++        } else
++            mReplaceStatement.bindNull(14);
+ 
+         return mReplaceStatement;
+     }
+@@ -355,11 +355,22 @@ public boolean recursiveDeleteAccount(long accountId){
+             String accountUIDList = "'" + TextUtils.join("','", descendantAccountUIDs) + "'";
+ 
+             // delete accounts
+-            mDb.delete(
++            long deletedCount = mDb.delete(
+                     AccountEntry.TABLE_NAME,
+                     AccountEntry.COLUMN_UID + " IN (" + accountUIDList + ")",
+                     null
+             );
++
++            //if we delete some accounts, reset the default transfer account to NULL
++            //there is also a database trigger from db version > 12
++            if (deletedCount > 0){
++                ContentValues contentValues = new ContentValues();
++                contentValues.putNull(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID);
++                mDb.update(mTableName, contentValues,
++                        AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + " IN (" + accountUIDList + ")",
++                        null);
++            }
++
+             mDb.setTransactionSuccessful();
+             return true;
+         }
+@@ -1216,6 +1227,19 @@ public int deleteAllRecords() {
+         return mDb.delete(AccountEntry.TABLE_NAME, null, null);
+     }
+ 
++    @Override
++    public boolean deleteRecord(@NonNull String uid) {
++        boolean result = super.deleteRecord(uid);
++        if (result){
++            ContentValues contentValues = new ContentValues();
++            contentValues.putNull(AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID);
++            mDb.update(mTableName, contentValues,
++                    AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + "=?",
++                    new String[]{uid});
++        }
++        return result;
++    }
++
+     public int getTransactionMaxSplitNum(@NonNull String accountUID) {
+         Cursor cursor = mDb.query("trans_extra_info",
+                 new String[]{"MAX(trans_split_count)"},
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 440e5c7e..639b79cd 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -73,6 +73,7 @@
+             + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID   + " varchar(255), "
+             + AccountEntry.COLUMN_CREATED_AT       + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + AccountEntry.COLUMN_MODIFIED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
++//            + "FOREIGN KEY (" 	+ AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID + ") REFERENCES " + AccountEntry.TABLE_NAME + " (" + AccountEntry.COLUMN_UID + ") ON DELETE SET NULL, "
+             + "FOREIGN KEY (" 	+ AccountEntry.COLUMN_COMMODITY_UID + ") REFERENCES " + CommodityEntry.TABLE_NAME + " (" + CommodityEntry.COLUMN_UID + ") "
+ 			+ ");" + createUpdatedAtTrigger(AccountEntry.TABLE_NAME);
+ 	
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index 260f98b5..afb7f1c5 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -22,6 +22,7 @@
+ import org.gnucash.android.test.unit.util.ShadowCrashlytics;
+ import org.gnucash.android.test.unit.util.ShadowUserVoice;
+ import org.junit.After;
++import org.junit.Assert;
+ import org.junit.Before;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+@@ -376,6 +377,36 @@ public void shouldCreateImbalanceAccountOnDemand(){
+         assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(2);
+     }
+ 
++    @Test
++    public void shouldSetDefaultTransferColumnToNull_WhenTheAccountIsDeleted(){
++        assertThat(mAccountsDbAdapter.getRecordsCount()).isZero();
++        Account account1 = new Account("Test");
++        Account account2 = new Account("Transfer Account");
++
++        account1.setDefaultTransferAccountUID(account2.getUID());
++
++        mAccountsDbAdapter.addRecord(account1);
++        mAccountsDbAdapter.addRecord(account2);
++
++        assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(3L); //plus ROOT account
++        mAccountsDbAdapter.deleteRecord(account2.getUID());
++
++        assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(2L);
++        assertThat(mAccountsDbAdapter.getRecord(account1.getUID()).getDefaultTransferAccountUID()).isNull();
++
++        Account account3 = new Account("Sub-test");
++        account3.setParentUID(account1.getUID());
++        Account account4 = new Account("Third-party");
++        account4.setDefaultTransferAccountUID(account3.getUID());
++
++        mAccountsDbAdapter.addRecord(account3);
++        mAccountsDbAdapter.addRecord(account4);
++        assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(4L);
++
++        mAccountsDbAdapter.recursiveDeleteAccount(mAccountsDbAdapter.getID(account1.getUID()));
++        assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(2L);
++        assertThat(mAccountsDbAdapter.getRecord(account4.getUID()).getDefaultTransferAccountUID()).isNull();
++    }
+ 
+     /**
+      * Opening an XML file should set the default currency to that used by the most accounts in the file

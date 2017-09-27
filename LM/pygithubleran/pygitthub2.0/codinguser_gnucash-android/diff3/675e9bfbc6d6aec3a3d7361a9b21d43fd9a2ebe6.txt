@@ -1,0 +1,138 @@
+From 675e9bfbc6d6aec3a3d7361a9b21d43fd9a2ebe6 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Tue, 24 Mar 2015 14:01:03 +0200
+Subject: [PATCH] Recalculate earliest and latest timestamps when one of
+ account types has no data
+
+---
+ .../gnucash/android/ui/chart/BarChartActivity.java | 27 +++++++++++++++++-----
+ .../android/ui/chart/LineChartActivity.java        | 22 ++++++++++++++----
+ 2 files changed, 38 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+index 8254344c..6163529a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/BarChartActivity.java
+@@ -44,9 +44,7 @@
+     private static final String X_AXIS_PATTERN = "MMM YY";
+     private static final String SELECTED_VALUE_PATTERN = "%s - %.2f (%.2f %%)";
+ 
+-    private static final int[] COLORS = {
+-            Color.rgb(104, 241, 175), Color.RED
+-    };
++    private static final int[] COLORS = { Color.rgb(104, 241, 175), Color.RED };
+ 
+     private BarChart mChart;
+     private List<AccountType> mAccountTypeList;
+@@ -75,7 +73,7 @@ protected void onCreate(Bundle savedInstanceState) {
+         mChart.getAxisRight().setEnabled(false);
+ 
+ //        mAccountTypeList = Arrays.asList(AccountType.EXPENSE, AccountType.INCOME);
+-        mAccountTypeList = Arrays.asList(AccountType.INCOME, AccountType.EXPENSE);
++        mAccountTypeList = new ArrayList<AccountType>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE));
+         setStackedData();
+ 
+         Legend l = mChart.getLegend();
+@@ -91,6 +89,20 @@ protected void setStackedData() {
+ 
+         setEarliestAndLatestTimestamps(mAccountTypeList);
+ 
++        if (mEarliestTransactionTimestamp == 0) {
++            if (mLatestTransactionTimestamp == 0) {
++                Log.w(TAG, "empty bar chart");
++                return;
++            }
++            for (Map.Entry<AccountType, Long> entry : mEarliestTimestampsMap.entrySet()) {
++                if (entry.getValue() == 0) {
++                    mAccountTypeList.remove(entry.getKey());
++                }
++            }
++            Log.d(TAG, mAccountTypeList.toString());
++            setEarliestAndLatestTimestamps(mAccountTypeList);
++        }
++
+         LocalDateTime start = new LocalDateTime(mEarliestTransactionTimestamp).withDayOfMonth(1).withMillisOfDay(0);
+         LocalDateTime end = new LocalDateTime(mLatestTransactionTimestamp).withDayOfMonth(1).withMillisOfDay(0);
+         Log.w(TAG, "X AXIS START DATE: " + start.toString("dd MM yyyy"));
+@@ -135,8 +147,9 @@ protected void setStackedData() {
+ 
+         BarDataSet set = new BarDataSet(values, "");
+ //        set.setValueFormatter();
+-        set.setStackLabels(new String[] { AccountType.INCOME.toString(), AccountType.EXPENSE.toString() });
+-        set.setColors(COLORS);
++        // conversion enum list to string array
++        set.setStackLabels(mAccountTypeList.toString().substring(1, mAccountTypeList.toString().length() - 1).split(", "));
++        set.setColors(Arrays.copyOfRange(COLORS, 0, mAccountTypeList.size()));
+ 
+         dataSets.add(set);
+ 
+@@ -146,6 +159,8 @@ protected void setStackedData() {
+ 
+     private void setEarliestAndLatestTimestamps(List<AccountType> accountTypeList) {
+         TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        mEarliestTimestampsMap.clear();
++        mLatestTimestampsMap.clear();
+         for (AccountType type : accountTypeList) {
+             mEarliestTimestampsMap.put(type, transactionsDbAdapter.getTimestampOfEarliestTransaction(type));
+             mLatestTimestampsMap.put(type, transactionsDbAdapter.getTimestampOfLatestTransaction(type));
+diff --git a/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java b/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
+index a5dce784..83ca262b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/chart/LineChartActivity.java
+@@ -67,7 +67,7 @@ protected void onCreate(Bundle savedInstanceState) {
+         mChart.setOnChartValueSelectedListener(this);
+         mChart.setDescription("");
+         mChart.getAxisRight().setEnabled(false);
+-        mChart.setData(getDataSet(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE)));
++        mChart.setData(getDataSet(new ArrayList<AccountType>(Arrays.asList(AccountType.INCOME, AccountType.EXPENSE))));
+ 
+         Legend legend = mChart.getLegend();
+         legend.setPosition(Legend.LegendPosition.RIGHT_OF_CHART_INSIDE);
+@@ -80,8 +80,17 @@ protected void onCreate(Bundle savedInstanceState) {
+     private LineData getDataSet(List<AccountType> accountTypes) {
+         setEarliestAndLatestTimestamps(accountTypes);
+ 
+-        if (mEarliestTransactionTimestamp == 0 && mLatestTransactionTimestamp == 0) {
+-            return getEmptyDataSet();
++        if (mEarliestTransactionTimestamp == 0) {
++            if (mLatestTransactionTimestamp == 0) {
++                return getEmptyDataSet();
++            }
++            for (Map.Entry<AccountType, Long> entry : mEarliestTimestampsMap.entrySet()) {
++                if (entry.getValue() == 0) {
++                    accountTypes.remove(entry.getKey());
++                }
++            }
++            Log.w(TAG, accountTypes.toString());
++            setEarliestAndLatestTimestamps(accountTypes);
+         }
+ 
+         LocalDate startDate = new LocalDate(mEarliestTransactionTimestamp).withDayOfMonth(1);
+@@ -138,8 +147,8 @@ private LineData getEmptyDataSet() {
+ 
+         LocalDateTime earliest = new LocalDateTime(mEarliestTimestampsMap.get(accountType));
+         LocalDateTime latest = new LocalDateTime(mLatestTimestampsMap.get(accountType));
+-        Log.d(TAG, "Earliest " + accountType + "date " + earliest.toString("dd MM yyyy"));
+-        Log.d(TAG, "Latest " + accountType + "date " + latest.toString("dd MM yyyy"));
++        Log.d(TAG, "Earliest " + accountType + " date " + earliest.toString("dd MM yyyy"));
++        Log.d(TAG, "Latest " + accountType + " date " + latest.toString("dd MM yyyy"));
+         int months = Months.monthsBetween(earliest.withDayOfMonth(1).withMillisOfDay(0),
+                 latest.withDayOfMonth(1).withMillisOfDay(0)).getMonths();
+ 
+@@ -159,6 +168,8 @@ private LineData getEmptyDataSet() {
+ 
+     private void setEarliestAndLatestTimestamps(List<AccountType> accountTypeList) {
+         TransactionsDbAdapter transactionsDbAdapter = TransactionsDbAdapter.getInstance();
++        mEarliestTimestampsMap.clear();
++        mLatestTimestampsMap.clear();
+         for (AccountType type : accountTypeList) {
+             mEarliestTimestampsMap.put(type, transactionsDbAdapter.getTimestampOfEarliestTransaction(type));
+             mLatestTimestampsMap.put(type, transactionsDbAdapter.getTimestampOfLatestTransaction(type));
+@@ -167,6 +178,7 @@ private void setEarliestAndLatestTimestamps(List<AccountType> accountTypeList) {
+         List<Long> timestamps = new ArrayList<Long>(mEarliestTimestampsMap.values());
+         timestamps.addAll(mLatestTimestampsMap.values());
+         Collections.sort(timestamps);
++        Log.d(TAG, "X-axis timestamps list: " + timestamps.toString());
+         mEarliestTransactionTimestamp = timestamps.get(0);
+         mLatestTransactionTimestamp = timestamps.get(timestamps.size() - 1);
+     }

@@ -1,0 +1,248 @@
+From 6eadaba86fdc974d524423b4e3a70eb7dfa831a4 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 26 Aug 2013 18:34:12 +0200
+Subject: [PATCH] - Feature: Autocomplete suggestions when entering transaction
+ names (description) - Improved: handling of commodities during account import
+
+---
+ app/res/layout/fragment_new_transaction.xml        |  2 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 18 ++++++
+ .../ui/transactions/NewTransactionFragment.java    | 74 +++++++++++++++-------
+ .../android/util/GnucashAccountXmlHandler.java     | 32 ++++++----
+ 4 files changed, 89 insertions(+), 37 deletions(-)
+
+diff --git a/app/res/layout/fragment_new_transaction.xml b/app/res/layout/fragment_new_transaction.xml
+index 15b815b1..7388922a 100644
+--- a/app/res/layout/fragment_new_transaction.xml
++++ b/app/res/layout/fragment_new_transaction.xml
+@@ -25,7 +25,7 @@
+ 	    android:padding="@dimen/dialog_padding"
+ 	    android:orientation="vertical" >
+ 	
+-	    <EditText
++	    <AutoCompleteTextView
+ 	        android:id="@+id/input_transaction_name"
+ 	        android:layout_width="match_parent"
+ 	        android:layout_height="wrap_content"
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 980d36ac..a3a546e7 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -451,4 +451,22 @@ public Cursor fetchRecord(long rowId) {
+         return fetchRecord(DatabaseHelper.TRANSACTIONS_TABLE_NAME, rowId);
+     }
+ 
++    /**
++     * Returns a cursor to transactions whose name (UI: description) start with the <code>prefix</code>
++     * <p>This method is used for autocomplete suggestions when creating new transactions</p>
++     * @param prefix Starting characters of the transaction name
++     * @return Cursor to the data set containing all matching transactions
++     */
++    public Cursor fetchTransactionsStartingWith(String prefix){
++        StringBuffer stringBuffer = new StringBuffer(DatabaseHelper.KEY_NAME)
++                .append(" LIKE '").append(prefix).append("%'");
++        String selection = stringBuffer.toString();
++
++        Cursor c = mDb.query(DatabaseHelper.TRANSACTIONS_TABLE_NAME,
++                new String[]{DatabaseHelper.KEY_ROW_ID, DatabaseHelper.KEY_NAME},
++                selection,
++                null, null, null,
++                DatabaseHelper.KEY_NAME);
++        return c;
++    }
+ }
+diff --git a/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index ebba10c2..176e4366 100644
+--- a/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -129,7 +129,7 @@
+ 	/**
+ 	 * Input field for the transaction name (description)
+ 	 */
+-	private EditText mNameEditText;
++	private AutoCompleteTextView mNameEditText;
+ 	
+ 	/**
+ 	 * Input field for the transaction amount
+@@ -172,8 +172,8 @@
+ 	 */
+ 	private Spinner mDoubleAccountSpinner;
+ 
+-	private boolean mUseDoubleEntry;  
+-	
++	private boolean mUseDoubleEntry;
++
+ 	/**
+ 	 * Create the view and retrieve references to the UI elements
+ 	 */
+@@ -182,7 +182,7 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 			Bundle savedInstanceState) {
+ 		View v = inflater.inflate(R.layout.fragment_new_transaction, container, false);
+ 		
+-		mNameEditText = (EditText) v.findViewById(R.id.input_transaction_name);
++		mNameEditText = (AutoCompleteTextView) v.findViewById(R.id.input_transaction_name);
+ 		mDescriptionEditText = (EditText) v.findViewById(R.id.input_description);
+ 		mDateTextView = (TextView) v.findViewById(R.id.input_date);
+ 		mTimeTextView = (TextView) v.findViewById(R.id.input_time);
+@@ -202,7 +202,6 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		actionBar.setHomeButtonEnabled(true);
+ 		actionBar.setDisplayHomeAsUpEnabled(true);
+ 		actionBar.setDisplayShowTitleEnabled(false);
+-		
+ 
+ 		SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+ 		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
+@@ -227,9 +226,40 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 			}
+ 			initializeViewsWithTransaction();
+ 		}
++
++        initTransactionNameAutocomplete();
+ 	}
+-	
+-	/**
++
++    /**
++     * Initializes the transaction name field for autocompletion with existing transaction names in the database
++     */
++    private void initTransactionNameAutocomplete() {
++        final int[] to = new int[]{android.R.id.text1};
++        final String[] from = new String[]{DatabaseHelper.KEY_NAME};
++
++        SimpleCursorAdapter adapter = new SimpleCursorAdapter(
++                getActivity(), android.R.layout.simple_dropdown_item_1line,
++                null, from, to, 0);
++
++        adapter.setCursorToStringConverter(new SimpleCursorAdapter.CursorToStringConverter() {
++            @Override
++            public CharSequence convertToString(Cursor cursor) {
++                final int colIndex = cursor.getColumnIndexOrThrow(DatabaseHelper.KEY_NAME);
++                return cursor.getString(colIndex);
++            }
++        });
++
++        adapter.setFilterQueryProvider(new FilterQueryProvider() {
++            @Override
++            public Cursor runQuery(CharSequence name) {
++                return mTransactionsDbAdapter.fetchTransactionsStartingWith(name.toString());
++            }
++        });
++
++        mNameEditText.setAdapter(adapter);
++    }
++
++    /**
+ 	 * Initialize views in the fragment with information from a transaction.
+ 	 * This method is called if the fragment is used for editing a transaction
+ 	 */
+@@ -355,21 +385,21 @@ public void onClick(View v) {
+ 		});
+ 		
+ 		mTimeTextView.setOnClickListener(new View.OnClickListener() {
+-			
+-			@Override
+-			public void onClick(View v) {
+-				FragmentTransaction ft = getFragmentManager().beginTransaction();
+-				long timeMillis = 0;				
+-				try {
+-					Date date = TIME_FORMATTER.parse(mTimeTextView.getText().toString());
+-					timeMillis = date.getTime();
+-				} catch (ParseException e) {
+-					Log.e(getTag(), "Error converting input time to Date object");
+-				}
+-				DialogFragment fragment = new TimePickerDialogFragment(NewTransactionFragment.this, timeMillis);
+-				fragment.show(ft, "time_dialog");
+-			}
+-		});
++
++            @Override
++            public void onClick(View v) {
++                FragmentTransaction ft = getFragmentManager().beginTransaction();
++                long timeMillis = 0;
++                try {
++                    Date date = TIME_FORMATTER.parse(mTimeTextView.getText().toString());
++                    timeMillis = date.getTime();
++                } catch (ParseException e) {
++                    Log.e(getTag(), "Error converting input time to Date object");
++                }
++                DialogFragment fragment = new TimePickerDialogFragment(NewTransactionFragment.this, timeMillis);
++                fragment.show(ft, "time_dialog");
++            }
++        });
+ 	}
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java b/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
+index 5d622034..a9760b72 100644
+--- a/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
++++ b/app/src/org/gnucash/android/util/GnucashAccountXmlHandler.java
+@@ -17,6 +17,7 @@
+ package org.gnucash.android.util;
+ 
+ import android.content.Context;
++import android.util.Log;
+ import android.widget.Toast;
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Account;
+@@ -27,7 +28,6 @@
+ import org.xml.sax.XMLReader;
+ import org.xml.sax.helpers.DefaultHandler;
+ 
+-import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.parsers.SAXParser;
+ import javax.xml.parsers.SAXParserFactory;
+ import java.io.*;
+@@ -50,8 +50,11 @@
+     public static final String TAG_CURRENCY     = "cmdty:id";
+     public static final String TAG_PARENT_UID   = "act:parent";
+     public static final String TAG_ACCOUNT      = "gnc:account";
++    public static final String TAG_COMMODITY_SPACE  = "cmdty:space";
++    private static final String NO_CURRENCY_CODE    = "XXX";
++
++    private static final String LOG_TAG = "GnuCashAccountImporter";
+ 
+-    private static final String ERROR_TAG   = "GnuCashAccountImporter";
+ 
+     AccountsDbAdapter mDatabaseAdapter;
+     StringBuilder mContent;
+@@ -88,27 +91,28 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             mAccount.setAccountType(Account.AccountType.valueOf(characterString));
+         }
+ 
++        if (qualifiedName.equalsIgnoreCase(TAG_COMMODITY_SPACE)){
++            if (characterString.equalsIgnoreCase("ISO4217")){
++                mISO4217Currency = true;
++            }
++        }
++
+         if (qualifiedName.equalsIgnoreCase(TAG_CURRENCY)){
+-            if (mAccount != null)
+-                mAccount.setCurrency(Currency.getInstance(characterString));
++            if (mAccount != null){
++                String currencyCode = mISO4217Currency ? characterString : NO_CURRENCY_CODE;
++                mAccount.setCurrency(Currency.getInstance(currencyCode));
++            }
+         }
+ 
+         if (qualifiedName.equalsIgnoreCase(TAG_PARENT_UID)){
+             mAccount.setParentUID(characterString);
+         }
+ 
+-        if (qualifiedName.equalsIgnoreCase("cmdty:space")){
+-            if (characterString.equalsIgnoreCase("ISO4217")){
+-                mISO4217Currency = true;
+-            }
+-        }
+-
+         if (qualifiedName.equalsIgnoreCase(TAG_ACCOUNT)){
+-            //we only save accounts with ISO 4217 currencies. Ignore all else
+-            if (mISO4217Currency)
+-                mDatabaseAdapter.addAccount(mAccount);
++            Log.i(LOG_TAG, "Saving account...");
++            mDatabaseAdapter.addAccount(mAccount);
+ 
+-            //reset for next account
++            //reset ISO 4217 flag for next account
+             mISO4217Currency = false;
+         }
+ 

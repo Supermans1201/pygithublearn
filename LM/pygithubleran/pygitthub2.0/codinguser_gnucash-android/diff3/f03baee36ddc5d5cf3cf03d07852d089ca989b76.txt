@@ -1,0 +1,922 @@
+From f03baee36ddc5d5cf3cf03d07852d089ca989b76 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 18 May 2016 15:26:10 +0200
+Subject: [PATCH] Add view for managing multiple books
+
+Add time of last sync to the books database
+Migrate shared preferences to book-specific preferences
+---
+ .../java/org/gnucash/android/db/BookDbHelper.java  |   1 +
+ .../org/gnucash/android/db/DatabaseSchema.java     |   1 +
+ .../org/gnucash/android/db/MigrationHelper.java    |  28 +++
+ .../gnucash/android/db/adapter/BooksDbAdapter.java |   9 +-
+ .../gnucash/android/importer/GncXmlHandler.java    |   3 +-
+ .../main/java/org/gnucash/android/model/Book.java  |  31 ++-
+ .../android/ui/common/BaseDrawerActivity.java      |   5 +-
+ .../android/ui/settings/BookListFragment.java      | 208 +++++++++++++++++++++
+ .../android/ui/settings/PreferenceActivity.java    |  13 +-
+ .../gnucash/android/util/PreferencesHelper.java    |  11 +-
+ .../org/gnucash/android/util/TimestampHelper.java  |   4 +-
+ .../main/res/drawable-hdpi/ic_clear_black_24dp.png | Bin 0 -> 207 bytes
+ .../main/res/drawable-mdpi/ic_clear_black_24dp.png | Bin 0 -> 164 bytes
+ .../res/drawable-xhdpi/ic_clear_black_24dp.png     | Bin 0 -> 235 bytes
+ .../res/drawable-xxhdpi/ic_clear_black_24dp.png    | Bin 0 -> 309 bytes
+ .../res/drawable-xxxhdpi/ic_clear_black_24dp.png   | Bin 0 -> 377 bytes
+ app/src/main/res/layout/cardview_book.xml          | 100 ++++++++++
+ app/src/main/res/layout/fragment_book_list.xml     |  38 ++++
+ .../res/layout/fragment_scheduled_events_list.xml  |  16 ++
+ app/src/main/res/menu/book_context_menu.xml        |  27 +++
+ app/src/main/res/values/strings.xml                |   2 +
+ app/src/main/res/xml/fragment_book_preferences.xml |   4 +
+ .../main/res/xml/preference_fragment_headers.xml   |   2 +
+ 23 files changed, 491 insertions(+), 12 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java
+ create mode 100644 app/src/main/res/drawable-hdpi/ic_clear_black_24dp.png
+ create mode 100644 app/src/main/res/drawable-mdpi/ic_clear_black_24dp.png
+ create mode 100644 app/src/main/res/drawable-xhdpi/ic_clear_black_24dp.png
+ create mode 100644 app/src/main/res/drawable-xxhdpi/ic_clear_black_24dp.png
+ create mode 100644 app/src/main/res/drawable-xxxhdpi/ic_clear_black_24dp.png
+ create mode 100644 app/src/main/res/layout/cardview_book.xml
+ create mode 100644 app/src/main/res/layout/fragment_book_list.xml
+ create mode 100644 app/src/main/res/menu/book_context_menu.xml
+ create mode 100644 app/src/main/res/xml/fragment_book_preferences.xml
+
+diff --git a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+index 2c5927b5..12c417a8 100644
+--- a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+@@ -56,6 +56,7 @@
+             + BookEntry.COLUMN_TEMPLATE_GUID + " varchar(255), "
+             + BookEntry.COLUMN_ACTIVE        + " tinyint default 0, "
+             + BookEntry.COLUMN_SOURCE_URI    + " varchar(255), "
++            + BookEntry.COLUMN_LAST_SYNC     + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + BookEntry.COLUMN_CREATED_AT    + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + BookEntry.COLUMN_MODIFIED_AT   + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+             + ");" + DatabaseHelper.createUpdatedAtTrigger(BookEntry.TABLE_NAME);
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 08ca8594..3c9a4f32 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -68,6 +68,7 @@ private DatabaseSchema(){}
+         public static final String COLUMN_ROOT_GUID     = "root_account_guid";
+         public static final String COLUMN_TEMPLATE_GUID = "root_template_guid";
+         public static final String COLUMN_ACTIVE        = "is_active";
++        public static final String COLUMN_LAST_SYNC     = "last_export_time";
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 11c67eaa..184c22ec 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -21,9 +21,11 @@
+ import android.content.ContentValues;
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.SharedPreferences;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.Environment;
++import android.support.v7.preference.PreferenceManager;
+ import android.text.TextUtils;
+ import android.util.Log;
+ 
+@@ -32,6 +34,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
+ import org.gnucash.android.export.Exporter;
+@@ -44,6 +47,7 @@
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.ui.settings.PreferenceActivity;
+ import org.gnucash.android.util.PreferencesHelper;
+ import org.gnucash.android.util.TimestampHelper;
+ import org.xml.sax.InputSource;
+@@ -1226,6 +1230,7 @@ static int upgradeDbToVersion12(SQLiteDatabase db){
+      *     <li>Migrate scheduled transaction recurrences to own table</li>
+      *     <li>Adds flags for reconciled status to split table</li>
+      *     <li>Add flags for auto-/advance- create and notification to scheduled actions</li>
++     *     <li>Migrate old shared preferences into new book-specific preferences</li>
+      * </ul>
+      * </p>
+      * @param db SQlite database to be upgraded
+@@ -1429,6 +1434,29 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+ 
+             db.execSQL("DROP TABLE " + SplitEntry.TABLE_NAME + "_bak");
+ 
++
++            //Migrate book-specific preferences away from shared preferences
++            Context context = GnuCashApplication.getAppContext();
++            String keyUseDoubleEntry = context.getString(R.string.key_use_double_entry);
++            String keySaveOpeningBalance = context.getString(R.string.key_save_opening_balances);
++            String keyLastExportTime = PreferencesHelper.PREFERENCE_LAST_EXPORT_TIME_KEY;
++
++            SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
++            String lastExportTime = sharedPrefs.getString(keyLastExportTime, TimestampHelper.getTimestampFromEpochZero().toString());
++            boolean useDoubleEntry = sharedPrefs.getBoolean(keyUseDoubleEntry, true);
++            boolean saveOpeningBalance = sharedPrefs.getBoolean(keySaveOpeningBalance, false);
++
++
++            SharedPreferences bookPrefs = PreferenceActivity.getActiveBookSharedPreferences(context);
++            bookPrefs.edit()
++                    .putString(keyLastExportTime, lastExportTime)
++                    .putBoolean(keyUseDoubleEntry, useDoubleEntry)
++                    .putBoolean(keySaveOpeningBalance, saveOpeningBalance)
++                    .apply();
++
++
++            //// TODO: 18.05.2016 Move backup files from external storage?
++
+             db.setTransactionSuccessful();
+             oldVersion = 13;
+         } finally {
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index 539b3661..f1e28a0e 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -26,6 +26,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseSchema.BookEntry;
+ import org.gnucash.android.model.Book;
++import org.gnucash.android.util.TimestampHelper;
+ 
+ /**
+  * Database adapter for creating/modifying book entries
+@@ -42,7 +43,9 @@ public BooksDbAdapter(SQLiteDatabase db) {
+                 BookEntry.COLUMN_ROOT_GUID,
+                 BookEntry.COLUMN_TEMPLATE_GUID,
+                 BookEntry.COLUMN_SOURCE_URI,
+-                BookEntry.COLUMN_ACTIVE
++                BookEntry.COLUMN_ACTIVE,
++                BookEntry.COLUMN_UID,
++                BookEntry.COLUMN_LAST_SYNC
+         });
+     }
+ 
+@@ -61,13 +64,16 @@ public Book buildModelInstance(@NonNull Cursor cursor) {
+         String uriString = cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_SOURCE_URI));
+         String displayName = cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_DISPLAY_NAME));
+         int active = cursor.getInt(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_ACTIVE));
++        String lastSync = cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_LAST_SYNC));
+ 
+         Book book = new Book(rootAccountGUID);
+         book.setDisplayName(displayName);
+         book.setRootTemplateUID(rootTemplateGUID);
+         book.setSourceUri(Uri.parse(uriString));
+         book.setActive(active > 0);
++        book.setLastSync(TimestampHelper.getTimestampFromUtcString(lastSync));
+ 
++        populateBaseModelAttributes(cursor, book);
+         return book;
+     }
+ 
+@@ -81,6 +87,7 @@ public Book buildModelInstance(@NonNull Cursor cursor) {
+             stmt.bindString(4, book.getSourceUri().toString());
+         stmt.bindLong(5, book.isActive() ? 1L : 0L);
+         stmt.bindString(6, book.getUID());
++        stmt.bindString(7, TimestampHelper.getUtcStringFromTimestamp(book.getLastSync()));
+         return stmt;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 9c44b5d9..25d02bcd 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -970,7 +970,8 @@ private void saveToDatabase() {
+         BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
+         mBook.setRootAccountUID(mRootAccount.getUID());
+         mBook.setDisplayName(booksDbAdapter.generateDefaultBookName());
+-
++        //we on purpose do not set the book active. Only import. Caller should handle activation
++        
+         long startTime = System.nanoTime();
+         mAccountsDbAdapter.beginTransaction();
+         Log.d(getClass().getSimpleName(), "bulk insert starts");
+diff --git a/app/src/main/java/org/gnucash/android/model/Book.java b/app/src/main/java/org/gnucash/android/model/Book.java
+index 665b34ab..84ada6f5 100644
+--- a/app/src/main/java/org/gnucash/android/model/Book.java
++++ b/app/src/main/java/org/gnucash/android/model/Book.java
+@@ -18,6 +18,8 @@
+ 
+ import android.net.Uri;
+ 
++import java.sql.Timestamp;
++
+ /**
+  * Represents a GnuCash book which is made up of accounts and transactions
+  * @author Ngewi Fet <ngewif@gmail.com>
+@@ -30,12 +32,13 @@
+     private String mRootTemplateUID;
+     private boolean mActive;
+ 
++    private Timestamp mLastSync;
++
+     /**
+      * Default constructor
+      */
+     public Book(){
+-        mRootTemplateUID = generateUID();
+-        //nothing to see here, move along
++        init();
+     }
+ 
+     /**
+@@ -44,7 +47,15 @@ public Book(){
+      */
+     public Book(String rootAccountUID){
+         this.mRootAccountUID = rootAccountUID;
++        init();
++    }
++
++    /**
++     * Initialize default values for the book
++     */
++    private void init(){
+         this.mRootTemplateUID = generateUID();
++        mLastSync = new Timestamp(System.currentTimeMillis());
+     }
+ 
+     /**
+@@ -133,4 +144,20 @@ public String getDisplayName() {
+     public void setDisplayName(String name) {
+         this.mDisplayName = name;
+     }
++
++    /**
++     * Get the time of last synchronization of the book
++     * @return Timestamp of last synchronization
++     */
++    public Timestamp getLastSync() {
++        return mLastSync;
++    }
++
++    /**
++     * Set the time of last synchronization of the book
++     * @param lastSync Timestamp of last synchronization
++     */
++    public void setLastSync(Timestamp lastSync) {
++        this.mLastSync = lastSync;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index ded39fd3..e484ef24 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -296,7 +296,10 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+     public boolean onMenuItemClick(MenuItem item) {
+         long id = item.getItemId();
+         if (id == ID_MANAGE_BOOKS){
+-            //// TODO: 11.12.2015 launch activity to manage books
++            Intent intent = new Intent(this, PreferenceActivity.class);
++            intent.setAction(PreferenceActivity.ACTION_MANAGE_BOOKS);
++            startActivity(intent);
++            mDrawerLayout.closeDrawer(mNavigationView);
+             return true;
+         }
+         BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java
+new file mode 100644
+index 00000000..e54bcd36
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java
+@@ -0,0 +1,208 @@
++/*
++ * Copyright (c) 2016 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.gnucash.android.ui.settings;
++
++import android.content.Context;
++import android.database.Cursor;
++import android.os.Bundle;
++import android.support.annotation.Nullable;
++import android.support.v4.app.ListFragment;
++import android.support.v4.app.LoaderManager;
++import android.support.v4.content.Loader;
++import android.support.v4.widget.SimpleCursorAdapter;
++import android.support.v7.app.ActionBar;
++import android.support.v7.app.AppCompatActivity;
++import android.support.v7.widget.PopupMenu;
++import android.util.Log;
++import android.view.LayoutInflater;
++import android.view.MenuInflater;
++import android.view.MenuItem;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.ImageView;
++import android.widget.ListView;
++import android.widget.TextView;
++
++import org.gnucash.android.R;
++import org.gnucash.android.db.BookDbHelper;
++import org.gnucash.android.db.DatabaseCursorLoader;
++import org.gnucash.android.db.DatabaseSchema;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
++
++import java.text.DateFormat;
++import java.util.Date;
++
++import org.gnucash.android.db.DatabaseSchema.BookEntry;
++import org.gnucash.android.ui.common.Refreshable;
++import org.w3c.dom.Text;
++
++/**
++ * Fragment for managing the books in the database
++ */
++public class BookListFragment extends ListFragment implements
++        LoaderManager.LoaderCallbacks<Cursor>, Refreshable{
++
++    private static String LOG_TAG = "BookListFragment";
++
++    SimpleCursorAdapter mCursorAdapter;
++
++    @Override
++    public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
++        return inflater.inflate(R.layout.fragment_book_list, container, false);
++    }
++
++    @Override
++    public void onCreate(@Nullable Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++
++        mCursorAdapter = new BooksCursorAdapter(getActivity(), R.layout.cardview_book,
++                null, new String[]{BookEntry.COLUMN_DISPLAY_NAME, BookEntry.COLUMN_SOURCE_URI},
++                new int[]{R.id.primary_text, R.id.secondary_text});
++
++        setListAdapter(mCursorAdapter);
++    }
++
++    @Override
++    public void onActivityCreated(@Nullable Bundle savedInstanceState) {
++        super.onActivityCreated(savedInstanceState);
++
++        ActionBar actionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
++        assert actionBar != null;
++        actionBar.setHomeButtonEnabled(true);
++        actionBar.setDisplayHomeAsUpEnabled(true);
++        actionBar.setTitle(R.string.title_manage_books);
++
++        getListView().setChoiceMode(ListView.CHOICE_MODE_NONE);
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        refresh();
++    }
++
++    @Override
++    public void refresh() {
++        getLoaderManager().initLoader(0, null, this);
++    }
++
++    @Override
++    public void refresh(String uid) {
++        refresh();
++    }
++
++    @Override
++    public Loader<Cursor> onCreateLoader(int id, Bundle args) {
++        Log.d(LOG_TAG, "Creating loader for books");
++        return new BooksCursorLoader(getActivity());
++    }
++
++    @Override
++    public void onLoadFinished(Loader<Cursor> loader, Cursor data) {
++        Log.d(LOG_TAG, "Finished loading books from database");
++        mCursorAdapter.swapCursor(data);
++        mCursorAdapter.notifyDataSetChanged();
++    }
++
++    @Override
++    public void onLoaderReset(Loader<Cursor> loader) {
++        Log.d(LOG_TAG, "Resetting books list loader");
++        mCursorAdapter.swapCursor(null);
++    }
++
++    private class BooksCursorAdapter extends SimpleCursorAdapter {
++
++        public BooksCursorAdapter(Context context, int layout, Cursor c, String[] from, int[] to) {
++            super(context, layout, c, from, to, 0);
++        }
++
++        @Override
++        public void bindView(View view, final Context context, Cursor cursor) {
++            super.bindView(view, context, cursor);
++
++            final String bookUID = cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_UID));
++
++            DateFormat dateFormat = DateFormat.getDateTimeInstance();
++            //// TODO: 18.05.2016 Add last export time to the database
++            long lastSyncMillis = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.BookEntry.COLUMN_CREATED_AT));
++
++            TextView lastSyncText = (TextView) view.findViewById(R.id.last_sync_time);
++            String lastSyncTime = dateFormat.format(new Date(lastSyncMillis));
++            lastSyncText.setText(lastSyncTime);
++
++            TextView labelLastSync = (TextView) view.findViewById(R.id.label_last_sync);
++            labelLastSync.setText("Last Sync:");
++            ImageView optionsMenu = (ImageView) view.findViewById(R.id.options_menu);
++
++            optionsMenu.setOnClickListener(new View.OnClickListener() {
++                @Override
++                public void onClick(View v) {
++                    PopupMenu popupMenu = new PopupMenu(context, v);
++                    MenuInflater menuInflater = popupMenu.getMenuInflater();
++                    menuInflater.inflate(R.menu.book_context_menu, popupMenu.getMenu());
++                    popupMenu.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
++                        @Override
++                        public boolean onMenuItemClick(MenuItem item) {
++                            switch (item.getItemId()){
++                                case R.id.ctx_menu_sync_book:
++                                    //TODO implement sync
++                                    return false;
++                                default:
++                                    return true;
++                            }
++                        }
++                    });
++                    popupMenu.show();
++                }
++            });
++
++            ImageView deleteBookBtn = (ImageView) view.findViewById(R.id.delete_book);
++            String activeBookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++            if (activeBookUID.equals(bookUID)) //we cannot delete the active book
++                deleteBookBtn.setVisibility(View.GONE);
++            else {
++                deleteBookBtn.setOnClickListener(new View.OnClickListener() {
++                    @Override
++                    public void onClick(View v) {
++                        //// TODO: 18.05.2016 Delete confirmation dialog
++                        BooksDbAdapter.getInstance().deleteRecord(bookUID);
++                        refresh();
++                    }
++                });
++            }
++        }
++    }
++
++    /**
++     * {@link DatabaseCursorLoader} for loading the book list from the database
++     * @author Ngewi Fet <ngewif@gmail.com>
++     */
++    private static class BooksCursorLoader extends DatabaseCursorLoader {
++        public BooksCursorLoader(Context context){
++            super(context);
++        }
++
++        @Override
++        public Cursor loadInBackground() {
++            BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
++            Cursor cursor = booksDbAdapter.fetchAllRecords();
++
++            registerContentObserver(cursor);
++            return cursor;
++        }
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
+index 5e6f980e..544ef8fc 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
+@@ -18,6 +18,7 @@
+ 
+ import android.annotation.TargetApi;
+ import android.content.Context;
++import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.os.Build;
+ import android.os.Bundle;
+@@ -49,6 +50,8 @@
+ public class PreferenceActivity extends PasscodeLockActivity implements
+         PreferenceFragmentCompat.OnPreferenceStartFragmentCallback{
+ 
++    public static final String ACTION_MANAGE_BOOKS = "org.gnucash.android.intent.action.MANAGE_BOOKS";
++
+     @Bind(R.id.slidingpane_layout) SlidingPaneLayout mSlidingPaneLayout;
+ 
+     @Override
+@@ -77,8 +80,14 @@ public void onPanelClosed(View panel) {
+             }
+         });
+ 
+-        mSlidingPaneLayout.openPane();
+-        loadFragment(new GeneralPreferenceFragment());
++        String action = getIntent().getAction();
++        if (action != null && action.equals(ACTION_MANAGE_BOOKS)){
++            loadFragment(new BookListFragment());
++            mSlidingPaneLayout.closePane();
++        } else {
++            mSlidingPaneLayout.openPane();
++            loadFragment(new GeneralPreferenceFragment());
++        }
+ 
+         ActionBar actionBar = getSupportActionBar();
+         assert actionBar != null;
+diff --git a/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java b/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+index a6d9d19a..ab372d5a 100644
+--- a/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
++++ b/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+@@ -15,10 +15,10 @@
+  */
+ package org.gnucash.android.util;
+ 
+-import android.preference.PreferenceManager;
+ import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.ui.settings.PreferenceActivity;
+ 
+ import java.sql.Timestamp;
+ 
+@@ -37,7 +37,10 @@ private PreferencesHelper() {}
+      */
+     protected static final String LOG_TAG = "PreferencesHelper";
+ 
+-    private static final String PREFERENCE_LAST_EXPORT_TIME_KEY = "last_export_time";
++    /**
++     * Preference key for saving the last export time
++     */
++    public static final String PREFERENCE_LAST_EXPORT_TIME_KEY = "last_export_time";
+ 
+     /**
+      * Set the last export time in UTC time zone.
+@@ -48,7 +51,7 @@ private PreferencesHelper() {}
+     public static void setLastExportTime(Timestamp lastExportTime) {
+         final String utcString = TimestampHelper.getUtcStringFromTimestamp(lastExportTime);
+         Log.d(LOG_TAG, "Storing '" + utcString + "' as lastExportTime in Android Preferences.");
+-        PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
++        PreferenceActivity.getActiveBookSharedPreferences(GnuCashApplication.getAppContext())
+                 .edit()
+                 .putString(PREFERENCE_LAST_EXPORT_TIME_KEY, utcString)
+                 .apply();
+@@ -60,7 +63,7 @@ public static void setLastExportTime(Timestamp lastExportTime) {
+      * @return A {@link Timestamp} with the time.
+      */
+     public static Timestamp getLastExportTime() {
+-        final String utcString = PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
++        final String utcString = PreferenceActivity.getActiveBookSharedPreferences(GnuCashApplication.getAppContext())
+                 .getString(PREFERENCE_LAST_EXPORT_TIME_KEY,
+                         TimestampHelper.getUtcStringFromTimestamp(TimestampHelper.getTimestampFromEpochZero()));
+         Log.d(LOG_TAG, "Retrieving '" + utcString + "' as lastExportTime from Android Preferences.");
+diff --git a/app/src/main/java/org/gnucash/android/util/TimestampHelper.java b/app/src/main/java/org/gnucash/android/util/TimestampHelper.java
+index 407f187c..c67b557f 100644
+--- a/app/src/main/java/org/gnucash/android/util/TimestampHelper.java
++++ b/app/src/main/java/org/gnucash/android/util/TimestampHelper.java
+@@ -27,6 +27,8 @@
+  */
+ public final class TimestampHelper {
+ 
++    public static final Timestamp EPOCH_ZERO_TIMESTAMP = new Timestamp(0);
++
+     /**
+      * Should be not instantiated.
+      */
+@@ -56,7 +58,7 @@ public static String getUtcStringFromTimestamp(Timestamp timestamp) {
+      * @return A {@link Timestamp} with time in milliseconds equals to zero.
+      */
+     public static Timestamp getTimestampFromEpochZero() {
+-        return new Timestamp(0);
++        return EPOCH_ZERO_TIMESTAMP;
+     }
+ 
+     /**
+diff --git a/app/src/main/res/drawable-hdpi/ic_clear_black_24dp.png b/app/src/main/res/drawable-hdpi/ic_clear_black_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a9cd75a0d2692fa380f367bdb41c2420df310b0
+GIT binary patch
+literal 207
+zcmeAS@N?(olHy`uVBq!ia0vp^Dj>|k0wldT1B8LpG*1`DkP61PSG>8J9RwIIzPh7b
+zJflYMsk(bE^P@Beu4=(eGmA7oyR_x~a$D?{a5p37g|Cs|p&E~Q4@@WZu3cW0RzKfl
+zOG4W1`7<rjzc~9@CSNI%iRiF;JjK{+?eT+CHH@6DO6**0r98#B^hN&uYw<r+LK-=x
+z=P)g94o;{k(CP_bJ;t_t$BlC<pY$DneQ8zgpQNAtZt-*3r-keNYU~2KkipZ{&t;uc
+GLK6TsDN>gJ
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-mdpi/ic_clear_black_24dp.png b/app/src/main/res/drawable-mdpi/ic_clear_black_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..40a1a84e34f4fb9c31b1dccf1b2bd7f5a50ac00d
+GIT binary patch
+literal 164
+zcmeAS@N?(olHy`uVBq!ia0vp^5+KaM0wlfaz7_+iY)==*kP619lQs%6EAp^x=L~Fl
+z``+Hk)n<pB%!Iph+z+<r>=Dm!pL5PtJwWQDwD%^7mKX72vfc*YT)xac;A{}-v*=ps
+zr9JO5s)Jrvt$1~wJ<6?Hv?}9?*Yy)i*G<&jSt@L~vF4xM{qD^_8RvC6y^4F&G81Sm
+NgQu&X%Q~loCIAp8KMVi>
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xhdpi/ic_clear_black_24dp.png b/app/src/main/res/drawable-xhdpi/ic_clear_black_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..6bc437298ab7bfbfbf128acdf5849e304b3c6903
+GIT binary patch
+literal 235
+zcmeAS@N?(olHy`uVBq!ia0vp^1|ZDA0wn)(8}b0DO`a}}Ar*{or)}gqq9DL3|6^j{
+z=hBm&C)~N@b{5Sp4w$_m*}geiNBekToKL{TWpQP5xqRwZuPjq53pI^Z3A|FbUaRcY
+z{O^J0fmhZ3y?R?;$@JP$iP2W!Cd>8DEZ3V|*s2`1aV~kzx#D@}&nn~61<yHG#mh(7
+zE3I3f=I(nvzf0xdSALCyU(F^idwFn~>{Xzi+b(jKntiPo%%5fP`-@uPgu|~7wTA~r
+iR9eY#70Eo`TEl2=&Qt5V_=GOd^$eb_elF{r5}E*W<X(IL
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xxhdpi/ic_clear_black_24dp.png b/app/src/main/res/drawable-xxhdpi/ic_clear_black_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..51b4401ca053ca8cad6e9903646709a2f44444df
+GIT binary patch
+literal 309
+zcmeAS@N?(olHy`uVBq!ia0vp^9w5xY0wn)GsXhaw{&>1LhEy=Vy<yFF$UwmLV))FX
+zs)>sgJ$~x+g}6OvsxLimbaeN-!xQItoH=3nd`|H@dF!kYp_dChV`b9AudQLRn7yg2
+zv~UiON9*MGOYAy6D=_*g@;c3(5`S(Hi^X<huBlrXE*Z1OSSv8{sT%UBug&L=pK7t(
+zuCv&pv-s5{i}uL^?UU{53W6WasStYJGTB0X+LZ~PA6Ee-z^V>;wk8Ms*3SMP^!WTf
+z-E_DAd$kLMWY`Z`);MuKF9=d$?_mzLoFj7Xp~|_3ODg!(3;AT&wLoS^O+0tsvcZJ&
+zD(m_$dNm(!9@n+CTyDa$w$*a^-$!>qK3P{4end8+qbAwoFEAV!JYD@<);T3K0RXh>
+Be)#|Z
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xxxhdpi/ic_clear_black_24dp.png b/app/src/main/res/drawable-xxxhdpi/ic_clear_black_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..df42feecb812b02df59b016f4d9ba995be1da82a
+GIT binary patch
+literal 377
+zcmeAS@N?(olHy`uVBq!ia0vp^2_VeD0wg^q?%&M7!06!V;uuoF`1aP_Or}5)*N1l-
+zmd#l`*P1uuRG{<>g~}cLi3<F6%!<`_*{;osx0o{}$V+o6h<G}^Cgo(ugE`)OasQ38
+z-$^?BpJ{qsX79gWa~ZzGKcA+2Z9b<%y_(10nG9bd4^8@dyfTI1@Ab$}Wo~i`iLaWg
+zxrG|+JOqB(HNO7Mvi7~OpM!kiEw2X<{<`<VTlV=|FxMWb)CS1|`8)Rc10@+>NSnFL
+zkGQYSP&@m;*IK6Q-#O#%t5^JG`{BMqf8+n2Z|={&zE4otx%%IU37m2NTYWzKGCBDA
+zGRyk&LVN6HtbDhUpKVe#i0?1F$Iko1uY_g0mfJ~qyju(6`+^n!Z*4i<wr{7w^gVNv
+z^LDSj9aHR4!W308>z5hh+Bv?p(-%zt$M-+!?Iw6Q#P16<$f#A@_7oVT44$rjF6*2U
+FngA8*uUr5C
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/layout/cardview_book.xml b/app/src/main/res/layout/cardview_book.xml
+new file mode 100644
+index 00000000..be292e8e
+--- /dev/null
++++ b/app/src/main/res/layout/cardview_book.xml
+@@ -0,0 +1,100 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++ Copyright (c) 2016 Ngewi Fet <ngewif@gmail.com>
++
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++
++<android.support.v7.widget.CardView xmlns:android="http://schemas.android.com/apk/res/android"
++                                    xmlns:tools="http://schemas.android.com/tools"
++                                    xmlns:cardview="http://schemas.android.com/apk/res-auto"
++                                    cardview:cardUseCompatPadding="true"
++                                    cardview:cardPreventCornerOverlap="false"
++                                    android:foreground="?selectableItemBackground"
++                                    android:focusable="false"
++                                    android:clickable="false"
++                                    android:layout_marginLeft="5dp"
++                                    android:layout_marginRight="5dp"
++                                    android:layout_width="match_parent"
++                                    android:layout_height="wrap_content">
++    <RelativeLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:minHeight="@dimen/card_min_height">
++
++        <include android:id="@+id/list_item_2_lines"
++                 layout="@layout/list_item_2_lines"
++                 android:paddingTop="6dp"
++                 android:layout_height="wrap_content"
++                 android:layout_width="match_parent"
++                 android:layout_toRightOf="@id/account_color_strip"
++                 android:layout_marginTop="6dp"
++                 android:layout_marginBottom="@dimen/dialog_padding"
++                 android:layout_marginLeft="@dimen/dialog_padding"
++                 android:layout_marginRight="52dp"/>
++
++        <ImageView android:visibility="gone"
++            android:id="@+id/options_menu"
++            android:layout_width="48dp"
++            android:layout_height="48dp"
++            android:layout_alignParentBottom="true"
++            android:layout_alignParentRight="true"
++            android:background="?attr/selectableItemBackgroundBorderless"
++            android:paddingTop="20dp"
++            android:layout_marginBottom="4dp"
++            android:paddingLeft="24dp"
++            android:scaleType="centerInside"
++            android:src="@drawable/ic_more_vert_black_24dp"
++            tools:ignore="ContentDescription" />
++
++        <ImageView
++            android:id="@+id/delete_book"
++            android:layout_width="48dp"
++            android:layout_height="48dp"
++            android:layout_alignParentRight="true"
++            android:background="?attr/selectableItemBackgroundBorderless"
++            android:paddingTop="6dp"
++            android:paddingRight="6dp"
++            android:paddingLeft="22dp"
++            android:paddingBottom="22dp"
++            android:src="@drawable/ic_clear_black_24dp"
++            tools:ignore="ContentDescription" />
++
++        <TextView
++            android:id="@+id/label_last_sync"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:singleLine="true"
++            android:layout_below="@id/list_item_2_lines"
++            android:layout_alignLeft="@id/list_item_2_lines"
++            android:layout_marginBottom="4dp"
++            android:gravity="left|bottom|start"
++            android:textSize="14sp"
++            android:textColor="@android:color/darker_gray"
++            tools:text="Last export:"/>
++
++        <TextView
++            android:id="@+id/last_sync_time"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:singleLine="true"
++            android:layout_below="@id/list_item_2_lines"
++            android:layout_toRightOf="@id/label_last_sync"
++            android:layout_marginBottom="4dp"
++            android:layout_marginLeft="5dp"
++            android:gravity="left|bottom|start"
++            android:textSize="14sp"
++            android:textColor="@android:color/darker_gray"
++            tools:text="Sat, 04 July"/>
++    </RelativeLayout>
++</android.support.v7.widget.CardView>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/fragment_book_list.xml b/app/src/main/res/layout/fragment_book_list.xml
+new file mode 100644
+index 00000000..9071c9e0
+--- /dev/null
++++ b/app/src/main/res/layout/fragment_book_list.xml
+@@ -0,0 +1,38 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++ Copyright (c) 2016 Ngewi Fet <ngewif@gmail.com>
++
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++              android:orientation="vertical"
++              android:padding="@dimen/dialog_padding"
++              android:layout_width="match_parent"
++              android:layout_height="match_parent">
++
++    <ListView android:id="@id/android:list"
++              android:layout_width="match_parent"
++              android:layout_height="match_parent"
++              android:divider="@null" />
++
++    <TextView android:id="@id/android:empty"
++              android:layout_width="match_parent"
++              android:layout_height="match_parent"
++              android:gravity="center"
++              android:text="No books in the database"
++              android:layout_gravity="center"
++              android:textAppearance="?android:textAppearanceLarge"
++              style="@style/ListItem"/>
++
++</LinearLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/fragment_scheduled_events_list.xml b/app/src/main/res/layout/fragment_scheduled_events_list.xml
+index 24429295..456e9758 100644
+--- a/app/src/main/res/layout/fragment_scheduled_events_list.xml
++++ b/app/src/main/res/layout/fragment_scheduled_events_list.xml
+@@ -1,5 +1,21 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ 
++<!--
++ Copyright (c) 2016 Ngewi Fet <ngewif@gmail.com>
++
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++
+ <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent"
+diff --git a/app/src/main/res/menu/book_context_menu.xml b/app/src/main/res/menu/book_context_menu.xml
+new file mode 100644
+index 00000000..a75c6cd4
+--- /dev/null
++++ b/app/src/main/res/menu/book_context_menu.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="utf-8"?>
++
++<!--
++ Copyright (c) 2016 Ngewi Fet <ngewif@gmail.com>
++
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++
++<menu xmlns:android="http://schemas.android.com/apk/res/android"
++      xmlns:app="http://schemas.android.com/apk/res-auto">
++
++    <item android:id="@+id/ctx_menu_sync_book"
++          android:checkable="true"
++          android:title="Enable Sync"
++          app:showAsAction="always"
++          android:orderInCategory="1" />
++</menu>
+\ No newline at end of file
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 8262c884..5df6c498 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -444,4 +444,6 @@
+     <string name="digit_zero">0</string>
+     <string name="digit_zero_text">+</string>
+ 
++    <string name="header_manage_books">Manage Books</string>
++    <string name="title_manage_books">Manage Books</string>
+ </resources>
+diff --git a/app/src/main/res/xml/fragment_book_preferences.xml b/app/src/main/res/xml/fragment_book_preferences.xml
+new file mode 100644
+index 00000000..624ed13a
+--- /dev/null
++++ b/app/src/main/res/xml/fragment_book_preferences.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
++
++</PreferenceScreen>
+\ No newline at end of file
+diff --git a/app/src/main/res/xml/preference_fragment_headers.xml b/app/src/main/res/xml/preference_fragment_headers.xml
+index 3acbd0dd..fb5ecb30 100644
+--- a/app/src/main/res/xml/preference_fragment_headers.xml
++++ b/app/src/main/res/xml/preference_fragment_headers.xml
+@@ -20,6 +20,8 @@
+     <Preference android:key="@string/key_prefs_header_general"
+         android:title="@string/header_general_settings"
+         app:fragment="org.gnucash.android.ui.settings.GeneralPreferenceFragment"/>
++    <Preference android:title="@string/header_manage_books"
++                app:fragment="org.gnucash.android.ui.settings.BookListFragment" />
+     <Preference app:fragment="org.gnucash.android.ui.settings.AccountPreferencesFragment"
+         android:title="@string/header_account_settings" />
+     <Preference app:fragment="org.gnucash.android.ui.settings.TransactionsPreferenceFragment"

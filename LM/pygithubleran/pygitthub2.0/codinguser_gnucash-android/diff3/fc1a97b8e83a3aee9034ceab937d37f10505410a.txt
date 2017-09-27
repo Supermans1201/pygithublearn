@@ -1,0 +1,531 @@
+From fc1a97b8e83a3aee9034ceab937d37f10505410a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 13 Feb 2014 12:12:06 +0100
+Subject: [PATCH] Lists of accounts are now sorted by the fully qualified
+ account name Closes #129
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  57 ++++++++--
+ .../org/gnucash/android/db/DatabaseAdapter.java    |   1 +
+ app/src/org/gnucash/android/db/DatabaseHelper.java | 116 ++++++++++++++++++++-
+ app/src/org/gnucash/android/model/Account.java     |  39 +++++--
+ .../android/ui/account/AccountFormFragment.java    |  16 ++-
+ .../ui/transaction/BulkMoveDialogFragment.java     |   2 +-
+ .../ui/transaction/TransactionFormFragment.java    |   2 +-
+ .../ui/transaction/TransactionsActivity.java       |   7 +-
+ .../ui/widget/WidgetConfigurationActivity.java     |  17 ++-
+ .../util/QualifiedAccountNameCursorAdapter.java    |   5 +-
+ 10 files changed, 212 insertions(+), 50 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 66c97d52..d99fd663 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -69,21 +69,26 @@ public void close() {
+ 	 */
+ 	public long addAccount(Account account){
+ 		ContentValues contentValues = new ContentValues();
+-		contentValues.put(DatabaseHelper.KEY_NAME, account.getName());
+-		contentValues.put(DatabaseHelper.KEY_TYPE, account.getAccountType().name());
+-		contentValues.put(DatabaseHelper.KEY_UID, account.getUID());
++		contentValues.put(DatabaseHelper.KEY_NAME,          account.getName());
++		contentValues.put(DatabaseHelper.KEY_TYPE,          account.getAccountType().name());
++		contentValues.put(DatabaseHelper.KEY_UID,           account.getUID());
+ 		contentValues.put(DatabaseHelper.KEY_CURRENCY_CODE, account.getCurrency().getCurrencyCode());
+-		contentValues.put(DatabaseHelper.KEY_PARENT_ACCOUNT_UID, account.getParentUID());
+-        contentValues.put(DatabaseHelper.KEY_DEFAULT_TRANSFER_ACCOUNT_UID, account.getDefaultTransferAccountUID());
+-        contentValues.put(DatabaseHelper.KEY_PLACEHOLDER, account.isPlaceholderAccount() ? 1 : 0);
+-        contentValues.put(DatabaseHelper.KEY_COLOR_CODE, account.getColorHexCode());
+-        contentValues.put(DatabaseHelper.KEY_FAVORITE, account.isFavorite() ? 1 : 0);
++        contentValues.put(DatabaseHelper.KEY_PLACEHOLDER,   account.isPlaceholderAccount() ? 1 : 0);
++        contentValues.put(DatabaseHelper.KEY_COLOR_CODE,    account.getColorHexCode());
++        contentValues.put(DatabaseHelper.KEY_FAVORITE,      account.isFavorite() ? 1 : 0);
++        contentValues.put(DatabaseHelper.KEY_FULL_NAME,     account.getFullName());
++        contentValues.put(DatabaseHelper.KEY_PARENT_ACCOUNT_UID,            account.getParentUID());
++        contentValues.put(DatabaseHelper.KEY_DEFAULT_TRANSFER_ACCOUNT_UID,  account.getDefaultTransferAccountUID());
++
+ 		long rowId = -1;
+ 		if ((rowId = getAccountID(account.getUID())) > 0){
+ 			//if account already exists, then just update
+ 			Log.d(TAG, "Updating existing account");
+-			mDb.update(DatabaseHelper.ACCOUNTS_TABLE_NAME, contentValues, 
+-					DatabaseHelper.KEY_ROW_ID + " = " + rowId, null);
++			int rowsAffected = mDb.update(DatabaseHelper.ACCOUNTS_TABLE_NAME, contentValues,
++                    DatabaseHelper.KEY_ROW_ID + " = " + rowId, null);
++            if (rowsAffected == 1){
++                updateAccount(rowId, DatabaseHelper.KEY_FULL_NAME, getFullyQualifiedAccountName(rowId));
++            }
+ 		} else {
+ 			Log.d(TAG, "Adding new account to db");
+ 			rowId = mDb.insert(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, contentValues);
+@@ -91,6 +96,8 @@ public long addAccount(Account account){
+ 		
+ 		//now add transactions if there are any
+ 		if (rowId > 0){
++            //update the fully qualified account name
++            updateAccount(rowId, DatabaseHelper.KEY_FULL_NAME, getFullyQualifiedAccountName(rowId));
+ 			for (Transaction t : account.getTransactions()) {
+ 				mTransactionsAdapter.addTransaction(t);
+ 			}
+@@ -237,6 +244,7 @@ public Account buildAccountInstance(Cursor c){
+         account.setDefaultTransferAccountUID(c.getString(DatabaseAdapter.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID));
+         account.setColorCode(c.getString(DatabaseAdapter.COLUMN_COLOR_CODE));
+         account.setFavorite(c.getInt(DatabaseAdapter.COLUMN_FAVORITE) == 1);
++        account.setFullName(c.getString(DatabaseAdapter.COLUMN_FULL_NAME));
+ 		return account;
+ 	}
+ 		
+@@ -441,6 +449,21 @@ public Cursor fetchAllRecords(){
+ 		return cursor;
+ 	}
+ 
++    /**
++     * Returns a cursor to all account records in the database ordered by full name.
++     * GnuCash ROOT accounts are ignored
++     * @return {@link Cursor} to all account records
++     */
++    public Cursor fetchAllRecordsOrderedByFullName(){
++        Log.v(TAG, "Fetching all accounts from db");
++        String selection =  DatabaseHelper.KEY_TYPE + " != ?" ;
++        return mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                null,
++                selection,
++                new String[]{AccountType.ROOT.name()},
++                null, null,
++                DatabaseHelper.KEY_FULL_NAME + " ASC");
++    }
+ 
+     @Override
+     public Cursor fetchRecord(long rowId) {
+@@ -471,7 +494,19 @@ public Cursor fetchAccounts(String condition){
+ 				DatabaseHelper.KEY_NAME + " ASC");
+ 		return cursor;
+ 	}
+-	
++
++    /**
++     * Returns a Cursor set of accounts which fulfill <code>condition</code>
++     * <p>This method returns the accounts list sorted by the full account name</p>
++     * @param condition SQL WHERE statement without the 'WHERE' itself
++     * @return Cursor set of accounts which fulfill <code>condition</code>
++     */
++    public Cursor fetchAccountsOrderedByFullName(String condition){
++        Log.v(TAG, "Fetching all accounts from db where " + condition);
++        return mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                null, condition, null, null, null,
++                DatabaseHelper.KEY_FULL_NAME + " ASC");
++    }
+     /**
+      * Returns the balance of an account while taking sub-accounts into consideration
+      * @return Account Balance of an account including sub-accounts
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index 84a71b3d..fd9952c7 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -58,6 +58,7 @@
+     public static final int COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID = 7;
+     public static final int COLUMN_COLOR_CODE           = 8;
+ 	public static final int COLUMN_FAVORITE             = 9;
++    public static final int COLUMN_FULL_NAME            = 10;
+ 
+ 	/**
+ 	 * {@link DatabaseHelper} for creating and opening the database
+diff --git a/app/src/org/gnucash/android/db/DatabaseHelper.java b/app/src/org/gnucash/android/db/DatabaseHelper.java
+index 5cc0fcf5..2541ff60 100644
+--- a/app/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -16,13 +16,13 @@
+ 
+ package org.gnucash.android.db;
+ 
+-import org.gnucash.android.model.Account.AccountType;
+-
+ import android.content.ContentValues;
+ import android.content.Context;
++import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteOpenHelper;
+ import android.util.Log;
++import org.gnucash.android.model.Account.AccountType;
+ 
+ /**
+  * Helper class for managing the SQLite database.
+@@ -46,7 +46,7 @@
+ 	 * Database version.
+ 	 * With any change to the database schema, this number must increase
+ 	 */
+-	private static final int DATABASE_VERSION = 5;
++	private static final int DATABASE_VERSION = 6;
+ 	
+ 	/**
+ 	 * Name of accounts table
+@@ -70,7 +70,13 @@
+ 	 * Currently used by all tables
+ 	 */
+ 	public static final String KEY_NAME 	= "name";
+-	
++
++    /**
++     * Key for fully qualified name of the account column
++     * This name includes the parent hierarchy
++     */
++    public static final String KEY_FULL_NAME = "full_name";
++
+ 	/**
+ 	 * Unique Identifier.
+ 	 */
+@@ -170,6 +176,7 @@
+             + KEY_DEFAULT_TRANSFER_ACCOUNT_UID + " varchar(255), "
+             + KEY_COLOR_CODE    + " varchar(255), "
+             + KEY_FAVORITE 		+ " tinyint default 0, "
++            + KEY_FULL_NAME 	+ " varchar(255), "
+ 			+ "UNIQUE (" + KEY_UID + ")"	
+ 			+ ");";
+ 	
+@@ -275,10 +282,109 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+                 oldVersion = 5;
+             }
++
++            if (oldVersion == 5 && newVersion >= 6){
++                Log.i(TAG, "Upgrading database to version 6");
++                String addFullAccountNameQuery = " ALTER TABLE " + ACCOUNTS_TABLE_NAME
++                        + " ADD COLUMN " + KEY_FULL_NAME + " varchar(255) ";
++                db.execSQL(addFullAccountNameQuery);
++
++                //update all existing accounts with their fully qualified name
++                Cursor cursor = db.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                        new String[]{KEY_ROW_ID, KEY_UID},
++                        null, null, null, null, null);
++                while(cursor != null && cursor.moveToNext()){
++                    String uid = cursor.getString(cursor.getColumnIndexOrThrow(KEY_UID));
++                    String fullName = getFullyQualifiedAccountName(db, uid);
++
++                    if (fullName == null)
++                        continue;
++
++                    ContentValues contentValues = new ContentValues();
++                    contentValues.put(KEY_FULL_NAME, fullName);
++
++                    long id = cursor.getLong(cursor.getColumnIndexOrThrow(KEY_ROW_ID));
++                    db.update(ACCOUNTS_TABLE_NAME, contentValues, KEY_ROW_ID + " = " + id, null);
++                }
++
++                if (cursor != null) {
++                    cursor.close();
++                }
++
++                oldVersion = 6;
++            }
+ 		}
+ 
+         if (oldVersion != newVersion) {
+-            Log.i(TAG, "Upgrade for the database failed. The Database is currently at version " + oldVersion);
++            Log.w(TAG, "Upgrade for the database failed. The Database is currently at version " + oldVersion);
+         }
+ 	}
++
++    /**
++     * Performs same functtion as {@link org.gnucash.android.db.AccountsDbAdapter#getFullyQualifiedAccountName(String)}
++     * <p>This method is only necessary because we cannot open the database again (by instantiating {@link AccountsDbAdapter}
++     * while it is locked for upgrades. So we reimplement the method here.</p>
++     * @param db SQLite database
++     * @param accountUID Unique ID of account whose fully qualified name is to be determined
++     * @return Fully qualified (colon-sepaated) account name
++     * @see org.gnucash.android.db.AccountsDbAdapter#getFullyQualifiedAccountName(String)
++     */
++    private String getFullyQualifiedAccountName(SQLiteDatabase db, String accountUID){
++        //get the parent account UID of the account
++        Cursor cursor = db.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                new String[] {DatabaseHelper.KEY_ROW_ID, DatabaseHelper.KEY_PARENT_ACCOUNT_UID},
++                DatabaseHelper.KEY_UID + " = ?",
++                new String[]{accountUID},
++                null, null, null, null);
++
++        String parentAccountUID = null;
++        if (cursor != null && cursor.moveToFirst()){
++            parentAccountUID = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseHelper.KEY_PARENT_ACCOUNT_UID));
++            cursor.close();
++        }
++
++        //get the name of the account
++        cursor = db.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                new String[]{DatabaseHelper.KEY_ROW_ID, DatabaseHelper.KEY_NAME},
++                DatabaseHelper.KEY_UID + " = '" + accountUID + "'",
++                null, null, null, null);
++
++        String accountName = null;
++        if (cursor != null && cursor.moveToFirst()){
++            accountName = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseHelper.KEY_NAME));
++            cursor.close();
++        }
++
++        String gnucashRootAccountUID = getGnuCashRootAccountUID(db);
++        if (parentAccountUID == null || accountName == null
++            || parentAccountUID.equalsIgnoreCase(gnucashRootAccountUID)){
++            return accountName;
++        }
++
++        String parentAccountName = getFullyQualifiedAccountName(db, parentAccountUID);
++
++        return parentAccountName + AccountsDbAdapter.ACCOUNT_NAME_SEPARATOR + accountName;
++    }
++
++    /**
++     * Returns the GnuCash ROOT account UID.
++     * <p>In GnuCash desktop account structure, there is a root account (which is not visible in the UI) from which
++     * other top level accounts derive. GnuCash Android does not have this ROOT account by default unless the account
++     * structure was imported from GnuCash for desktop. Hence this method also returns <code>null</code> as an
++     * acceptable result.</p>
++     * <p><b>Note:</b> NULL is an acceptable response, be sure to check for it</p>
++     * @return Unique ID of the GnuCash root account.
++     */
++    private String getGnuCashRootAccountUID(SQLiteDatabase db){
++        String condition = DatabaseHelper.KEY_TYPE + "= '" + AccountType.ROOT.name() + "'";
++        Cursor cursor =  db.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                null, condition, null, null, null,
++                DatabaseHelper.KEY_NAME + " ASC");
++        String rootUID = null;
++        if (cursor != null && cursor.moveToFirst()){
++            rootUID = cursor.getString(DatabaseAdapter.COLUMN_UID);
++            cursor.close();
++        }
++        return rootUID;
++    }
+ }
+diff --git a/app/src/org/gnucash/android/model/Account.java b/app/src/org/gnucash/android/model/Account.java
+index 1f25a99d..ff27efaa 100644
+--- a/app/src/org/gnucash/android/model/Account.java
++++ b/app/src/org/gnucash/android/model/Account.java
+@@ -117,7 +117,13 @@ public TransactionType getNormalBalanceType(){
+ 	 * Name of this account
+ 	 */
+ 	private String mName;
+-	
++
++    /**
++     * Fully qualified name of this account including the parent hierarchy.
++     * On instantiation of an account, the full name is set to the name by default
++     */
++    private String mFullName;
++
+ 	/**
+ 	 * Currency used by transactions in this account
+ 	 */
+@@ -179,8 +185,9 @@ public TransactionType getNormalBalanceType(){
+ 	 */
+ 	public Account(String name) {
+ 		setName(name);
+-		this.mUID = generateUID();
+-		this.mCurrency = Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
++        this.mFullName  = mName;
++		this.mUID       = generateUID();
++		this.mCurrency  = Currency.getInstance(Money.DEFAULT_CURRENCY_CODE);
+ 	}
+ 	
+ 	/**
+@@ -190,8 +197,9 @@ public Account(String name) {
+ 	 */
+ 	public Account(String name, Currency currency){
+ 		setName(name);
+-		this.mUID = generateUID();
+-		this.mCurrency = currency;
++        this.mFullName  = mName;
++		this.mUID       = generateUID();
++		this.mCurrency  = currency;
+ 	}
+ 
+ 	/**
+@@ -209,8 +217,25 @@ public void setName(String name) {
+ 	public String getName() {
+ 		return mName;
+ 	}
+-	
+-	/**
++
++    /**
++     * Returns the full name of this account.
++     * The full name is the full account hierarchy name
++     * @return Fully qualified name of the account
++     */
++    public String getFullName() {
++        return mFullName;
++    }
++
++    /**
++     * Sets the fully qualified name of the account
++     * @param fullName Fully qualified account name
++     */
++    public void setFullName(String fullName) {
++        this.mFullName = fullName;
++    }
++
++    /**
+ 	 * Generates a unique ID for the account based on the name and a random string. 
+ 	 * This represents the ACCTID in the exported OFX and should have a maximum of 22 alphanumeric characters
+ 	 * @return Generated Unique ID string
+diff --git a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+index 3401ef9e..3551a85c 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -142,11 +142,6 @@
+     private Spinner mDefaulTransferAccountSpinner;
+ 
+     /**
+-     * Cursor holding data set of eligible transfer accounts
+-     */
+-    private Cursor mDefaultTransferAccountCursor;
+-
+-    /**
+      * Checkbox indicating if account is a placeholder account
+      */
+     private CheckBox mPlaceholderCheckBox;
+@@ -486,15 +481,18 @@ private void loadDefaultTransferAccoutList(){
+         String condition = DatabaseHelper.KEY_ROW_ID + " != " + mSelectedAccountId
+                 + " AND " + DatabaseHelper.KEY_PLACEHOLDER + "=0"
+                 + " AND " + DatabaseHelper.KEY_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID() + "'";
+-        mDefaultTransferAccountCursor = mAccountsDbAdapter.fetchAccounts(condition);
++        /*
++      Cursor holding data set of eligible transfer accounts
++     */
++        Cursor defaultTransferAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(condition);
+ 
+-        if (mDefaultTransferAccountCursor == null || mDefaulTransferAccountSpinner.getCount() <= 0){
++        if (defaultTransferAccountCursor == null || mDefaulTransferAccountSpinner.getCount() <= 0){
+             setDefaultTransferAccountInputsVisible(false);
+         }
+ 
+         mDefaultTransferAccountCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+                 android.R.layout.simple_spinner_item,
+-                mDefaultTransferAccountCursor);
++                defaultTransferAccountCursor);
+         mParentAccountCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+         mDefaulTransferAccountSpinner.setAdapter(mParentAccountCursorAdapter);
+     }
+@@ -512,7 +510,7 @@ private void loadParentAccountList(){
+             //TODO: Limit all descendants of the account to eliminate the possibility of cyclic hierarchy
+         }
+ 
+-		mParentAccountCursor = mAccountsDbAdapter.fetchAccounts(condition);
++		mParentAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(condition);
+ 		if (mParentAccountCursor == null || mParentAccountCursor.getCount() <= 0){
+             final View view = getView();
+             view.findViewById(R.id.layout_parent_account).setVisibility(View.GONE);
+diff --git a/app/src/org/gnucash/android/ui/transaction/BulkMoveDialogFragment.java b/app/src/org/gnucash/android/ui/transaction/BulkMoveDialogFragment.java
+index 6b72af9f..122eba05 100644
+--- a/app/src/org/gnucash/android/ui/transaction/BulkMoveDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/BulkMoveDialogFragment.java
+@@ -102,7 +102,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		getDialog().setTitle(title);
+ 		
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		Cursor cursor = mAccountsDbAdapter.fetchAllRecords();
++		Cursor cursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+ 
+ 		SimpleCursorAdapter mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+                 android.R.layout.simple_spinner_item, cursor);
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 5f7fb9be..251a920e 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -420,7 +420,7 @@ private void updateTransferAccountsList(){
+                             + "' AND " + DatabaseHelper.KEY_PLACEHOLDER + " = 0"
+                             + ")";
+ 
+-		mCursor = mAccountsDbAdapter.fetchAccounts(conditions);
++		mCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions);
+ 
+         mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+                 android.R.layout.simple_spinner_item, mCursor);
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index ae035c04..fa16cd9b 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -348,9 +348,10 @@ private void setTitleIndicatorColor() {
+ 	 */
+ 	private void setupActionBarNavigation() {
+ 		// set up spinner adapter for navigation list
+-		Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecords();
++		Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+ 
+-        SpinnerAdapter mSpinnerAdapter = new QualifiedAccountNameCursorAdapter(getSupportActionBar().getThemedContext(),
++        SpinnerAdapter mSpinnerAdapter = new QualifiedAccountNameCursorAdapter(
++                getSupportActionBar().getThemedContext(),
+                 R.layout.sherlock_spinner_item, accountsCursor);
+ 		((ResourceCursorAdapter) mSpinnerAdapter)
+ 				.setDropDownViewResource(R.layout.sherlock_spinner_dropdown_item);
+@@ -370,7 +371,7 @@ private void setupActionBarNavigation() {
+ 	public void updateNavigationSelection() {
+ 		// set the selected item in the spinner
+ 		int i = 0;
+-		Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecords();
++		Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+         while (accountsCursor.moveToNext()) {
+             long id = accountsCursor.getLong(DatabaseAdapter.COLUMN_ROW_ID);
+             if (mAccountId == id) {
+diff --git a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index b3c98891..f0b74fc3 100644
+--- a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -54,8 +54,7 @@
+  */
+ public class WidgetConfigurationActivity extends Activity {
+ 	private AccountsDbAdapter mAccountsDbAdapter;
+-	private SimpleCursorAdapter mCursorAdapter;
+-	private int mAppWidgetId;
++    private int mAppWidgetId;
+ 	
+ 	private Spinner mAccountsSpinner;
+ 	private Button mOkButton;
+@@ -72,18 +71,18 @@ public void onCreate(Bundle savedInstanceState) {
+ 		mCancelButton 	= (Button) findViewById(R.id.btn_cancel);
+ 
+ 		mAccountsDbAdapter = new AccountsDbAdapter(this);
+-		Cursor cursor = mAccountsDbAdapter.fetchAllRecords();
++		Cursor cursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+ 		
+ 		if (cursor.getCount() <= 0){
+ 			Toast.makeText(this, R.string.error_no_accounts, Toast.LENGTH_LONG).show();
+ 			finish();
+ 		}
+-			
+-		mCursorAdapter = new QualifiedAccountNameCursorAdapter(this,
+-				android.R.layout.simple_spinner_item, 
+-				cursor);
+-		mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-		mAccountsSpinner.setAdapter(mCursorAdapter);
++
++        SimpleCursorAdapter cursorAdapter = new QualifiedAccountNameCursorAdapter(this,
++                android.R.layout.simple_spinner_item,
++                cursor);
++		cursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++		mAccountsSpinner.setAdapter(cursorAdapter);
+ 		
+ 		bindListeners();
+ 	}
+diff --git a/app/src/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java b/app/src/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
+index 2d1b6c64..edbf2e83 100644
+--- a/app/src/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
++++ b/app/src/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
+@@ -33,20 +33,17 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+ public class QualifiedAccountNameCursorAdapter extends SimpleCursorAdapter {
+-    private AccountsDbAdapter mAccountDbAdapter;
+ 
+     public QualifiedAccountNameCursorAdapter(Context context, int layout, Cursor c) {
+         super(context, layout, c,
+-                new String[] {DatabaseHelper.KEY_NAME},
++                new String[] {DatabaseHelper.KEY_FULL_NAME},
+                 new int[] {android.R.id.text1}, 0);
+-        mAccountDbAdapter = new AccountsDbAdapter(context);
+     }
+ 
+     @Override
+     public void bindView(View view, Context context, Cursor cursor) {
+         super.bindView(view, context, cursor);
+         TextView textView = (TextView) view.findViewById(android.R.id.text1);
+-        textView.setText(mAccountDbAdapter.getFullyQualifiedAccountName(cursor.getLong(DatabaseAdapter.COLUMN_ROW_ID)));
+         textView.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+     }
+ }

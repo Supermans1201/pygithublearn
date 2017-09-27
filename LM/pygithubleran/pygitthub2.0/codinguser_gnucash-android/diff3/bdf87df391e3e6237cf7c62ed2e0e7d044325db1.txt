@@ -1,0 +1,188 @@
+From bdf87df391e3e6237cf7c62ed2e0e7d044325db1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 3 Oct 2012 13:48:02 +0200
+Subject: [PATCH] Refactoring and bug fixes for transaction lists and OFX file
+ export format Fixed: OFX exported file header missing encoding (closes #16)
+ Fixed: Exported file includes empty memo tag (closes #15) Fixed: sectioned
+ headers erroneously duplicated for transactions on same day when scrolling
+
+---
+ .../res/layout/fragment_new_transaction.xml        |  2 +-
+ .../src/org/gnucash/android/data/Account.java      |  4 +--
+ .../src/org/gnucash/android/data/Transaction.java  | 10 +++++---
+ .../android/ui/accounts/ExportDialogFragment.java  |  4 +--
+ .../ui/transactions/TransactionsListFragment.java  | 29 +++++++++++++++-------
+ .../src/org/gnucash/android/util/OfxFormatter.java |  9 +++++--
+ 6 files changed, 38 insertions(+), 20 deletions(-)
+
+diff --git a/GnucashMobile/res/layout/fragment_new_transaction.xml b/GnucashMobile/res/layout/fragment_new_transaction.xml
+index 93a44aa2..ee739db2 100644
+--- a/GnucashMobile/res/layout/fragment_new_transaction.xml
++++ b/GnucashMobile/res/layout/fragment_new_transaction.xml
+@@ -130,7 +130,7 @@
+ 			        android:singleLine="false"
+ 			        android:layout_marginBottom="@dimen/dialog_padding"
+ 			        android:hint="@string/label_transaction_description"
+-			        android:inputType="textMultiLine"
++			        android:inputType="textMultiLine|textCapSentences"
+ 			        android:gravity="top"
+ 			        />
+ 	   </LinearLayout>
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index 505c1fd7..bbac1ed1 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -275,11 +275,11 @@ public void setCurrency(Currency mCurrency) {
+ 	 * @param doc XML DOM document for the OFX data
+ 	 * @param parent Parent node to which to add this account's transactions in XML
+ 	 */
+-	public void toXml(Document doc, Element parent, boolean allTransactions){
++	public void toOfx(Document doc, Element parent, boolean allTransactions){
+ 		for (Transaction transaction : mTransactionsList) {
+ 			if (!allTransactions && transaction.isExported())
+ 				continue;
+-			parent.appendChild(transaction.toXml(doc));
++			parent.appendChild(transaction.toOfx(doc));
+ 		}
+ 	}
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index 31b7faac..e47eed29 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -337,7 +337,7 @@ public void setAccountUID(String accountUID) {
+ 	 * @param doc XML document to which transaction should be added
+ 	 * @return Element in DOM corresponding to transaction
+ 	 */
+-	public Element toXml(Document doc){		
++	public Element toOfx(Document doc){		
+ 		Element transactionNode = doc.createElement("STMTTRN");
+ 		Element type = doc.createElement("TRNTYPE");
+ 		type.appendChild(doc.createTextNode(mType.toString()));
+@@ -364,9 +364,11 @@ public Element toXml(Document doc){
+ 		name.appendChild(doc.createTextNode(mName));
+ 		transactionNode.appendChild(name);
+ 		
+-		Element memo = doc.createElement("MEMO");
+-		memo.appendChild(doc.createTextNode(mDescription));
+-		transactionNode.appendChild(memo);
++		if (mDescription != null && mDescription.length() > 0){
++			Element memo = doc.createElement("MEMO");
++			memo.appendChild(doc.createTextNode(mDescription));
++			transactionNode.appendChild(memo);
++		}
+ 		
+ 		return transactionNode;
+ 	}
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+index 914fbd03..50112ded 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/ExportDialogFragment.java
+@@ -304,12 +304,12 @@ protected Document exportOfx(boolean exportAll) throws ParserConfigurationExcept
+ 		Document document = docBuilder.newDocument();
+ 		Element root = document.createElement("OFX");
+ 		
+-		ProcessingInstruction pi = document.createProcessingInstruction("OFX", "OFXHEADER=\"200\" VERSION=\"211\" SECURITY=\"NONE\" OLDFILEUID=\"NONE\" NEWFILEUID=\"NONE\"");
++		ProcessingInstruction pi = document.createProcessingInstruction("OFX", OfxFormatter.OFX_HEADER);
+ 		document.appendChild(pi);		
+ 		document.appendChild(root);
+ 		
+ 		OfxFormatter exporter = new OfxFormatter(getActivity(), exportAll);
+-		exporter.toXml(document, root);
++		exporter.toOfx(document, root);
+ 		
+ 		return document;
+ 	}
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+index 3ef1a112..d7afe676 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+@@ -405,15 +405,14 @@ protected void showBulkMoveDialog(){
+ 	    args.putLongArray(SELECTED_TRANSACTION_IDS, selectedIds);
+ 	    bulkMoveFragment.setArguments(args);
+ 	    bulkMoveFragment.show(ft, "bulk_move_dialog");
+-	}
++	}	
+ 	
+ 	/**
+ 	 * Extends a simple cursor adapter to bind transaction attributes to views 
+ 	 * @author Ngewi Fet <ngewif@gmail.com>
+ 	 */
+ 	protected class TransactionsCursorAdapter extends SimpleCursorAdapter {
+-		private long mPreviousTimestamp;
+-		
++				
+ 		public TransactionsCursorAdapter(Context context, int layout, Cursor c,
+ 				String[] from, int[] to) {
+ 			super(context, layout, c, from, to, 0);
+@@ -468,18 +467,30 @@ public void bindView(View view, Context context, Cursor cursor) {
+ 				trNote.setText(description);
+ 			}
+ 			
+-			TextView dateHeader = (TextView) view.findViewById(R.id.date_section_header);
+ 			long transactionTime = cursor.getLong(DatabaseAdapter.COLUMN_TIMESTAMP);
+-			boolean sameDay = isSameDay(mPreviousTimestamp, transactionTime);
+-			if (sameDay)
+-				dateHeader.setVisibility(View.GONE);
+-			else {
++			int position = cursor.getPosition();
++						
++			boolean hasSectionHeader = false;
++			if (position == 0){
++				hasSectionHeader = true;
++			} else {
++				cursor.moveToPosition(position - 1);
++				long previousTimestamp = cursor.getLong(DatabaseAdapter.COLUMN_TIMESTAMP);
++				cursor.moveToPosition(position);				
++				//has header if two consecutive transactions were not on same day
++				hasSectionHeader = !isSameDay(previousTimestamp, transactionTime);
++			}
++			
++			TextView dateHeader = (TextView) view.findViewById(R.id.date_section_header);
++			
++			if (hasSectionHeader){
+ 				java.text.DateFormat format = DateFormat.getLongDateFormat(getActivity());
+ 				String dateString = format.format(new Date(transactionTime));
+ 				dateHeader.setText(dateString);
+ 				dateHeader.setVisibility(View.VISIBLE);
++			} else {
++				dateHeader.setVisibility(View.GONE);
+ 			}
+-			mPreviousTimestamp = transactionTime;
+ 		}
+ 		
+ 		private boolean isSameDay(long timeMillis1, long timeMillis2){
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+index 738c1fab..d299a555 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+@@ -69,6 +69,11 @@
+ 	 * Reference to the application context
+ 	 */
+ 	private Context mContext;
++
++	/**
++	 * Header for OFX documents
++	 */
++	public static final String OFX_HEADER = "OFXHEADER=\"200\" VERSION=\"211\" SECURITY=\"NONE\" ENCODING=\"UTF-8\" OLDFILEUID=\"NONE\" NEWFILEUID=\"NONE\"";
+ 	
+ 	/**
+ 	 * Builds an XML representation of the {@link Account}s and {@link Transaction}s in the database 
+@@ -112,7 +117,7 @@ public static String getOfxFormattedTime(long milliseconds){
+ 	 * @param doc DOM document of the OFX expenses.
+ 	 * @param parent Parent node for all expenses in report
+ 	 */
+-	public void toXml(Document doc, Element parent){
++	public void toOfx(Document doc, Element parent){
+ 		Element transactionUid = doc.createElement("TRNUID");		
+ 		//unsolicited because the data exported is not as a result of a request
+ 		transactionUid.appendChild(doc.createTextNode(UNSOLICITED_TRANSACTION_ID));
+@@ -192,7 +197,7 @@ public void toXml(Document doc, Element parent){
+ 			statementTransactionResponse.appendChild(statementTransactions);
+ 			
+ 			//add account details (transactions) to the XML document			
+-			account.toXml(doc, bankTransactionsList, mExportAll);
++			account.toOfx(doc, bankTransactionsList, mExportAll);
+ 			
+ 			//mark as exported
+ 			transactionsDbAdapter.markAsExported(account.getUID());

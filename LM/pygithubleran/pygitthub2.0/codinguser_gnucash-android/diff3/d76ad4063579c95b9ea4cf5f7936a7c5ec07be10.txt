@@ -1,0 +1,143 @@
+From d76ad4063579c95b9ea4cf5f7936a7c5ec07be10 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Tue, 8 Sep 2015 23:26:34 +0800
+Subject: [PATCH] export ofx based on export time
+
+---
+ app/src/main/java/org/gnucash/android/export/Exporter.java     |  8 ++++++++
+ .../main/java/org/gnucash/android/export/ofx/OfxExporter.java  |  5 +++++
+ .../main/java/org/gnucash/android/export/qif/QifExporter.java  |  5 ++---
+ app/src/main/java/org/gnucash/android/model/Account.java       | 10 ++++++++--
+ app/src/main/java/org/gnucash/android/model/BaseModel.java     |  2 +-
+ 5 files changed, 24 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index c51fe5fc..94703e7f 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -35,6 +35,7 @@
+ import java.io.File;
+ import java.io.FileFilter;
+ import java.io.Writer;
++import java.sql.Timestamp;
+ import java.text.ParseException;
+ import java.text.SimpleDateFormat;
+ import java.util.Date;
+@@ -74,6 +75,13 @@
+     protected ExportParams mParameters;
+ 
+     private static final SimpleDateFormat EXPORT_FILENAME_DATE_FORMAT = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US);
++
++    /**
++     * last export time in preferences
++     */
++    public static final String PREF_LAST_EXPORT_TIME = "last_export_time";
++
++    public static final String TIMESTAMP_ZERO = new Timestamp(0).toString();
+     /**
+      * Adapter for retrieving accounts to export
+      * Subclasses should close this object when they are done with exporting
+diff --git a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+index 1f46581d..ff9b144e 100644
+--- a/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/ofx/OfxExporter.java
+@@ -37,6 +37,7 @@
+ import java.io.IOException;
+ import java.io.StringWriter;
+ import java.io.Writer;
++import java.sql.Timestamp;
+ import java.util.List;
+ 
+ import javax.xml.parsers.DocumentBuilder;
+@@ -131,10 +132,13 @@ public String generateExport() throws ExporterException {
+         boolean useXmlHeader = PreferenceManager.getDefaultSharedPreferences(mContext)
+                 .getBoolean(mContext.getString(R.string.key_xml_ofx_header), false);
+ 
++        String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
++
+         StringWriter stringWriter = new StringWriter();
+         //if we want SGML OFX headers, write first to string and then prepend header
+         if (useXmlHeader){
+             write(document, stringWriter, false);
++            PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+             return stringWriter.toString();
+         } else {
+             Node ofxNode = document.getElementsByTagName("OFX").item(0);
+@@ -144,6 +148,7 @@ public String generateExport() throws ExporterException {
+             StringBuffer stringBuffer = new StringBuffer(OfxHelper.OFX_SGML_HEADER);
+             stringBuffer.append('\n');
+             stringBuffer.append(stringWriter.toString());
++            PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+             return stringBuffer.toString();
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+index aae3a496..2de23b82 100644
+--- a/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/qif/QifExporter.java
+@@ -54,8 +54,7 @@ public void generateExport(Writer writer) throws ExporterException {
+         final String newLine = "\n";
+         TransactionsDbAdapter transactionsDbAdapter = mTransactionsDbAdapter;
+         try {
+-            final String zeroTimeStamp = new Timestamp(0).toString();
+-            String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(mContext).getString("qif_last_export", zeroTimeStamp);
++            String lastExportTimeStamp = PreferenceManager.getDefaultSharedPreferences(mContext).getString(Exporter.PREF_LAST_EXPORT_TIME, Exporter.TIMESTAMP_ZERO);
+             Cursor cursor = transactionsDbAdapter.fetchTransactionsWithSplitsWithTransactionAccount(
+                     new String[]{
+                             TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID + " AS trans_uid",
+@@ -213,6 +212,6 @@ public void generateExport(Writer writer) throws ExporterException {
+ 
+         /// export successful
+         String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
+-        PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString("qif_last_export", timeStamp).apply();
++        PreferenceManager.getDefaultSharedPreferences(mContext).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index 465855dd..635eddf4 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -17,12 +17,17 @@
+ package org.gnucash.android.model;
+ 
+ 
++import android.preference.PreferenceManager;
++
+ import org.gnucash.android.BuildConfig;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.CommoditiesDbAdapter;
++import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.ofx.OfxHelper;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ 
++import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.List;
+@@ -520,9 +525,10 @@ public void toOfx(Document doc, Element parent, boolean exportAllTransactions){
+ 		Element bankTransactionsList = doc.createElement(OfxHelper.TAG_BANK_TRANSACTION_LIST);
+ 		bankTransactionsList.appendChild(dtstart);
+ 		bankTransactionsList.appendChild(dtend);
+-		
++
++		Timestamp lastExportedTimestamp = Timestamp.valueOf(PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext()).getString(Exporter.PREF_LAST_EXPORT_TIME, Exporter.TIMESTAMP_ZERO));
+ 		for (Transaction transaction : mTransactionsList) {
+-			if (!exportAllTransactions && transaction.isExported())
++			if (!exportAllTransactions && /*transaction.isExported()*/ transaction.getModifiedTimestamp().before(lastExportedTimestamp))
+ 				continue;
+             bankTransactionsList.appendChild(transaction.toOFX(doc, getUID()));
+ 		}		
+diff --git a/app/src/main/java/org/gnucash/android/model/BaseModel.java b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+index eff68b1f..224f1d54 100644
+--- a/app/src/main/java/org/gnucash/android/model/BaseModel.java
++++ b/app/src/main/java/org/gnucash/android/model/BaseModel.java
+@@ -74,7 +74,7 @@ public void setUID(String uid) {
+         this.mUID = uid;
+     }
+ 
+-    /**
++    /**8
+      * Returns the timestamp when this model entry was created in the database
+      * @return Timestamp of creation of model
+      */

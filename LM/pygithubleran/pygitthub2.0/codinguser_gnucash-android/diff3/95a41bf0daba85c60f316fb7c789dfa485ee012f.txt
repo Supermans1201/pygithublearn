@@ -1,0 +1,249 @@
+From 95a41bf0daba85c60f316fb7c789dfa485ee012f Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 13 Sep 2014 11:42:30 +0800
+Subject: [PATCH] Update the descendant accounts'full names after parent
+ account is changed.
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 61 +++++++++++++++++---
+ .../gnucash/android/export/xml/GncXmlExporter.java |  2 +-
+ .../android/ui/account/AccountFormFragment.java    | 67 ++++++++++++++++++++--
+ 3 files changed, 116 insertions(+), 14 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index ce82e18e..ee3c046f 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -458,17 +458,40 @@ public String getName(long accountID) {
+     public List<Account> getSimpleAccountList(){
+         LinkedList<Account> accounts = new LinkedList<Account>();
+         Cursor c = fetchAccounts(null);
+-
+         if (c == null)
+             return accounts;
+ 
+-        while(c.moveToNext()){
+-            accounts.add(buildSimpleAccountInstance(c));
++        try {
++            while (c.moveToNext()) {
++                accounts.add(buildSimpleAccountInstance(c));
++            }
++        }
++        finally {
++            c.close();
+         }
+-        c.close();
+         return accounts;
+     }
+ 
++    /**
++     * Returns a list of all account entries in the system (includes root account)
++     * No transactions are loaded, just the accounts
++     * @return List of {@link Account}s in the database
++     */
++    public List<Account> getSimpleAccountList(String where, String[] whereArgs, String orderBy){
++        LinkedList<Account> accounts = new LinkedList<Account>();
++        Cursor c = fetchAccounts(where, whereArgs, orderBy);
++        if (c == null)
++            return accounts;
++        try {
++            while (c.moveToNext()) {
++                accounts.add(buildSimpleAccountInstance(c));
++            }
++        }
++        finally {
++            c.close();
++        }
++        return accounts;
++    }
+ 	/**
+ 	 * Returns a list of accounts which have transactions that have not been exported yet
+ 	 * @return List of {@link Account}s with unexported transactions
+@@ -633,15 +656,17 @@ public Cursor fetchAccounts(String condition){
+     /**
+      * Returns a Cursor set of accounts which fulfill <code>condition</code>
+      * and ordered by <code>orderBy</code>
+-     * @param condition SQL WHERE statement without the 'WHERE' itself
++     * @param where SQL WHERE statement without the 'WHERE' itself
++     * @param whereArgs args to where clause
++     * @param orderBy orderBy clause
+      * @return Cursor set of accounts which fulfill <code>condition</code>
+      */
+-    public Cursor fetchAccounts(String condition, String orderBy){
++    public Cursor fetchAccounts(String where, String[] whereArgs, String orderBy){
+         Log.v(TAG, "Fetching all accounts from db where " +
+-                (condition == null ? "NONE" : condition) + " order by " +
++                (where == null ? "NONE" : where) + " order by " +
+                 (orderBy == null ? "NONE" : orderBy));
+         return mDb.query(AccountEntry.TABLE_NAME,
+-                null, condition, null, null, null,
++                null, where, whereArgs, null, null,
+                 orderBy);
+     }
+     /**
+@@ -1018,6 +1043,26 @@ public String getFullyQualifiedAccountName(String accountUID){
+     }
+ 
+     /**
++     * get account's full name directly from DB
++     * @param accountUID the account to retrieve full name
++     * @return full name registered in DB
++     */
++    public String getAccountFullName(String accountUID) {
++        Cursor cursor = mDb.query(AccountEntry.TABLE_NAME, new String[]{AccountEntry.COLUMN_FULL_NAME},
++                AccountEntry.COLUMN_UID + " = ?", new String[]{accountUID},
++                null, null, null);
++        try {
++            if (cursor.moveToFirst()) {
++                return cursor.getString(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_FULL_NAME));
++            }
++        }
++        finally {
++            cursor.close();
++        }
++        return null;
++    }
++
++    /**
+      * Overloaded convenience method.
+      * Simply resolves the account UID and calls {@link #getFullyQualifiedAccountName(String)}
+      * @param accountId Database record ID of account
+diff --git a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+index b2a09103..90294c1b 100644
+--- a/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -91,7 +91,7 @@ private void exportSlots(XmlSerializer xmlSerializer,
+     }
+ 
+     private void exportAccounts(XmlSerializer xmlSerializer) throws IOException {
+-        Cursor cursor = mAccountsDbAdapter.fetchAccounts(null, null);
++        Cursor cursor = mAccountsDbAdapter.fetchAccounts(null, null, null);
+         while (cursor.moveToNext()) {
+             // write account
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_ACCOUNT);
+diff --git a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+index 8078047f..3a15b2b0 100644
+--- a/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -29,6 +29,7 @@
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.text.TextUtils;
++import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+@@ -54,6 +55,7 @@
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Currency;
++import java.util.HashMap;
+ import java.util.List;
+ 
+ /**
+@@ -119,6 +121,7 @@
+ 
+     /**
+      * List of all descendant Account UIDs, if we are modifying an account
++     * null if creating a new account
+      */
+     private List<String> mDescendantAccountUIDs;
+ 
+@@ -664,7 +667,7 @@ public void onDestroy() {
+ 			mParentAccountCursor.close();
+         // The mAccountsDbAdapter should only be closed when it is not passed in
+         // by other Activities.
+-		if (mReleaseDbAdapter == true && mAccountsDbAdapter != null) {
++		if (mReleaseDbAdapter && mAccountsDbAdapter != null) {
+             mAccountsDbAdapter.close();
+         }
+         if (mDefaultTransferAccountCursorAdapter != null) {
+@@ -676,6 +679,8 @@ public void onDestroy() {
+      * Reads the fields from the account form and saves as a new account
+      */
+ 	private void saveAccount() {
++        // accounts to update, in case we're updating full names of a sub account tree
++        ArrayList<Account> accountsToUpdate = new ArrayList<Account>();
+ 		if (mAccount == null){
+ 			String name = getEnteredName();
+ 			if (name == null || name.length() == 0){
+@@ -699,12 +704,19 @@ private void saveAccount() {
+         mAccount.setPlaceHolderFlag(mPlaceholderCheckBox.isChecked());
+         mAccount.setColorCode(mSelectedColor);
+ 
++        long newParentAccountID;
++        String newParentAccountGUID;
++        String rootAccountGUID = mAccountsDbAdapter.getGnuCashRootAccountUID();
++        long rootAccountID = mAccountsDbAdapter.getAccountID(rootAccountGUID);
+ 		if (mParentCheckBox.isChecked()){
+-			long id = mParentAccountSpinner.getSelectedItemId();
+-			mAccount.setParentUID(mAccountsDbAdapter.getAccountUID(id));
++            newParentAccountID = mParentAccountSpinner.getSelectedItemId();
++            newParentAccountGUID = mAccountsDbAdapter.getAccountUID(newParentAccountID);
++			mAccount.setParentUID(newParentAccountGUID);
+ 		} else {
+             //need to do this explicitly in case user removes parent account
+ 			mAccount.setParentUID(null);
++            newParentAccountGUID = rootAccountGUID;
++            newParentAccountID = rootAccountID;
+ 		}
+ 
+         if (mDefaultTransferAccountCheckBox.isChecked()){
+@@ -714,10 +726,55 @@ private void saveAccount() {
+             //explicitly set in case of removal of default account
+             mAccount.setDefaultTransferAccountUID(null);
+         }
+-		
++
++        // update full names
++        long oldParentAccountId = mParentAccountId == -1 ? rootAccountID : mParentAccountId;
++        if (mDescendantAccountUIDs == null || newParentAccountID != oldParentAccountId) {
++            // new Account or parent account changed
++            String newAccountFullName;
++            if (newParentAccountID == rootAccountID){
++                newAccountFullName = mAccount.getName();
++            }
++            else {
++                newAccountFullName = mAccountsDbAdapter.getAccountFullName(newParentAccountGUID) +
++                    AccountsDbAdapter.ACCOUNT_NAME_SEPARATOR + mAccount.getName();
++            }
++            mAccount.setFullName(newAccountFullName);
++            if (mDescendantAccountUIDs != null) {
++                // modifying existing account
++                if (oldParentAccountId != newParentAccountID && mDescendantAccountUIDs.size() > 0) {
++                    // parent change, update all full names of descent accounts
++                    accountsToUpdate.addAll(mAccountsDbAdapter.getSimpleAccountList(
++                            DatabaseSchema.AccountEntry.COLUMN_UID + " IN ('" +
++                                    TextUtils.join("','", mDescendantAccountUIDs) + "')",
++                            null,
++                            null
++                    ));
++                }
++                HashMap<String, Account> mapAccount = new HashMap<String, Account>();
++                for (Account acct : accountsToUpdate) mapAccount.put(acct.getUID(), acct);
++                for (String uid: mDescendantAccountUIDs) {
++                    // mAccountsDbAdapter.getDescendantAccountUIDs() will ensure a parent-child order
++                    Account acct = mapAccount.get(uid);
++                    // mAccount cannot be root, so acct here cannot be top level account.
++                    if (acct.getParentUID().equals(mAccount.getUID())) {
++                        acct.setFullName(mAccount.getFullName() + AccountsDbAdapter.ACCOUNT_NAME_SEPARATOR + acct.getName());
++                    }
++                    else {
++                        acct.setFullName(
++                                mapAccount.get(acct.getParentUID()).getFullName() +
++                                        AccountsDbAdapter.ACCOUNT_NAME_SEPARATOR +
++                                        acct.getName()
++                        );
++                    }
++                }
++            }
++        }
++        accountsToUpdate.add(mAccount);
+ 		if (mAccountsDbAdapter == null)
+ 			mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		mAccountsDbAdapter.addAccount(mAccount);
++        // bulk update, will not update transactions
++		mAccountsDbAdapter.bulkAddAccounts(accountsToUpdate);
+ 
+ 		finishFragment();
+ 	}

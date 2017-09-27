@@ -1,0 +1,398 @@
+From b0cbd8ef53415e63b21b1157bc8ac4c94dcfe247 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 24 Apr 2015 13:41:00 +0200
+Subject: [PATCH] Improved database migration code
+
+Fixed: incorrect DropBox sync configuration in manifest (for beta and
+production)
+Fixed: crash after deleting top-level account
+Add default root account if none exists during migration
+Stop scheduled actions from being executed during migration
+Set the root account as hidden when it is created
+---
+ app/build.gradle                                   | 16 ++++-----
+ app/src/main/AndroidManifest.xml                   |  8 ++---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 26 ++------------
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  8 +++--
+ .../org/gnucash/android/db/DatabaseHelper.java     | 42 ++++++++++++++--------
+ .../android/db/ScheduledActionDbAdapter.java       |  2 ++
+ .../org/gnucash/android/db/SplitsDbAdapter.java    |  2 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  2 ++
+ .../android/ui/account/AccountFormFragment.java    | 10 +++---
+ .../android/ui/account/AccountsListFragment.java   |  3 ++
+ .../ui/transaction/TransactionFormFragment.java    | 11 +++---
+ 11 files changed, 62 insertions(+), 68 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index b4e155a4..5a14db31 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -8,7 +8,7 @@ def versionPatch = 0
+ def versionBuild = 1
+ 
+ def buildTime() {
+-    def df = new SimpleDateFormat("yyyyMMdd_HHmm'Z'")
++    def df = new SimpleDateFormat("yyyyMMdd_HHmm'UTC'")
+     df.setTimeZone(TimeZone.getTimeZone("UTC"))
+     return df.format(new Date())
+ }
+@@ -27,6 +27,11 @@ android {
+         targetSdkVersion 19
+         versionCode versionMajor * 10000 + versionMinor * 1000 + versionPatch * 100 + versionBuild
+         versionName "${versionMajor}.${versionMinor}.${versionPatch}"
++        if (project.hasProperty("RELEASE_DROPBOX_APP_KEY")){
++            resValue "string", "dropbox_app_key", RELEASE_DROPBOX_APP_KEY
++            resValue "string", "dropbox_app_secret", RELEASE_DROPBOX_APP_SECRET
++            resValue "string", "manifest_dropbox_app_key", "db-${RELEASE_DROPBOX_APP_KEY}"
++        }
+     }
+ 
+     applicationVariants.all { variant ->
+@@ -74,24 +79,17 @@ android {
+             resValue "string", "app_name", "GnuCash-devel"
+             resValue "string", "dropbox_app_key", "dhjh8ke9wf05948"
+             resValue "string", "dropbox_app_secret", "h2t9fphj3nr4wkw"
++            resValue "string", "manifest_dropbox_app_key", "db-dhjh8ke9wf05948"
+             versionName "${versionMajor}.${versionMinor}.${versionPatch}-dev${versionBuild}_${buildTime()}"
+         }
+ 
+         beta {
+             resValue "string", "app_name", "GnuCash - beta"
+-            if (project.hasProperty("RELEASE_DROPBOX_APP_KEY")){
+-                resValue "string", "dropbox_app_key", RELEASE_DROPBOX_APP_KEY
+-                resValue "string", "dropbox_app_secret", RELEASE_DROPBOX_APP_SECRET
+-            }
+             versionName "${versionMajor}.${versionMinor}.${versionPatch}-beta${versionBuild}_${buildTime()}"
+         }
+ 
+         production {
+             resValue "string", "app_name", "GnuCash"
+-            if (project.hasProperty("RELEASE_DROPBOX_APP_KEY")){
+-                resValue "string", "dropbox_app_key", RELEASE_DROPBOX_APP_KEY
+-                resValue "string", "dropbox_app_secret", RELEASE_DROPBOX_APP_SECRET
+-            }
+         }
+ 
+     }
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 919efda0..02414209 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -16,12 +16,8 @@
+ -->
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+-    package="org.gnucash.android"
+-    android:versionCode="48"
+-    android:versionName="@string/app_version_name" >
++    package="org.gnucash.android">
+ 
+-    <uses-sdk android:minSdkVersion="10" android:targetSdkVersion="19"/>
+-    
+     <permission-group 
+         android:name="${applicationId}.permission.group.GNUCASH"
+         android:label="@string/label_permission_group" 
+@@ -111,7 +107,7 @@
+             android:configChanges="orientation|keyboard">
+             <intent-filter>
+                 <!-- Change this to be db- followed by your app key -->
+-                <data android:scheme="db-dhjh8ke9wf05948" />
++                <data android:scheme="@string/manifest_dropbox_app_key" />
+                 <action android:name="android.intent.action.VIEW" />
+                 <category android:name="android.intent.category.BROWSABLE"/>
+                 <category android:name="android.intent.category.DEFAULT" />
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 175df568..eec86031 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -74,6 +74,8 @@
+ 
+     private static String mImbalanceAccountPrefix = GnuCashApplication.getAppContext().getString(R.string.imbalance_account_name) + "-";
+ 
++    private static final String TAG = "AccountsDbAdapter";
++
+     /**
+      * Overloaded constructor. Creates an adapter for an already open database
+      * @param db SQliteDatabase instance
+@@ -763,29 +765,6 @@ public Cursor fetchAccountsOrderedByFullName(String where, String[] whereArgs) {
+                 null, where, whereArgs, null, null,
+                 AccountEntry.COLUMN_FULL_NAME + " ASC");
+     }
+-    /**
+-     * Returns the balance of an account while taking sub-accounts into consideration
+-     * @return Account Balance of an account including sub-accounts
+-     */
+-    public Money getAccountBalance(long accountId){
+-        Log.d(TAG, "Computing account balance for account ID " + accountId);
+-        String currencyCode = getCurrencyCode(getUID(accountId));
+-        Money balance = Money.createZeroInstance(currencyCode);
+-
+-        List<Long> subAccounts = getSubAccountIds(accountId);
+-        for (long id : subAccounts){
+-            //recurse because arbitrary nesting depth is allowed
+-            Money subBalance = getAccountBalance(id);
+-            if (subBalance.getCurrency().equals(balance.getCurrency())){
+-                //only add the balances if they are of the same currency
+-                //ignore sub accounts of different currency just like GnuCash desktop does
+-                balance = balance.add(subBalance);
+-            }
+-        }
+-
+-        Money splitSum = mTransactionsAdapter.getSplitDbAdapter().computeSplitBalance(getUID(accountId));
+-        return balance.add(splitSum);
+-    }
+ 
+     /**
+      * Returns the balance of an account while taking sub-accounts into consideration
+@@ -1002,6 +981,7 @@ public String getOrCreateGnuCashRootAccountUID() {
+         Account rootAccount = new Account("ROOT Account");
+         rootAccount.setAccountType(AccountType.ROOT);
+         rootAccount.setFullName(ROOT_ACCOUNT_FULL_NAME);
++        rootAccount.setHidden(true);
+         addAccount(rootAccount);
+         return rootAccount.getUID();
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index c783ddd7..4d6b87e8 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -42,7 +42,7 @@
+ 	/**
+ 	 * Tag for logging
+ 	 */
+-	protected static final String TAG = DatabaseAdapter.class.getName();
++	protected static final String TAG = "DatabaseAdapter";
+ 
+ 	/**
+ 	 * SQLite database
+@@ -234,6 +234,7 @@ public Cursor fetchAllRecords(){
+ 	 * @return <code>true</code> if deletion was successful, <code>false</code> otherwise
+ 	 */
+ 	public boolean deleteRecord(long rowId){
++        Log.d(TAG, "Deleting record with id " + rowId + " from " + mTableName);
+ 		return mDb.delete(mTableName, DatabaseSchema.CommonColumns._ID + "=" + rowId, null) > 0;
+ 	}
+ 
+@@ -427,8 +428,9 @@ public String getAttribute(@NonNull String recordUID, @NonNull String columnName
+         try {
+             if (cursor.moveToFirst())
+                 return cursor.getString(cursor.getColumnIndexOrThrow(columnName));
+-            else
+-                throw new IllegalArgumentException(String.format("Column (%s) or GUID (%s) does not exist in the db", columnName, recordUID));
++            else {
++                throw new IllegalArgumentException(String.format("Record with GUID %s does not exist in the db", recordUID));
++            }
+         } finally {
+             cursor.close();
+         }
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 48990015..559ddbb9 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -337,6 +337,7 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+                             + AccountEntry.COLUMN_FAVORITE + " , "
+                             + AccountEntry.COLUMN_FULL_NAME + " , "
+                             + AccountEntry.COLUMN_PLACEHOLDER + " , "
++                            + AccountEntry.COLUMN_HIDDEN + " , "
+                             + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " , "
+                             + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID
+                             + ") SELECT "
+@@ -349,6 +350,7 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+                             + AccountEntry.TABLE_NAME + "_bak." + AccountEntry.COLUMN_FAVORITE + " , "
+                             + AccountEntry.TABLE_NAME + "_bak." + AccountEntry.COLUMN_FULL_NAME + " , "
+                             + AccountEntry.TABLE_NAME + "_bak." + AccountEntry.COLUMN_PLACEHOLDER + " , "
++                            + " CASE WHEN " + AccountEntry.TABLE_NAME + "_bak.type = 'ROOT' THEN 1 ELSE 0 END, "
+                             + AccountEntry.TABLE_NAME + "_bak." + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " , "
+                             + AccountEntry.TABLE_NAME + "_bak." + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID
+                             + " FROM " + AccountEntry.TABLE_NAME + "_bak;"
+@@ -433,26 +435,38 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+                             + " FROM " + SplitEntry.TABLE_NAME + "_bak;"
+             );
+ 
++
++
+             //================================ END TABLE MIGRATIONS ================================
+ 
+-            Log.i(LOG_TAG, "Migrating existing recurring transactions");
+-            ContentValues contentValues = new ContentValues();
+ 
+-            Cursor c = db.query(TransactionEntry.TABLE_NAME + "_bak", null, "recurrence_period > 0", null, null, null, null);
++
+             ScheduledActionDbAdapter scheduledActionDbAdapter = new ScheduledActionDbAdapter(db);
+             SplitsDbAdapter splitsDbAdapter = new SplitsDbAdapter(db);
+             TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(db, splitsDbAdapter);
+-            while (c.moveToNext()){
++            AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(db,transactionsDbAdapter);
++
++            Log.i(LOG_TAG, "Creating default root account if none exists");
++            ContentValues contentValues = new ContentValues();
++            //assign a root account to all accounts which had null as parent (top-level accounts)
++            String rootAccountUID = accountsDbAdapter.getOrCreateGnuCashRootAccountUID();
++            contentValues.put(AccountEntry.COLUMN_PARENT_ACCOUNT_UID, rootAccountUID);
++            db.update(AccountEntry.TABLE_NAME, contentValues, AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IS NULL", null);
++
++            Log.i(LOG_TAG, "Migrating existing recurring transactions");
++            Cursor cursor = db.query(TransactionEntry.TABLE_NAME + "_bak", null, "recurrence_period > 0", null, null, null, null);
++            while (cursor.moveToNext()){
+                 contentValues.clear();
+-                Timestamp timestamp = new Timestamp(c.getLong(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TIMESTAMP)));
++                Timestamp timestamp = new Timestamp(cursor.getLong(cursor.getColumnIndexOrThrow(TransactionEntry.COLUMN_TIMESTAMP)));
+                 contentValues.put(TransactionEntry.COLUMN_CREATED_AT, timestamp.toString());
+-                long transactionId = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
++                long transactionId = cursor.getLong(cursor.getColumnIndexOrThrow(TransactionEntry._ID));
+                 db.update(TransactionEntry.TABLE_NAME, contentValues, TransactionEntry._ID + "=" + transactionId, null);
+ 
+                 ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
+-                scheduledAction.setActionUID(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_UID)));
+-                long period = c.getLong(c.getColumnIndexOrThrow("recurrence_period"));
++                scheduledAction.setActionUID(cursor.getString(cursor.getColumnIndexOrThrow(TransactionEntry.COLUMN_UID)));
++                long period = cursor.getLong(cursor.getColumnIndexOrThrow("recurrence_period"));
+                 scheduledAction.setPeriod(period);
++                scheduledAction.setLastRun(System.currentTimeMillis()); //prevent this from being executed at the end of migration
+                 scheduledActionDbAdapter.addScheduledAction(scheduledAction);
+ 
+                 //build intent for recurring transactions in the database
+@@ -466,15 +480,13 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+                 AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                 alarmManager.cancel(recurringPendingIntent);
+             }
+-            c.close();
++            cursor.close();
+ 
+             //auto-balance existing splits
+             Log.i(LOG_TAG, "Auto-balancing existing transaction splits");
+-            c = transactionsDbAdapter.fetchAllRecords();
+-            AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(db, transactionsDbAdapter);
+-
+-            while (c.moveToNext()){
+-                Transaction transaction = transactionsDbAdapter.buildTransactionInstance(c);
++            cursor = transactionsDbAdapter.fetchAllRecords();
++            while (cursor.moveToNext()){
++                Transaction transaction = transactionsDbAdapter.buildTransactionInstance(cursor);
+                 if (transaction.isTemplate())
+                     continue;
+                 Money imbalance = transaction.getImbalance();
+@@ -485,7 +497,7 @@ private int upgradeDbToVersion8(SQLiteDatabase db) {
+                     splitsDbAdapter.addSplit(split);
+                 }
+             }
+-            c.close();
++            cursor.close();
+ 
+             Log.i(LOG_TAG, "Dropping temporary migration tables");
+             db.execSQL("DROP TABLE " + SplitEntry.TABLE_NAME + "_bak");
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index 61bcee47..6c932b44 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -39,6 +39,8 @@
+  */
+ public class ScheduledActionDbAdapter extends DatabaseAdapter {
+ 
++    private static final String TAG = "ScheduledActionDbAdapter";
++
+     public ScheduledActionDbAdapter(SQLiteDatabase db){
+         super(db, ScheduledActionEntry.TABLE_NAME);
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index cb1843a8..c6e24843 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -48,7 +48,7 @@
+  */
+ public class SplitsDbAdapter extends DatabaseAdapter {
+ 
+-    protected static final String TAG = "SplitsDbAdapter";
++    private static final String TAG = "SplitsDbAdapter";
+ 
+     public SplitsDbAdapter(SQLiteDatabase db) {
+         super(db, SplitEntry.TABLE_NAME);
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index b6e03e1c..d76f09fc 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -50,6 +50,8 @@
+  */
+ public class TransactionsDbAdapter extends DatabaseAdapter {
+ 
++    private static final String TAG = "TransactionsDbAdapter";
++
+     private final SplitsDbAdapter mSplitsDbAdapter;
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index e09c97bf..80fc9260 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -537,13 +537,13 @@ public boolean onOptionsItemSelected(MenuItem item) {
+      * Initializes the default transfer account spinner with eligible accounts
+      */
+     private void loadDefaultTransferAccountList(){
+-        String condition = DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountUID + "' "
++        String condition = DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountUID + "' " //when creating a new account mAccountUID is null, so don't use whereArgs
+                 + " AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + "=0"
+-                + " AND " + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID() + "'";
++                + " AND " + DatabaseSchema.AccountEntry.COLUMN_HIDDEN + "=0"
++                + " AND " + DatabaseSchema.AccountEntry.COLUMN_TYPE + " != ?";
+ 
+-        //using whereArgs (2nd parameter) would produce safer sql,
+-        // however we get an exception because mAccountUID can be null, or the root account may be null as well
+-        Cursor defaultTransferAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(condition, null);
++        Cursor defaultTransferAccountCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(condition,
++                new String[]{AccountType.ROOT.name()});
+ 
+         if (mDefaulTransferAccountSpinner.getCount() <= 0) {
+             setDefaultTransferAccountInputsVisible(false);
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index c5a8aaa1..71bb162c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -186,11 +186,13 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                 case R.id.context_menu_edit_accounts:
+                     openCreateOrEditActivity(mSelectedItemId);
+                     mode.finish();
++                    mActionMode = null;
+                     return true;
+ 
+                 case R.id.context_menu_delete:
+                     tryDeleteAccount(mSelectedItemId);
+                     mode.finish();
++                    mActionMode = null;
+                     return true;
+ 
+                 default:
+@@ -318,6 +320,7 @@ public void tryDeleteAccount(long rowId) {
+             showConfirmationDialog(rowId);
+         } else {
+             mAccountsDbAdapter.deleteRecord(rowId);
++            mAccountsCursorAdapter.swapCursor(null);
+             refresh();
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 4675ee06..944822a4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -498,17 +498,16 @@ private void initalizeViews() {
+      * Only accounts with the same currency can be transferred to
+      */
+ 	private void updateTransferAccountsList(){
+-
+-		String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountUID
+-                            + "' AND " + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountUID)
+-                            + "' AND ")) + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getOrCreateGnuCashRootAccountUID()
+-                            + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
++		String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID + " != ?"
++                            + " AND " + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountUID) + "'"
++                            + " AND ")) + DatabaseSchema.AccountEntry.COLUMN_TYPE + " != ?"
++                            + " AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                             + ")";
+ 
+         if (mCursor != null) {
+             mCursor.close();
+         }
+-		mCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions, null);
++		mCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions, new String[]{mAccountUID, AccountType.ROOT.name()});
+ 
+         mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+                 android.R.layout.simple_spinner_item, mCursor);

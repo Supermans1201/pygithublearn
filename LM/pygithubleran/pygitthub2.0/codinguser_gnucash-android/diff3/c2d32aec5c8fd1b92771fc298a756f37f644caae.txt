@@ -1,0 +1,418 @@
+From c2d32aec5c8fd1b92771fc298a756f37f644caae Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 18 Aug 2015 22:51:52 +0200
+Subject: [PATCH] Fixed: last item of accounts/transactions lists not displayed
+ Fixed: incorrect value for modified_at saved in the database Fixed: split
+ amounts incorrectly saved to and parsed from database Fixed: broken
+ computation of account balances
+
+Upgraded app version string 2.0.0
+Code refactoring - added @nonnull annotation to base db adapter methods
+[UNVERIFIED] Added split value to temporary view created for db
+[CONSIDER]: Adding split quantity to the view
+---
+ app/build.gradle                                   |  6 ++---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  2 +-
+ .../gnucash/android/db/CommoditiesDbAdapter.java   |  2 +-
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 19 +++++++++-----
+ .../org/gnucash/android/db/PricesDbAdapter.java    |  2 +-
+ .../android/db/ScheduledActionDbAdapter.java       |  2 +-
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 17 +++++++-----
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  6 ++---
+ .../main/java/org/gnucash/android/model/Money.java | 30 ++++++++++++++--------
+ .../main/java/org/gnucash/android/model/Split.java | 16 ++++++++----
+ .../android/ui/util/AccountBalanceTask.java        |  2 +-
+ app/src/main/res/layout/cardview_account.xml       |  2 +-
+ app/src/main/res/layout/cardview_transaction.xml   |  2 +-
+ app/src/main/res/layout/fragment_accounts_list.xml |  2 ++
+ .../main/res/layout/fragment_transactions_list.xml |  2 ++
+ app/src/main/res/values/dimens.xml                 |  1 +
+ 16 files changed, 71 insertions(+), 42 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 5cd245f2..3583f75c 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -3,9 +3,9 @@ import java.text.SimpleDateFormat
+ apply plugin: 'com.android.application'
+ apply plugin: 'io.fabric'
+ 
+-def versionMajor = 1
+-def versionMinor = 6
+-def versionPatch = 4
++def versionMajor = 2
++def versionMinor = 0
++def versionPatch = 0
+ def versionBuild = 0
+ 
+ def buildTime() {
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 3333c9d9..30c32f3b 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -137,7 +137,7 @@ public long bulkAddRecords(@NonNull List<Account> accountList){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(Account account) {
++    protected SQLiteStatement compileReplaceStatement(@NonNull final Account account) {
+         if (mReplaceStatement == null){
+             mReplaceStatement = mDb.compileStatement("REPLACE INTO " + AccountEntry.TABLE_NAME + " ( "
+                     + AccountEntry.COLUMN_UID           + " , "
+diff --git a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+index 1cc806a6..291d8410 100644
+--- a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+@@ -28,7 +28,7 @@ public static CommoditiesDbAdapter getInstance(){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(Commodity commodity) {
++    protected SQLiteStatement compileReplaceStatement(@NonNull final Commodity commodity) {
+         if (mReplaceStatement == null) {
+             mReplaceStatement = mDb.compileStatement("REPLACE INTO " + CommodityEntry.TABLE_NAME + " ( "
+                     + CommodityEntry.COLUMN_UID             + " , "
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 62ecdae4..932561bc 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -72,6 +72,11 @@ public DatabaseAdapter(SQLiteDatabase db, @NonNull String tableName) {
+     }
+ 
+     private void createTempView() {
++        //the multiplication by 1.0 is to cause sqlite to handle the value as REAL and not to round off
++        String splitValueSql = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + "*1.0 / " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_DENOM;
++
++        final String SPLIT_VALUE_AMOUNT = "amount";
++
+         // Create some temporary views. Temporary views only exists in one DB session, and will not
+         // be saved in the DB
+         //
+@@ -98,8 +103,8 @@ private void createTempView() {
+                         + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_UID + " , "
+                         + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TYPE + " AS "
+                         + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_TYPE + " , "
+-                        + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_AMOUNT + " AS "
+-                        + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_AMOUNT + " , "
++                        + splitValueSql + " AS " //FIXME: Check if the split value is properly extracted. Also consider adding split quantity to the view
++                        + SplitEntry.TABLE_NAME + "_" + SPLIT_VALUE_AMOUNT + " , "
+                         + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_MEMO + " AS "
+                         + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_MEMO + " , "
+                         + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID + " AS "
+@@ -150,14 +155,16 @@ private void createTempView() {
+         //   if not, attach a 'b' to the split account uid
+         //   pick the minimal value of the modified account uid (one of the ones begins with 'a', if exists)
+         //   use substr to get account uid
++        
++        //FIXME: Check if the split value is properly extracted. Also consider adding split quantity to the view
+         mDb.execSQL("CREATE TEMP VIEW IF NOT EXISTS trans_extra_info AS SELECT " + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID +
+                 " AS trans_acct_t_uid , SUBSTR ( MIN ( ( CASE WHEN IFNULL ( " + SplitEntry.TABLE_NAME + "_" +
+                 SplitEntry.COLUMN_MEMO + " , '' ) == '' THEN 'a' ELSE 'b' END ) || " +
+                 AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID +
+                 " ) , 2 ) AS trans_acct_a_uid , TOTAL ( CASE WHEN " + SplitEntry.TABLE_NAME + "_" +
+                 SplitEntry.COLUMN_TYPE + " = 'DEBIT' THEN "+ SplitEntry.TABLE_NAME + "_" +
+-                SplitEntry.COLUMN_AMOUNT + " ELSE - " + SplitEntry.TABLE_NAME + "_" +
+-                SplitEntry.COLUMN_AMOUNT + " END ) AS trans_acct_balance , COUNT ( DISTINCT " +
++                SPLIT_VALUE_AMOUNT + " ELSE - " + SplitEntry.TABLE_NAME + "_" +
++                SPLIT_VALUE_AMOUNT + " END ) AS trans_acct_balance , COUNT ( DISTINCT " +
+                 AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_CURRENCY +
+                 " ) AS trans_currency_count , COUNT (*) AS trans_split_count FROM trans_split_acct " +
+                 " GROUP BY " + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID
+@@ -224,7 +231,7 @@ public long bulkAddRecords(@NonNull List<Model> modelList) {
+      * @param model Model whose attributes will be used as bindings
+      * @return SQLiteStatement for replacing a record in the database
+      */
+-    protected abstract SQLiteStatement compileReplaceStatement(Model model);
++    protected abstract SQLiteStatement compileReplaceStatement(@NonNull final Model model);
+ 
+     /**
+      * Returns a model instance populated with data from the record with GUID {@code uid}
+@@ -298,7 +305,7 @@ protected ContentValues populateBaseModelAttributes(@NonNull ContentValues conte
+      * @param cursor Cursor pointing to database record
+      * @param model Model instance to be initialized
+      */
+-    protected void populateBaseModelAttributes(Cursor cursor, BaseModel model){ //// FIXME: use template type
++    protected void populateBaseModelAttributes(Cursor cursor, BaseModel model){
+         String uid = cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_UID));
+         String created = cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_CREATED_AT));
+         String modified= cursor.getString(cursor.getColumnIndexOrThrow(CommonColumns.COLUMN_MODIFIED_AT));
+diff --git a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+index 35b54cab..57b0337d 100644
+--- a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+@@ -30,7 +30,7 @@ public static PricesDbAdapter getInstance(){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(Price price) {
++    protected SQLiteStatement compileReplaceStatement(@NonNull final Price price) {
+         if (mReplaceStatement == null) {
+             mReplaceStatement = mDb.compileStatement("REPLACE INTO " + PriceEntry.TABLE_NAME + " ( "
+                     + PriceEntry.COLUMN_UID + " , "
+diff --git a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+index b051811f..8a98500d 100644
+--- a/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/ScheduledActionDbAdapter.java
+@@ -76,7 +76,7 @@ public long updateRecurrenceAttributes(ScheduledAction scheduledAction){
+ 
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(ScheduledAction schedxAction) {
++    protected SQLiteStatement compileReplaceStatement(@NonNull final ScheduledAction schedxAction) {
+         if (mReplaceStatement == null) {
+             mReplaceStatement = mDb.compileStatement("REPLACE INTO " + ScheduledActionEntry.TABLE_NAME + " ( "
+                     + ScheduledActionEntry.COLUMN_UID 	            + " , "
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index 00f6e961..e99cf6d5 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -32,6 +32,7 @@
+ import org.gnucash.android.model.TransactionType;
+ 
+ import java.math.BigDecimal;
++import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.List;
+@@ -77,11 +78,11 @@ public void addRecord(@NonNull final Split split){
+ 
+         //modifying a split means modifying the accompanying transaction as well
+         updateRecord(TransactionEntry.TABLE_NAME, transactionId,
+-                TransactionEntry.COLUMN_MODIFIED_AT, Long.toString(System.currentTimeMillis()));
++                TransactionEntry.COLUMN_MODIFIED_AT, new Timestamp(System.currentTimeMillis()).toString());
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(Split split) {
++    protected SQLiteStatement compileReplaceStatement(@NonNull final Split split) {
+         if (mReplaceStatement == null) {
+             mReplaceStatement = mDb.compileStatement("REPLACE INTO " + SplitEntry.TABLE_NAME + " ( "
+                     + SplitEntry.COLUMN_UID + " , "
+@@ -102,10 +103,10 @@ protected SQLiteStatement compileReplaceStatement(Split split) {
+             mReplaceStatement.bindString(2, split.getMemo());
+         }
+         mReplaceStatement.bindString(3, split.getType().name());
+-        mReplaceStatement.bindLong(4, split.getValue().multiply(split.getValue().getNumberOfDecimalPlaces()).intValue());
+-        mReplaceStatement.bindLong(5, (long)Math.pow(10, split.getValue().getNumberOfDecimalPlaces()));
+-        mReplaceStatement.bindLong(6, split.getQuantity().multiply(split.getQuantity().getNumberOfDecimalPlaces()).intValue());
+-        mReplaceStatement.bindLong(7, (long)Math.pow(10, split.getQuantity().getNumberOfDecimalPlaces()));
++        mReplaceStatement.bindLong(4,   split.getValue().getNumerator());
++        mReplaceStatement.bindLong(5,   split.getValue().getDenominator());
++        mReplaceStatement.bindLong(6,   split.getQuantity().getNumerator());
++        mReplaceStatement.bindLong(7,   split.getQuantity().getDenominator());
+         mReplaceStatement.bindString(8, split.getCreatedTimestamp().toString());
+         mReplaceStatement.bindString(9, split.getAccountUID());
+         mReplaceStatement.bindString(10, split.getTransactionUID());
+@@ -172,6 +173,7 @@ public Money computeSplitBalance(List<String> accountUIDList, String currencyCod
+         return calculateSplitBalance(accountUIDList, currencyCode, hasDebitNormalBalance, startTimestamp, endTimestamp);
+     }
+ 
++
+     private Money calculateSplitBalance(List<String> accountUIDList, String currencyCode, boolean hasDebitNormalBalance,
+                           long startTimestamp, long endTimestamp){
+         if (accountUIDList.size() == 0){
+@@ -195,7 +197,8 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+             selectionArgs = new String[]{String.valueOf(startTimestamp)};
+         }
+ 
+-        String splitValueSql = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + " / " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_DENOM;
++        //the multiplication by 1.0 is to cause sqlite to handle the value as REAL and not to round off
++        String splitValueSql = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + "*1.0 / " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_DENOM;
+         cursor = mDb.query(SplitEntry.TABLE_NAME + " , " + TransactionEntry.TABLE_NAME,
+                 new String[]{"TOTAL ( CASE WHEN " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TYPE + " = 'DEBIT' THEN " +
+                         splitValueSql + " ELSE - " + splitValueSql + " END )"},
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 47cdd826..579fb030 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -151,7 +151,7 @@ public long bulkAddRecords(@NonNull List<Transaction> transactionList){
+     }
+ 
+     @Override
+-    protected SQLiteStatement compileReplaceStatement(Transaction transaction) {
++    protected SQLiteStatement compileReplaceStatement(@NonNull final Transaction transaction) {
+         if (mReplaceStatement == null) {
+             mReplaceStatement = mDb.compileStatement("REPLACE INTO " + TransactionEntry.TABLE_NAME + " ( "
+                     + TransactionEntry.COLUMN_UID + " , "
+@@ -169,8 +169,8 @@ protected SQLiteStatement compileReplaceStatement(Transaction transaction) {
+         mReplaceStatement.bindString(1, transaction.getUID());
+         mReplaceStatement.bindString(2, transaction.getDescription());
+         mReplaceStatement.bindString(3, transaction.getNote());
+-        mReplaceStatement.bindLong(4, transaction.getTimeMillis());
+-        mReplaceStatement.bindLong(5, transaction.isExported() ? 1 : 0);
++        mReplaceStatement.bindLong(4,   transaction.getTimeMillis());
++        mReplaceStatement.bindLong(5,   transaction.isExported() ? 1 : 0);
+         mReplaceStatement.bindString(6, transaction.getCurrencyCode());
+         mReplaceStatement.bindString(7, transaction.getCreatedTimestamp().toString());
+         if (transaction.getScheduledActionUID() == null)
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 1f7324ee..fdcdeab0 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -157,7 +157,7 @@ public Money(BigDecimal amount, Currency currency, MathContext context){
+ 	 * @param currencyCode 3-character currency code string
+ 	 */
+ 	public Money(long numerator, long denominator, String currencyCode){
+-		mAmount = new BigDecimal(numerator).divide(new BigDecimal(denominator), BigDecimal.ROUND_HALF_EVEN);
++		mAmount = new BigDecimal(numerator).divide(new BigDecimal(denominator), MathContext.UNLIMITED);
+ 		setCurrency(Currency.getInstance(currencyCode));
+ 	}
+ 
+@@ -230,6 +230,24 @@ private void setCurrency(Currency currency) {
+ 	}
+ 
+ 	/**
++	 * Returns the GnuCash format numerator for this amount.
++	 * <p>Example: Given an amount 32.50$, the numerator will be 3250</p>
++	 * @return GnuCash numerator for this amount
++	 */
++	public int getNumerator(){
++		return mAmount.multiply(new BigDecimal(getDenominator())).intValue();
++	}
++
++	/**
++	 * Returns the GnuCash amount format denominator for this amount
++	 * <p>The denominator is 10 raised to the power of number of fractional digits in the currency</p>
++	 * @return GnuCash format denominator
++	 */
++	public int getDenominator(){
++		return (int) Math.pow(10, mCurrency.getDefaultFractionDigits());
++	}
++
++	/**
+ 	 * Returns the amount represented by this Money object
+ 	 * @return {@link BigDecimal} valure of amount in object
+ 	 */
+@@ -460,16 +478,6 @@ public int compareTo(@NonNull Money another) {
+ 		return mAmount.compareTo(another.mAmount);
+ 	}
+ 
+-	/** TODO: add tests for this
+-	 * Returns the number of decimal places in this amount
+-	 * @return Number of decimal places
+-	 */
+-	public int getNumberOfDecimalPlaces() {
+-		String string = mAmount.stripTrailingZeros().toPlainString();
+-		int index = string.indexOf(".");
+-		return index < 0 ? 0 : string.length() - index - 1;
+-	}
+-
+ 	/**
+ 	 * Parses a Locale specific string into a number using format for {@link Locale#US}
+ 	 * @param amountString Formatted String amount
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 9f1f44ce..f90d0fb7 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -87,13 +87,17 @@ public Money getValue() {
+     }
+ 
+     /**
+-     * Sets the value amount of the split.
++     * Sets the value amount of the split.<br>
+      * The value is in the currency of the containing transaction
++     * <p>If the quantity of the split is null, it will be set to the {@code amount}</p>
+      * @param amount Money value of this split
+      * @see #setQuantity(Money)
+      */
+     public void setValue(Money amount) {
+         this.mValue = amount;
++        if (mQuantity == null){
++            mQuantity = amount;
++        }
+     }
+ 
+     /**
+@@ -234,10 +238,12 @@ public String toString() {
+      */
+     public String toCsv(){
+         String sep = ";";
+-        String valueNum = String.valueOf(mValue.multiply(mValue.getNumberOfDecimalPlaces()).intValue());
+-        String valueDenom = String.valueOf(mValue.getNumberOfDecimalPlaces());
+-        String qtyNum   = String.valueOf(mQuantity.multiply(mQuantity.getNumberOfDecimalPlaces()).intValue());
+-        String qtyDenom = String.valueOf(mQuantity.getNumberOfDecimalPlaces());
++        int valueFractionDigits = mValue.getCurrency().getDefaultFractionDigits();
++        int qtyFractionDigits = mQuantity.getCurrency().getDefaultFractionDigits();
++        String valueDenom = String.valueOf((int) Math.pow(10, valueFractionDigits));
++        String valueNum = String.valueOf(mValue.multiply(Integer.parseInt(valueDenom)).intValue());
++        String qtyDenom = String.valueOf((int)Math.pow(10, qtyFractionDigits));
++        String qtyNum   = String.valueOf(mQuantity.multiply(Integer.parseInt(qtyDenom)).intValue());
+ 
+         String splitString = valueNum + sep + valueDenom + sep + mValue.getCurrency().getCurrencyCode()
+                 + qtyNum + sep + qtyDenom + sep + mQuantity.getCurrency().getCurrencyCode()
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java b/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
+index 0e3c2705..35e71936 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/AccountBalanceTask.java
+@@ -59,7 +59,7 @@ protected Money doInBackground(String... params) {
+         try {
+             balance = accountsDbAdapter.getAccountBalance(params[0], -1, System.currentTimeMillis());
+         } catch (Exception ex) {
+-            Log.e(LOG_TAG, "Error computing account balance: " + ex);
++            Log.e(LOG_TAG, "Error computing account balance ", ex);
+             Crashlytics.logException(ex);
+         }
+         return balance;
+diff --git a/app/src/main/res/layout/cardview_account.xml b/app/src/main/res/layout/cardview_account.xml
+index 9e2b6bea..118383d3 100644
+--- a/app/src/main/res/layout/cardview_account.xml
++++ b/app/src/main/res/layout/cardview_account.xml
+@@ -31,7 +31,7 @@
+     <RelativeLayout
+         android:layout_width="match_parent"
+         android:layout_height="wrap_content"
+-        android:minHeight="80dp">
++        android:minHeight="@dimen/card_min_height">
+ 
+         <View android:id="@+id/account_color_strip"
+             android:layout_width="@dimen/strip_width"
+diff --git a/app/src/main/res/layout/cardview_transaction.xml b/app/src/main/res/layout/cardview_transaction.xml
+index 4e2fc5e2..c2bfabd4 100644
+--- a/app/src/main/res/layout/cardview_transaction.xml
++++ b/app/src/main/res/layout/cardview_transaction.xml
+@@ -30,7 +30,7 @@
+     <RelativeLayout
+         android:layout_width="match_parent"
+         android:layout_height="wrap_content"
+-        android:minHeight="80dp">
++        android:minHeight="@dimen/card_min_height">
+ 
+         <include android:id="@+id/list_item_2_lines"
+             layout="@layout/list_item_2_lines"
+diff --git a/app/src/main/res/layout/fragment_accounts_list.xml b/app/src/main/res/layout/fragment_accounts_list.xml
+index 42755573..591abe6b 100644
+--- a/app/src/main/res/layout/fragment_accounts_list.xml
++++ b/app/src/main/res/layout/fragment_accounts_list.xml
+@@ -29,6 +29,8 @@
+     <android.support.v7.widget.RecyclerView
+         android:id="@+id/account_recycler_view"
+         android:scrollbars="vertical"
++        android:paddingBottom="@dimen/card_min_height"
++        android:clipToPadding="false"
+         android:layout_above="@id/account_balance_toolbar"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent"/>
+diff --git a/app/src/main/res/layout/fragment_transactions_list.xml b/app/src/main/res/layout/fragment_transactions_list.xml
+index 8d8da4e8..da0ef709 100644
+--- a/app/src/main/res/layout/fragment_transactions_list.xml
++++ b/app/src/main/res/layout/fragment_transactions_list.xml
+@@ -25,6 +25,8 @@
+     <android.support.v7.widget.RecyclerView
+         android:id="@+id/transaction_recycler_view"
+         android:scrollbars="vertical"
++        android:paddingBottom="@dimen/card_min_height"
++        android:clipToPadding="false"
+         android:layout_above="@id/account_balance_toolbar"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent"/>
+diff --git a/app/src/main/res/values/dimens.xml b/app/src/main/res/values/dimens.xml
+index b13f1e13..f3d43379 100644
+--- a/app/src/main/res/values/dimens.xml
++++ b/app/src/main/res/values/dimens.xml
+@@ -31,4 +31,5 @@
+     <dimen name="color_swatch_small">48dip</dimen>
+     <dimen name="color_swatch_margins_large">8dip</dimen>
+     <dimen name="color_swatch_margins_small">4dip</dimen>
++    <dimen name="card_min_height">80dp</dimen>
+ </resources>
+\ No newline at end of file

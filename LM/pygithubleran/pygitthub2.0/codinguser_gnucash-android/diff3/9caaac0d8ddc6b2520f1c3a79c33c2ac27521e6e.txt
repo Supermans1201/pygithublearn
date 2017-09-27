@@ -1,0 +1,387 @@
+From 9caaac0d8ddc6b2520f1c3a79c33c2ac27521e6e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 23 Sep 2015 13:29:31 +0200
+Subject: [PATCH] Fix wrong denominator values for currencies having digits
+ other than 2 in the database
+
+Fix: display amounts with the minimum currency digits
+
+The migration updates the split values and quantities to match the fractional digits in the currencies.
+WARNING: The decimal part will be dropped for currencies that do not use it. This can lead to some data loss if someone was using decimals for a currency which doesn't support it
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  11 +-
+ .../org/gnucash/android/db/DatabaseAdapter.java    |   2 +-
+ .../org/gnucash/android/db/MigrationHelper.java    | 125 ++++++++++++++++++---
+ .../gnucash/android/export/xml/GncXmlExporter.java |   4 +-
+ .../android/importer/CommoditiesXmlHandler.java    |   4 +
+ .../main/java/org/gnucash/android/model/Money.java |  33 +-----
+ .../android/ui/settings/SettingsActivity.java      |   2 +-
+ 7 files changed, 128 insertions(+), 53 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 252951e1..15b5535e 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -27,11 +27,11 @@
+ import android.support.annotation.Nullable;
+ import android.text.TextUtils;
+ import android.util.Log;
++
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+-import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+@@ -1163,13 +1163,14 @@ public static int getActiveAccountColorResource(@NonNull String accountUID) {
+     }
+ 
+     /**
+-     * Returns the list of currencies in the database
+-     * @return List of currencies in the database
++     * Returns the list of currencies in use in the database.
++     * <p>This is not the same as the list of all available commodities</p>
++     * @return List of currencies in use
+      */
+-    public List<Currency> getCurrencies(){
++    public List<Currency> getCurrenciesInUse(){
+         Cursor cursor = mDb.query(true, AccountEntry.TABLE_NAME, new String[]{AccountEntry.COLUMN_CURRENCY},
+                 null, null, null, null, null, null);
+-        List<Currency> currencyList = new ArrayList<Currency>();
++        List<Currency> currencyList = new ArrayList<>();
+         try {
+             while (cursor.moveToNext()) {
+                 String currencyCode = cursor.getString(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_CURRENCY));
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 286741dc..33e4ca75 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -66,7 +66,7 @@ public DatabaseAdapter(SQLiteDatabase db, @NonNull String tableName) {
+         if (!db.isOpen() || db.isReadOnly())
+             throw new IllegalArgumentException("Database not open or is read-only. Require writeable database");
+ 
+-        if (mDb.getVersion() >= DatabaseSchema.SPLITS_DB_VERSION) {
++        if (mDb.getVersion() >= 9) {
+             createTempView();
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 7432a7e6..a7b08989 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -24,6 +24,7 @@
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.Environment;
++import android.text.TextUtils;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+@@ -49,13 +50,21 @@
+ import java.math.BigDecimal;
+ import java.nio.channels.FileChannel;
+ import java.sql.Timestamp;
++import java.util.ArrayList;
++import java.util.List;
+ import java.util.UUID;
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.parsers.SAXParser;
+ import javax.xml.parsers.SAXParserFactory;
+ 
+-import static org.gnucash.android.db.DatabaseSchema.*;
++import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
++import static org.gnucash.android.db.DatabaseSchema.CommodityEntry;
++import static org.gnucash.android.db.DatabaseSchema.CommonColumns;
++import static org.gnucash.android.db.DatabaseSchema.PriceEntry;
++import static org.gnucash.android.db.DatabaseSchema.ScheduledActionEntry;
++import static org.gnucash.android.db.DatabaseSchema.SplitEntry;
++import static org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+ 
+ /**
+  * Collection of helper methods which are used during database migrations
+@@ -728,20 +737,6 @@ static int upgradeDbToVersion8(SQLiteDatabase db) {
+ 
+             //auto-balance existing splits
+             Log.i(DatabaseHelper.LOG_TAG, "Auto-balancing existing transaction splits");
+-//            cursor = transactionsDbAdapter.fetchAllRecords();
+-//            while (cursor.moveToNext()){
+-//                Transaction transaction = transactionsDbAdapter.buildModelInstance(cursor);
+-//                if (transaction.isTemplate())
+-//                    continue;
+-//                Money imbalance = transaction.getImbalance();
+-//                if (!imbalance.isAmountZero()){
+-//                    Split split = new Split(imbalance.negate(),
+-//                            accountsDbAdapter.getOrCreateImbalanceAccountUID(imbalance.getCurrency()));
+-//                    split.setTransactionUID(transaction.getUID());
+-//                    splitsDbAdapter.addRecord(split);
+-//                }
+-//            }
+-//            cursor.close();
+             cursor = db.query(
+                     TransactionEntry.TABLE_NAME + " , " + SplitEntry.TABLE_NAME + " ON "
+                             + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + "=" + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID
+@@ -952,7 +947,7 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+                     + SplitEntry.TABLE_NAME + "_bak." + SplitEntry.COLUMN_UID + " , "
+                     + SplitEntry.TABLE_NAME + "_bak." + SplitEntry.COLUMN_MEMO + " , "
+                     + SplitEntry.TABLE_NAME + "_bak." + SplitEntry.COLUMN_TYPE + " , "
+-                    + SplitEntry.TABLE_NAME + "_bak.amount * 100, " //put the amount as both value and quantity since multicurrency transactions were not supported until now
++                    + SplitEntry.TABLE_NAME + "_bak.amount * 100, " //we will update this value in the next steps
+                     + "100, "
+                     + SplitEntry.TABLE_NAME + "_bak.amount * 100, " //default units of 2 decimal places were assumed until now
+                     + "100, "
+@@ -960,6 +955,104 @@ static int upgradeDbToVersion9(SQLiteDatabase db){
+                     + SplitEntry.TABLE_NAME + "_bak." + SplitEntry.COLUMN_TRANSACTION_UID
+                     + " FROM " + SplitEntry.TABLE_NAME + "_bak;");
+ 
++
++            //************** UPDATE SPLITS WHOSE CURRENCIES HAVE NO DECIMAL PLACES *****************
++            //get all account UIDs which have currencies with fraction digits of 0
++            String query = "SELECT " + "A." + AccountEntry.COLUMN_UID + " AS account_uid "
++                    + " FROM " + AccountEntry.TABLE_NAME + " AS A, " + CommodityEntry.TABLE_NAME + " AS C "
++                    + " WHERE A." + AccountEntry.COLUMN_CURRENCY + " = C." + CommodityEntry.COLUMN_MNEMONIC
++                    + " AND C." + CommodityEntry.COLUMN_FRACTION + "= 1";
++
++            Cursor cursor = db.rawQuery(query, null);
++
++            List<String> accountUIDs = new ArrayList<>();
++            try {
++                while (cursor.moveToNext()) {
++                    String accountUID = cursor.getString(cursor.getColumnIndexOrThrow("account_uid"));
++                    accountUIDs.add(accountUID);
++                }
++            } finally {
++                cursor.close();
++            }
++
++            String accounts = TextUtils.join("' , '", accountUIDs);
++            db.execSQL("REPLACE INTO " + SplitEntry.TABLE_NAME + " ( "
++                    + SplitEntry.COLUMN_UID + " , "
++                    + SplitEntry.COLUMN_MEMO + " , "
++                    + SplitEntry.COLUMN_TYPE + " , "
++                    + SplitEntry.COLUMN_ACCOUNT_UID + " , "
++                    + SplitEntry.COLUMN_TRANSACTION_UID + " , "
++                    + SplitEntry.COLUMN_CREATED_AT + " , "
++                    + SplitEntry.COLUMN_MODIFIED_AT + " , "
++                    + SplitEntry.COLUMN_VALUE_NUM + " , "
++                    + SplitEntry.COLUMN_VALUE_DENOM + " , "
++                    + SplitEntry.COLUMN_QUANTITY_NUM + " , "
++                    + SplitEntry.COLUMN_QUANTITY_DENOM
++                    + ")  SELECT "
++                    + SplitEntry.COLUMN_UID + " , "
++                    + SplitEntry.COLUMN_MEMO + " , "
++                    + SplitEntry.COLUMN_TYPE + " , "
++                    + SplitEntry.COLUMN_ACCOUNT_UID + " , "
++                    + SplitEntry.COLUMN_TRANSACTION_UID + " , "
++                    + SplitEntry.COLUMN_CREATED_AT + " , "
++                    + SplitEntry.COLUMN_MODIFIED_AT + " , "
++                    + " ROUND (" + SplitEntry.COLUMN_VALUE_NUM + "/ 100), "
++                    + "1, "
++                    + " ROUND (" + SplitEntry.COLUMN_QUANTITY_NUM + "/ 100), "
++                    + "1 "
++                    + " FROM " + SplitEntry.TABLE_NAME
++                    + " WHERE " + SplitEntry.COLUMN_ACCOUNT_UID + " IN ('" + accounts + "')"
++                    + ";");
++
++
++
++            //************ UPDATE SPLITS WITH CURRENCIES HAVING 3 DECIMAL PLACES *******************
++            query = "SELECT " + "A." + AccountEntry.COLUMN_UID + " AS account_uid "
++                    + " FROM " + AccountEntry.TABLE_NAME + " AS A, " + CommodityEntry.TABLE_NAME + " AS C "
++                    + " WHERE A." + AccountEntry.COLUMN_CURRENCY + " = C." + CommodityEntry.COLUMN_MNEMONIC
++                    + " AND C." + CommodityEntry.COLUMN_FRACTION + "= 1000";
++
++            cursor = db.rawQuery(query, null);
++
++            accountUIDs.clear();
++            try {
++                while (cursor.moveToNext()) {
++                    String accountUID = cursor.getString(cursor.getColumnIndexOrThrow("account_uid"));
++                    accountUIDs.add(accountUID);
++                }
++            } finally {
++                cursor.close();
++            }
++
++            accounts = TextUtils.join("' , '", accountUIDs);
++            db.execSQL("REPLACE INTO " + SplitEntry.TABLE_NAME + " ( "
++                    + SplitEntry.COLUMN_UID             + " , "
++                    + SplitEntry.COLUMN_MEMO            + " , "
++                    + SplitEntry.COLUMN_TYPE            + " , "
++                    + SplitEntry.COLUMN_ACCOUNT_UID     + " , "
++                    + SplitEntry.COLUMN_TRANSACTION_UID + " , "
++                    + SplitEntry.COLUMN_CREATED_AT      + " , "
++                    + SplitEntry.COLUMN_MODIFIED_AT     + " , "
++                    + SplitEntry.COLUMN_VALUE_NUM       + " , "
++                    + SplitEntry.COLUMN_VALUE_DENOM     + " , "
++                    + SplitEntry.COLUMN_QUANTITY_NUM    + " , "
++                    + SplitEntry.COLUMN_QUANTITY_DENOM
++                    + ")  SELECT "
++                    + SplitEntry.COLUMN_UID + " , "
++                    + SplitEntry.COLUMN_MEMO + " , "
++                    + SplitEntry.COLUMN_TYPE + " , "
++                    + SplitEntry.COLUMN_ACCOUNT_UID + " , "
++                    + SplitEntry.COLUMN_TRANSACTION_UID + " , "
++                    + SplitEntry.COLUMN_CREATED_AT  + " , "
++                    + SplitEntry.COLUMN_MODIFIED_AT + " , "
++                    + " ROUND (" + SplitEntry.COLUMN_VALUE_NUM + "* 10), " //add an extra zero because we used only 2 digits before
++                    + "1000, "
++                    + " ROUND (" + SplitEntry.COLUMN_QUANTITY_NUM + "* 10), "
++                    + "1000 "
++                    + " FROM " + SplitEntry.TABLE_NAME
++                    + " WHERE " + SplitEntry.COLUMN_ACCOUNT_UID + " IN ('" + accounts + "')"
++                    + ";");
++
+             db.execSQL("DROP TABLE " + SplitEntry.TABLE_NAME + "_bak");
+ 
+             db.setTransactionSuccessful();
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 374097cb..671bef6b 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -23,7 +23,6 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
+-import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportFormat;
+@@ -49,7 +48,6 @@
+ import java.util.Collection;
+ import java.util.Currency;
+ import java.util.List;
+-import java.util.Locale;
+ import java.util.Map;
+ import java.util.TreeMap;
+ import java.util.UUID;
+@@ -719,7 +717,7 @@ public void generateExport(Writer writer) throws ExporterException{
+             xmlSerializer.text(UUID.randomUUID().toString().replaceAll("-", ""));
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_BOOK_ID);
+             //commodity count
+-            List<Currency> currencies = mAccountsDbAdapter.getCurrencies();
++            List<Currency> currencies = mAccountsDbAdapter.getCurrenciesInUse();
+             for (int i = 0; i< currencies.size();i++) {
+                 if (currencies.get(i).getCurrencyCode().equals("XXX")) {
+                     currencies.remove(i);
+diff --git a/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+index 75aff02d..6b4ce3a1 100644
+--- a/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/CommoditiesXmlHandler.java
+@@ -48,6 +48,10 @@ public void startElement(String uri, String localName, String qName, Attributes
+             String fullname = attributes.getValue(ATTR_FULL_NAME);
+             String namespace = attributes.getValue(ATTR_NAMESPACE);
+             String cusip = attributes.getValue(ATTR_EXCHANGE_CODE);
++            //TODO: investigate how up-to-date the currency XML list is and use of parts-per-unit vs smallest-fraction.
++            //some currencies like XAF have smallest fraction 100, but parts-per-unit of 1.
++            // However java.util.Currency agrees only with the parts-per-unit although we use smallest-fraction in the app
++            // This could lead to inconsistencies over time
+             String smallestFraction = attributes.getValue(ATTR_SMALLEST_FRACTION);
+             String localSymbol = attributes.getValue(ATTR_LOCAL_SYMBOL);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index c7a66e47..780e33cb 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -77,12 +77,6 @@
+ 	 * Defaults to {@link #DEFAULT_ROUNDING_MODE}
+ 	 */
+ 	protected RoundingMode ROUNDING_MODE = DEFAULT_ROUNDING_MODE;
+-	
+-	/**
+-	 * Number of decimal places to limit fractions to in arithmetic operations
+-	 * Defaults to {@link #DEFAULT_DECIMAL_PLACES}
+-	 */
+-	protected int DECIMAL_PLACES = DEFAULT_DECIMAL_PLACES;
+ 
+ 	/**
+ 	 * Default currency code (according ISO 4217) 
+@@ -140,7 +134,7 @@ public static BigDecimal getBigDecimal(long numerator, long denominator) {
+ 	 */
+ 	public Money(BigDecimal amount, Currency currency){
+ 		this.mAmount = amount;
+-		this.mCurrency = currency;
++		setCurrency(currency);
+ 	}
+ 	
+ 	/**
+@@ -153,20 +147,6 @@ public Money(String amount, String currencyCode){
+ 		setAmount(amount);
+ 		setCurrency(Currency.getInstance(currencyCode));
+ 	}
+-	
+-	/**
+-	 * Overloaded constructor
+-	 * Accepts <code>context</code> options for rounding mode during operations on this money object
+-	 * @param amount {@link BigDecimal} value of the money instance
+-	 * @param currency {@link Currency} associated with the <code>amount</code>
+-	 * @param context {@link MathContext} specifying rounding mode during operations
+-	 */
+-	public Money(BigDecimal amount, Currency currency, MathContext context){
+-		setAmount(amount);
+-		setCurrency(currency);
+-		ROUNDING_MODE = context.getRoundingMode();
+-		DECIMAL_PLACES = context.getPrecision();
+-	}
+ 
+ 	/**
+ 	 * Constructs a new money amount given the numerator and denominator of the amount.
+@@ -244,7 +224,6 @@ public Money withCurrency(Currency currency){
+ 	 * @param currency {@link Currency} to assign to the Money object  
+ 	 */
+ 	private void setCurrency(Currency currency) {
+-		//TODO: Consider doing a conversion of the value as well in the future
+ 		this.mCurrency = currency;
+ 	}
+ 
+@@ -338,14 +317,14 @@ public String asString(){
+ 	/**
+ 	 * Returns a string representation of the Money object formatted according to 
+ 	 * the <code>locale</code> and includes the currency symbol. 
+-	 * The output precision is limited to {@link #DECIMAL_PLACES}.
++	 * The output precision is limited to the number of fractional digits supported by the currency
+ 	 * @param locale Locale to use when formatting the object
+ 	 * @return String containing formatted Money representation
+ 	 */
+     public String formattedString(Locale locale){
+ 		NumberFormat formatter = NumberFormat.getInstance(locale);
+-		formatter.setMinimumFractionDigits(DECIMAL_PLACES);
+-		formatter.setMaximumFractionDigits(DECIMAL_PLACES);
++		formatter.setMinimumFractionDigits(mCurrency.getDefaultFractionDigits());
++		formatter.setMaximumFractionDigits(mCurrency.getDefaultFractionDigits());
+ 		return formatter.format(asDouble()) + " " + mCurrency.getSymbol(locale);
+ 	}
+ 
+@@ -371,7 +350,7 @@ public Money negate(){
+ 	 * @param amount {@link BigDecimal} amount to be set
+ 	 */
+ 	private void setAmount(BigDecimal amount) {
+-		mAmount = amount.setScale(DECIMAL_PLACES, ROUNDING_MODE);
++		mAmount = amount.setScale(mCurrency.getDefaultFractionDigits(), ROUNDING_MODE);
+ 	}
+ 	
+ 	/**
+@@ -493,7 +472,7 @@ public boolean isNegative(){
+ 	 * @return String representation of the amount (without currency) of the Money object
+ 	 */
+ 	public String toPlainString(){
+-		return mAmount.setScale(DECIMAL_PLACES, ROUNDING_MODE).toPlainString();
++		return mAmount.setScale(mCurrency.getDefaultFractionDigits(), ROUNDING_MODE).toPlainString();
+ 	}
+ 	
+ 	/**
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 74d7f3f3..7fb17bfe 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -278,7 +278,7 @@ protected boolean isValidFragment(String fragmentName) {
+     public void setImbalanceAccountsHidden(boolean useDoubleEntry) {
+         String isHidden = useDoubleEntry ? "0" : "1";
+         AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
+-        List<Currency> currencies = accountsDbAdapter.getCurrencies();
++        List<Currency> currencies = accountsDbAdapter.getCurrenciesInUse();
+         for (Currency currency : currencies) {
+             String uid = accountsDbAdapter.getImbalanceAccountUID(currency);
+             if (uid != null){

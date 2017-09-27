@@ -1,0 +1,2084 @@
+From de6afbc1fedfde3455e7126dc368265fb4b7eed3 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Fri, 27 Nov 2015 14:00:30 +0800
+Subject: [PATCH 1/7] fix the bug that modify account name will delete all
+ transaction under the account
+
+---
+ .../java/org/gnucash/android/db/DatabaseAdapter.java   | 18 ++++++++++++++++++
+ .../android/ui/account/AccountFormFragment.java        |  2 ++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 5281404f..533b7af7 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -56,6 +56,10 @@
+ 
+     protected SQLiteStatement mReplaceStatement;
+ 
++    public enum UpdateMethod {
++        insert, update, replace
++    };
++
+     /**
+      * Opens the database adapter with an existing database
+      * @param db SQLiteDatabase object
+@@ -620,6 +624,20 @@ public void setTransactionSuccessful() {
+         mDb.setTransactionSuccessful();
+     }
+ 
++    /// Foreign key constraits should be enabled in general.
++    /// But if it affects speed (check constraints takes time)
++    /// and the constrained can be assured by the program,
++    /// or if some SQL exec will cause deletion of records
++    /// (like use replace in accounts update will delete all transactions)
++    /// that need not be deleted, then it can be disabled temporarily
++    public void enableForeignKey(boolean enable) {
++        if (enable){
++            mDb.execSQL("PRAGMA foreign_keys=ON");
++        } else {
++            mDb.execSQL("PRAGMA foreign_keys=OFF");
++        }
++    }
++
+     /**
+      * Expose mDb.endTransaction()
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index b83b0288..0a62283f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -846,7 +846,9 @@ private void saveAccount() {
+ 		if (mAccountsDbAdapter == null)
+ 			mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+         // bulk update, will not update transactions
++        mAccountsDbAdapter.enableForeignKey(false);
+ 		mAccountsDbAdapter.bulkAddRecords(accountsToUpdate);
++        mAccountsDbAdapter.enableForeignKey(true);
+ 
+ 		finishFragment();
+ 	}
+
+From 13ef64a5bd2be9ec0b3923c90a209d6a46745df1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 11:13:25 +0100
+Subject: [PATCH 2/7] Fix QIF export sometimes exports all transactions
+
+This is due to the import still in progress while the last export time is set.
+Now we query the database to get the last export time (instead of using current time) which ensures that the import database transaction must have completed first.
+
+Fixes #444
+---
+ CHANGELOG.md                                            |  6 ++++++
+ app/build.gradle                                        |  2 +-
+ .../org/gnucash/android/db/TransactionsDbAdapter.java   | 17 +++++++++++++++++
+ .../org/gnucash/android/importer/GncXmlImporter.java    |  9 +++++++--
+ 4 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 10f24f1b..77ac5089 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,11 @@
+ Change Log
+ ===============================================================================
++Version 2.0.4 *(2015-12-xx)*
++----------------------------
++* Fixed: Transaction export time not always working reliably
++* Fixed: Renaming account causes transactions to be deleted
++
++
+ Version 2.0.3 *(2015-11-21)*
+ ----------------------------
+ * Fixed: Unable to enter decimal amounts in split editor
+diff --git a/app/build.gradle b/app/build.gradle
+index 820cf023..3280e903 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -5,7 +5,7 @@ apply plugin: 'io.fabric'
+ 
+ def versionMajor = 2
+ def versionMinor = 0
+-def versionPatch = 3
++def versionPatch = 4
+ def versionBuild = 0
+ 
+ def buildTime() {
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index b522ea7f..bf3d19af 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -37,6 +37,7 @@
+ import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ 
++import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -634,6 +635,22 @@ public long getTimestampOfLatestTransaction(AccountType type, String currencyCod
+     }
+ 
+     /**
++     * Returns the most recent `modified_at` timestamp of non-template transactions in the database
++     * @return Last moodified time in milliseconds or null if no such transactions exist
++     */
++    public Timestamp getTimestampOfLastModification(){
++        Cursor cursor = mDb.query(TransactionEntry.TABLE_NAME,
++                new String[]{"MAX(" + TransactionEntry.COLUMN_MODIFIED_AT + ")"},
++                TransactionEntry.COLUMN_TEMPLATE + " = 0", null, null, null, null);
++        Timestamp timestamp = null;
++        if (cursor.moveToNext()){
++            String timeString = cursor.getString(0);
++            timestamp = Timestamp.valueOf(timeString);
++        }
++        return timestamp;
++    }
++
++    /**
+      * Returns the earliest or latest timestamp of transactions for a specific account type and currency
+      * @param mod Mode (either MAX or MIN)
+      * @param type AccountType
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index 43ea7c61..a6734ed1 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -21,6 +21,7 @@
+ import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.Exporter;
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+@@ -93,8 +94,12 @@ public static void parse(InputStream gncXmlInputStream) throws ParserConfigurati
+         xr.parse(new InputSource(bos));
+         long endTime = System.nanoTime();
+ 
+-        String timeStamp = new Timestamp(System.currentTimeMillis()).toString();
+-        PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext()).edit().putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp).apply();
++
++        Timestamp timeStamp = TransactionsDbAdapter.getInstance().getTimestampOfLastModification();
++        PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
++                .edit()
++                .putString(Exporter.PREF_LAST_EXPORT_TIME, timeStamp.toString())
++                .apply();
+ 
+         Log.d(GncXmlImporter.class.getSimpleName(), String.format("%d ns spent on importing the file", endTime-startTime));
+     }
+
+From 93cc38df92f2ef957218d74642c3de89706c016e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 13:54:54 +0100
+Subject: [PATCH 3/7] Improve time formatting in transactions list
+
+Fix random crashes when saving transactions
+Closes #431
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  6 ++++-
+ .../java/org/gnucash/android/export/Exporter.java  |  4 +--
+ .../ui/transaction/TransactionFormFragment.java    |  4 +--
+ .../ui/transaction/TransactionsActivity.java       | 31 +++++++++++++++++++++-
+ .../ui/transaction/TransactionsListFragment.java   | 11 ++++----
+ 5 files changed, 45 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 63b189a3..7da4727b 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -794,9 +794,13 @@ private Money computeBalance(String accountUID, long startTimestamp, long endTim
+      * @param endTimestamp the end timestamp of the time range
+      * @return Money balance of account list
+      */
+-    public Money getAccountsBalance(List<String> accountUIDList, long startTimestamp, long endTimestamp) {
++    public Money getAccountsBalance(@NonNull List<String> accountUIDList, long startTimestamp, long endTimestamp) {
+         String currencyCode = GnuCashApplication.getDefaultCurrencyCode();
+         Money balance = Money.createZeroInstance(currencyCode);
++
++        if (accountUIDList.isEmpty())
++            return balance;
++
+         boolean hasDebitNormalBalance = getAccountType(accountUIDList.get(0)).hasDebitNormalBalance();
+ 
+         SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 9727f101..7e2878a8 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -201,11 +201,11 @@ public String getExportMimeType(){
+     public static class ExporterException extends RuntimeException{
+ 
+         public ExporterException(ExportParams params){
+-            super("Failed to generate " + params.getExportFormat().toString());
++            super("Failed to generate export with parameters:  " + params.toString());
+         }
+ 
+         public ExporterException(@NonNull ExportParams params, @NonNull String msg) {
+-            super("Failed to generate " + params.getExportFormat().toString() + "-" + msg);
++            super("Failed to generate export with parameters: " + params.toString() + " - " + msg);
+         }
+ 
+         public ExporterException(ExportParams params, Throwable throwable){
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 49042df7..48db0b81 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -785,8 +785,8 @@ private void saveNewTransaction() {
+                     mTransaction.addSplit(split);
+ 
+                     String transferAcctUID;
+-                    if (mUseDoubleEntry) {
+-                        long transferAcctId = mTransferAccountSpinner.getSelectedItemId();
++                    long transferAcctId = mTransferAccountSpinner.getSelectedItemId();
++                    if (mUseDoubleEntry || transferAcctId < 0) {
+                         transferAcctUID = mAccountsDbAdapter.getUID(transferAcctId);
+                     } else {
+                         transferAcctUID = mAccountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 350f0a50..b2beebf7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -24,6 +24,7 @@
+ import android.os.AsyncTask;
+ import android.os.Build;
+ import android.os.Bundle;
++import android.support.annotation.NonNull;
+ import android.support.design.widget.FloatingActionButton;
+ import android.support.design.widget.TabLayout;
+ import android.support.v4.app.Fragment;
+@@ -32,6 +33,7 @@
+ import android.support.v4.view.PagerAdapter;
+ import android.support.v4.view.ViewPager;
+ import android.support.v7.widget.Toolbar;
++import android.text.format.DateUtils;
+ import android.util.Log;
+ import android.util.SparseArray;
+ import android.view.Menu;
+@@ -60,8 +62,12 @@
+ import org.gnucash.android.ui.util.OnTransactionClickedListener;
+ import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
++import org.joda.time.LocalDate;
+ 
+ import java.math.BigDecimal;
++import java.text.DateFormat;
++import java.text.SimpleDateFormat;
++import java.util.Date;
+ 
+ import butterknife.Bind;
+ import butterknife.ButterKnife;
+@@ -92,6 +98,7 @@
+      * Number of pages to show
+      */
+     private static final int DEFAULT_NUM_PAGES = 2;
++    private static SimpleDateFormat mDayMonthDateFormat = new SimpleDateFormat("EEE, d MMM");
+ 
+     /**
+      * GUID of {@link Account} whose transactions are displayed
+@@ -153,7 +160,6 @@ public void onNothingSelected(AdapterView<?> parent) {
+     private PagerAdapter mPagerAdapter;
+ 
+ 
+-
+     /**
+      * Adapter for managing the sub-account and transaction fragment pages in the accounts view
+      */
+@@ -486,6 +492,29 @@ public static void displayBalance(TextView balanceTextView, Money balance){
+         balanceTextView.setTextColor(fontColor);
+     }
+ 
++    /**
++     * Formats the date to show the the day of the week if the {@code dateMillis} is within 7 days
++     * of today. Else it shows the actual date formatted as short string. <br>
++     * It also shows "today", "yesterday" or "tomorrow" if the date is on any of those days
++     * @param dateMillis
++     * @return
++     */
++    @NonNull
++    public static String getPrettyDateFormat(Context context, long dateMillis) {
++        LocalDate transactionTime = new LocalDate(dateMillis);
++        LocalDate today = new LocalDate();
++        String prettyDateText = null;
++        if (transactionTime.compareTo(today.minusDays(1)) >= 0 && transactionTime.compareTo(today.plusDays(1)) <= 0){
++            prettyDateText = DateUtils.getRelativeTimeSpanString(dateMillis, System.currentTimeMillis(), DateUtils.DAY_IN_MILLIS).toString();
++        } else if (transactionTime.getYear() == today.getYear()){
++            prettyDateText = mDayMonthDateFormat.format(new Date(dateMillis));
++        } else {
++            prettyDateText = DateUtils.formatDateTime(context, dateMillis, DateUtils.FORMAT_ABBREV_MONTH | DateUtils.FORMAT_SHOW_YEAR);
++        }
++
++        return prettyDateText;
++    }
++
+ 	@Override
+ 	public void createNewTransaction(String accountUID) {
+         Intent createTransactionIntent = new Intent(this.getApplicationContext(), FormActivity.class);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index e59155ea..9b0a8c41 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -21,6 +21,7 @@
+ import android.content.res.Configuration;
+ import android.database.Cursor;
+ import android.os.Bundle;
++import android.support.annotation.NonNull;
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.LoaderManager.LoaderCallbacks;
+ import android.support.v4.content.Loader;
+@@ -42,6 +43,7 @@
+ import android.widget.TextView;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseSchema;
+@@ -57,8 +59,10 @@
+ import org.gnucash.android.ui.util.CursorRecyclerAdapter;
+ import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.util.widget.EmptyRecyclerView;
++import org.joda.time.LocalDate;
+ 
+ import java.text.DateFormat;
++import java.text.SimpleDateFormat;
+ import java.util.Date;
+ import java.util.List;
+ 
+@@ -196,7 +200,6 @@ public void onLoaderReset(Loader<Cursor> loader) {
+ 		mTransactionRecyclerAdapter.swapCursor(null);
+ 	}
+ 
+-	
+ 	/**
+ 	 * {@link DatabaseCursorLoader} for loading transactions asynchronously from the database
+ 	 * @author Ngewi Fet <ngewif@gmail.com>
+@@ -221,8 +224,6 @@ public Cursor loadInBackground() {
+ 
+ 	public class TransactionRecyclerAdapter extends CursorRecyclerAdapter<TransactionRecyclerAdapter.ViewHolder>{
+ 
+-		DateFormat simpleDateFormat = DateFormat.getDateInstance(DateFormat.MEDIUM);
+-
+ 		public TransactionRecyclerAdapter(Cursor cursor) {
+ 			super(cursor);
+ 		}
+@@ -264,7 +265,8 @@ public void onBindViewHolderCursor(ViewHolder holder, Cursor cursor) {
+ 			holder.transactionNote.setText(text);
+ 
+ 			long dateMillis = cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.TransactionEntry.COLUMN_TIMESTAMP));
+-			String dateText = DateUtils.getRelativeTimeSpanString(dateMillis, System.currentTimeMillis(), DateUtils.DAY_IN_MILLIS).toString();
++			String dateText = TransactionsActivity.getPrettyDateFormat(getActivity(), dateMillis);
++
+ 			holder.transactionDate.setText(dateText);
+ 
+ 			final long id = holder.transactionId;
+@@ -288,7 +290,6 @@ public void onClick(View v) {
+ 
+ 		}
+ 
+-
+ 		public class ViewHolder extends RecyclerView.ViewHolder implements PopupMenu.OnMenuItemClickListener{
+ 			@Bind(R.id.primary_text) 		public TextView transactionDescription;
+ 			@Bind(R.id.secondary_text) 		public TextView transactionNote;
+
+From 8b8f1944285e299d13ef1e00ded080c4a074170a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 17:58:12 +0100
+Subject: [PATCH 4/7] Fix: setup wizard won't  complete if manual account
+ creation is selected
+
+Fix dialog not shown during initial account import
+Fix: setting last import date when only accounts are imported (no transactions)
+
+Fixes #443
+Fixes #428
+Fixes #438
+---
+ CHANGELOG.md                                               |  3 ++-
+ .../java/org/gnucash/android/db/TransactionsDbAdapter.java | 14 ++++++++++----
+ .../java/org/gnucash/android/importer/GncXmlImporter.java  |  1 -
+ .../org/gnucash/android/ui/account/AccountsActivity.java   |  5 +++--
+ .../org/gnucash/android/ui/common/BaseDrawerActivity.java  |  2 +-
+ .../org/gnucash/android/ui/settings/SettingsActivity.java  |  2 +-
+ .../gnucash/android/ui/wizard/FirstRunWizardActivity.java  | 11 +++++++++--
+ 7 files changed, 26 insertions(+), 12 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 77ac5089..3a274fca 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,7 +4,8 @@ Version 2.0.4 *(2015-12-xx)*
+ ----------------------------
+ * Fixed: Transaction export time not always working reliably
+ * Fixed: Renaming account causes transactions to be deleted
+-
++* Fixed: Progress dialog not displayed during initial import
++* Fixed: Unable to finish first-run wizard if choosing to create accounts manually
+ 
+ Version 2.0.3 *(2015-11-21)*
+ ----------------------------
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index bf3d19af..64920a7b 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -636,17 +636,23 @@ public long getTimestampOfLatestTransaction(AccountType type, String currencyCod
+ 
+     /**
+      * Returns the most recent `modified_at` timestamp of non-template transactions in the database
+-     * @return Last moodified time in milliseconds or null if no such transactions exist
++     * @return Last moodified time in milliseconds or current time if there is none in the database
+      */
+     public Timestamp getTimestampOfLastModification(){
+         Cursor cursor = mDb.query(TransactionEntry.TABLE_NAME,
+                 new String[]{"MAX(" + TransactionEntry.COLUMN_MODIFIED_AT + ")"},
+-                TransactionEntry.COLUMN_TEMPLATE + " = 0", null, null, null, null);
++                null, null, null, null, null);
++
+         Timestamp timestamp = null;
+-        if (cursor.moveToNext()){
++        if (cursor.moveToFirst()){
+             String timeString = cursor.getString(0);
+-            timestamp = Timestamp.valueOf(timeString);
++            if (timeString == null) //in case there were no transactions in the XML file (account structure only)
++                timestamp = new Timestamp(System.currentTimeMillis());
++            else {
++                timestamp = Timestamp.valueOf(timeString);
++            }
+         }
++        cursor.close();
+         return timestamp;
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index a6734ed1..eb9eea9a 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -94,7 +94,6 @@ public static void parse(InputStream gncXmlInputStream) throws ParserConfigurati
+         xr.parse(new InputSource(bos));
+         long endTime = System.nanoTime();
+ 
+-
+         Timestamp timeStamp = TransactionsDbAdapter.getInstance().getTimestampOfLastModification();
+         PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext())
+                 .edit()
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 494d817b..34e9e3c8 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -525,10 +525,11 @@ public static void startXmlFileChooser(Activity activity) {
+      * <p>This method is usually called in response to {@link AccountsActivity#startXmlFileChooser(Activity)}</p>
+      * @param context Activity context
+      * @param data Intent data containing the XML uri
++     * @param onFinishTask Task to be executed when import is complete
+      */
+-    public static void importXmlFileFromIntent(Activity context, Intent data) {
++    public static void importXmlFileFromIntent(Activity context, Intent data, TaskDelegate onFinishTask) {
+         GncXmlExporter.createBackup();
+-        new ImportAsyncTask(context).execute(data.getData());
++        new ImportAsyncTask(context, onFinishTask).execute(data.getData());
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index 6d12529f..c0b3460b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -193,7 +193,7 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 
+         switch (requestCode) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+-                AccountsActivity.importXmlFileFromIntent(this, data);
++                AccountsActivity.importXmlFileFromIntent(this, data, null);
+                 break;
+         }
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 250a799c..6cd389c4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -578,7 +578,7 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+         switch (requestCode) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 if (resultCode == Activity.RESULT_OK && data != null) {
+-                    AccountsActivity.importXmlFileFromIntent(this, data);
++                    AccountsActivity.importXmlFileFromIntent(this, data, null);
+                 }
+                 break;
+             case GeneralPreferenceFragment.PASSCODE_REQUEST_CODE:
+diff --git a/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java b/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
+index 850d8032..71732849 100644
+--- a/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/wizard/FirstRunWizardActivity.java
+@@ -52,6 +52,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.ui.account.AccountsActivity;
++import org.gnucash.android.ui.util.TaskDelegate;
+ 
+ import java.io.FileNotFoundException;
+ import java.io.InputStream;
+@@ -212,6 +213,8 @@ private void createAccountsAndFinish() {
+             finish();
+         } else if (mAccountOptions.equals(getString(R.string.wizard_option_import_my_accounts))){
+             AccountsActivity.startXmlFileChooser(this);
++        } else {
++            finish();
+         }
+     }
+ 
+@@ -252,9 +255,13 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+         switch (requestCode){
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 if (resultCode == Activity.RESULT_OK && data != null) {
+-                    AccountsActivity.importXmlFileFromIntent(this, data);
++                    AccountsActivity.importXmlFileFromIntent(this, data, new TaskDelegate() {
++                        @Override
++                        public void onTaskComplete() {
++                            finish();
++                        }
++                    });
+                 }
+-                finish();
+                 break;
+         }
+     }
+
+From 3624798f5107e80b807ce6f787da7190de3ecb92 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 18:08:12 +0100
+Subject: [PATCH 5/7] Remove inapplicable options from scheduled actions
+ context menu
+
+Update CHANGELOG
+---
+ CHANGELOG.md                                       |  3 ++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  6 ++---
+ .../transaction/ScheduledActionsListFragment.java  |  2 +-
+ .../main/res/menu/schedxactions_context_menu.xml   | 26 ++++++++++++++++++++++
+ .../main/res/menu/transactions_context_menu.xml    |  3 +--
+ 5 files changed, 32 insertions(+), 8 deletions(-)
+ create mode 100644 app/src/main/res/menu/schedxactions_context_menu.xml
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3a274fca..80e01a7d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,11 +1,12 @@
+ Change Log
+ ===============================================================================
+-Version 2.0.4 *(2015-12-xx)*
++Version 2.0.4 *(2015-12-02)*
+ ----------------------------
+ * Fixed: Transaction export time not always working reliably
+ * Fixed: Renaming account causes transactions to be deleted
+ * Fixed: Progress dialog not displayed during initial import
+ * Fixed: Unable to finish first-run wizard if choosing to create accounts manually
++* Fixed: Removed inapplicable options in scheduled actions context menu
+ 
+ Version 2.0.3 *(2015-11-21)*
+ ----------------------------
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 64920a7b..0f9b4bfa 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -643,12 +643,10 @@ public Timestamp getTimestampOfLastModification(){
+                 new String[]{"MAX(" + TransactionEntry.COLUMN_MODIFIED_AT + ")"},
+                 null, null, null, null, null);
+ 
+-        Timestamp timestamp = null;
++        Timestamp timestamp = new Timestamp(System.currentTimeMillis());
+         if (cursor.moveToFirst()){
+             String timeString = cursor.getString(0);
+-            if (timeString == null) //in case there were no transactions in the XML file (account structure only)
+-                timestamp = new Timestamp(System.currentTimeMillis());
+-            else {
++            if (timeString != null){ //in case there were no transactions in the XML file (account structure only)
+                 timestamp = Timestamp.valueOf(timeString);
+             }
+         }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
+index 2358ddbf..649f5a51 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
+@@ -95,7 +95,7 @@
+         @Override
+         public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+             MenuInflater inflater = mode.getMenuInflater();
+-            inflater.inflate(R.menu.transactions_context_menu, menu);
++            inflater.inflate(R.menu.schedxactions_context_menu, menu);
+             return true;
+         }
+ 
+diff --git a/app/src/main/res/menu/schedxactions_context_menu.xml b/app/src/main/res/menu/schedxactions_context_menu.xml
+new file mode 100644
+index 00000000..74106be5
+--- /dev/null
++++ b/app/src/main/res/menu/schedxactions_context_menu.xml
+@@ -0,0 +1,26 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++ Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ 
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++ 
++    http://www.apache.org/licenses/LICENSE-2.0
++ 
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++-->
++
++<menu xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto">
++
++    <item android:id="@+id/context_menu_delete"
++        android:icon="@drawable/content_discard_holo_dark"
++        android:title="@string/menu_delete"
++        app:showAsAction="always"
++        android:orderInCategory="3"/>
++</menu>
+\ No newline at end of file
+diff --git a/app/src/main/res/menu/transactions_context_menu.xml b/app/src/main/res/menu/transactions_context_menu.xml
+index cd4f7717..14cb5e34 100644
+--- a/app/src/main/res/menu/transactions_context_menu.xml
++++ b/app/src/main/res/menu/transactions_context_menu.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <!--
+- Copyright (c) 2012 Ngewi Fet <ngewif@gmail.com>
++ Copyright (c) 2012 - 2015 Ngewi Fet <ngewif@gmail.com>
+  
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+@@ -26,7 +26,6 @@
+         android:title="@string/menu_duplicate_transaction"
+         app:showAsAction="always"
+         android:orderInCategory="2" />
+-    <!-- TODO: Add duplicate option -->
+ 	<item android:id="@+id/context_menu_delete"
+           android:icon="@drawable/content_discard_holo_dark"
+           android:title="@string/menu_delete"
+
+From a90da4dc7da4a27719cc9d53f190cd8958c65eeb Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 22:05:06 +0100
+Subject: [PATCH 6/7] Fix crash when deleting scheduled exports
+
+Fixes #441
+---
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  6 +----
+ .../transaction/ScheduledActionsListFragment.java  | 26 ++++++++++++++--------
+ 2 files changed, 18 insertions(+), 14 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 533b7af7..2e810b56 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -56,10 +56,6 @@
+ 
+     protected SQLiteStatement mReplaceStatement;
+ 
+-    public enum UpdateMethod {
+-        insert, update, replace
+-    };
+-
+     /**
+      * Opens the database adapter with an existing database
+      * @param db SQLiteDatabase object
+@@ -427,7 +423,7 @@ public String getUID(long id){
+             if (cursor.moveToFirst()) {
+                 uid = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.CommonColumns.COLUMN_UID));
+             } else {
+-                throw new IllegalArgumentException("Account record ID " + id + " does not exist in the db");
++                throw new IllegalArgumentException(mTableName + " Record ID " + id + " does not exist in the db");
+             }
+         } finally {
+             cursor.close();
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
+index 649f5a51..5d60d8b3 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/ScheduledActionsListFragment.java
+@@ -115,16 +115,24 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+             switch (item.getItemId()) {
+                 case R.id.context_menu_delete:
+                     for (long id : getListView().getCheckedItemIds()) {
+-                        Log.i(TAG, "Cancelling scheduled transaction(s)");
+-                        String trnUID = mTransactionsDbAdapter.getUID(id);
+-                        ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+-                        List<ScheduledAction> actions = scheduledActionDbAdapter.getScheduledActionsWithUID(trnUID);
+-
+-                        if (mTransactionsDbAdapter.deleteRecord(id)){
+-                            Toast.makeText(getActivity(), R.string.toast_recurring_transaction_deleted, Toast.LENGTH_SHORT).show();
+-                            for (ScheduledAction action : actions) {
+-                                scheduledActionDbAdapter.deleteRecord(action.getUID());
++
++                        if (mActionType == ScheduledAction.ActionType.TRANSACTION) {
++                            Log.i(TAG, "Cancelling scheduled transaction(s)");
++                            String trnUID = mTransactionsDbAdapter.getUID(id);
++                            ScheduledActionDbAdapter scheduledActionDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
++                            List<ScheduledAction> actions = scheduledActionDbAdapter.getScheduledActionsWithUID(trnUID);
++
++                            if (mTransactionsDbAdapter.deleteRecord(id)) {
++                                Toast.makeText(getActivity(),
++                                        R.string.toast_recurring_transaction_deleted,
++                                        Toast.LENGTH_SHORT).show();
++                                for (ScheduledAction action : actions) {
++                                    scheduledActionDbAdapter.deleteRecord(action.getUID());
++                                }
+                             }
++                        } else if (mActionType == ScheduledAction.ActionType.BACKUP){
++                            Log.i(TAG, "Removing scheduled exports");
++                            ScheduledActionDbAdapter.getInstance().deleteRecord(id);
+                         }
+                     }
+                     mode.finish();
+
+From e589a2687a892d0611c44165d712ade3d238f31c Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 1 Dec 2015 22:12:53 +0100
+Subject: [PATCH 7/7] Update translations
+
+---
+ app/src/main/res/values-af-rZA/strings.xml |   2 +-
+ app/src/main/res/values-ar-rSA/strings.xml |   2 +-
+ app/src/main/res/values-ca-rES/strings.xml |   2 +-
+ app/src/main/res/values-cs-rCZ/strings.xml |   2 +-
+ app/src/main/res/values-de/strings.xml     | 322 ++++++++++++++---------------
+ app/src/main/res/values-el-rGR/strings.xml |   2 +-
+ app/src/main/res/values-en-rGB/strings.xml |  10 +-
+ app/src/main/res/values-es-rMX/strings.xml |   2 +-
+ app/src/main/res/values-es/strings.xml     |   6 +-
+ app/src/main/res/values-fi-rFI/strings.xml |   2 +-
+ app/src/main/res/values-fr/strings.xml     |   2 +-
+ app/src/main/res/values-hu-rHU/strings.xml |   2 +-
+ app/src/main/res/values-it-rIT/strings.xml |   2 +-
+ app/src/main/res/values-iw-rIL/strings.xml |   2 +-
+ app/src/main/res/values-ja-rJP/strings.xml |   2 +-
+ app/src/main/res/values-ko-rKR/strings.xml |   2 +-
+ app/src/main/res/values-nb/strings.xml     |   2 +-
+ app/src/main/res/values-nl-rNL/strings.xml |   2 +-
+ app/src/main/res/values-no-rNO/strings.xml |   2 +-
+ app/src/main/res/values-pl-rPL/strings.xml |   2 +-
+ app/src/main/res/values-pt-rBR/strings.xml |   2 +-
+ app/src/main/res/values-pt-rPT/strings.xml |   2 +-
+ app/src/main/res/values-ro-rRO/strings.xml |  20 +-
+ app/src/main/res/values-ru/strings.xml     |   2 +-
+ app/src/main/res/values-sr-rSP/strings.xml |   2 +-
+ app/src/main/res/values-sv-rSE/strings.xml |   2 +-
+ app/src/main/res/values-tr-rTR/strings.xml |  82 ++++----
+ app/src/main/res/values-uk-rUA/strings.xml |   2 +-
+ app/src/main/res/values-vi-rVN/strings.xml |   2 +-
+ app/src/main/res/values-zh-rCN/strings.xml | 188 +++++++++--------
+ app/src/main/res/values-zh-rTW/strings.xml |   2 +-
+ 31 files changed, 338 insertions(+), 340 deletions(-)
+
+diff --git a/app/src/main/res/values-af-rZA/strings.xml b/app/src/main/res/values-af-rZA/strings.xml
+index 54aa639b..8c2aa2c9 100644
+--- a/app/src/main/res/values-af-rZA/strings.xml
++++ b/app/src/main/res/values-af-rZA/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-ar-rSA/strings.xml b/app/src/main/res/values-ar-rSA/strings.xml
+index 107153ca..18213c28 100644
+--- a/app/src/main/res/values-ar-rSA/strings.xml
++++ b/app/src/main/res/values-ar-rSA/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-ca-rES/strings.xml b/app/src/main/res/values-ca-rES/strings.xml
+index 7b935d0b..4294768f 100644
+--- a/app/src/main/res/values-ca-rES/strings.xml
++++ b/app/src/main/res/values-ca-rES/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Exporta</string>
+-  <string name="option_delete_after_export">Suprimeix desprs d\'exportar</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Preferncies</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-cs-rCZ/strings.xml b/app/src/main/res/values-cs-rCZ/strings.xml
+index 92c01bd4..5cc20066 100644
+--- a/app/src/main/res/values-cs-rCZ/strings.xml
++++ b/app/src/main/res/values-cs-rCZ/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index b16e201b..ab37838d 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Auswhlen, um alle Buchungen zu exportieren. Andernfalls werden nur die neuen Buchungen seit letztem Export exportiert.</string>
+   <string name="toast_export_error">Fehler beim Exportieren der %1$s-Datei</string>
+   <string name="btn_export">Exportieren</string>
+-  <string name="option_delete_after_export">Lschen nach dem Exportieren</string>
++  <string name="option_delete_after_export">Buchungen nach dem Export lschen</string>
+   <string name="hint_delete_after_export">Alle exportierten Buchungen werden nach dem Export gelscht.</string>
+   <string name="title_settings">Einstellungen</string>
+   <string-array name="export_destinations">
+@@ -85,20 +85,20 @@
+   <string name="label_display_account">Konto anzeigen</string>
+   <string name="btn_create_accounts">Konten erstellen</string>
+   <string name="title_default_accounts">Zu erstellende Konten auswhlen</string>
+-  <string name="error_no_accounts">Keine Konten vorhanden.\nSie mssen ein Konto erstellen um Widgets anfgen zu knnen.</string>
++  <string name="error_no_accounts">Keine Konten vorhanden.\nErstellen Sie ein Konto um Widgets hinzuzufgen</string>
+   <string name="title_build_version">Version</string>
+   <string name="title_license">Lizenz</string>
+   <string name="summary_licence_details">Apache License v2.0. Klicken fr Details</string>
+   <string name="title_general_prefs">Allgemein</string>
+   <string name="label_widget_configuration">Konto auswhlen</string>
+   <string name="toast_no_transactions_to_export">Keine Buchungen zum Exportieren</string>
+-  <string name="header_passcode_settings">Passcode</string>
+-  <string name="title_passcode_preferences">Passcode Preferences</string>
+-  <string name="title_passcode_enabled">Passcode Turned On</string>
+-  <string name="title_passcode_disabled">Passcode Turned Off</string>
+-  <string name="title_change_passcode">Change Passcode</string>
++  <string name="header_passcode_settings">PIN Einstellungen</string>
++  <string name="title_passcode_preferences">Sicherheit</string>
++  <string name="title_passcode_enabled">Zugang nur mit PIN</string>
++  <string name="title_passcode_disabled">Zugang ohne PIN</string>
++  <string name="title_change_passcode">PIN ndern</string>
+   <string name="title_about_gnucash">ber GnuCash</string>
+-  <string name="summary_about_gnucash">A mobile finance management and expense-tracker designed for Android</string>
++  <string name="summary_about_gnucash">Ein leistungsfhiger und flexibler mobiler Finanzmanager fr Android</string>
+   <string name="title_about">ber</string>
+   <string name="toast_format_exported_to">%1$s-Datei erfolgreich exportiert nach:\n</string>
+   <string name="title_export_email">GnuCash Android exportierte %1$s-Datei</string>
+@@ -129,17 +129,17 @@
+   <string name="title_xml_ofx_header">XML-OFX-Header verwenden</string>
+   <string name="summary_xml_ofx_header">Diese Option aktivieren, wenn Sie die OFX-Dateien fr ein anderes Programm als GnuCash auf dem Desktop exportieren</string>
+   <string name="title_whats_new">Neuigkeiten in dieser Version</string>
+-  <string name="whats_new">
+-        - New Material app design \n
+-        - Multi-currency transactions\n
+-        - Calculator to transaction amounts\n
+-        - Better reporting options\n
+-        - New help &amp; feedback section\n
+-        - Multiple bug fixes and improvements\n
+-	</string>
++  <string name="whats_new">\n
++        - App im Material Design\n
++        - Mehrwhrungsbuchungen\n
++        - Rechner fr Buchungsbetrge\n
++        - Verbesserte Berichte\n
++        - Neuer Hilfe &amp; Feedback-Bereich\n
++        - Viele Fehlerbehebungen und Verbesserungen\n
++\n</string>
+   <string name="label_dismiss">Schlieen</string>
+   <string name="toast_transanction_amount_required">Geben Sie einen Betrag ein, um die Buchung speichern zu knnen</string>
+-  <string name="toast_error_edit_multi_currency_transaction">Multi-currency transactions cannot be modified</string>
++  <string name="toast_error_edit_multi_currency_transaction">Mehrwhrungsbuchungen knnen nicht bearbeitet werden</string>
+   <string name="menu_import_accounts">GnuCash-Konten importieren</string>
+   <string name="btn_import_accounts">Konten importieren</string>
+   <string name="toast_error_importing_accounts">Beim Importieren der GnuCash-Konten ist ein Fehler aufgetreten!</string>
+@@ -165,7 +165,7 @@
+   <string name="title_default_export_format">Standard-Export-Format</string>
+   <string name="summary_default_export_format">Dateiformat, welches standardmig verwendet wird, wenn Buchungen exportiert werden</string>
+   <string name="menu_export_transactions">Buchungen exportieren&#8230;</string>
+-  <string name="label_recurring_transaction">Wiederkehr</string>
++  <string name="label_recurring_transaction">Wiederholung</string>
+   <string name="imbalance_account_name">Ausgleichskonto</string>
+   <string name="title_progress_exporting_transactions">Die Buchungen werden exportiert</string>
+   <string name="label_no_recurring_transactions">Keine wiederkehrende Buchungen vorhanden</string>
+@@ -184,13 +184,13 @@
+     <item>PASSIVA</item>
+     <item>EINKOMMEN</item>
+     <item>AUFWENDUNGEN</item>
+-    <item>PAYABLE</item>
++    <item>VERBINDLICHKEITEN</item>
+     <item>FORDERUNGEN</item>
+     <item>EIGENKAPITAL</item>
+     <item>WHRUNG</item>
+     <item>AKTIENKONTO</item>
+     <item>INVESTMENTFONDS</item>
+-    <item>TRADING</item>
++    <item>HANDELSKONTO</item>
+   </string-array>
+   <string-array name="export_formats">
+     <item>QIF</item>
+@@ -205,8 +205,8 @@
+   <string name="title_all_accounts">Alle</string>
+   <string name="summary_create_default_accounts">Erstellt die hufig verwendeten Standard-GnuCash-Konten</string>
+   <string name="title_create_default_accounts">Standard-Konten erstellen</string>
+-  <string name="msg_confirm_create_default_accounts_setting">All existing accounts and transactions on the device will be deleted.\n\nAre you sure you want to proceed?</string>
+-  <string name="menu_scheduled_transactions">Eingeplante Buchungen</string>
++  <string name="msg_confirm_create_default_accounts_setting">Es werden alle bestehenden Konten und Buchungen auf dem Gert gelscht.\n\nWollen Sie fortfahren?</string>
++  <string name="menu_scheduled_transactions">Geplante Buchungen</string>
+   <string name="msg_confirm_create_default_accounts_first_run">Willkommen bei GnuCash Android!\nSie knnen entweder eine Hierarchie der fr gewhnlich verwendeten Konten erstellen oder Ihre eigene GnuCash-Kontenstruktur importieren.\n\nBeide Optionen sind auch in den Einstellungen verfgbar, sodass Sie dies spter entscheiden knnen.
+     </string>
+   <string name="title_scheduled_transactions">Eingeplante Buchungen</string>
+@@ -230,164 +230,164 @@
+   <string name="label_repeats">Wiederholungen</string>
+   <string name="toast_no_recent_backup">Keine Sicherheitskopie vorhanden</string>
+   <string name="account_name_opening_balances">Anfangsbestand</string>
+-  <string name="account_name_equity">Equity</string>
++  <string name="account_name_equity">Eigenkapital</string>
+   <string name="summary_save_opening_balances">Mglichkeit aktivieren, den aktuellen Saldo als neuen Anfangsbestand nach dem Lschen der Buchungen zu bernehmen
+     </string>
+   <string name="title_save_opening_balances">Saldo als neuen Anfangsbestand bernehmen</string>
+-  <string name="export_warning_ofx">OFX does not support double-entry transactions</string>
+-  <string name="export_warning_qif">Generates separate QIF files per currency</string>
+-  <string name="title_transaction_splits">Transaction splits</string>
+-  <string name="label_imbalance">Imbalance:</string>
+-  <string name="btn_add_split">Add split</string>
+-  <string name="menu_title_favorite">Favorite</string>
+-  <string name="drawer_open">Navigation drawer opened</string>
+-  <string name="drawer_close">Navigation drawer closed</string>
+-  <string name="title_reports">Reports</string>
+-  <string name="title_pie_chart">Pie Chart</string>
+-  <string name="title_line_chart">Line Chart</string>
+-  <string name="title_bar_chart">Bar Chart</string>
+-  <string name="title_report_prefs">Report Preferences</string>
+-  <string name="label_report_currency">Select currency</string>
+-  <string name="title_use_account_color">Account color in reports</string>
+-  <string name="summary_use_account_color">Use account color in the bar/pie chart</string>
+-  <string name="header_report_settings">Reports</string>
+-  <string name="menu_order_by_size">Order by size</string>
+-  <string name="menu_toggle_legend">Show legend</string>
+-  <string name="menu_toggle_labels">Show labels</string>
+-  <string name="menu_toggle_percentage_mode">Show percentage</string>
+-  <string name="menu_toggle_average_lines">Show average lines</string>
+-  <string name="menu_group_smaller_slices">Group Smaller Slices</string>
+-  <string name="label_chart_no_data">No chart data available</string>
+-  <string name="label_chart_overall">Overall</string>
+-  <string name="label_chart_total">Total</string>
+-  <string name="label_other_slice">Other</string>
+-  <string name="toast_chart_percentage_mode_total">The percentage of selected value calculated from the total amount</string>
+-  <string name="toast_chart_percentage_mode_current_bar">The percentage of selected value calculated from the current stacked bar amount</string>
+-  <string name="label_save_template">Save as template</string>
+-  <string name="label_delete_account_transactions_description">This account contains transactions. \nWhat would you like to do with these transactions</string>
+-  <string name="label_delete_account_subaccounts_description">This account contains sub-accounts. \nWhat would you like to do with these sub-accounts</string>
+-  <string name="label_delete_transactions">Delete transactions</string>
+-  <string name="toast_disable_double_entry_to_save_transaction">Create and specify a transfer account OR disable double-entry in settings to save the transaction</string>
+-  <string name="label_tap_to_create_schedule">Tap to create schedule</string>
+-  <string name="title_restore_backup">Restore Backup&#8230;</string>
+-  <string name="header_backup_and_export_settings">Backup &amp; export</string>
+-  <string name="title_dropbox_sync_preference">DropBox Sync</string>
++  <string name="export_warning_ofx">OFX untersttzt keine doppelte Buchfhrung</string>
++  <string name="export_warning_qif">Erzeugt eine QIF-Datei fr jede Whrung</string>
++  <string name="title_transaction_splits">Split Buchung</string>
++  <string name="label_imbalance">Differenz:</string>
++  <string name="btn_add_split">Split hinzufgen</string>
++  <string name="menu_title_favorite">Favorit</string>
++  <string name="drawer_open">Navigationsleiste geffnet</string>
++  <string name="drawer_close">Navigationsleiste geschlossen</string>
++  <string name="title_reports">Berichte</string>
++  <string name="title_pie_chart">Tortendiagramm</string>
++  <string name="title_line_chart">Liniendiagramm</string>
++  <string name="title_bar_chart">Balkendiagramm</string>
++  <string name="title_report_prefs">Berichte</string>
++  <string name="label_report_currency">Whlen Sie eine Whrung</string>
++  <string name="title_use_account_color">Kontofarbe</string>
++  <string name="summary_use_account_color">Verwende Kontofarben in Balken- und Tortendiagrammen</string>
++  <string name="header_report_settings">Berichte</string>
++  <string name="menu_order_by_size">Nach Gre sortieren</string>
++  <string name="menu_toggle_legend">Legende anzeigen</string>
++  <string name="menu_toggle_labels">Beschreibung anzeigen</string>
++  <string name="menu_toggle_percentage_mode">Prozent anzeigen</string>
++  <string name="menu_toggle_average_lines">Durchschnitt anzeigen</string>
++  <string name="menu_group_smaller_slices">Kleine Segmente zusammenfassen</string>
++  <string name="label_chart_no_data">Keine Daten zum anzeigen gefunden</string>
++  <string name="label_chart_overall">Summe</string>
++  <string name="label_chart_total">Summe</string>
++  <string name="label_other_slice">Sonstige</string>
++  <string name="toast_chart_percentage_mode_total">Der Prozentsatz wird aus der Gesamtsumme errechnet</string>
++  <string name="toast_chart_percentage_mode_current_bar">Der Prozentsatz wird vom Gesamtwert des Balkens errechnet</string>
++  <string name="label_save_template">Als Vorlage speichern</string>
++  <string name="label_delete_account_transactions_description">Dieses Konto enthlt Buchungen.\nWas wollen Sie mit diesen Buchungen tun?</string>
++  <string name="label_delete_account_subaccounts_description">Dieses Konto enthlt Unterkonten. \nWas wollen Sie mit diesen Unterkonten tun?</string>
++  <string name="label_delete_transactions">Buchungen lschen</string>
++  <string name="toast_disable_double_entry_to_save_transaction">Erstellen und whlen Sie ein Transferkonto aus oder deaktivieren Sie Doppelte Buchfhrung in den Einstellungen um diese Buchung zu speichern</string>
++  <string name="label_tap_to_create_schedule">Wiederholung erstellen</string>
++  <string name="title_restore_backup">Sicherung wiederherstellen&#8230;</string>
++  <string name="header_backup_and_export_settings">Backup &amp; Exporte</string>
++  <string name="title_dropbox_sync_preference">Dropbox Sync</string>
+   <string name="title_backup_preference_category">Backup</string>
+-  <string name="summary_dropbox_sync">Enable to sync to DropBox</string>
+-  <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+-  <string name="title_backup_prefs">Backup Preferences</string>
+-  <string name="title_create_backup_pref">Create Backup</string>
+-  <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
+-  <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
+-  <string name="toast_backup_successful">Backup successful</string>
+-  <string name="toast_backup_failed">Backup failed</string>
+-  <string name="export_warning_xml">Exports all accounts and transactions</string>
++  <string name="summary_dropbox_sync">Aktiviert Synchronisierung mit DropBox</string>
++  <string name="title_select_gnucash_xml_file">GnuCash XML Datei auswhlen</string>
++  <string name="title_backup_prefs">Sicherungs-Einstellungen</string>
++  <string name="title_create_backup_pref">Sicherung erstellen</string>
++  <string name="summary_create_backup_pref">Sicherungen werden auf der SDCARD gespeichert</string>
++  <string name="summary_restore_backup_pref">Whle eine Sicherungskopie zur Wiederherstellung aus</string>
++  <string name="toast_backup_successful">Sicherung erfolgreich</string>
++  <string name="toast_backup_failed">Sicherung fehlgeschlagen</string>
++  <string name="export_warning_xml">Alle Konten und Buchungen werden exportiert</string>
+   <string name="title_google_drive_sync_pref">Google Drive Sync</string>
+-  <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+-  <string name="toast_install_file_manager">Install a file manager to select files</string>
+-  <string name="title_select_backup_to_restore">Select backup to restore</string>
+-  <string name="nav_menu_favorites">Favorites</string>
+-  <string name="nav_menu_open">Open&#8230;</string>
+-  <string name="nav_menu_reports">Reports</string>
+-  <string name="nav_menu_scheduled_transactions">Scheduled Transactions</string>
+-  <string name="nav_menu_export">Export&#8230;</string>
+-  <string name="nav_menu_settings">Settings</string>
++  <string name="summary_google_drive_sync">Aktiviert Synchronisierung mit Google Drive</string>
++  <string name="toast_install_file_manager">Installieren Sie einen Dateimanager um Dateien auszuwhlen</string>
++  <string name="title_select_backup_to_restore">Whle eine Sicherungskopie</string>
++  <string name="nav_menu_favorites">Favoriten</string>
++  <string name="nav_menu_open">ffnen&#8230;</string>
++  <string name="nav_menu_reports">Berichte</string>
++  <string name="nav_menu_scheduled_transactions">Geplante Buchungen</string>
++  <string name="nav_menu_export">Exportieren&#8230;</string>
++  <string name="nav_menu_settings">Einstellungen</string>
+   <plurals name="label_every_x_days">
+-    <item quantity="one">Daily</item>
+-    <item quantity="other">Every %d days</item>
++    <item quantity="one">Tglich</item>
++    <item quantity="other">Jeden %d. Tag</item>
+   </plurals>
+   <plurals name="label_every_x_weeks">
+-    <item quantity="one">Weekly</item>
+-    <item quantity="other">Every %d weeks</item>
++    <item quantity="one">Wchentlich</item>
++    <item quantity="other">Jede %d. Woche</item>
+   </plurals>
+   <plurals name="label_every_x_months">
+-    <item quantity="one">Monthly</item>
+-    <item quantity="other">Every %d months</item>
++    <item quantity="one">Monatlich</item>
++    <item quantity="other">Jenden %d. Monat</item>
+   </plurals>
+   <plurals name="label_every_x_years">
+-    <item quantity="one">Yearly</item>
+-    <item quantity="other">Every %d years</item>
++    <item quantity="one">Jhrlich</item>
++    <item quantity="other">Alle %d Jahre</item>
+   </plurals>
+-  <string name="title_enable_crashlytics">Enable Crash Logging</string>
++  <string name="title_enable_crashlytics">Absturzprotokolloerung aktivieren</string>
+   <string name="msg_enable_crashlytics">Enable to send information about malfunctions to the developers for improvement (recommended).
+ No user-identifiable information will be collected as part of this process!</string>
+   <string name="label_export_format"> Format</string>
+-  <string name="toast_backup_folder_not_found">Backup folder cannot be found. Make sure the SD Card is mounted!</string>
+-  <string name="label_old_passcode">Enter your old passcode</string>
+-  <string name="label_new_passcode">Enter your new passcode</string>
+-  <string name="nav_menu_scheduled_backups">Scheduled Exports</string>
++  <string name="toast_backup_folder_not_found">Sicherungsordner nicht gefunden. Prfe, ob eine SD-Karte vorhanden ist!</string>
++  <string name="label_old_passcode">Alten PIN eingeben</string>
++  <string name="label_new_passcode">Neuen PIN eingeben</string>
++  <string name="nav_menu_scheduled_backups">Geplanten Exporte</string>
+   <string name="title_scheduled_exports">Scheduled Exports</string>
+-  <string name="label_no_scheduled_exports_to_display">No scheduled exports to display</string>
+-  <string name="title_create_export_schedule">Create export schedule</string>
+-  <string name="toast_exported_to">Exported to: %1$s</string>
+-  <string name="toast_legend_too_long">The legend is too long</string>
+-  <string name="hint_account_description">Account description</string>
+-  <string name="label_no_recent_accounts">No recent accounts</string>
+-  <string name="label_no_favorite_accounts">No favorite accounts</string>
+-  <string name="nav_menu_scheduled_actions">Scheduled Actions</string>
++  <string name="label_no_scheduled_exports_to_display">Keine geplanten Exporte</string>
++  <string name="title_create_export_schedule">Wiederkehrenden Export erstellen</string>
++  <string name="toast_exported_to">Exportiert auf %1$s</string>
++  <string name="toast_legend_too_long">Die Legende ist zu lang</string>
++  <string name="hint_account_description">Kontobeschreibung</string>
++  <string name="label_no_recent_accounts">Keine krzlich verwendeten Konten</string>
++  <string name="label_no_favorite_accounts">Keine bevorzugten Konten</string>
++  <string name="nav_menu_scheduled_actions">Geplante Aktionen</string>
+   <string name="label_scheduled_action_ended">"Ended, last executed on "</string>
+-  <string name="label_select_bar_to_view_details">Select a bar to view details</string>
+-  <string name="btn_wizard_next">Next</string>
+-  <string name="btn_wizard_finish">Done</string>
+-  <string name="wizard_title_default_currency">Default Currency</string>
+-  <string name="wizard_title_account_setup">Account Setup</string>
+-  <string name="wizard_title_select_currency">Select Currency</string>
+-  <string name="wizard_title_feedback_options">Feedback Options</string>
+-  <string name="wizard_option_create_default_accounts">Create default accounts</string>
+-  <string name="wizard_option_import_my_accounts">Import my accounts</string>
+-  <string name="wizard_option_let_me_handle_it">Let me handle it</string>
++  <string name="label_select_bar_to_view_details">Whlen Sie einen Balken fr Details</string>
++  <string name="btn_wizard_next">Weiter</string>
++  <string name="btn_wizard_finish">Fertig</string>
++  <string name="wizard_title_default_currency">Standardwhrung</string>
++  <string name="wizard_title_account_setup">Konto einrichten</string>
++  <string name="wizard_title_select_currency">Whrung whlen</string>
++  <string name="wizard_title_feedback_options">Feedbackoptionen</string>
++  <string name="wizard_option_create_default_accounts">Standard-Konten erstellen</string>
++  <string name="wizard_option_import_my_accounts">Meine Konten importieren</string>
++  <string name="wizard_option_let_me_handle_it">berlassen Sie das mir</string>
+   <string name="wizard_option_currency_other">Other...</string>
+-  <string name="wizard_option_auto_send_crash_reports">Automatically send crash reports</string>
+-  <string name="wizard_option_disable_crash_reports">Disable crash reports</string>
+-  <string name="wizard_btn_back">Back</string>
+-  <string name="title_setup_gnucash">Setup GnuCash</string>
+-  <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+-  <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+-  <string name="title_split_editor">Split Editor</string>
+-  <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
+-  <string name="label_error_invalid_expression">Invalid expression!</string>
+-  <string name="toast_scheduled_recurring_transaction">Scheduled recurring transaction</string>
+-  <string name="error_exchange_rate_required">An exchange rate is required</string>
+-  <string name="error_converted_amount_required">The converted amount is required</string>
+-  <string name="title_transfer_funds">Transfer Funds</string>
+-  <string name="nav_menu_help"><![CDATA[Help & Feedback]]></string>
+-  <string name="label_select_pie_slice_to_see_details">Select a slice to see details</string>
+-  <string name="label_report_period">Period:</string>
+-  <string name="label_convert_from">From:</string>
+-  <string name="label_convert_to">To:</string>
+-  <string name="msg_provide_exchange_rate">Provide either the converted amount or exchange rate in order to transfer funds</string>
+-  <string name="hint_exchange_rate">Exchange rate</string>
+-  <string name="btn_fetch_quote">Fetch quote</string>
+-  <string name="hint_converted_amount">Converted Amount</string>
+-  <string name="title_report_sheet">Sheet</string>
+-  <string name="label_last_3_months_expenses">Expenses for last 3 months</string>
+-  <string name="label_total_assets">Total Assets</string>
+-  <string name="label_total_liabilities">Total Liabilities</string>
+-  <string name="label_net_worth">Net Worth</string>
+-  <string name="label_assets">Assets</string>
+-  <string name="label_liabilities">Liabilities</string>
+-  <string name="label_equity">Equity</string>
+-  <string name="label_total_liabilities_and_equity"><![CDATA[Total Liabilites & Equity]]></string>
+-  <string name="label_move_to">Move to:</string>
+-  <string name="menu_group_by">Group By</string>
+-  <string name="menu_group_by_month">Month</string>
+-  <string name="menu_group_by_quarter">Quarter</string>
+-  <string name="menu_group_by_year">Year</string>
+-  <string name="title_balance_sheet_report">Balance Sheet</string>
+-  <string name="label_balance_sheet_total">Total:</string>
+-  <string name="title_google_plus_community">Google+ Community</string>
+-  <string name="title_translate_gnucash">Translate GnuCash</string>
+-  <string name="summary_google_plus">Share ideas, discuss changes or report problems</string>
+-  <string name="summary_translate_gnucash">Translate or proof-read on CrowdIn</string>
+-  <string name="toast_no_compatible_apps_to_receive_export">No compatible apps to receive the exported transactions!</string>
+-  <string name="menu_move_transaction">Move...</string>
+-  <string name="menu_duplicate_transaction">Duplicate</string>
++  <string name="wizard_option_auto_send_crash_reports">Absturzberichte automatisch senden</string>
++  <string name="wizard_option_disable_crash_reports">Absturzberichte deaktivieren</string>
++  <string name="wizard_btn_back">Zurck</string>
++  <string name="title_setup_gnucash">GnuCash einrichten</string>
++  <string name="wizard_title_welcome_to_gnucash">Willkommen bei GnuCash</string>
++  <string name="msg_wizard_welcome_page">Bevor Sie anfangen, \nlassen Sie uns ein paar Dinge einrichten\n\nZum fortfahren drcken Sie auf Weiter</string>
++  <string name="title_split_editor">Split Buchung</string>
++  <string name="toast_error_check_split_amounts">Prfen Sie vor dem Speichern, ob alle Buchungsteile gltige Betrge enthalten!</string>
++  <string name="label_error_invalid_expression">Ungltiger Ausdruck!</string>
++  <string name="toast_scheduled_recurring_transaction">Geplante Buchung</string>
++  <string name="error_exchange_rate_required">Ein Wechselkurs ist erforderlich</string>
++  <string name="error_converted_amount_required">Ein Wechselbetrag ist erforderlich</string>
++  <string name="title_transfer_funds">berweisungen</string>
++  <string name="nav_menu_help"><![CDATA[Hilfe & Feedback]]></string>
++  <string name="label_select_pie_slice_to_see_details">Tippe auf ein Segment um Details zu sehen</string>
++  <string name="label_report_period">Zeitraum:</string>
++  <string name="label_convert_from">Von:</string>
++  <string name="label_convert_to">An:</string>
++  <string name="msg_provide_exchange_rate">Whlen Sie entweder den gewechselten Betrag oder den Wechselkurs fr die berweisung an</string>
++  <string name="hint_exchange_rate">Wechselkurs</string>
++  <string name="btn_fetch_quote">Kurs einholen</string>
++  <string name="hint_converted_amount">Umgerechneter Betrag</string>
++  <string name="title_report_sheet">Bilanz</string>
++  <string name="label_last_3_months_expenses">Aufwendungen der letzten 3 Monate</string>
++  <string name="label_total_assets">Summe Vermgen</string>
++  <string name="label_total_liabilities">Summe Verbindlichkeiten</string>
++  <string name="label_net_worth">Reinvermgen</string>
++  <string name="label_assets">Vermgen</string>
++  <string name="label_liabilities">Verbindlichkeiten</string>
++  <string name="label_equity">Eigenkapital</string>
++  <string name="label_total_liabilities_and_equity"><![CDATA[Summe Verbindlichkeiten & Eigenkapital]]></string>
++  <string name="label_move_to">Verschieben nach:</string>
++  <string name="menu_group_by">Gruppieren nach</string>
++  <string name="menu_group_by_month">Monat</string>
++  <string name="menu_group_by_quarter">Quartal</string>
++  <string name="menu_group_by_year">Jahr</string>
++  <string name="title_balance_sheet_report">Bilanz</string>
++  <string name="label_balance_sheet_total">Summe:</string>
++  <string name="title_google_plus_community">Google+ community</string>
++  <string name="title_translate_gnucash">GnuCash bersetzen</string>
++  <string name="summary_google_plus">Teile deine Ideen und Verbesserungsvorschlge mit oder berichte ber Probleme mit GnuCash</string>
++  <string name="summary_translate_gnucash">bersetze oder korrigiere bersetzungen auf CrowdIn</string>
++  <string name="toast_no_compatible_apps_to_receive_export">Es gibt keine kompatible App, welche die exportierten Buchungen empfangen kann!</string>
++  <string name="menu_move_transaction">Verschieben</string>
++  <string name="menu_duplicate_transaction">Kopieren</string>
+   <string-array name="report_time_range">
+-    <item>Current month</item>
+-    <item>Last 3 months</item>
+-    <item>Last 6 months</item>
+-    <item>Last 12 months</item>
+-    <item>All time</item>
+-    <item>Custom range&#8230;</item>
++    <item>Aktueller Monat</item>
++    <item>Letzte 3 Monate</item>
++    <item>Letzte 6 Monate</item>
++    <item>Letzte 12 Monate</item>
++    <item>Unbegrenzt</item>
++    <item>Benutzerdefiniert&#8230;</item>
+   </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-el-rGR/strings.xml b/app/src/main/res/values-el-rGR/strings.xml
+index 9b033a1b..1e6c5f29 100644
+--- a/app/src/main/res/values-el-rGR/strings.xml
++++ b/app/src/main/res/values-el-rGR/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">,          .          </string>
+   <string name="toast_export_error">   %1$s</string>
+   <string name="btn_export"></string>
+-  <string name="option_delete_after_export">   </string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">    ,       </string>
+   <string name="title_settings"></string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-en-rGB/strings.xml b/app/src/main/res/values-en-rGB/strings.xml
+index 54aa639b..f1bfc01c 100644
+--- a/app/src/main/res/values-en-rGB/strings.xml
++++ b/app/src/main/res/values-en-rGB/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+@@ -203,7 +203,7 @@
+   <string name="label_account_color_and_type">Account Color &amp; Type</string>
+   <string name="label_delete_sub_accounts">Delete sub-accounts</string>
+   <string name="title_recent_accounts">Recent</string>
+-  <string name="title_favorite_accounts">Favorites</string>
++  <string name="title_favorite_accounts">Favourites</string>
+   <string name="title_all_accounts">All</string>
+   <string name="summary_create_default_accounts">Creates default GnuCash commonly-used account structure</string>
+   <string name="title_create_default_accounts">Create default accounts</string>
+@@ -243,7 +243,7 @@
+   <string name="title_transaction_splits">Transaction splits</string>
+   <string name="label_imbalance">Imbalance:</string>
+   <string name="btn_add_split">Add split</string>
+-  <string name="menu_title_favorite">Favorite</string>
++  <string name="menu_title_favorite">Favourite</string>
+   <string name="drawer_open">Navigation drawer opened</string>
+   <string name="drawer_close">Navigation drawer closed</string>
+   <string name="title_reports">Reports</string>
+@@ -290,7 +290,7 @@
+   <string name="summary_google_drive_sync">Enable to sync to Google Drive</string>
+   <string name="toast_install_file_manager">Install a file manager to select files</string>
+   <string name="title_select_backup_to_restore">Select backup to restore</string>
+-  <string name="nav_menu_favorites">Favorites</string>
++  <string name="nav_menu_favorites">Favourites</string>
+   <string name="nav_menu_open">Open&#8230;</string>
+   <string name="nav_menu_reports">Reports</string>
+   <string name="nav_menu_scheduled_transactions">Scheduled Transactions</string>
+@@ -326,7 +326,7 @@
+   <string name="toast_legend_too_long">The legend is too long</string>
+   <string name="hint_account_description">Account description</string>
+   <string name="label_no_recent_accounts">No recent accounts</string>
+-  <string name="label_no_favorite_accounts">No favorite accounts</string>
++  <string name="label_no_favorite_accounts">No favourite accounts</string>
+   <string name="nav_menu_scheduled_actions">Scheduled Actions</string>
+   <string name="label_scheduled_action_ended">"Ended, last executed on %1$s"</string>
+   <string name="label_select_bar_to_view_details">Select a bar to view details</string>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index 276b7d0e..4ab003dc 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Por defecto solo las nuevas transacciones desde la ltima exportacin sern exportadas. Seleccione esta opcin para exportar todas las transacciones</string>
+   <string name="toast_export_error">Error exportando datos %1$s</string>
+   <string name="btn_export">Exportar</string>
+-  <string name="option_delete_after_export">Borrar despus de exportar</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">Todas las transacciones exportadas sern borradas cuando la exportacin haya terminado</string>
+   <string name="title_settings">Ajustes</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index d0f5da33..4f8a964b 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Por defecto solo las nuevas transacciones desde la ltima exportacin sern exportadas. Seleccione esta opcin para exportar todas las transacciones</string>
+   <string name="toast_export_error">Error exportando datos %1$s</string>
+   <string name="btn_export">Exportar</string>
+-  <string name="option_delete_after_export">Borrar despus de exportar</string>
++  <string name="option_delete_after_export">Borrar las transacciones exportadas</string>
+   <string name="hint_delete_after_export">Todas las transacciones exportadas sern borradas cuando la exportacin haya terminado</string>
+   <string name="title_settings">Ajustes</string>
+   <string-array name="export_destinations">
+@@ -380,8 +380,8 @@ Este proceso solo recoge informacin que no permite identificar al usuario</str
+   <string name="summary_google_plus">Compartir ideas, discutir cambios o reportar problemas</string>
+   <string name="summary_translate_gnucash">Traducir o revisar en CrowdIn</string>
+   <string name="toast_no_compatible_apps_to_receive_export">No hay aplicaciones compatibles para recibir las transacciones exportadas!</string>
+-  <string name="menu_move_transaction">Move...</string>
+-  <string name="menu_duplicate_transaction">Duplicate</string>
++  <string name="menu_move_transaction">Mover...</string>
++  <string name="menu_duplicate_transaction">Duplicar</string>
+   <string-array name="report_time_range">
+     <item>Mes actual</item>
+     <item>ltimos 3 meses</item>
+diff --git a/app/src/main/res/values-fi-rFI/strings.xml b/app/src/main/res/values-fi-rFI/strings.xml
+index 54aa639b..8c2aa2c9 100644
+--- a/app/src/main/res/values-fi-rFI/strings.xml
++++ b/app/src/main/res/values-fi-rFI/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 547ffb19..30d4f59a 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Par dfaut, seul les nouvelles transactions depuis le dernier export seront exportes. Cochez cette option pour exporter toutes les transactions</string>
+   <string name="toast_export_error">Erreur lors de l\'export des donnes en %1$s</string>
+   <string name="btn_export">Exporter</string>
+-  <string name="option_delete_after_export">Supprimer aprs export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">Toutes les transactions exportes seront supprimes aprs l\'export</string>
+   <string name="title_settings">Paramtres</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-hu-rHU/strings.xml b/app/src/main/res/values-hu-rHU/strings.xml
+index f6e4e0ff..6dc9b45d 100644
+--- a/app/src/main/res/values-hu-rHU/strings.xml
++++ b/app/src/main/res/values-hu-rHU/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s data</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-it-rIT/strings.xml b/app/src/main/res/values-it-rIT/strings.xml
+index 313ddee2..52e4f11a 100644
+--- a/app/src/main/res/values-it-rIT/strings.xml
++++ b/app/src/main/res/values-it-rIT/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Di default, verranno esportate solo le transazioni dall\'ultima esportazione. Selezionare questa opzione per esportare tutte le transazioni</string>
+   <string name="toast_export_error">Errore nell\'esportazione dei dati %1$s</string>
+   <string name="btn_export">Esporta</string>
+-  <string name="option_delete_after_export">Elimina dopo l\'esportazione</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">Tutte le transazioni esportate verranno eliminate al termine dell\'esportazione</string>
+   <string name="title_settings">Impostazioni</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-iw-rIL/strings.xml b/app/src/main/res/values-iw-rIL/strings.xml
+index 54aa639b..8c2aa2c9 100644
+--- a/app/src/main/res/values-iw-rIL/strings.xml
++++ b/app/src/main/res/values-iw-rIL/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-ja-rJP/strings.xml b/app/src/main/res/values-ja-rJP/strings.xml
+index 52fe7ce5..59c35147 100644
+--- a/app/src/main/res/values-ja-rJP/strings.xml
++++ b/app/src/main/res/values-ja-rJP/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-ko-rKR/strings.xml b/app/src/main/res/values-ko-rKR/strings.xml
+index 1656ad73..27cff508 100644
+--- a/app/src/main/res/values-ko-rKR/strings.xml
++++ b/app/src/main/res/values-ko-rKR/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index 05ee7407..f6958153 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Standard eksporteres bare nye transaksjoner siden siste eksport. Merk dette alternativet for  eksportere alle transaksjoner</string>
+   <string name="toast_export_error">Feil ved eksport av %1$s</string>
+   <string name="btn_export">Eksporter</string>
+-  <string name="option_delete_after_export">Slette etter eksport</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">Alle eksporterte transaksjoner slettes nr eksport er fullfrt</string>
+   <string name="title_settings">Innstillinger</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-nl-rNL/strings.xml b/app/src/main/res/values-nl-rNL/strings.xml
+index 6654dae5..22badd8a 100644
+--- a/app/src/main/res/values-nl-rNL/strings.xml
++++ b/app/src/main/res/values-nl-rNL/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Aanvinken om alle boekingen te exporteren. Anders worden uitsluitend de nieuwe boekingen sinds de laatste export gexporteerd.</string>
+   <string name="toast_export_error">Fout tijdens het exporteren van de %1$s data</string>
+   <string name="btn_export">Exporteren</string>
+-  <string name="option_delete_after_export">Verwijderen na exporteren</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">Alle gexporteerde boekingen zullen verwijderd worden na de export</string>
+   <string name="title_settings">Instellingen</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-no-rNO/strings.xml b/app/src/main/res/values-no-rNO/strings.xml
+index 05ee7407..f6958153 100644
+--- a/app/src/main/res/values-no-rNO/strings.xml
++++ b/app/src/main/res/values-no-rNO/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Standard eksporteres bare nye transaksjoner siden siste eksport. Merk dette alternativet for  eksportere alle transaksjoner</string>
+   <string name="toast_export_error">Feil ved eksport av %1$s</string>
+   <string name="btn_export">Eksporter</string>
+-  <string name="option_delete_after_export">Slette etter eksport</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">Alle eksporterte transaksjoner slettes nr eksport er fullfrt</string>
+   <string name="title_settings">Innstillinger</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-pl-rPL/strings.xml b/app/src/main/res/values-pl-rPL/strings.xml
+index aa736601..dd96df3c 100644
+--- a/app/src/main/res/values-pl-rPL/strings.xml
++++ b/app/src/main/res/values-pl-rPL/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Bd eksportowania pliku %1$s</string>
+   <string name="btn_export">Eksportuj</string>
+-  <string name="option_delete_after_export">Usu po eksporcie</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">Wszystkie eksportowane transakcje bd usunite po zakoczeniu eksportu</string>
+   <string name="title_settings">Ustawienia</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index 443b85b8..9780fcea 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Por padro, apenas as novas transaes aps a ltima exportao sero exportadas. Marque esta opo para exportar todas as transaes</string>
+   <string name="toast_export_error">Erro ao exportar o ficheiro %1$s</string>
+   <string name="btn_export">Exportar</string>
+-  <string name="option_delete_after_export">Apagar aps exportao</string>
++  <string name="option_delete_after_export">Excluir transaes aps exportar</string>
+   <string name="hint_delete_after_export">Todas as transaes exportadas sero apagadas quando a exportao estiver completa</string>
+   <string name="title_settings">Configuraes</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-pt-rPT/strings.xml b/app/src/main/res/values-pt-rPT/strings.xml
+index ce055634..300f2335 100644
+--- a/app/src/main/res/values-pt-rPT/strings.xml
++++ b/app/src/main/res/values-pt-rPT/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">Por defeito, apenas as novas transaes aps a ltima exportao sero exportadas. Marque esta opo para exportar todas as transaes</string>
+   <string name="toast_export_error">Erro ao exportar o ficheiro %1$s</string>
+   <string name="btn_export">Exportar</string>
+-  <string name="option_delete_after_export">Apagar aps exportao</string>
++  <string name="option_delete_after_export">Apagar as transaes depois de exportar</string>
+   <string name="hint_delete_after_export">Todas as transaes exportadas sero apagadas quando a exportao estiver completa</string>
+   <string name="title_settings">Configuraes</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-ro-rRO/strings.xml b/app/src/main/res/values-ro-rRO/strings.xml
+index 92c01bd4..58d71312 100644
+--- a/app/src/main/res/values-ro-rRO/strings.xml
++++ b/app/src/main/res/values-ro-rRO/strings.xml
+@@ -16,17 +16,17 @@
+  limitations under the License.
+ -->
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+-  <string name="title_create_account">Create Account</string>
+-  <string name="title_edit_account">Edit Account</string>
++  <string name="title_create_account">Creeaz cont</string>
++  <string name="title_edit_account">Editai contul</string>
+   <string name="info_details">Info</string>
+   <string name="menu_export">Export&#8230;</string>
+-  <string name="description_add_transaction_icon">Add a new transaction to an account</string>
+-  <string name="label_no_accounts">No accounts to display</string>
+-  <string name="label_account_name">Account name</string>
+-  <string name="btn_cancel">Cancel</string>
+-  <string name="btn_save">Save</string>
+-  <string name="label_passcode">Enter Passcode</string>
+-  <string name="toast_wrong_passcode">Wrong passcode, please try again</string>
++  <string name="description_add_transaction_icon">Adugai o nou tranzacie ntr-un cont</string>
++  <string name="label_no_accounts">Nu exist conturi pentru a afia</string>
++  <string name="label_account_name">Numele contului</string>
++  <string name="btn_cancel">Rezilia</string>
++  <string name="btn_save">Salvai</string>
++  <string name="label_passcode">Introducei parola</string>
++  <string name="toast_wrong_passcode">Greit parola, v rugm s ncercai din nou</string>
+   <string name="toast_passcode_set">Passcode set</string>
+   <string name="label_confirm_passcode">Please confirm your passcode</string>
+   <string name="toast_invalid_passcode_confirmation">Invalid passcode confirmation. Please try again</string>
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 764b17f0..73e539fc 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">  ,    .</string>
+   <string name="toast_export_error">   %1$s</string>
+   <string name="btn_export"></string>
+-  <string name="option_delete_after_export">  </string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">      .</string>
+   <string name="title_settings"></string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-sr-rSP/strings.xml b/app/src/main/res/values-sr-rSP/strings.xml
+index c92cb105..1210f63e 100644
+--- a/app/src/main/res/values-sr-rSP/strings.xml
++++ b/app/src/main/res/values-sr-rSP/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">          .        </string>
+   <string name="toast_export_error">    %1$s</string>
+   <string name="btn_export"></string>
+-  <string name="option_delete_after_export">  </string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">        </string>
+   <string name="title_settings"></string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-sv-rSE/strings.xml b/app/src/main/res/values-sv-rSE/strings.xml
+index 54aa639b..8c2aa2c9 100644
+--- a/app/src/main/res/values-sv-rSE/strings.xml
++++ b/app/src/main/res/values-sv-rSE/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-tr-rTR/strings.xml b/app/src/main/res/values-tr-rTR/strings.xml
+index a9c76198..55baa90e 100644
+--- a/app/src/main/res/values-tr-rTR/strings.xml
++++ b/app/src/main/res/values-tr-rTR/strings.xml
+@@ -19,49 +19,49 @@
+   <string name="title_create_account">Hesap Olutur</string>
+   <string name="title_edit_account">Hesab Dzenle</string>
+   <string name="info_details">Bilgilendirme</string>
+-  <string name="menu_export">Export&#8230;</string>
+-  <string name="description_add_transaction_icon">Add a new transaction to an account</string>
++  <string name="menu_export">Dar Aktar&#8230;</string>
++  <string name="description_add_transaction_icon">Bir hesaba yeni bir ilem ekle</string>
+   <string name="label_no_accounts">No accounts to display</string>
+-  <string name="label_account_name">Account name</string>
++  <string name="label_account_name">Hesap ad</string>
+   <string name="btn_cancel">ptal</string>
+   <string name="btn_save">Kaydet</string>
+-  <string name="label_passcode">Enter Passcode</string>
+-  <string name="toast_wrong_passcode">Wrong passcode, please try again</string>
+-  <string name="toast_passcode_set">Passcode set</string>
+-  <string name="label_confirm_passcode">Please confirm your passcode</string>
++  <string name="label_passcode">ifre girin</string>
++  <string name="toast_wrong_passcode">Yanl ifre, ltfen tekrar deneyin</string>
++  <string name="toast_passcode_set">ifre ayarla</string>
++  <string name="label_confirm_passcode">Ltfen, ifreyi onaylayn</string>
+   <string name="toast_invalid_passcode_confirmation">Invalid passcode confirmation. Please try again</string>
+-  <string name="label_transaction_name">Description</string>
+-  <string name="label_transaction_amount">Amount</string>
++  <string name="label_transaction_name">Aklama</string>
++  <string name="label_transaction_amount">Tutar</string>
+   <string name="title_add_transaction">New transaction</string>
+   <string name="label_no_transactions">No transactions to display</string>
+   <string name="label_timeanddate">DATE &amp; TIME</string>
+-  <string name="label_account">Account</string>
++  <string name="label_account">Hesap</string>
+   <string name="label_debit">DEBIT</string>
+-  <string name="label_credit">CREDIT</string>
+-  <string name="title_accounts">Accounts</string>
+-  <string name="title_transactions">Transactions</string>
+-  <string name="menu_delete">Delete</string>
+-  <string name="alert_dialog_ok_delete">Delete</string>
+-  <string name="alert_dialog_cancel">Cancel</string>
+-  <string name="toast_account_deleted">Account deleted</string>
++  <string name="label_credit">KRED</string>
++  <string name="title_accounts">Hesaplar</string>
++  <string name="title_transactions">lemler</string>
++  <string name="menu_delete">Sil</string>
++  <string name="alert_dialog_ok_delete">Sil</string>
++  <string name="alert_dialog_cancel">ptal</string>
++  <string name="toast_account_deleted">Silinmi hesap</string>
+   <string name="title_confirm_delete">Confirm delete</string>
+   <string name="delete_account_confirmation_message">All transactions in this account will also be deleted</string>
+   <string name="title_edit_transaction">Edit Transaction</string>
+   <string name="label_transaction_description">Add note</string>
+-  <string name="menu_move">MOVE</string>
+-  <string name="title_selected">%1$d selected</string>
+-  <string name="label_account_balance">Balance:</string>
++  <string name="menu_move">TAI</string>
++  <string name="title_selected">%1$d seildi</string>
++  <string name="label_account_balance">Bakiye:</string>
+   <string name="label_export_destination">Export To:</string>
+   <string name="title_export_dialog">Export Transactions</string>
+   <string name="option_export_all_transactions">Export all transactions</string>
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+-  <string name="title_settings">Settings</string>
++  <string name="title_settings">Ayarlar</string>
+   <string-array name="export_destinations">
+-    <item>SD Card</item>
++    <item>Hafza Kart</item>
+     <item>DropBox</item>
+     <item>Google Drive</item>
+     <item>Send to&#8230;</item>
+@@ -69,12 +69,12 @@
+   <string name="btn_move">Move</string>
+   <string name="title_move_transactions">Move %1$d transaction(s)</string>
+   <string name="label_move_destination">Destination Account</string>
+-  <string name="permission_access_sdcard">Access SD Card</string>
++  <string name="permission_access_sdcard">SD Kart Eriimi</string>
+   <string name="toast_incompatible_currency">Cannot move transactions.\nThe destination account uses a different currency from origin account</string>
+-  <string name="header_general_settings">General</string>
+-  <string name="header_about_gnucash">About</string>
+-  <string name="title_choose_currency">Choose default currency</string>
+-  <string name="title_default_currency">Default currency</string>
++  <string name="header_general_settings">Genel</string>
++  <string name="header_about_gnucash">Hakknda</string>
++  <string name="title_choose_currency">Varsaylan para birimini sein</string>
++  <string name="title_default_currency">Varsaylan para birimi</string>
+   <string name="summary_default_currency">Default currency to assign to new accounts</string>
+   <string name="label_permission_record_transactions">Enables recording transactions in GnuCash for Android</string>
+   <string name="label_permission_create_accounts">Enables creation of accounts in GnuCash for Android</string>
+@@ -83,14 +83,14 @@
+   <string name="label_permission_record_transaction">Record transactions in GnuCash</string>
+   <string name="label_permission_create_account">Create accounts in GnuCash</string>
+   <string name="label_display_account">Display account</string>
+-  <string name="btn_create_accounts">Create Accounts</string>
++  <string name="btn_create_accounts">Hesap Olutur</string>
+   <string name="title_default_accounts">Select accounts to create</string>
+   <string name="error_no_accounts">No accounts exist in GnuCash.\nCreate an account before adding a widget</string>
+   <string name="title_build_version">Build version</string>
+-  <string name="title_license">License</string>
+-  <string name="summary_licence_details">Apache License v2.0. Click for details</string>
+-  <string name="title_general_prefs">General Preferences</string>
+-  <string name="label_widget_configuration">Select Account</string>
++  <string name="title_license">Lisans</string>
++  <string name="summary_licence_details">Apache Lisans v2.0. Detaylar iin tklayn</string>
++  <string name="title_general_prefs">Genel Tercihler</string>
++  <string name="label_widget_configuration">Hesap sein</string>
+   <string name="toast_no_transactions_to_export">There are no transactions available to export</string>
+   <string name="header_passcode_settings">Passcode</string>
+   <string name="title_passcode_preferences">Passcode Preferences</string>
+@@ -109,7 +109,7 @@
+   <string name="title_default_transaction_type">Default Transaction Type</string>
+   <string name="summary_default_transaction_type">The type of transaction to use by default, CREDIT or DEBIT</string>
+   <string-array name="transaction_types">
+-    <item>CREDIT</item>
++    <item>KRED</item>
+     <item>DEBIT</item>
+   </string-array>
+   <string name="msg_delete_all_transactions_confirmation">Are you sure you want to delete ALL transactions?</string>
+@@ -122,13 +122,13 @@
+   <string name="label_double_entry_account">Transfer Account</string>
+   <string name="summary_use_double_entry">All transactions will be a transfer from one account to another</string>
+   <string name="title_use_double_entry">Activate Double Entry</string>
+-  <string name="account_balance">Balance</string>
++  <string name="account_balance">Bakiye</string>
+   <string name="toast_no_account_name_entered">Enter an account name to create an account</string>
+-  <string name="label_account_currency">Currency</string>
++  <string name="label_account_currency">Para birimi</string>
+   <string name="label_parent_account">Parent account</string>
+   <string name="title_xml_ofx_header">Use XML OFX header</string>
+   <string name="summary_xml_ofx_header">Enable this option when exporting to third-party application other than GnuCash for desktop</string>
+-  <string name="title_whats_new">What\'s New</string>
++  <string name="title_whats_new">Yenilikler</string>
+   <string name="whats_new">
+         - New Material app design \n
+         - Multi-currency transactions\n
+@@ -137,7 +137,7 @@
+         - New help &amp; feedback section\n
+         - Multiple bug fixes and improvements\n
+ 	</string>
+-  <string name="label_dismiss">Dismiss</string>
++  <string name="label_dismiss">Yoksay</string>
+   <string name="toast_transanction_amount_required">Enter an amount to save the transaction</string>
+   <string name="toast_error_edit_multi_currency_transaction">Multi-currency transactions cannot be modified</string>
+   <string name="menu_import_accounts">Import GnuCash Accounts</string>
+@@ -150,12 +150,12 @@
+         well.
+     </string>
+   <string name="title_delete_all_accounts">Delete all accounts</string>
+-  <string name="header_account_settings">Accounts</string>
++  <string name="header_account_settings">Hesaplar</string>
+   <string name="toast_all_accounts_deleted">All accounts have been successfully deleted</string>
+   <string name="confirm_delete_all_accounts">Are you sure you want to delete all accounts and transactions?\n\nThis
+         operation cannot be undone!
+     </string>
+-  <string name="label_account_type">Account Type</string>
++  <string name="label_account_type">Hesap Tr</string>
+   <string name="summary_delete_all_transactions">All transactions in all accounts will be deleted!</string>
+   <string name="title_delete_all_transactions">Delete all transactions</string>
+   <string name="toast_all_transactions_deleted">All transactions successfully deleted!</string>
+@@ -163,7 +163,7 @@
+   <string name="toast_tap_again_to_confirm_delete">Tap again to confirm. ALL entries will be deleted!!</string>
+   <string name="section_header_transactions">Transactions</string>
+   <string name="section_header_subaccounts">Sub-Accounts</string>
+-  <string name="menu_search_accounts">Search</string>
++  <string name="menu_search_accounts">Arama</string>
+   <string name="title_default_export_format">Default Export Format</string>
+   <string name="summary_default_export_format">File format to use by default when exporting transactions</string>
+   <string name="menu_export_transactions">Export transactions&#8230;</string>
+diff --git a/app/src/main/res/values-uk-rUA/strings.xml b/app/src/main/res/values-uk-rUA/strings.xml
+index 0f843662..bd4f1b49 100644
+--- a/app/src/main/res/values-uk-rUA/strings.xml
++++ b/app/src/main/res/values-uk-rUA/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">  ,    .</string>
+   <string name="toast_export_error">   %1$s</string>
+   <string name="btn_export"></string>
+-  <string name="option_delete_after_export">  </string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">      .</string>
+   <string name="title_settings"></string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-vi-rVN/strings.xml b/app/src/main/res/values-vi-rVN/strings.xml
+index 1656ad73..27cff508 100644
+--- a/app/src/main/res/values-vi-rVN/strings.xml
++++ b/app/src/main/res/values-vi-rVN/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice">By default, only new transactions since last export will be exported. Check this option to export all transactions</string>
+   <string name="toast_export_error">Error exporting %1$s file</string>
+   <string name="btn_export">Export</string>
+-  <string name="option_delete_after_export">Delete after export</string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+   <string name="title_settings">Settings</string>
+   <string-array name="export_destinations">
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 83f48ddf..d9944b68 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -51,7 +51,7 @@
+   <string name="menu_move"></string>
+   <string name="title_selected">%1$d </string>
+   <string name="label_account_balance"></string>
+-  <string name="label_export_destination">Export To:</string>
++  <string name="label_export_destination"></string>
+   <string name="title_export_dialog"></string>
+   <string name="option_export_all_transactions"></string>
+   <string name="hint_export_choice"></string>
+@@ -64,7 +64,7 @@
+     <item>SD</item>
+     <item>DropBox</item>
+     <item>Google Drive</item>
+-    <item>&#8230;</item>
++    <item>Owncloud</item>
+   </string-array>
+   <string name="btn_move"></string>
+   <string name="title_move_transactions"> %1$d </string>
+@@ -88,7 +88,7 @@
+   <string name="error_no_accounts">GnuCash\n</string>
+   <string name="title_build_version"></string>
+   <string name="title_license"></string>
+-  <string name="summary_licence_details">Apache License v2.0</string>
++  <string name="summary_licence_details">Apache License v2.0</string>
+   <string name="title_general_prefs"></string>
+   <string name="label_widget_configuration"></string>
+   <string name="toast_no_transactions_to_export"></string>
+@@ -98,10 +98,10 @@
+   <string name="title_passcode_disabled"></string>
+   <string name="title_change_passcode"></string>
+   <string name="title_about_gnucash">GnuCash</string>
+-  <string name="summary_about_gnucash">A mobile finance management and expense-tracker designed for Android</string>
++  <string name="summary_about_gnucash">Android</string>
+   <string name="title_about"></string>
+   <string name="toast_format_exported_to">%1$s\n</string>
+-  <string name="title_export_email">GnuCash Android %1$s </string>
++  <string name="title_export_email">GnuCash Android %1$s </string>
+   <string name="description_export_email">GnuCash Android Export from </string>
+   <string name="header_transaction_settings"></string>
+   <string name="title_transaction_preferences"></string>
+@@ -117,7 +117,7 @@
+   <string name="title_export_preference_category"></string>
+   <string name="title_export_all_transactions"></string>
+   <string name="title_always_delete_exported_transactions"></string>
+-  <string name="title_default_export_email">email</string>
++  <string name="title_default_export_email">Email</string>
+   <string name="summary_default_export_email">OFXemail</string>
+   <string name="label_double_entry_account"></string>
+   <string name="summary_use_double_entry"></string>
+@@ -130,12 +130,12 @@
+   <string name="summary_xml_ofx_header">GnuCash</string>
+   <string name="title_whats_new"></string>
+   <string name="whats_new">
+-        - New Material app design \n
+-        - Multi-currency transactions\n
+-        - Calculator to transaction amounts\n
+-        - Better reporting options\n
+-        - New help &amp; feedback section\n
+-        - Multiple bug fixes and improvements\n
++        - Material Design \n
++        -  \n
++        -  \n
++        -  \n
++        -  \n
++        - \n
+     </string>
+   <string name="label_dismiss"></string>
+   <string name="toast_transanction_amount_required"></string>
+@@ -238,8 +238,8 @@
+   <string name="label_imbalance"></string>
+   <string name="btn_add_split"></string>
+   <string name="menu_title_favorite"></string>
+-  <string name="drawer_open">Navigation drawer opened</string>
+-  <string name="drawer_close">Navigation drawer closed</string>
++  <string name="drawer_open"></string>
++  <string name="drawer_close"></string>
+   <string name="title_reports"></string>
+   <string name="title_pie_chart"></string>
+   <string name="title_line_chart"></string>
+@@ -250,29 +250,29 @@
+   <string name="summary_use_account_color"></string>
+   <string name="header_report_settings"></string>
+   <string name="menu_order_by_size"></string>
+-  <string name="menu_toggle_legend">Show legend</string>
+-  <string name="menu_toggle_labels">Show labels</string>
+-  <string name="menu_toggle_percentage_mode">Show percentage</string>
+-  <string name="menu_toggle_average_lines">Show average lines</string>
++  <string name="menu_toggle_legend"></string>
++  <string name="menu_toggle_labels"></string>
++  <string name="menu_toggle_percentage_mode"></string>
++  <string name="menu_toggle_average_lines"></string>
+   <string name="menu_group_smaller_slices"></string>
+   <string name="label_chart_no_data"></string>
+   <string name="label_chart_overall"></string>
+   <string name="label_chart_total"></string>
+   <string name="label_other_slice"></string>
+-  <string name="toast_chart_percentage_mode_total">The percentage of selected value calculated from the total amount</string>
+-  <string name="toast_chart_percentage_mode_current_bar">The percentage of selected value calculated from the current stacked bar amount</string>
++  <string name="toast_chart_percentage_mode_total"></string>
++  <string name="toast_chart_percentage_mode_current_bar"></string>
+   <string name="label_save_template"></string>
+   <string name="label_delete_account_transactions_description"> \n</string>
+   <string name="label_delete_account_subaccounts_description"> \n</string>
+   <string name="label_delete_transactions"></string>
+   <string name="toast_disable_double_entry_to_save_transaction"></string>
+-  <string name="label_tap_to_create_schedule"></string>
++  <string name="label_tap_to_create_schedule"></string>
+   <string name="title_restore_backup">&#8230;</string>
+   <string name="header_backup_and_export_settings"></string>
+-  <string name="title_dropbox_sync_preference">DropBox Sync</string>
++  <string name="title_dropbox_sync_preference">DropBox </string>
+   <string name="title_backup_preference_category"></string>
+   <string name="summary_dropbox_sync">DropBox</string>
+-  <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
++  <string name="title_select_gnucash_xml_file">GnuCash XML</string>
+   <string name="title_backup_prefs"></string>
+   <string name="title_create_backup_pref"></string>
+   <string name="summary_create_backup_pref">SD</string>
+@@ -280,7 +280,7 @@
+   <string name="toast_backup_successful"></string>
+   <string name="toast_backup_failed"></string>
+   <string name="export_warning_xml"></string>
+-  <string name="title_google_drive_sync_pref">Google Drive Sync</string>
++  <string name="title_google_drive_sync_pref">Google Drive </string>
+   <string name="summary_google_drive_sync">Google Drive</string>
+   <string name="toast_install_file_manager"></string>
+   <string name="title_select_backup_to_restore"></string>
+@@ -303,10 +303,8 @@
+     <item quantity="other"> %d </item>
+   </plurals>
+   <string name="title_enable_crashlytics"></string>
+-  <string name="msg_enable_crashlytics">Enable to send information about malfunctions to the developers for improvement (recommended).
+-No user-identifiable information will be collected as part of this process!
+-    </string>
+-  <string name="label_export_format">Format</string>
++  <string name="msg_enable_crashlytics"></string>
++  <string name="label_export_format"></string>
+   <string name="toast_backup_folder_not_found">SD</string>
+   <string name="label_old_passcode"></string>
+   <string name="label_new_passcode"></string>
+@@ -315,74 +313,74 @@ No user-identifiable information will be collected as part of this process!
+   <string name="label_no_scheduled_exports_to_display"></string>
+   <string name="title_create_export_schedule"></string>
+   <string name="toast_exported_to">%1$s</string>
+-  <string name="toast_legend_too_long">The legend is too long</string>
+-  <string name="hint_account_description">Account description</string>
+-  <string name="label_no_recent_accounts">No recent accounts</string>
+-  <string name="label_no_favorite_accounts">No favorite accounts</string>
+-  <string name="nav_menu_scheduled_actions">Scheduled Actions</string>
++  <string name="toast_legend_too_long"></string>
++  <string name="hint_account_description"></string>
++  <string name="label_no_recent_accounts"></string>
++  <string name="label_no_favorite_accounts"></string>
++  <string name="nav_menu_scheduled_actions"></string>
+   <string name="label_scheduled_action_ended">"Ended, last executed on "</string>
+-  <string name="label_select_bar_to_view_details">Select a bar to view details</string>
+-  <string name="btn_wizard_next">Next</string>
+-  <string name="btn_wizard_finish">Done</string>
+-  <string name="wizard_title_default_currency">Default Currency</string>
+-  <string name="wizard_title_account_setup">Account Setup</string>
+-  <string name="wizard_title_select_currency">Select Currency</string>
+-  <string name="wizard_title_feedback_options">Feedback Options</string>
+-  <string name="wizard_option_create_default_accounts">Create default accounts</string>
+-  <string name="wizard_option_import_my_accounts">Import my accounts</string>
+-  <string name="wizard_option_let_me_handle_it">Let me handle it</string>
+-  <string name="wizard_option_currency_other">Other...</string>
+-  <string name="wizard_option_auto_send_crash_reports">Automatically send crash reports</string>
+-  <string name="wizard_option_disable_crash_reports">Disable crash reports</string>
+-  <string name="wizard_btn_back">Back</string>
+-  <string name="title_setup_gnucash">Setup GnuCash</string>
+-  <string name="wizard_title_welcome_to_gnucash">Welcome to GnuCash</string>
+-  <string name="msg_wizard_welcome_page">Before you dive in, \nlet\'s setup a few things first\n\nTo continue, press Next</string>
+-  <string name="title_split_editor">Split Editor</string>
+-  <string name="toast_error_check_split_amounts">Check that all splits have valid amounts before saving!</string>
+-  <string name="label_error_invalid_expression">Invalid expression!</string>
+-  <string name="toast_scheduled_recurring_transaction">Scheduled recurring transaction</string>
+-  <string name="error_exchange_rate_required">An exchange rate is required</string>
+-  <string name="error_converted_amount_required">The converted amount is required</string>
+-  <string name="title_transfer_funds">Transfer Funds</string>
+-  <string name="nav_menu_help"><![CDATA[Help & Feedback]]></string>
+-  <string name="label_select_pie_slice_to_see_details">Select a slice to see details</string>
+-  <string name="label_report_period">Period:</string>
+-  <string name="label_convert_from">From:</string>
+-  <string name="label_convert_to">To:</string>
+-  <string name="msg_provide_exchange_rate">Provide either the converted amount or exchange rate in order to transfer funds</string>
+-  <string name="hint_exchange_rate">Exchange rate</string>
+-  <string name="btn_fetch_quote">Fetch quote</string>
+-  <string name="hint_converted_amount">Converted Amount</string>
+-  <string name="title_report_sheet">Sheet</string>
+-  <string name="label_last_3_months_expenses">Expenses for last 3 months</string>
+-  <string name="label_total_assets">Total Assets</string>
+-  <string name="label_total_liabilities">Total Liabilities</string>
+-  <string name="label_net_worth">Net Worth</string>
+-  <string name="label_assets">Assets</string>
+-  <string name="label_liabilities">Liabilities</string>
+-  <string name="label_equity">Equity</string>
+-  <string name="label_total_liabilities_and_equity"><![CDATA[Total Liabilites & Equity]]></string>
+-  <string name="label_move_to">Move to:</string>
+-  <string name="menu_group_by">Group By</string>
+-  <string name="menu_group_by_month">Month</string>
+-  <string name="menu_group_by_quarter">Quarter</string>
+-  <string name="menu_group_by_year">Year</string>
+-  <string name="title_balance_sheet_report">Balance Sheet</string>
+-  <string name="label_balance_sheet_total">Total:</string>
+-  <string name="title_google_plus_community">Google+ Community</string>
+-  <string name="title_translate_gnucash">Translate GnuCash</string>
+-  <string name="summary_google_plus">Share ideas, discuss changes or report problems</string>
+-  <string name="summary_translate_gnucash">Translate or proof-read on CrowdIn</string>
+-  <string name="toast_no_compatible_apps_to_receive_export">No compatible apps to receive the exported transactions!</string>
+-  <string name="menu_move_transaction">Move...</string>
+-  <string name="menu_duplicate_transaction">Duplicate</string>
++  <string name="label_select_bar_to_view_details"></string>
++  <string name="btn_wizard_next"></string>
++  <string name="btn_wizard_finish"></string>
++  <string name="wizard_title_default_currency"></string>
++  <string name="wizard_title_account_setup"></string>
++  <string name="wizard_title_select_currency"></string>
++  <string name="wizard_title_feedback_options"></string>
++  <string name="wizard_option_create_default_accounts"></string>
++  <string name="wizard_option_import_my_accounts"></string>
++  <string name="wizard_option_let_me_handle_it"></string>
++  <string name="wizard_option_currency_other">&#8230;</string>
++  <string name="wizard_option_auto_send_crash_reports"></string>
++  <string name="wizard_option_disable_crash_reports"></string>
++  <string name="wizard_btn_back"></string>
++  <string name="title_setup_gnucash">GnuCash</string>
++  <string name="wizard_title_welcome_to_gnucash">GnuCash</string>
++  <string name="msg_wizard_welcome_page"> \n\n\n</string>
++  <string name="title_split_editor"></string>
++  <string name="toast_error_check_split_amounts"></string>
++  <string name="label_error_invalid_expression"></string>
++  <string name="toast_scheduled_recurring_transaction"></string>
++  <string name="error_exchange_rate_required"></string>
++  <string name="error_converted_amount_required"></string>
++  <string name="title_transfer_funds"></string>
++  <string name="nav_menu_help"><![CDATA[]]></string>
++  <string name="label_select_pie_slice_to_see_details"></string>
++  <string name="label_report_period"></string>
++  <string name="label_convert_from"></string>
++  <string name="label_convert_to"></string>
++  <string name="msg_provide_exchange_rate"></string>
++  <string name="hint_exchange_rate"></string>
++  <string name="btn_fetch_quote"></string>
++  <string name="hint_converted_amount"></string>
++  <string name="title_report_sheet"></string>
++  <string name="label_last_3_months_expenses"></string>
++  <string name="label_total_assets"></string>
++  <string name="label_total_liabilities"></string>
++  <string name="label_net_worth"></string>
++  <string name="label_assets"></string>
++  <string name="label_liabilities"></string>
++  <string name="label_equity"></string>
++  <string name="label_total_liabilities_and_equity"><![CDATA[]]></string>
++  <string name="label_move_to"></string>
++  <string name="menu_group_by"></string>
++  <string name="menu_group_by_month"></string>
++  <string name="menu_group_by_quarter"></string>
++  <string name="menu_group_by_year"></string>
++  <string name="title_balance_sheet_report"></string>
++  <string name="label_balance_sheet_total"></string>
++  <string name="title_google_plus_community">Google+</string>
++  <string name="title_translate_gnucash">GnuCash</string>
++  <string name="summary_google_plus">Google+</string>
++  <string name="summary_translate_gnucash">CrowdIn</string>
++  <string name="toast_no_compatible_apps_to_receive_export"></string>
++  <string name="menu_move_transaction"></string>
++  <string name="menu_duplicate_transaction"></string>
+   <string-array name="report_time_range">
+-    <item>Current month</item>
+-    <item>Last 3 months</item>
+-    <item>Last 6 months</item>
+-    <item>Last 12 months</item>
+-    <item>All time</item>
+-    <item>Custom range&#8230;</item>
++    <item></item>
++    <item>3</item>
++    <item>6</item>
++    <item>12</item>
++    <item></item>
++    <item>&#8230;</item>
+   </string-array>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+index fc5f6b5d..38ac9b20 100644
+--- a/app/src/main/res/values-zh-rTW/strings.xml
++++ b/app/src/main/res/values-zh-rTW/strings.xml
+@@ -57,7 +57,7 @@
+   <string name="hint_export_choice"></string>
+   <string name="toast_export_error">%1$s</string>
+   <string name="btn_export"></string>
+-  <string name="option_delete_after_export"></string>
++  <string name="option_delete_after_export">Delete transactions after export</string>
+   <string name="hint_delete_after_export"></string>
+   <string name="title_settings"></string>
+   <string-array name="export_destinations">

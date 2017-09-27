@@ -1,0 +1,195 @@
+From 6995e9ca0a3684254f7d072f96cb94a242f189f7 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 16 Sep 2015 22:33:17 +0800
+Subject: [PATCH] fix price table export bugs
+
+remove price table before import
+use long instead int for price num/denom
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java    |  1 +
+ .../java/org/gnucash/android/db/PricesDbAdapter.java |  9 +++++----
+ .../gnucash/android/export/xml/GncXmlExporter.java   |  4 ++--
+ .../org/gnucash/android/importer/GncXmlHandler.java  |  8 ++++++--
+ .../main/java/org/gnucash/android/model/Money.java   |  6 +++---
+ .../main/java/org/gnucash/android/model/Price.java   | 20 ++++++++++----------
+ 6 files changed, 27 insertions(+), 21 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 293a7b9e..ec77cdc2 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -1185,6 +1185,7 @@ public static int getActiveAccountColorResource(@NonNull String accountUID) {
+ 	 */
+     @Override
+ 	public int deleteAllRecords() {
++        mDb.delete(DatabaseSchema.PriceEntry.TABLE_NAME, null, null);
+         // Relies "ON DELETE CASCADE" takes too much time
+         // It take more than 300s to complete the deletion on my dataset without
+         // clearing the split table first, but only needs a little more that 1s
+diff --git a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+index 57b0337d..b03f1a92 100644
+--- a/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/PricesDbAdapter.java
+@@ -5,6 +5,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
+ import android.support.annotation.NonNull;
++import android.util.Log;
+ 
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Price;
+@@ -67,15 +68,15 @@ public Price buildModelInstance(@NonNull final Cursor cursor) {
+         String dateString   = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_DATE));
+         String source       = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_SOURCE));
+         String type         = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_TYPE));
+-        String valueNum     = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_NUM));
+-        String valueDenom   = cursor.getString(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_DENOM));
++        long valueNum     = cursor.getLong(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_NUM));
++        long valueDenom   = cursor.getLong(cursor.getColumnIndexOrThrow(PriceEntry.COLUMN_VALUE_DENOM));
+ 
+         Price price = new Price(commodityUID, currencyUID);
+         price.setDate(Timestamp.valueOf(dateString));
+         price.setSource(source);
+         price.setType(type);
+-        price.setValueNum(Integer.parseInt(valueNum));
+-        price.setValueDenom(Integer.parseInt(valueDenom));
++        price.setValueNum(valueNum);
++        price.setValueDenom(valueDenom);
+ 
+         populateBaseModelAttributes(cursor, price);
+         return price;
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 0122b820..b154960f 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -649,14 +649,14 @@ private void exportPrices(XmlSerializer xmlSerializer) throws IOException {
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_COMMODITY);
+                 // currency
+-                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_COMMODITY);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_CURRENCY);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
+                 xmlSerializer.text("ISO4217");
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_ID);;
+                 xmlSerializer.text(mCommoditiesDbAdapter.getCurrencyCode(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_CURRENCY_UID))));
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
+-                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_COMMODITY);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_CURRENCY);
+                 // time
+                 String strDate = GncXmlHelper.formatDate(Timestamp.valueOf(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_DATE))).getTime());
+                 xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_TIME);
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 9a4bffb6..74fc95c9 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -698,8 +698,10 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                         Crashlytics.log(message);
+                         throw new SAXException(message);
+                     } else {
+-                        mPrice.setValueNum(Integer.valueOf(parts[0]));
+-                        mPrice.setValueDenom(Integer.valueOf(parts[1]));
++                        mPrice.setValueNum(Long.valueOf(parts[0]));
++                        mPrice.setValueDenom(Long.valueOf(parts[1]));
++                        Log.d(getClass().getName(), "price " + characterString +
++                        " .. " + mPrice.getValueNum() + "/" + mPrice.getValueDenom());
+                     }
+                 }
+                 break;
+@@ -707,11 +709,13 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 if (mPrice != null) {
+                     mPrice.setType(characterString);
+                 }
++                break;
+             case GncXmlHelper.TAG_PRICE:
+                 if (mPrice != null) {
+                     mPriceList.add(mPrice);
+                     mPrice = null;
+                 }
++                break;
+         }
+ 
+         //reset the accumulated characters
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 9a4f8946..81a06b7a 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -253,9 +253,9 @@ private void setCurrency(Currency currency) {
+ 	 * <p>Example: Given an amount 32.50$, the numerator will be 3250</p>
+ 	 * @return GnuCash numerator for this amount
+ 	 */
+-	public int getNumerator() {
++	public long getNumerator() {
+ 		try {
+-			return mAmount.scaleByPowerOfTen(getScale()).intValueExact();
++			return mAmount.scaleByPowerOfTen(getScale()).longValueExact();
+ 		} catch (ArithmeticException e) {
+ 			Log.e(getClass().getName(), "Currency " + mCurrency.getCurrencyCode() +
+ 					" with scale " + getScale() +
+@@ -269,7 +269,7 @@ public int getNumerator() {
+ 	 * <p>The denominator is 10 raised to the power of number of fractional digits in the currency</p>
+ 	 * @return GnuCash format denominator
+ 	 */
+-	public int getDenominator() {
++	public long getDenominator() {
+ 		switch (getScale()) {
+ 			case 0:
+ 				return 1;
+diff --git a/app/src/main/java/org/gnucash/android/model/Price.java b/app/src/main/java/org/gnucash/android/model/Price.java
+index 2fb9c910..084da550 100644
+--- a/app/src/main/java/org/gnucash/android/model/Price.java
++++ b/app/src/main/java/org/gnucash/android/model/Price.java
+@@ -12,8 +12,8 @@
+     private Timestamp mDate;
+     private String mSource;
+     private String mType;
+-    private int mValueNum;
+-    private int mValueDenom;
++    private long mValueNum;
++    private long mValueDenom;
+ 
+     /**
+      * String indicating that the price was provided by the user
+@@ -75,19 +75,19 @@ public void setType(String type) {
+         this.mType = type;
+     }
+ 
+-    public int getValueNum() {
++    public long getValueNum() {
+         return mValueNum;
+     }
+ 
+-    public void setValueNum(int valueNum) {
++    public void setValueNum(long valueNum) {
+         this.mValueNum = valueNum;
+     }
+ 
+-    public int getValueDenom() {
++    public long getValueDenom() {
+         return mValueDenom;
+     }
+ 
+-    public void setValueDenom(int valueDenom) {
++    public void setValueDenom(long valueDenom) {
+         this.mValueDenom = valueDenom;
+     }
+ 
+@@ -97,14 +97,14 @@ public void reduce() {
+             mValueNum = -mValueNum;
+         }
+         if (mValueDenom != 0 && mValueNum != 0) {
+-            int num1 = mValueNum;
++            long num1 = mValueNum;
+             if (num1 < 0) {
+                 num1 = -num1;
+             }
+-            int num2 = mValueDenom;
+-            int commonDivisor = 1;
++            long num2 = mValueDenom;
++            long commonDivisor = 1;
+             for(;;) {
+-                int r = num1 % num2;
++                long r = num1 % num2;
+                 if (r == 0) {
+                     commonDivisor = num2;
+                     break;

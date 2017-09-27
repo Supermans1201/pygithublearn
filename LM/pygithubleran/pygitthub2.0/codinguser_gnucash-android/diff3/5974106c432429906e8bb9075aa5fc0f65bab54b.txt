@@ -1,0 +1,615 @@
+From 5974106c432429906e8bb9075aa5fc0f65bab54b Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 29 Jun 2012 01:00:55 +0200
+Subject: [PATCH] Added tests for manipulating accounts and transactions Added
+ TDD tests for OFX export Fixed bugs discovered through testing Code
+ refactoring
+
+---
+ .../menu/{action_bar.xml => global_actions.xml}    |   0
+ .../src/org/gnucash/android/data/Account.java      |   4 +
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  47 ++++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  |   4 +
+ .../gnucash/android/ui/AccountsListFragment.java   |   2 +-
+ .../gnucash/android/ui/NewTransactionFragment.java |   6 +-
+ .../gnucash/android/test/AccountsActivityTest.java |  86 ++++++++-
+ .../org/gnucash/android/test/OfxExportTest.java    |  53 ++++++
+ .../android/test/TransactionsFragmentTest.java     | 197 +++++++++++++++++++++
+ 9 files changed, 381 insertions(+), 18 deletions(-)
+ rename GnucashMobile/res/menu/{action_bar.xml => global_actions.xml} (100%)
+ create mode 100644 GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+ create mode 100644 GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java
+
+diff --git a/GnucashMobile/res/menu/action_bar.xml b/GnucashMobile/res/menu/global_actions.xml
+similarity index 100%
+rename from GnucashMobile/res/menu/action_bar.xml
+rename to GnucashMobile/res/menu/global_actions.xml
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index 3bc9d331..20c74722 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -126,6 +126,7 @@ public void setAccountType(AccountType mAccountType) {
+ 	 * @param transaction {@link Transaction} to be added to the account
+ 	 */
+ 	public void addTransaction(Transaction transaction){
++		transaction.setAccountUID(getUID());
+ 		mTransactionsList.add(transaction);
+ 	}
+ 	
+@@ -135,6 +136,9 @@ public void addTransaction(Transaction transaction){
+ 	 * @param transactionsList List of transactions to be set.
+ 	 */
+ 	public void setTransactions(List<Transaction> transactionsList){
++		for (Transaction transaction : transactionsList) {
++			transaction.setAccountUID(getUID());
++		}
+ 		this.mTransactionsList = transactionsList;
+ 	}
+ 		
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 0712449a..8f2a36db 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -26,6 +26,7 @@
+ 
+ import org.gnucash.android.data.Account;
+ import org.gnucash.android.data.Account.AccountType;
++import org.gnucash.android.data.Transaction;
+ 
+ import android.content.ContentValues;
+ import android.content.Context;
+@@ -81,18 +82,37 @@ public long addAccount(Account account){
+ 		} else {
+ 			Log.d(TAG, "Adding new account to db");
+ 			rowId = mDb.insert(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, contentValues);
+-		}			
++		}
++		
++		//now add transactions if there are any
++		if (rowId > 0){
++			for (Transaction t : account.getTransactions()) {
++				mTransactionsAdapter.addTransaction(t);
++			}
++		}
+ 		return rowId;
+ 	}
+ 	
+ 	/**
+ 	 * Deletes an account with database id <code>rowId</code>
++	 * All the transactions in the account will also be deleted
+ 	 * @param rowId Database id of the account record to be deleted
+ 	 * @return <code>true</code> if deletion was successful, <code>false</code> otherwise.
+ 	 */
+-	public boolean deleteAccount(long rowId){
++	public boolean destructiveDeleteAccount(long rowId){
+ 		Log.d(TAG, "Delete account with rowId: " + rowId);
+-		return deleteRecord(DatabaseHelper.ACCOUNTS_TABLE_NAME, rowId);
++		boolean result = false;
++		//first remove all transactions for the account
++		Cursor c = mTransactionsAdapter.fetchAllTransactionsForAccount(rowId);
++		if (c == null)
++			return result; 
++		
++		while (c.moveToNext()){
++			long id = c.getLong(DatabaseAdapter.COLUMN_ROW_ID);
++			result &= mTransactionsAdapter.deleteTransaction(id);
++		}
++		result &= deleteRecord(DatabaseHelper.ACCOUNTS_TABLE_NAME, rowId);
++		return result;
+ 	}
+ 	
+ 	/**
+@@ -118,7 +138,7 @@ public boolean transactionPreservingDelete(long rowIdToDelete, long accountReass
+ 					null);
+ 			transactionsCursor.close();
+ 		}
+-		return deleteAccount(rowIdToDelete);
++		return destructiveDeleteAccount(rowIdToDelete);
+ 	}
+ 	
+ 	/**
+@@ -173,6 +193,16 @@ public Account getAccount(long rowId){
+ 	}
+ 	
+ 	/**
++	 * Returns the {@link Account} object populated with data from the database
++	 * for the record with UID <code>uid</code>
++	 * @param uid Unique ID of the account to be retrieved
++	 * @return {@link Account} object for unique ID <code>uid</code>
++	 */
++	public Account getAccount(String uid){
++		return getAccount(getId(uid));
++	}	
++	
++	/**
+ 	 * Returns a cursor to all account records in the database
+ 	 * @return {@link Cursor} to all account records
+ 	 */
+@@ -190,7 +220,7 @@ public long getId(String accountUID){
+ 		long id = -1;
+ 		Cursor c = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
+ 				new String[]{DatabaseHelper.KEY_ROW_ID, DatabaseHelper.KEY_UID}, 
+-				DatabaseHelper.KEY_UID + "=" + accountUID, 
++				DatabaseHelper.KEY_UID + "='" + accountUID + "'", 
+ 				null, null, null, null);
+ 		if (c != null && c.moveToFirst()){
+ 			id = c.getLong(DatabaseAdapter.COLUMN_ROW_ID);
+@@ -199,4 +229,11 @@ public long getId(String accountUID){
+ 		return id;
+ 	}
+ 	
++	/**
++	 * Deletes all accounts and their transactions from the database
++	 */
++	public void deleteAllAccounts(){
++		mDb.delete(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, null);
++		mDb.delete(DatabaseHelper.TRANSACTIONS_TABLE_NAME, null, null);
++	}
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 98428cec..2e8651bc 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -180,6 +180,10 @@ public boolean deleteTransaction(long rowId){
+ 		return deleteRecord(DatabaseHelper.TRANSACTIONS_TABLE_NAME, rowId);
+ 	}
+ 	
++	public boolean deleteTransaction(String uid){
++		return mDb.delete(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
++				DatabaseHelper.KEY_UID + "='" + uid + "'", null) > 0;
++	}
+ 	public int getTransactionsCount(long accountId){
+ 		Cursor cursor = fetchAllTransactionsForAccount(accountId);
+ 		int count = 0;
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+index ec93c695..022339b1 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+@@ -251,7 +251,7 @@ public void tryDeleteAccount(long rowId){
+ 	
+ 	protected void deleteAccount(long rowId){		
+ 
+-		boolean deleted = mAccountsDbAdapter.deleteAccount(rowId);
++		boolean deleted = mAccountsDbAdapter.destructiveDeleteAccount(rowId);
+ 		if (deleted){
+ 			Toast.makeText(getActivity(), R.string.notify_account_deleted, Toast.LENGTH_SHORT).show();
+ 		}
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
+index cc397084..d6fd73e9 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
+@@ -80,8 +80,8 @@
+ 	
+ 	public static final String SELECTED_TRANSACTION_ID = "selected_transaction_id";
+ 	
+-	final static SimpleDateFormat DATE_FORMATTER = new SimpleDateFormat("dd MMM yyyy");
+-	final static SimpleDateFormat TIME_FORMATTER = new SimpleDateFormat("HH:mm");
++	public final static SimpleDateFormat DATE_FORMATTER = new SimpleDateFormat("dd MMM yyyy");
++	public final static SimpleDateFormat TIME_FORMATTER = new SimpleDateFormat("HH:mm");
+ 	
+ 	private ToggleButton mTransactionTypeButton;
+ 	private EditText mNameEditText;
+@@ -338,7 +338,7 @@ public void onTimeSet(TimePicker view, int hourOfDay, int minute) {
+ 		mTime.set(Calendar.MINUTE, minute);
+ 	}
+ 	
+-	private static String stripCurrencyFormatting(String s){
++	public static String stripCurrencyFormatting(String s){
+ 		String symbol = Currency.getInstance(Locale.getDefault()).getSymbol();
+ 		//if in scientific notation, do not remove the period
+ 		String regex = s.contains("E") ? "[" + symbol + ",-]" : "[" + symbol + ",.-]";
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
+index bccd92d1..485c0d7b 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/AccountsActivityTest.java
+@@ -1,7 +1,14 @@
+ package org.gnucash.android.test;
+ 
++import java.util.List;
++
+ import org.gnucash.android.R;
++import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Transaction;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.ui.AccountsActivity;
++import org.gnucash.android.ui.AccountsListFragment;
+ 
+ import android.support.v4.app.Fragment;
+ import android.test.ActivityInstrumentationTestCase2;
+@@ -11,6 +18,7 @@
+ import com.jayway.android.robotium.solo.Solo;
+ 
+ public class AccountsActivityTest extends ActivityInstrumentationTestCase2<AccountsActivity> {
++	private static final String DUMMY_ACCOUNT_NAME = "Test account";
+ 	private Solo mSolo;
+ 	
+ 	public AccountsActivityTest() {		
+@@ -18,7 +26,12 @@ public AccountsActivityTest() {
+ 	}
+ 
+ 	protected void setUp() throws Exception {
+-		mSolo = new Solo(getInstrumentation(), getActivity());
++		mSolo = new Solo(getInstrumentation(), getActivity());	
++		
++		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
++		Account account = new Account(DUMMY_ACCOUNT_NAME);
++		adapter.addAccount(account);
++		adapter.close();
+ 	}
+ 
+ 	public void testDisplayAccountsList(){		
+@@ -32,7 +45,7 @@ public void testDisplayAccountsList(){
+ 	
+ 	public void testCreateAccount(){
+ 		mSolo.clickOnActionBarItem(R.id.menu_add_account);
+-		mSolo.enterText(0, "Test account");
++		mSolo.enterText(0, "New Account");
+ 		
+ 		mSolo.clickOnButton(1);
+ 		
+@@ -42,14 +55,20 @@ public void testCreateAccount(){
+ 		TextView v = (TextView) lv.getChildAt(lv.getCount() - 1)
+ 				.findViewById(R.id.account_name);
+ 		
+-		assertEquals(v.getText().toString(), "Test account");
++		assertEquals(v.getText().toString(), "New Account");
+ 	}
+ 	
+ 	public void testEditAccount(){
+-		String editedAccountName = "Edited Account";
+-		ListView lv = mSolo.getCurrentListViews().get(0);
++		Fragment fragment = getActivity()
++				.getSupportFragmentManager()
++				.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
++		((AccountsListFragment) fragment).refreshList();
++		
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		
+-		mSolo.clickLongOnView(lv.getChildAt(lv.getCount() - 1));
++		String editedAccountName = "Edited Account";
++				
++		mSolo.clickLongOnText(DUMMY_ACCOUNT_NAME);
+ 		
+ 		mSolo.clickOnImage(1);
+ 		
+@@ -59,16 +78,24 @@ public void testEditAccount(){
+ 		mSolo.clickOnButton(1);
+ 		mSolo.waitForDialogToClose(1000);
+ 		
++		ListView lv = mSolo.getCurrentListViews().get(0);
+ 		TextView tv = (TextView) lv.getChildAt(lv.getCount() - 1)
+ 				.findViewById(R.id.account_name);		
+ 		assertEquals(editedAccountName, tv.getText().toString());
+ 	}
+ 	
+-	public void testDisplayTransactionsList(){		
+-		mSolo.clickOnText("Test account");
+-		mSolo.waitForText("Test account");
++	public void testDisplayTransactionsList(){	
+ 		Fragment fragment = getActivity()
+ 				.getSupportFragmentManager()
++				.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
++		((AccountsListFragment) fragment).refreshList();
++		
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
++		mSolo.clickOnText(DUMMY_ACCOUNT_NAME);
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
++		
++		fragment = getActivity()
++				.getSupportFragmentManager()
+ 				.findFragmentByTag(AccountsActivity.FRAGMENT_TRANSACTIONS_LIST);
+ 		assertNotNull(fragment);
+ 		
+@@ -77,8 +104,49 @@ public void testDisplayTransactionsList(){
+ 		
+ 	}
+ 		
++	public void testDeleteAccount(){		
++		Account acc = new Account("TO BE DELETED");
++		acc.setUID("to-be-deleted");
++		
++		Transaction transaction = new Transaction(5.99, "hats");
++		transaction.setAccountUID("to-be-deleted");
++		acc.addTransaction(transaction);
++		AccountsDbAdapter accDbAdapter = new AccountsDbAdapter(getActivity());
++		accDbAdapter.addAccount(acc);		
++		
++		Fragment fragment = getActivity()
++				.getSupportFragmentManager()
++				.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
++		assertNotNull(fragment);
++		
++		((AccountsListFragment) fragment).refreshList();
++		
++		mSolo.clickLongOnText("TO BE DELETED");
++		
++		mSolo.clickOnImage(2);
++		mSolo.clickOnText("Delete");
++		
++		mSolo.waitForDialogToClose(1000);
++		
++		long id = accDbAdapter.fetchAccountWithUID("to-be-deleted");
++		assertEquals(-1, id);
++		
++		TransactionsDbAdapter transDbAdapter = new TransactionsDbAdapter(getActivity());
++		List<Transaction> transactions = transDbAdapter.getAllTransactionsForAccount("to-be-deleted");
++		
++		assertEquals(0, transactions.size());
++		
++		accDbAdapter.close();
++		transDbAdapter.close();
++	}
++	
+ 	protected void tearDown() throws Exception {
++		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
++		adapter.deleteAllAccounts();
++		adapter.close();
++		
+ 		mSolo.finishOpenedActivities();		
++		super.tearDown();
+ 	}
+ 
+ }
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java b/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+new file mode 100644
+index 00000000..4e56c590
+--- /dev/null
++++ b/GnucashMobileTest/src/org/gnucash/android/test/OfxExportTest.java
+@@ -0,0 +1,53 @@
++package org.gnucash.android.test;
++
++import java.io.File;
++import java.text.SimpleDateFormat;
++import java.util.Date;
++
++import org.gnucash.android.R;
++import org.gnucash.android.ui.AccountsActivity;
++
++import android.test.ActivityInstrumentationTestCase2;
++
++import com.jayway.android.robotium.solo.Solo;
++
++public class OfxExportTest extends
++		ActivityInstrumentationTestCase2<AccountsActivity> {
++
++	private Solo mSolo;
++	
++	public OfxExportTest() {
++		super(AccountsActivity.class);
++	}
++	
++	@Override
++	protected void setUp() throws Exception {
++		mSolo = new Solo(getInstrumentation(), getActivity());
++		super.setUp();
++	}
++	
++	public void testOfxExport(){
++		mSolo.clickOnActionBarItem(R.id.menu_export);
++		
++		mSolo.waitForText("Export OFX");
++		mSolo.clickOnText("Export");
++		long timeMillis = System.currentTimeMillis();
++		
++		SimpleDateFormat formatter = new SimpleDateFormat("yyyyMMdd_HHmm");
++		String filename = formatter.format(new Date(timeMillis)) + "_gnucash_export.ofx";
++		
++		File file = new File(getActivity().getExternalFilesDir(null), filename);
++		assertNotNull(file);
++		assertTrue(file.exists());
++	}	
++	
++	public void testValidityOfExport(){
++		//TODO: Validate with an XML schema if possible
++	}
++	
++	@Override
++	protected void tearDown() throws Exception {
++		// TODO Auto-generated method stub
++		super.tearDown();
++	}
++}
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java b/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java
+new file mode 100644
+index 00000000..4eaace8c
+--- /dev/null
++++ b/GnucashMobileTest/src/org/gnucash/android/test/TransactionsFragmentTest.java
+@@ -0,0 +1,197 @@
++package org.gnucash.android.test;
++
++import java.util.Date;
++
++import org.gnucash.android.R;
++import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Transaction;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++import org.gnucash.android.ui.AccountsActivity;
++import org.gnucash.android.ui.AccountsListFragment;
++import org.gnucash.android.ui.NewTransactionFragment;
++
++import android.database.Cursor;
++import android.support.v4.app.Fragment;
++import android.test.ActivityInstrumentationTestCase2;
++import android.widget.Spinner;
++
++import com.jayway.android.robotium.solo.Solo;
++
++public class TransactionsFragmentTest extends
++		ActivityInstrumentationTestCase2<AccountsActivity> {
++	private static final String DUMMY_ACCOUNT_UID = "transactions-account";
++	private static final String DUMMY_ACCOUNT_NAME = "Transactions Account";
++	private Solo mSolo;
++	private Transaction mTransaction;
++	
++	public TransactionsFragmentTest() {
++		super(AccountsActivity.class);
++	}
++
++	@Override
++	protected void setUp() throws Exception {
++		mSolo = new Solo(getInstrumentation(), getActivity());	
++		
++		Account account = new Account(DUMMY_ACCOUNT_NAME);
++		account.setUID(DUMMY_ACCOUNT_UID);
++		
++		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
++		adapter.addAccount(account);
++		adapter.close();
++		
++		mTransaction = new Transaction(9.99, "Pizza");
++		mTransaction.setAccountUID(DUMMY_ACCOUNT_UID);
++		mTransaction.setDescription("What up?");
++		mTransaction.setTime(System.currentTimeMillis());
++		
++		TransactionsDbAdapter dbAdapter = new TransactionsDbAdapter(getActivity());
++		dbAdapter.addTransaction(mTransaction);
++		dbAdapter.close();
++		
++	}
++	
++	private void validateTransactionListDisplayed(){
++		Fragment fragment = getActivity()
++				.getSupportFragmentManager()
++				.findFragmentByTag(AccountsActivity.FRAGMENT_TRANSACTIONS_LIST);
++		
++		assertNotNull(fragment);
++	}
++	
++	private int getTranscationCount(){
++		TransactionsDbAdapter transactionsDb = new TransactionsDbAdapter(getActivity());
++		int count = transactionsDb.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID).size();
++		transactionsDb.close();
++		return count;
++	}
++	
++	private void validateNewTransactionFields(){
++		String expectedValue = NewTransactionFragment.DATE_FORMATTER.format(new Date(System.currentTimeMillis()));
++		String actualValue = mSolo.getText(5).getText().toString();
++		assertEquals(expectedValue, actualValue);
++		
++		expectedValue = NewTransactionFragment.TIME_FORMATTER.format(new Date(System.currentTimeMillis()));
++		actualValue = mSolo.getText(6).getText().toString();
++		assertEquals(expectedValue, actualValue);
++		Spinner spinner = mSolo.getCurrentSpinners().get(0);
++		
++		actualValue = ((Cursor)spinner.getSelectedItem()).getString(DatabaseAdapter.COLUMN_NAME);
++		assertEquals(DUMMY_ACCOUNT_NAME, actualValue);
++	}
++	
++	public void testAddTransaction(){
++		refreshAccountsList();
++		
++		//open transactions
++		mSolo.clickOnText(DUMMY_ACCOUNT_NAME);
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);		
++		validateTransactionListDisplayed();
++		
++		mSolo.clickOnActionBarItem(R.id.menu_add_transaction);
++		mSolo.waitForText("Description");
++		
++		validateNewTransactionFields();
++		
++		//validate creation of transaction
++				mSolo.enterText(0, "Lunch");
++		mSolo.enterText(1, "899");
++		//check that the amount is correctly converted in the input field
++		String actualValue = mSolo.getEditText(1).getText().toString();
++		assertEquals(" - $8.99", actualValue);
++		
++		int transactionsCount = getTranscationCount();
++		
++		mSolo.clickOnActionBarItem(R.id.menu_save);	
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
++		validateTransactionListDisplayed();
++		
++		assertEquals(getTranscationCount(), transactionsCount + 1);
++	}
++	
++	private void validateEditTransactionFields(Transaction transaction){
++		
++		String name = mSolo.getEditText(0).getText().toString();
++		assertEquals(transaction.getName(), name);
++		
++		String amountString = mSolo.getEditText(1).getText().toString();
++		double amount = Double.parseDouble(NewTransactionFragment.stripCurrencyFormatting(amountString))/100;
++		amount *= mSolo.getCurrentToggleButtons().get(0).isChecked() ? -1 : 1; //set negative for debit
++		assertEquals(transaction.getAmount(), amount);
++		
++		String description = mSolo.getEditText(2).getText().toString();
++		assertEquals(transaction.getDescription(), description);
++		
++		String expectedValue = NewTransactionFragment.DATE_FORMATTER.format(transaction.getTimeMillis());
++		String actualValue = mSolo.getText(5).getText().toString();
++		assertEquals(expectedValue, actualValue);
++		
++		expectedValue = NewTransactionFragment.TIME_FORMATTER.format(transaction.getTimeMillis());
++		actualValue = mSolo.getText(6).getText().toString();
++		assertEquals(expectedValue, actualValue);
++		Spinner spinner = mSolo.getCurrentSpinners().get(0);
++		
++		actualValue = ((Cursor)spinner.getSelectedItem()).getString(DatabaseAdapter.COLUMN_UID);		
++		assertEquals(transaction.getAccountUID(), actualValue);
++	}
++	
++	public void testEditTransaction(){
++		refreshAccountsList();
++		
++		//open transactions
++		mSolo.clickOnText(DUMMY_ACCOUNT_NAME);
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
++		
++		validateTransactionListDisplayed();
++		
++		mSolo.clickOnText("Pizza");
++		mSolo.waitForText("Description");
++		
++		validateEditTransactionFields(mTransaction);
++				
++		mSolo.enterText(0, "Pasta");
++		mSolo.clickOnActionBarItem(R.id.menu_save);
++		
++		//if we see the text, then it was successfully created
++		mSolo.waitForText("Pasta");
++	}
++	
++	public void testDeleteTransaction(){
++		refreshAccountsList();
++		
++		mSolo.clickOnText(DUMMY_ACCOUNT_NAME);
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
++		
++		mSolo.clickOnCheckBox(0);
++		mSolo.clickOnImage(2);
++		
++		AccountsDbAdapter accAdapter = new AccountsDbAdapter(getActivity());
++		long id = accAdapter.getId(DUMMY_ACCOUNT_UID);
++		TransactionsDbAdapter adapter = new TransactionsDbAdapter(getActivity());
++		assertEquals(0, adapter.getTransactionsCount(id));
++		
++		accAdapter.close();
++		adapter.close();
++		
++	}
++	
++	private void refreshAccountsList(){
++		Fragment fragment = getActivity()
++				.getSupportFragmentManager()
++				.findFragmentByTag(AccountsActivity.FRAGMENT_ACCOUNTS_LIST);
++		assertNotNull(fragment);
++		((AccountsListFragment) fragment).refreshList();		
++	}
++	
++	@Override
++	protected void tearDown() throws Exception {	
++		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
++		adapter.deleteAllAccounts();
++		adapter.close();
++		
++		mSolo.finishOpenedActivities();
++		
++		super.tearDown();
++	}
++}

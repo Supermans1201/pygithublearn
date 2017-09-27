@@ -1,0 +1,199 @@
+From d4e439608095f36756eec97fbd13353cb543ab6e Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Mon, 14 Sep 2015 22:42:26 +0800
+Subject: [PATCH] export price table
+
+---
+ .../gnucash/android/db/CommoditiesDbAdapter.java   | 15 ++++
+ .../java/org/gnucash/android/export/Exporter.java  |  8 +++
+ .../gnucash/android/export/xml/GncXmlExporter.java | 79 +++++++++++++++++++++-
+ .../gnucash/android/export/xml/GncXmlHelper.java   |  1 +
+ 4 files changed, 101 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+index c23ab334..b1b442e1 100644
+--- a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+@@ -117,4 +117,19 @@ public String getCommodityUID(String currencyCode){
+             cursor.close();
+         }
+     }
++
++    public String getCurrencyCode(@NonNull String guid) {
++        Cursor cursor = mDb.query(mTableName, new String[]{CommodityEntry.COLUMN_MNEMONIC},
++                DatabaseSchema.CommonColumns.COLUMN_UID + " = ?", new String[]{guid},
++                null, null, null);
++        try {
++            if (cursor.moveToNext()) {
++                return cursor.getString(cursor.getColumnIndexOrThrow(CommodityEntry.COLUMN_MNEMONIC));
++            } else {
++                throw new IllegalArgumentException("guid " + guid + " not exits in commodity db");
++            }
++        } finally {
++            cursor.close();
++        }
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 94703e7f..41f04166 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -28,6 +28,8 @@
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.CommoditiesDbAdapter;
++import org.gnucash.android.db.PricesDbAdapter;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -90,6 +92,8 @@
+     protected TransactionsDbAdapter mTransactionsDbAdapter;
+     protected SplitsDbAdapter mSplitsDbAdapter;
+     protected ScheduledActionDbAdapter mScheduledActionDbAdapter;
++    protected PricesDbAdapter mPricesDbAdpater;
++    protected CommoditiesDbAdapter mCommoditiesDbAdapter;
+     protected Context mContext;
+ 
+     public Exporter(ExportParams params, SQLiteDatabase db) {
+@@ -100,11 +104,15 @@ public Exporter(ExportParams params, SQLiteDatabase db) {
+             mTransactionsDbAdapter = TransactionsDbAdapter.getInstance();
+             mSplitsDbAdapter = SplitsDbAdapter.getInstance();
+             mScheduledActionDbAdapter = ScheduledActionDbAdapter.getInstance();
++            mPricesDbAdpater = PricesDbAdapter.getInstance();
++            mCommoditiesDbAdapter = CommoditiesDbAdapter.getInstance();
+         } else {
+             mSplitsDbAdapter = new SplitsDbAdapter(db);
+             mTransactionsDbAdapter = new TransactionsDbAdapter(db, mSplitsDbAdapter);
+             mAccountsDbAdapter = new AccountsDbAdapter(db, mTransactionsDbAdapter);
+             mScheduledActionDbAdapter = new ScheduledActionDbAdapter(db);
++            mPricesDbAdpater = new PricesDbAdapter(db);
++            mCommoditiesDbAdapter = new CommoditiesDbAdapter(db);
+         }
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index f76288fc..0122b820 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -23,6 +23,7 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportFormat;
+@@ -114,6 +115,8 @@ private void exportSlots(XmlSerializer xmlSerializer,
+     }
+ 
+     private void exportAccounts(XmlSerializer xmlSerializer) throws IOException {
++        // gnucash desktop requires that parent account appears before its descendants.
++        // sort by full-name to fulfill the request
+         Cursor cursor = mAccountsDbAdapter.fetchAccounts(null, null, DatabaseSchema.AccountEntry.COLUMN_FULL_NAME + " ASC");
+         while (cursor.moveToNext()) {
+             // write account
+@@ -624,6 +627,67 @@ private void exportCommodity(XmlSerializer xmlSerializer, List<Currency> currenc
+         }
+     }
+ 
++    private void exportPrices(XmlSerializer xmlSerializer) throws IOException {
++        xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICEDB);
++        xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_VERSION, "1");
++        Cursor cursor = mPricesDbAdpater.fetchAllRecords();
++        try {
++            while(cursor.moveToNext()) {
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE);
++                // GUID
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_ID);
++                xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
++                xmlSerializer.text(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.CommonColumns.COLUMN_UID)));
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_ID);
++                // commodity
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_COMMODITY);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
++                xmlSerializer.text("ISO4217");
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_ID);;
++                xmlSerializer.text(mCommoditiesDbAdapter.getCurrencyCode(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_COMMODITY_UID))));
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_COMMODITY);
++                // currency
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_COMMODITY);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
++                xmlSerializer.text("ISO4217");
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_SPACE);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_COMMODITY_ID);;
++                xmlSerializer.text(mCommoditiesDbAdapter.getCurrencyCode(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_CURRENCY_UID))));
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_COMMODITY_ID);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_COMMODITY);
++                // time
++                String strDate = GncXmlHelper.formatDate(Timestamp.valueOf(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_DATE))).getTime());
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_TIME);
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_TS_DATE);
++                xmlSerializer.text(strDate);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_TS_DATE);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_TIME);
++                // source
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_SOURCE);
++                xmlSerializer.text(cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_SOURCE)));
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_SOURCE);
++                // type, optional
++                String type = cursor.getString(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_TYPE));
++                if (type != null && !type.equals("")) {
++                    xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_TYPE);
++                    xmlSerializer.text(type);
++                    xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_TYPE);
++                }
++                // value
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_PRICE_VALUE);
++                xmlSerializer.text(cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_VALUE_NUM))
++                                + "/" + cursor.getLong(cursor.getColumnIndexOrThrow(DatabaseSchema.PriceEntry.COLUMN_VALUE_DENOM)));
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE_VALUE);
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICE);
++            }
++        } finally {
++            cursor.close();
++        }
++        xmlSerializer.endTag(null, GncXmlHelper.TAG_PRICEDB);
++    }
++
+     @Override
+     public void generateExport(Writer writer) throws ExporterException{
+         try {
+@@ -671,10 +735,21 @@ public void generateExport(Writer writer) throws ExporterException{
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, "transaction");
+             xmlSerializer.text(mTransactionsDbAdapter.getRecordsCount() + "");
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_COUNT_DATA);
++            //price count
++            long priceCount = mPricesDbAdpater.getRecordsCount();
++            if (priceCount > 0) {
++                xmlSerializer.startTag(null, GncXmlHelper.TAG_COUNT_DATA);
++                xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_CD_TYPE, "price");
++                xmlSerializer.text(priceCount + "");
++                xmlSerializer.endTag(null, GncXmlHelper.TAG_COUNT_DATA);
++            }
+             // export the commodities used in the DB
+             exportCommodity(xmlSerializer, currencies);
+-            // accounts. bulk import does not rely on account order
+-            // the cursor gather account in arbitrary order
++            // prices
++            if (priceCount > 0) {
++                exportPrices(xmlSerializer);
++            }
++            // accounts.
+             exportAccounts(xmlSerializer);
+             // transactions.
+             exportTransactions(xmlSerializer, false);
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+index 65a42795..470e8819 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -94,6 +94,7 @@
+     public static final String TAG_SPLIT_QUANTITY   = "split:quantity";
+     public static final String TAG_SPLIT_SLOTS      = "split:slots";
+ 
++    public static final String TAG_PRICEDB = "gnc:princedb";
+     public static final String TAG_PRICE = "price";
+     public static final String TAG_PRICE_ID = "price:id";
+     public static final String TAG_PRICE_COMMODITY = "price:commodity";

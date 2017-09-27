@@ -1,0 +1,669 @@
+From a1e760f86a9bc65b86f314bc2a5e74260ec1efa0 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 9 Aug 2012 03:30:52 +0200
+Subject: [PATCH] Fixed: crash when entering new transactions by starting with
+ minus sign Fixed: parsing money amounts was not locale sensitive Fixed:
+ keyboard not closed when Transaction activity is finished before saving
+ Accounts are now sorted alphabetically Transactions are now sorted by time
+ (of the transaction) Added and improved tests Some code refactoring
+
+---
+ .../res/layout/fragment_new_transaction.xml        |  2 +-
+ .../src/org/gnucash/android/data/Money.java        | 13 +++---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  9 ++--
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 17 ++++---
+ .../android/ui/accounts/AccountsActivity.java      |  3 +-
+ .../ui/accounts/NewAccountDialogFragment.java      |  4 +-
+ .../ui/transactions/NewTransactionFragment.java    | 29 ++++++++----
+ .../ui/transactions/TransactionsListFragment.java  |  3 +-
+ .../android/test/db/AccountsDbAdapterTest.java     | 43 +++++++++++++++++
+ .../android/test/db/TransactionsDbAdapterTest.java | 54 ++++++++++++++++++++++
+ .../android/test/ui/AccountsActivityTest.java      | 39 +++++++---------
+ .../android/test/ui/TransactionsActivityTest.java  | 14 ++++--
+ .../org/gnucash/android/test/unit/AccountTest.java | 16 +++++++
+ .../org/gnucash/android/test/unit/MoneyTest.java   | 17 +++++--
+ 14 files changed, 201 insertions(+), 62 deletions(-)
+ create mode 100644 GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+ create mode 100644 GnucashMobileTest/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+
+diff --git a/GnucashMobile/res/layout/fragment_new_transaction.xml b/GnucashMobile/res/layout/fragment_new_transaction.xml
+index b7d36139..5230cb68 100644
+--- a/GnucashMobile/res/layout/fragment_new_transaction.xml
++++ b/GnucashMobile/res/layout/fragment_new_transaction.xml
+@@ -61,7 +61,7 @@
+ 		        android:ems="10"
+ 		        android:layout_marginBottom="10dp"
+ 		        android:hint="@string/label_transaction_amount"
+-		        android:inputType="numberSigned"
++		        android:inputType="number"
+ 		        android:textColor="@color/debit_red"
+ 		        style="@style/ListItemText" />
+ 		    
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Money.java b/GnucashMobile/src/org/gnucash/android/data/Money.java
+index 75a3e07d..84e6c0ab 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Money.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Money.java
+@@ -130,7 +130,7 @@ public Money(BigDecimal amount, Currency currency, MathContext context){
+ 	 */
+ 	public Money(String amount){
+ 		init();
+-		setAmount(parseToString(amount));
++		setAmount(parseToDecimal(amount));
+ 	}
+ 	
+ 	/**
+@@ -244,7 +244,7 @@ private void setAmount(BigDecimal amount) {
+ 	 * @param amount {@link String} amount to be set
+ 	 */
+ 	private void setAmount(String amount){
+-		setAmount(new BigDecimal(amount));
++		setAmount(parseToDecimal(amount));
+ 	}
+ 	
+ 	/**
+@@ -416,11 +416,12 @@ public int compareTo(Money another) {
+ 	 * @param formattedAmount Formatted String amount
+ 	 * @return String amount formatted in the default locale
+ 	 */
+-	public static String parseToString(String formattedAmount){
+-		DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());
+-		String result = formattedAmount;
++	public static BigDecimal parseToDecimal(String formattedAmount){
++		DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());		
++		formatter.setParseBigDecimal(true);
++		BigDecimal result = null;
+ 		try {
+-			result = formatter.parse(formattedAmount).toString();
++			result = (BigDecimal) formatter.parse(formattedAmount);
+ 			
+ 		} catch (ParseException e) {
+ 			Log.e("Money", "Could not parse the amount");			
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index e026e831..4727b1f6 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -16,9 +16,9 @@
+ 
+ package org.gnucash.android.db;
+ 
+-import java.util.ArrayList;
+ import java.util.Currency;
+ import java.util.Iterator;
++import java.util.LinkedList;
+ import java.util.List;
+ 
+ import org.gnucash.android.data.Account;
+@@ -220,7 +220,7 @@ public String getName(long accountID) {
+ 	 * @return List of {@link Account}s in the database
+ 	 */
+ 	public List<Account> getAllAccounts(){
+-		ArrayList<Account> accounts = new ArrayList<Account>();
++		LinkedList<Account> accounts = new LinkedList<Account>();
+ 		Cursor c = fetchAllAccounts();
+ 		
+ 		if (c == null)
+@@ -256,7 +256,10 @@ public String getName(long accountID) {
+ 	 */
+ 	public Cursor fetchAllAccounts(){
+ 		Log.v(TAG, "Fetching all accounts from db");
+-		return fetchAllRecords(DatabaseHelper.ACCOUNTS_TABLE_NAME);
++		Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
++				null, null, null, null, null, 
++				DatabaseHelper.KEY_NAME + " ASC");
++		return cursor;
+ 	}
+ 
+ 	/**
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 17ed2fda..aa22cb53 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -105,6 +105,9 @@ public long fetchTransactionWithUID(String uid){
+ 	 */
+ 	public Transaction getTransaction(long rowId){
+ 		Transaction transaction = null;
++		if (rowId <= 0)
++			return transaction;
++		
+ 		Log.v(TAG, "Fetching transaction with id " + rowId);
+ 		Cursor c =	fetchRecord(DatabaseHelper.TRANSACTIONS_TABLE_NAME, rowId);
+ 		if (c != null && c.moveToFirst()){
+@@ -123,7 +126,7 @@ public Cursor fetchAllTransactionsForAccount(String accountUID){
+ 		Cursor cursor = mDb.query(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
+ 				null, 
+ 				DatabaseHelper.KEY_ACCOUNT_UID + " = '" + accountUID + "'", 
+-				null, null, null, null);
++				null, null, null, DatabaseHelper.KEY_TIMESTAMP + " DESC");
+ 		
+ 		return cursor;
+ 	}
+@@ -304,9 +307,11 @@ public Money getTransactionsSum(long accountId){
+ 		
+ 		String currencyCode = getCurrencyCode(accountId);
+ 		
+-		if (c == null)
+-			return new Money("0", currencyCode);
++		if (currencyCode == null)
++			currencyCode = Money.DEFAULT_CURRENCY_CODE;
+ 		
++		if (c == null || c.getCount() <= 0)
++			return new Money("0", currencyCode);		
+ 		
+ 		Money amountSum = new Money("0", currencyCode);
+ 		
+@@ -355,14 +360,14 @@ public int markAsExported(String accountUID){
+ 
+ 	/**
+ 	 * Returns an account UID of the account with record id <code>accountRowID</code>
+-	 * @param acountRowID Record ID of account as long paramenter
++	 * @param accountRowID Record ID of account as long paramenter
+ 	 * @return String containing UID of account
+ 	 */
+-	public String getAccountUID(long acountRowID){
++	public String getAccountUID(long accountRowID){
+ 		String uid = null;
+ 		Cursor c = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
+ 				new String[]{DatabaseHelper.KEY_UID}, 
+-				DatabaseHelper.KEY_ROW_ID + "=" + acountRowID, 
++				DatabaseHelper.KEY_ROW_ID + "=" + accountRowID, 
+ 				null, null, null, null);
+ 		if (c != null && c.moveToFirst()){
+ 			uid = c.getString(0);
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+index 5392dc70..57aa5c53 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+@@ -67,7 +67,8 @@ public void onCreate(Bundle savedInstanceState) {
+ 		setContentView(R.layout.activity_accounts);
+ 
+ 		SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+-		String currencyCode = prefs.getString(getString(R.string.pref_default_currency), Currency.getInstance(Locale.getDefault()).getCurrencyCode());
++		String currencyCode = prefs.getString(getString(R.string.pref_default_currency), 
++				Currency.getInstance(Locale.getDefault()).getCurrencyCode());		
+ 		Money.DEFAULT_CURRENCY_CODE = currencyCode;		
+ 		
+ 		boolean firstRun = prefs.getBoolean(getString(R.string.key_first_run), true);
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
+index e5310421..14829b09 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/NewAccountDialogFragment.java
+@@ -28,7 +28,6 @@
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import android.os.Bundle;
+-import android.preference.PreferenceManager;
+ import android.text.Editable;
+ import android.text.TextWatcher;
+ import android.view.LayoutInflater;
+@@ -132,7 +131,8 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		arrayAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+ 		mCurrencySpinner.setAdapter(arrayAdapter);
+ 		
+-		String currencyCode = PreferenceManager.getDefaultSharedPreferences(getActivity()).getString(getString(R.string.pref_default_currency), Money.DEFAULT_CURRENCY_CODE);
++		String currencyCode = Money.DEFAULT_CURRENCY_CODE;
++		
+ 		if (mSelectedId != 0){
+ 			//if we are editing an account instead of creating one
+ 			currencyCode = mAccount.getCurrency().getCurrencyCode();
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index 127879c0..b5402c4e 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -95,6 +95,7 @@
+ 	private SimpleCursorAdapter mCursorAdapter; 
+ 	
+ 	private MenuItem mSaveMenuItem;
++	private Cursor mCursor;
+ 	
+ 	@Override
+ 	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+@@ -119,18 +120,17 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		setHasOptionsMenu(true);
+ 		ActionBar actionBar = getSherlockActivity().getSupportActionBar();
+ 		actionBar.setHomeButtonEnabled(true);
++		actionBar.setDisplayHomeAsUpEnabled(true);
+ 		actionBar.setTitle(R.string.add_transaction);
+ 		
+-		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+-				
+ 		String[] from = new String[] {DatabaseHelper.KEY_NAME};
+ 		int[] to = new int[] {android.R.id.text1};
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		Cursor cursor = mAccountsDbAdapter.fetchAllAccounts();
++		mCursor = mAccountsDbAdapter.fetchAllAccounts();
+ 		
+ 		mCursorAdapter = new SimpleCursorAdapter(getActivity(), 
+ 				android.R.layout.simple_spinner_item, 
+-				cursor,
++				mCursor,
+ 				from,
+ 				to, 
+ 				0);
+@@ -138,6 +138,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		mAccountsSpinner.setAdapter(mCursorAdapter);
+ 		
+ 		mTransactionId = getArguments().getLong(SELECTED_TRANSACTION_ID);
++		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+ 		mTransaction = mTransactionsDbAdapter.getTransaction(mTransactionId);
+ 		
+ 		setListeners();
+@@ -185,7 +186,6 @@ private void initalizeViews() {
+ 		mTimeTextView.setText(TIME_FORMATTER.format(time));
+ 		mTime = mDate = Calendar.getInstance();
+ 				
+-		//TODO select the right account even from button
+ 		final long accountId = getArguments().getLong(TransactionsListFragment.SELECTED_ACCOUNT_ID);
+ 		final int count = mCursorAdapter.getCount();
+ 		for (int pos = 0; pos < count; pos++) {
+@@ -276,7 +276,9 @@ private void saveNewTransaction() {
+ 		String name = mNameEditText.getText().toString();
+ 		String description = mDescriptionEditText.getText().toString();
+ 		String amountString = mAmountEditText.getText().toString();
+-		BigDecimal amountBigd = new BigDecimal(stripCurrencyFormatting(amountString)).divide(new BigDecimal(100));
++		BigDecimal amountBigd = new BigDecimal(stripCurrencyFormatting(amountString))
++									.setScale(2, RoundingMode.HALF_EVEN)
++									.divide(new BigDecimal(100), 2, RoundingMode.HALF_EVEN);;
+ 		
+ 		Calendar cal = new GregorianCalendar(
+ 				mDate.get(Calendar.YEAR), 
+@@ -308,14 +310,14 @@ private void saveNewTransaction() {
+ 		//update widgets, if any
+ 		WidgetConfigurationActivity.updateAllWidgets(getActivity().getApplicationContext());
+ 		
+-		InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
+-		imm.hideSoftInputFromWindow(mNameEditText.getWindowToken(), 0);
+ 		getSherlockActivity().getSupportFragmentManager().popBackStack();
+ 	}
+ 
+ 	@Override
+ 	public void onDestroyView() {
+ 		super.onDestroyView();
++		if (mCursor != null)
++			mCursor.close();
+ 		mAccountsDbAdapter.close();
+ 		mTransactionsDbAdapter.close();
+ 	}
+@@ -330,6 +332,10 @@ public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+ 	
+ 	@Override
+ 	public boolean onOptionsItemSelected(MenuItem item) {
++		//hide the keyboard if it is visible
++		InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
++		imm.hideSoftInputFromWindow(mNameEditText.getWindowToken(), 0);
++		
+ 		switch (item.getItemId()) {
+ 		case R.id.menu_cancel:
+ 			getSherlockActivity().getSupportFragmentManager().popBackStack();
+@@ -363,7 +369,8 @@ public void onTimeSet(TimePicker view, int hourOfDay, int minute) {
+ 	}
+ 	
+ 	public static String stripCurrencyFormatting(String s){
+-		return s.replace(".", "").replace(",", "");
++		//remove all currency formatting and anything else which is not a number
++		return s.replace(".", "").replace(",", "").replaceAll("\\D*", "");
+ 	}
+ 	
+ 	private class ValidationsWatcher implements TextWatcher {
+@@ -401,7 +408,9 @@ public void afterTextChanged(Editable s) {
+ 			if (cleanString.length() == 0)
+ 				return;
+ 			
+-			BigDecimal amount = new BigDecimal(cleanString).setScale(2, RoundingMode.HALF_EVEN).divide(new BigDecimal(100), 2, RoundingMode.HALF_EVEN);
++			BigDecimal amount = new BigDecimal(cleanString)
++									.setScale(2, RoundingMode.HALF_EVEN)
++									.divide(new BigDecimal(100), 2, RoundingMode.HALF_EVEN);
+ 			if (mTransactionTypeButton.isChecked() && amount.doubleValue() > 0) 
+ 				amount = amount.negate();
+ 			DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance();
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+index e4a110a1..2d05f469 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+@@ -188,8 +188,7 @@ public void refreshList(){
+ 		if (sum.isNegative())
+ 			mSumTextView.setTextColor(getResources().getColor(R.color.debit_red));
+ 		else
+-			mSumTextView.setTextColor(getResources().getColor(R.color.credit_green));
+-			
++			mSumTextView.setTextColor(getResources().getColor(R.color.credit_green));			
+ 	}
+ 			
+ 	@Override
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java b/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+new file mode 100644
+index 00000000..b692985c
+--- /dev/null
++++ b/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+@@ -0,0 +1,43 @@
++package org.gnucash.android.test.db;
++
++import java.util.List;
++
++import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Transaction;
++import org.gnucash.android.db.AccountsDbAdapter;
++
++import android.test.AndroidTestCase;
++
++public class AccountsDbAdapterTest extends AndroidTestCase {
++
++	private static final String BRAVO_ACCOUNT_NAME = "Bravo";
++	private static final String ALPHA_ACCOUNT_NAME = "Alpha";
++	private AccountsDbAdapter mAdapter;
++	
++	@Override
++	protected void setUp() throws Exception {		
++		super.setUp();
++		mAdapter = new AccountsDbAdapter(getContext());
++		Account first = new Account(ALPHA_ACCOUNT_NAME);
++		Transaction t1 = new Transaction(2.99, "T800");
++		t1.setAccountUID(first.getUID());
++		Transaction t2 = new Transaction(4.99, "T1000");
++		t2.setAccountUID(first.getUID());
++		
++		Account second = new Account(BRAVO_ACCOUNT_NAME);
++		Transaction t = new Transaction(9.99, "buyout");
++		t.setAccountUID(second.getUID());
++		
++		mAdapter.addAccount(second);
++		mAdapter.addAccount(first);
++	}
++	
++	public void testAlphabeticalSorting(){
++		List<Account> accountsList = mAdapter.getAllAccounts();
++		//bravo was saved first, but alpha should be first alphabetically
++		assertEquals(ALPHA_ACCOUNT_NAME, accountsList.get(0).getName());
++		assertEquals(BRAVO_ACCOUNT_NAME, accountsList.get(1).getName());
++	}
++	
++	
++}
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java b/GnucashMobileTest/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+new file mode 100644
+index 00000000..c170d0b6
+--- /dev/null
++++ b/GnucashMobileTest/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+@@ -0,0 +1,54 @@
++package org.gnucash.android.test.db;
++
++import java.util.List;
++
++import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Transaction;
++import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.TransactionsDbAdapter;
++
++import android.test.AndroidTestCase;
++
++public class TransactionsDbAdapterTest extends AndroidTestCase {
++	private static final String ALPHA_ACCOUNT_NAME = "Alpha";
++	private static final String BRAVO_ACCOUNT_NAME = "Bravo";
++	private static final String ALPHA_ACCOUNT_UID = "alpha-team";
++	
++	private TransactionsDbAdapter mAdapter;	
++	
++	@Override
++	protected void setUp() throws Exception {
++		super.setUp();
++		mAdapter = new TransactionsDbAdapter(getContext());
++		AccountsDbAdapter accountsAdapter = new AccountsDbAdapter(mContext);
++		Account first = new Account(ALPHA_ACCOUNT_NAME);
++		first.setUID(ALPHA_ACCOUNT_UID);
++		Transaction t1 = new Transaction(2.99, "T800");
++		t1.setTime(System.currentTimeMillis() - 10000);
++		Transaction t2 = new Transaction(4.99, "T1000");
++		t2.setTime(System.currentTimeMillis());
++		first.addTransaction(t1);
++		first.addTransaction(t2);
++		
++		Account second = new Account(BRAVO_ACCOUNT_NAME);
++		Transaction t = new Transaction(9.99, "buyout");
++		second.addTransaction(t);
++		
++		accountsAdapter.addAccount(second);
++		accountsAdapter.addAccount(first);
++	}
++	
++	public void testTransactionsAreTimeSorted(){
++		List<Transaction> transactionsList = mAdapter.getAllTransactionsForAccount(ALPHA_ACCOUNT_UID);
++		assertEquals("T1000", transactionsList.get(0).getName());
++		assertEquals("T800", transactionsList.get(1).getName());
++	}
++	
++	@Override
++	protected void tearDown() throws Exception {
++		super.tearDown();
++		AccountsDbAdapter accAdapter = new AccountsDbAdapter(mContext);
++		accAdapter.deleteAllAccounts();
++		accAdapter.close();
++	}
++}
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 69f9ff34..f0a1c4a2 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -21,6 +21,7 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Money;
+ import org.gnucash.android.data.Transaction;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -41,6 +42,7 @@
+ import com.jayway.android.robotium.solo.Solo;
+ 
+ public class AccountsActivityTest extends ActivityInstrumentationTestCase2<AccountsActivity> {
++	private static final String DUMMY_ACCOUNT_CURRENCY_CODE = "USD";
+ 	private static final String DUMMY_ACCOUNT_NAME = "Test account";
+ 	private Solo mSolo;
+ 	
+@@ -58,7 +60,7 @@ protected void setUp() throws Exception {
+ 		
+ 		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+-		account.setCurrency(Currency.getInstance("USD"));
++		account.setCurrency(Currency.getInstance(DUMMY_ACCOUNT_CURRENCY_CODE));
+ 		adapter.addAccount(account);
+ 		adapter.close();
+ 	}
+@@ -81,26 +83,22 @@ public void testCreateAccount(){
+ 		mSolo.waitForText("Create");
+ 		mSolo.enterText(0, "New Account");
+ 		
+-		//this depends on the strings resource for currencies
+-		//the Swiss franc is on position 144. If list changes, fix this test
+-		int position = mSolo.getCurrentSpinners().get(0).getSelectedItemPosition();
+-		mSolo.pressSpinnerItem(0, 144 - position);
+-		mSolo.clickOnButton(1);
++		mSolo.clickOnText(getActivity().getString(R.string.btn_save));
+ 		
+ 		mSolo.waitForDialogToClose(1000);
+ 		ListView lv = mSolo.getCurrentListViews().get(0);
+ 		assertNotNull(lv);
+-		TextView v = (TextView) lv.getChildAt(lv.getCount() - 1)
++		TextView v = (TextView) lv.getChildAt(0) //accounts are sorted alphabetically
+ 				.findViewById(R.id.account_name);
+ 		
+-		assertEquals(v.getText().toString(), "New Account");
++		assertEquals("New Account", v.getText().toString());
+ 		AccountsDbAdapter accAdapter = new AccountsDbAdapter(getActivity());
+ 		
+ 		List<Account> accounts = accAdapter.getAllAccounts();
+-		Account newestAccount = accounts.get(accounts.size()-1);
++		Account newestAccount = accounts.get(0);
+ 		
+-		assertEquals(newestAccount.getName(), "New Account");
+-		assertEquals(newestAccount.getCurrency().getCurrencyCode(), "CHF");	
++		assertEquals("New Account", newestAccount.getName());		
++		assertEquals(Money.DEFAULT_CURRENCY_CODE, newestAccount.getCurrency().getCurrencyCode());	
+ 		
+ 		accAdapter.close();		
+ 	}
+@@ -121,28 +119,22 @@ public void testEditAccount(){
+ 		
+ 		mSolo.clearEditText(0);
+ 		mSolo.enterText(0, editedAccountName);
+-		
+-		//this depends on the strings resource for currencies
+-		//the Swiss franc is on position 144. If list changes, fix this test
+-		int position = mSolo.getCurrentSpinners().get(0).getSelectedItemPosition();
+-		mSolo.pressSpinnerItem(0, 144 - position);
+-		
+-		mSolo.clickOnButton(1);
+-		
+-		mSolo.waitForDialogToClose(1000);
++				
++		mSolo.clickOnText(getActivity().getString(R.string.btn_save));
++		mSolo.waitForDialogToClose(2000);
+ 		
+ 		ListView lv = mSolo.getCurrentListViews().get(0);
+-		TextView tv = (TextView) lv.getChildAt(lv.getCount() - 1)
++		TextView tv = (TextView) lv.getChildAt(0)
+ 				.findViewById(R.id.account_name);		
+ 		assertEquals(editedAccountName, tv.getText().toString());
+ 		
+ 		AccountsDbAdapter accAdapter = new AccountsDbAdapter(getActivity());
+ 		
+ 		List<Account> accounts = accAdapter.getAllAccounts();
+-		Account latest = accounts.get(accounts.size()-1);
++		Account latest = accounts.get(0);  //will be the first due to alphabetical sorting
+ 		
+ 		assertEquals(latest.getName(), "Edited Account");
+-		assertEquals(latest.getCurrency().getCurrencyCode(), "CHF");	
++		assertEquals(DUMMY_ACCOUNT_CURRENCY_CODE, latest.getCurrency().getCurrencyCode());	
+ 		accAdapter.close();
+ 	}
+ 	
+@@ -235,6 +227,7 @@ public void testIntentAccountCreation(){
+ 		assertEquals("EUR", account.getCurrency().getCurrencyCode());
+ 	}
+ 	
++	
+ 	protected void tearDown() throws Exception {
+ 		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+ 		adapter.deleteAllAccounts();
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 68b08b3b..9955cefe 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -16,8 +16,10 @@
+ 
+ package org.gnucash.android.test.ui;
+ 
++import java.util.Currency;
+ import java.util.Date;
+ import java.util.List;
++import java.util.Locale;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Account;
+@@ -54,7 +56,7 @@ public TransactionsActivityTest() {
+ 	protected void setUp() throws Exception {		
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+ 		account.setUID(DUMMY_ACCOUNT_UID);
+-		
++		account.setCurrency(Currency.getInstance(Locale.getDefault()));
+ 		mTransaction = new Transaction(9.99, "Pizza");
+ 		mTransaction.setAccountUID(DUMMY_ACCOUNT_UID);
+ 		mTransaction.setDescription("What up?");
+@@ -121,7 +123,7 @@ public void testAddTransaction(){
+ 		mSolo.enterText(1, "899");
+ 		//check that the amount is correctly converted in the input field
+ 		String value = mSolo.getEditText(1).getText().toString();
+-		double actualValue = Double.parseDouble(Money.parseToString(value));
++		double actualValue = Money.parseToDecimal(value).doubleValue();
+ 		assertEquals(-8.99, actualValue);
+ 		
+ 		int transactionsCount = getTranscationCount();
+@@ -208,10 +210,16 @@ public void testBulkMoveTransactions(){
+ 		mSolo.clickOnCheckBox(0);
+ 		mSolo.clickOnImage(1);
+ 		
+-		mSolo.pressSpinnerItem(0, 1);
++		mSolo.waitForDialogToClose(2000);
++		
++		Spinner spinner = mSolo.getCurrentSpinners().get(0);
++		mSolo.clickOnView(spinner);
++		mSolo.clickOnText("Target");
+ 		mSolo.clickOnButton(1);
+ //		mSolo.clickOnText(getActivity().getString(R.string.menu_move));
+ 		
++		mSolo.waitForDialogToClose(2000);
++		
+ 		int targetCount = accountsDbAdapter.getAccount(account.getUID()).getTransactionCount();		
+ 		assertEquals(1, targetCount);
+ 		
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/unit/AccountTest.java b/GnucashMobileTest/src/org/gnucash/android/test/unit/AccountTest.java
+index a1a2f565..77221508 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/unit/AccountTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/unit/AccountTest.java
+@@ -1,5 +1,7 @@
+ package org.gnucash.android.test.unit;
+ 
++import org.gnucash.android.data.Account;
++
+ import junit.framework.TestCase;
+ 
+ public class AccountTest extends TestCase {
+@@ -8,4 +10,18 @@ public AccountTest(String name) {
+ 		super(name);
+ 	}
+ 
++	public void testUIDContainsName(){
++		Account account = new Account("dummy");
++		assertTrue(account.getUID().contains("dummy"));
++				
++		Account another = new Account("tele pathy x-men");
++		String uid = another.getUID();
++		
++		//only first ten characters are used in uid
++		assertTrue(uid.contains("tele-pathy"));
++		
++		//no spaces allowed
++		assertFalse(uid.contains(" "));
++		assertFalse(uid.contains("tele pathy x-men"));
++	}
+ }
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java b/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+index 72ff95f5..196645dc 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+@@ -42,7 +42,11 @@ protected void setUp() throws Exception {
+ 	}
+ 
+ 	public void testCreation(){
+-		Money temp = new Money("12.25");
++		String amount = "12.25";
++		if (Locale.getDefault().equals(Locale.GERMANY)) 
++			amount = "12,25";
++		
++		Money temp = new Money(amount);
+ 		assertEquals(12.25, temp.asDouble());
+ 		
+ 		temp = new Money(9.95);
+@@ -54,8 +58,11 @@ public void testCreation(){
+ 		
+ 		assertEquals(decimal, temp.asBigDecimal());
+ 		assertEquals(currency, temp.getCurrency());
+-	
+-		temp = new Money("15.50","USD");
++		
++		amount = "15.50";
++		if (Locale.getDefault().equals(Locale.GERMANY)) 
++			amount = "15,50";
++		temp = new Money(amount,"USD");
+ 		assertEquals(15.50, temp.asDouble());
+ 		assertEquals(temp.getCurrency().getCurrencyCode(), "USD");		
+ 	}
+@@ -147,8 +154,8 @@ public void testPrinting(){
+ 		assertEquals(money.asString(), money.toPlainString());
+ 		assertEquals("15.75", money.asString());
+ 		
+-		assertEquals("15,75 ", money.formattedString(Locale.GERMAN));		
+-		assertEquals("15.75 ", money.formattedString(Locale.US));
++		assertEquals("15,75 ", money.formattedString(Locale.GERMAN));		
++		assertEquals("15.75 ", money.formattedString(Locale.US));
+ 		
+ 		//always prints with 2 decimal places only
+ 		Money some = new Money(9.7469);

@@ -1,0 +1,210 @@
+From dbce36f00b708516d022dfb73167baa3d6c35e0e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 2 Nov 2013 17:32:16 +0100
+Subject: [PATCH] Updated credit/debit handling to match Gnucash desktop -
+ fixes #78 Now credit transactions decrease balance in Assets and Expenses
+ accounts while debits increase the balance
+
+---
+ app/src/org/gnucash/android/data/Account.java      | 24 ++++++++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 13 ++++-
+ .../ui/transactions/NewTransactionFragment.java    | 63 +++++++++++++++++++---
+ .../ui/transactions/TransactionsActivity.java      |  1 +
+ 4 files changed, 89 insertions(+), 12 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/data/Account.java b/app/src/org/gnucash/android/data/Account.java
+index d6304d81..31e29397 100644
+--- a/app/src/org/gnucash/android/data/Account.java
++++ b/app/src/org/gnucash/android/data/Account.java
+@@ -54,8 +54,28 @@
+ 	 * This are the different types specified by the OFX format and 
+ 	 * they are currently not used except for exporting
+ 	 */
+-	public enum AccountType {CASH, BANK, CREDIT, ASSET, LIABILITY, INCOME, EXPENSE,
+-							PAYABLE, RECEIVABLE, EQUITY, CURRENCY, STOCK, MUTUAL, ROOT};
++	public enum AccountType {
++        CASH, BANK, CREDIT, ASSET(true), LIABILITY, INCOME, EXPENSE(true),
++        PAYABLE, RECEIVABLE, EQUITY, CURRENCY, STOCK, MUTUAL, ROOT;
++
++        /**
++         * Indicates that this type of account has an inverted state for credits and debits.
++         * Credits decrease the account balance, while debits increase it.
++         */
++        private boolean mInvertedCredit = false;
++
++        private AccountType(boolean invertedCredit){
++            mInvertedCredit = invertedCredit;
++        }
++
++        private AccountType() {
++            //nothing to see here, move along
++        }
++
++        public boolean hasInvertedCredit(){
++            return mInvertedCredit;
++        }
++    };
+ 
+     /**
+      * Accounts types which are used by the OFX standard
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index e9889c1c..463956c7 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -285,8 +285,17 @@ public AccountType getAccountType(String uid){
+ 		}
+ 		return AccountType.valueOf(type);
+ 	}
+-	
+-	/**
++
++    /**
++     * Overloaded method. Resolves the account unique ID from the row ID and makes a call to {@link #getAccountType(String)}
++     * @param accountId Database row ID of the account
++     * @return {@link AccountType} of the account
++     */
++    public AccountType getAccountType(long accountId){
++        return getAccountType(getAccountUID(accountId));
++    }
++
++    /**
+ 	 * Returns the name of the account with id <code>accountID</code>
+ 	 * @param accountID Database ID of the account record
+ 	 * @return Name of the account 
+diff --git a/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index d233451f..d9bb5d40 100644
+--- a/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -26,6 +26,7 @@
+ 
+ import android.widget.*;
+ import org.gnucash.android.R;
++import org.gnucash.android.data.Account;
+ import org.gnucash.android.data.Money;
+ import org.gnucash.android.data.Transaction;
+ import org.gnucash.android.data.Transaction.TransactionType;
+@@ -173,6 +174,12 @@
+      */
+     boolean mAmountManuallyEdited = false;
+ 
++    /**
++     * The AccountType of the account to which this transaction belongs.
++     * Used for determining the accounting rules for credits and debits
++     */
++    Account.AccountType mAccountType;
++
+ 	/**
+ 	 * Create the view and retrieve references to the UI elements
+ 	 */
+@@ -215,8 +222,12 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         long transactionId = getArguments().getLong(SELECTED_TRANSACTION_ID);
+ 		mTransactionsDbAdapter = new TransactionsDbAdapter(getActivity());
+ 		mTransaction = mTransactionsDbAdapter.getTransaction(transactionId);
+-		
+-		setListeners();
++
++        final long accountId = getArguments().getLong(TransactionsListFragment.SELECTED_ACCOUNT_ID);
++        mAccountType = mAccountsDbAdapter.getAccountType(accountId);
++        toggleTransactionTypeState();
++
++        setListeners();
+ 		if (mTransaction == null)
+ 			initalizeViews();
+ 		else {
+@@ -229,6 +240,22 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         initTransactionNameAutocomplete();
+ 	}
+ 
++    private void toggleTransactionTypeState() {
++        switch (mAccountType) {
++            case ASSET:
++            case EXPENSE:
++                mTransactionTypeButton.setTextOff(getString(R.string.label_debit));
++                mTransactionTypeButton.setTextOn(getString(R.string.label_credit));
++                break;
++
++            default:
++                mTransactionTypeButton.setTextOff(getString(R.string.label_credit));
++                mTransactionTypeButton.setTextOn(getString(R.string.label_debit));
++                break;
++        }
++        mTransactionTypeButton.invalidate();
++    }
++
+     /**
+      * Initializes the transaction name field for autocompletion with existing transaction names in the database
+      */
+@@ -276,7 +303,6 @@ public void onItemClick(AdapterView<?> adapterView, View view, int position, lon
+ 	 * This method is called if the fragment is used for editing a transaction
+ 	 */
+ 	private void initializeViewsWithTransaction(){
+-				
+ 		mNameEditText.setText(mTransaction.getName());
+ 		mTransactionTypeButton.setChecked(mTransaction.getTransactionType() == TransactionType.DEBIT);
+ 		if (!mAmountManuallyEdited){
+@@ -315,11 +341,19 @@ private void initalizeViews() {
+ 		mDateTextView.setText(DATE_FORMATTER.format(time));
+ 		mTimeTextView.setText(TIME_FORMATTER.format(time));
+ 		mTime = mDate = Calendar.getInstance();
+-				
++
+ 		String typePref = PreferenceManager.getDefaultSharedPreferences(getActivity()).getString(getString(R.string.key_default_transaction_type), "DEBIT");
+ 		if (typePref.equals("CREDIT")){
+-			mTransactionTypeButton.setChecked(false);
+-		}
++            if (mAccountType == Account.AccountType.ASSET || mAccountType == Account.AccountType.EXPENSE)
++                mTransactionTypeButton.setChecked(false);
++            else
++                mTransactionTypeButton.setChecked(true);
++		} else {
++            if (mAccountType == Account.AccountType.ASSET || mAccountType == Account.AccountType.EXPENSE)
++                mTransactionTypeButton.setChecked(true);
++            else
++                mTransactionTypeButton.setChecked(false);
++        }
+ 				
+ 		final long accountId = getArguments().getLong(TransactionsListFragment.SELECTED_ACCOUNT_ID);
+ 		String code = Money.DEFAULT_CURRENCY_CODE;
+@@ -455,7 +489,16 @@ public void onAccountChanged(long newAccountId){
+ 		String currencyCode = accountsDbAdapter.getCurrencyCode(newAccountId);
+ 		Currency currency = Currency.getInstance(currencyCode);
+ 		mCurrencyTextView.setText(currency.getSymbol(Locale.getDefault()));
+-		
++
++        Account.AccountType previousAccountType = mAccountType;
++        mAccountType = accountsDbAdapter.getAccountType(newAccountId);
++        toggleTransactionTypeState();
++
++        //if the new account has a different credit/debit philosophy as the previous one, then toggle the button
++        if (mAccountType.hasInvertedCredit() != previousAccountType.hasInvertedCredit()){
++            mTransactionTypeButton.toggle();
++        }
++
+ 		updateTransferAccountsList();
+ 	}
+ 	
+@@ -478,7 +521,11 @@ private void saveNewTransaction() {
+ 		long accountID 	= ((TransactionsActivity) getSherlockActivity()).getCurrentAccountID(); 		
+ 		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getCurrencyCode(accountID));
+ 		Money amount 	= new Money(amountBigd, currency);
+-		TransactionType type = mTransactionTypeButton.isChecked() ? TransactionType.DEBIT : TransactionType.CREDIT;
++		TransactionType type;
++        if (mAccountType.hasInvertedCredit()){
++            type = amount.isNegative() ? TransactionType.CREDIT : TransactionType.DEBIT;
++        } else
++            type = amount.isNegative() ? TransactionType.DEBIT : TransactionType.CREDIT;
+ 		if (mTransaction != null){
+ 			mTransaction.setAmount(amount);
+ 			mTransaction.setName(name);
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+index 0bea0c51..b1da8522 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+@@ -170,6 +170,7 @@ protected void onCreate(Bundle savedInstanceState) {
+             if (transactionId > 0) {
+                 mSectionHeaderTransactions.setText(R.string.title_edit_transaction);
+                 args.putLong(NewTransactionFragment.SELECTED_TRANSACTION_ID, transactionId);
++                args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID, mAccountId);
+             } else {
+                 mSectionHeaderTransactions.setText(R.string.title_add_transaction);
+                 args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID, mAccountId);

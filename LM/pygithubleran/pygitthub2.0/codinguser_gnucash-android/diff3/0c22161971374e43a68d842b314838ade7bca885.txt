@@ -1,0 +1,247 @@
+From 0c22161971374e43a68d842b314838ade7bca885 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 13 Apr 2017 23:18:03 +0200
+Subject: [PATCH] Copy backup files from external storage to the storage
+ reserved for the app (which requires no WRITE_EXTERNAL_STORAGE) permission
+
+Fixes #670
+---
+ app/build.gradle                                   |  4 +-
+ .../gnucash/android/app/GnuCashApplication.java    |  1 +
+ .../java/org/gnucash/android/db/BookDbHelper.java  | 10 +--
+ .../org/gnucash/android/db/DatabaseSchema.java     |  2 +-
+ .../org/gnucash/android/db/MigrationHelper.java    | 90 ++++++++++++++++++++--
+ .../java/org/gnucash/android/export/Exporter.java  |  9 ++-
+ 6 files changed, 101 insertions(+), 15 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 399b2c26..42cc4b54 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -6,8 +6,8 @@ apply plugin: 'android-apt'
+ 
+ def versionMajor = 2
+ def versionMinor = 1
+-def versionPatch = 5
+-def versionBuild = 4
++def versionPatch = 6
++def versionBuild = 0
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd HH:mm 'UTC'")
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 39492696..6f722a63 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -41,6 +41,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.BookDbHelper;
+ import org.gnucash.android.db.DatabaseHelper;
++import org.gnucash.android.db.MigrationHelper;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.BudgetAmountsDbAdapter;
+diff --git a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+index 6fa1a6eb..3a7cf40e 100644
+--- a/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/BookDbHelper.java
+@@ -159,15 +159,15 @@ private void insertBook(SQLiteDatabase db, Book book) {
+     private void migrateBackupFiles(String activeBookUID){
+ 
+         Log.d(LOG_TAG, "Moving export and backup files to book-specific folders");
+-        File newBasePath = new File(Exporter.BASE_FOLDER_PATH + "/" + activeBookUID);
++        File newBasePath = new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/" + activeBookUID);
+         newBasePath.mkdirs();
+ 
+-        File src = new File(Exporter.BASE_FOLDER_PATH + "/backups/");
+-        File dst = new File(Exporter.BASE_FOLDER_PATH + "/" + activeBookUID + "/backups/");
++        File src = new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/backups/");
++        File dst = new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/" + activeBookUID + "/backups/");
+         new Thread(new RecursiveMoveFiles(src, dst)).start();
+ 
+-        src = new File(Exporter.BASE_FOLDER_PATH + "/exports/");
+-        dst = new File(Exporter.BASE_FOLDER_PATH + "/" + activeBookUID + "/exports/");
++        src = new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/exports/");
++        dst = new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/" + activeBookUID + "/exports/");
+         new Thread(new RecursiveMoveFiles(src, dst)).start();
+ 
+         File nameFile = new File(newBasePath, "Book 1");
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 0f32f068..01f07d2d 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -39,7 +39,7 @@
+      * Version number of database containing accounts and transactions info.
+      * With any change to the database schema, this number must increase
+      */
+-    public static final int DATABASE_VERSION = 13;
++    public static final int DATABASE_VERSION = 14;
+ 
+     /**
+      * Name of the database
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index f5d3805e..059634bb 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -56,6 +56,7 @@
+ import java.io.File;
+ import java.io.FileInputStream;
+ import java.io.FileOutputStream;
++import java.io.FileWriter;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.math.BigDecimal;
+@@ -64,6 +65,7 @@
+ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.List;
++import java.util.Locale;
+ import java.util.Map;
+ import java.util.TimeZone;
+ 
+@@ -167,12 +169,17 @@ private static String getGnuCashRootAccountUID(SQLiteDatabase db){
+      * @throws IOException if an error occurred during the file copy
+      */
+     static void moveFile(File src, File dst) throws IOException {
++        Log.d(LOG_TAG, String.format(Locale.US, "Moving %s from %s to %s",
++                src.getName(), src.getParent(), dst.getParent()));
+         FileChannel inChannel = new FileInputStream(src).getChannel();
+         FileChannel outChannel = new FileOutputStream(dst).getChannel();
+         try {
+             long bytesCopied = inChannel.transferTo(0, inChannel.size(), outChannel);
+-            if(bytesCopied >= src.length())
+-                src.delete();
++            if(bytesCopied >= src.length()) {
++                boolean result = src.delete();
++                String msg = result ? "Deleted src file: " : "Could not delete src: ";
++                Log.d(LOG_TAG, msg + src.getPath());
++            }
+         } finally {
+             if (inChannel != null)
+                 inChannel.close();
+@@ -194,7 +201,7 @@ public void run() {
+                 for (File src : oldExportFolder.listFiles()) {
+                     if (src.isDirectory())
+                         continue;
+-                    File dst = new File(Exporter.BASE_FOLDER_PATH + "/exports/" + src.getName());
++                    File dst = new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/exports/" + src.getName());
+                     try {
+                         MigrationHelper.moveFile(src, dst);
+                     } catch (IOException e) {
+@@ -210,7 +217,7 @@ public void run() {
+             File oldBackupFolder = new File(oldExportFolder, "backup");
+             if (oldBackupFolder.exists()){
+                 for (File src : new File(oldExportFolder, "backup").listFiles()) {
+-                    File dst = new File(Exporter.BASE_FOLDER_PATH + "/backups/" + src.getName());
++                    File dst = new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/backups/" + src.getName());
+                     try {
+                         MigrationHelper.moveFile(src, dst);
+                     } catch (IOException e) {
+@@ -490,8 +497,8 @@ static int upgradeDbToVersion7(SQLiteDatabase db) {
+     static int upgradeDbToVersion8(SQLiteDatabase db) {
+         Log.i(DatabaseHelper.LOG_TAG, "Upgrading database to version 8");
+         int oldVersion = 7;
+-        new File(Exporter.BASE_FOLDER_PATH + "/backups/").mkdirs();
+-        new File(Exporter.BASE_FOLDER_PATH + "/exports/").mkdirs();
++        new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/backups/").mkdirs();
++        new File(Exporter.LEGACY_BASE_FOLDER_PATH + "/exports/").mkdirs();
+         //start moving the files in background thread before we do the database stuff
+         new Thread(moveExportedFilesToNewDefaultLocation).start();
+ 
+@@ -1474,4 +1481,75 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+ 
+         return oldVersion;
+     }
++
++    /**
++     * Move files from {@code srcDir} to {@code dstDir}
++     * Subdirectories will be created in the target as necessary
++     * @param srcDir Source directory which should already exist
++     * @param dstDir Destination directory which should already exist
++     * @see #moveFile(File, File)
++     */
++    private static void moveDirectory(File srcDir, File dstDir){
++        if (!srcDir.exists() || !srcDir.isDirectory() || !dstDir.isDirectory() || !dstDir.exists()){
++            throw new IllegalArgumentException("Source is not a directory, use MigrationHelper.moveFile(...)");
++        }
++
++        for (File src : srcDir.listFiles()){
++            if (src.isDirectory()){
++                File dst = new File(dstDir, src.getName());
++                dst.mkdir();
++                moveDirectory(src, dst);
++                if (!src.delete())
++                    Log.i(LOG_TAG, "Failed to delete directory: " + src.getPath());
++                continue;
++            }
++
++            try {
++                File dst = new File(dstDir, src.getName());
++                MigrationHelper.moveFile(src, dst);
++            } catch (IOException e) {
++                Log.e(LOG_TAG, "Error moving file " + src.getPath());
++                Crashlytics.logException(e);
++            }
++        }
++    }
++
++    /**
++     * Upgrade the database to version 14
++     * <p>
++     *     This migration actually does not change anything in the database
++     *     It moves the backup files to a new backup location which does not require SD CARD write permission
++     * </p>
++     * @param db SQLite database to be upgraded
++     * @return
++     */
++    public static int upgradeDbToVersion14(SQLiteDatabase db){
++        Log.i(DatabaseHelper.LOG_TAG, "Upgrading database to version 14");
++        int oldDbVersion = 13;
++        File backupFolder = new File(Exporter.BASE_FOLDER_PATH);
++        backupFolder.mkdir();
++
++        new Thread(new Runnable() {
++            @Override
++            public void run() {
++                File srcDir = new File(Exporter.LEGACY_BASE_FOLDER_PATH);
++                File dstDir = new File(Exporter.BASE_FOLDER_PATH);
++                moveDirectory(srcDir, dstDir);
++                File readmeFile = new File(Exporter.LEGACY_BASE_FOLDER_PATH, "README.txt");
++                FileWriter writer = null;
++                try {
++                    writer = new FileWriter(readmeFile);
++                    writer.write("Backup files have been moved to " + dstDir.getPath() +
++                            "\nYou can now delete this folder");
++                    writer.flush();
++                } catch (IOException e) {
++                    e.printStackTrace();
++                    Log.e(LOG_TAG, "Error creating README file");
++                }
++
++            }
++        }).start();
++
++        return 14;
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 6e000d03..87c60d56 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -61,8 +61,15 @@
+ 
+     /**
+      * Application folder on external storage
++     * @deprecated Use {@link #BASE_FOLDER_PATH} instead
+      */
+-    public static final String BASE_FOLDER_PATH = Environment.getExternalStorageDirectory() + "/" + BuildConfig.APPLICATION_ID;
++    @Deprecated
++    public static final String LEGACY_BASE_FOLDER_PATH = Environment.getExternalStorageDirectory() + "/" + BuildConfig.APPLICATION_ID;
++
++    /**
++     * Application folder on external storage
++     */
++    public static final String BASE_FOLDER_PATH = GnuCashApplication.getAppContext().getExternalFilesDir(null).getAbsolutePath();
+ 
+     /**
+      * Export options

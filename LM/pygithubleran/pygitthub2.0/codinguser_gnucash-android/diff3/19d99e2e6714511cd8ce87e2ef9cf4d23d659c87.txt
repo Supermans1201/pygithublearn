@@ -1,0 +1,173 @@
+From 19d99e2e6714511cd8ce87e2ef9cf4d23d659c87 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 1 Jun 2016 19:00:59 +0200
+Subject: [PATCH] Upgrade database version to v13
+
+Switch "Open" menu to use Storage Access Framework
+Update delete confirmation dialog for deleting books
+---
+ app/build.gradle                                     |  6 +++---
+ app/proguard-rules.pro                               |  3 +++
+ .../java/org/gnucash/android/db/DatabaseSchema.java  |  2 +-
+ .../android/ui/account/AccountsListFragment.java     |  4 +++-
+ .../android/ui/common/BaseDrawerActivity.java        | 20 +++++++++++++++++++-
+ .../android/ui/settings/BookListFragment.java        | 11 +++++++----
+ 6 files changed, 36 insertions(+), 10 deletions(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index 856fcebf..7bbf5830 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -82,8 +82,8 @@ android {
+     buildTypes {
+         //todo re-enable proguard and test coverage
+         release {
+-            //minifyEnabled true
+-            shrinkResources true
++//            minifyEnabled true
++//            shrinkResources true
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+             if (project.hasProperty("RELEASE_STORE_FILE")){
+                 signingConfig signingConfigs.release
+@@ -205,7 +205,7 @@ dependencies {
+             'com.android.support:preference-v7:'    + androidSupportVersion,
+             'com.android.support:recyclerview-v7:'  + androidSupportVersion,
+             'com.viewpagerindicator:library:2.4.1@aar',
+-            'com.code-troopers.betterpickers:library:2.5.4',
++            'com.code-troopers.betterpickers:library:2.5.5',
+             'org.jraf:android-switch-backport:2.0.1@aar',
+             'com.github.PhilJay:MPAndroidChart:v2.1.3',
+             'joda-time:joda-time:2.7',
+diff --git a/app/proguard-rules.pro b/app/proguard-rules.pro
+index 57520016..9e7ef5e6 100644
+--- a/app/proguard-rules.pro
++++ b/app/proguard-rules.pro
+@@ -10,3 +10,6 @@
+ -keepclasseswithmembernames class * {
+     @butterknife.* <methods>;
+ }
++
++-keep class org.gnucash.android.** {*;}
++-keep class com.dropbox.** {*;}
+\ No newline at end of file
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 3c9a4f32..0f32f068 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -39,7 +39,7 @@
+      * Version number of database containing accounts and transactions info.
+      * With any change to the database schema, this number must increase
+      */
+-    public static final int DATABASE_VERSION = 12;
++    public static final int DATABASE_VERSION = 13;
+ 
+     /**
+      * Name of the database
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 35369433..39fe510e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -300,7 +300,9 @@ public void refresh(String parentAccountUID) {
+      */
+     @Override
+     public void refresh() {
+-        getLoaderManager().restartLoader(0, null, this);
++        if (!isDetached()) {
++            getLoaderManager().restartLoader(0, null, this);
++        }
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index e03726e0..d18ebdc8 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -22,6 +22,7 @@
+ import android.database.Cursor;
+ import android.graphics.Color;
+ import android.graphics.PorterDuff;
++import android.os.Build;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.annotation.LayoutRes;
+@@ -85,6 +86,7 @@
+ 
+     protected ActionBarDrawerToggle mDrawerToggle;
+ 
++    public static final int REQUEST_OPEN_DOCUMENT = 0x20;
+ 
+     private class DrawerItemClickListener implements NavigationView.OnNavigationItemSelectedListener {
+ 
+@@ -227,7 +229,16 @@ protected void onDrawerMenuItemClicked(int itemId) {
+         mNavigationView.getMenu().findItem(itemId).setChecked(true);
+         switch (itemId){
+             case R.id.nav_item_open: { //Open... files
+-                AccountsActivity.startXmlFileChooser(this);
++                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT){
++                    //use the storage access framework
++                    Intent openDocument = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++                    openDocument.addCategory(Intent.CATEGORY_OPENABLE);
++                    openDocument.setType("*/*");
++                    startActivityForResult(openDocument, REQUEST_OPEN_DOCUMENT);
++
++                } else {
++                    AccountsActivity.startXmlFileChooser(this);
++                }
+             }
+             break;
+ 
+@@ -286,6 +297,12 @@ protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+             case AccountsActivity.REQUEST_PICK_ACCOUNTS_FILE:
+                 AccountsActivity.importXmlFileFromIntent(this, data, null);
+                 break;
++            case BaseDrawerActivity.REQUEST_OPEN_DOCUMENT:
++                final int takeFlags = data.getFlags()
++                        & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
++                AccountsActivity.importXmlFileFromIntent(this, data, null);
++                getContentResolver().takePersistableUriPermission(data.getData(), takeFlags);
++                break;
+             default:
+                 super.onActivityResult(requestCode, resultCode, data);
+                 break;
+@@ -313,6 +330,7 @@ public boolean onMenuItemClick(MenuItem item) {
+     }
+ 
+     public void onClickAppTitle(View view){
++        mDrawerLayout.closeDrawer(mNavigationView);
+         AccountsActivity.start(this);
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java
+index 16b45c68..7954e90b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BookListFragment.java
+@@ -205,8 +205,8 @@ public void onClick(View v) {
+                         //// TODO: extract strings
+                         AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(getActivity());
+                         dialogBuilder.setTitle("Confirm delete Book")
+-                                .setIcon(R.drawable.ic_close_white_24dp)
+-                                .setMessage("Are you sure you want to delete this book.\nThis action cannot be undone!");
++                                .setIcon(R.drawable.ic_close_black_24dp)
++                                .setMessage("All accounts and transactions in this book will be deleted!");
+                         dialogBuilder.setPositiveButton("Delete Book", new DialogInterface.OnClickListener() {
+                             @Override
+                             public void onClick(DialogInterface dialog, int which) {
+@@ -214,13 +214,16 @@ public void onClick(DialogInterface dialog, int which) {
+                                 refresh();
+                             }
+                         });
+-                        dialogBuilder.setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
++                        dialogBuilder.setNegativeButton(R.string.btn_cancel, new DialogInterface.OnClickListener() {
+                             @Override
+                             public void onClick(DialogInterface dialog, int which) {
+                                 dialog.dismiss();
+                             }
+                         });
+-                        dialogBuilder.create().show();
++                        AlertDialog dialog = dialogBuilder.create();
++                        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
++                                .setTextColor(getResources().getColor(R.color.account_red));
++                        dialog.show();
+ 
+                     }
+                 });

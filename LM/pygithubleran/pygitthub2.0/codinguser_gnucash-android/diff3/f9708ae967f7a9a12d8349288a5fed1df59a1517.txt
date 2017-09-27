@@ -1,0 +1,316 @@
+From f9708ae967f7a9a12d8349288a5fed1df59a1517 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sun, 19 Aug 2012 20:31:34 +0200
+Subject: [PATCH] Fixed: typo in transaction currency_code intent extra Fixed:
+ crash when creating transactions in locales with comma decimal separator
+ Money parses amounts now only in US locale. Input should be cleaned up before
+ passing to Money.java constructors Removed all double constructors from
+ Money.java and Transaction.java
+
+---
+ .../src/org/gnucash/android/data/Account.java      |  2 +-
+ .../src/org/gnucash/android/data/Money.java        | 51 ++++++++--------------
+ .../src/org/gnucash/android/data/Transaction.java  | 24 +---------
+ .../android/test/db/AccountsDbAdapterTest.java     |  8 ++--
+ .../android/test/db/TransactionsDbAdapterTest.java |  6 +--
+ .../android/test/ui/AccountsActivityTest.java      |  2 +-
+ .../org/gnucash/android/test/ui/OfxExportTest.java |  2 +-
+ .../android/test/ui/TransactionsActivityTest.java  |  2 +-
+ .../org/gnucash/android/test/unit/MoneyTest.java   | 19 ++++----
+ 9 files changed, 43 insertions(+), 73 deletions(-)
+
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Account.java b/GnucashMobile/src/org/gnucash/android/data/Account.java
+index 1685d0a2..505c1fd7 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Account.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Account.java
+@@ -81,7 +81,7 @@
+ 	/**
+ 	 * An extra key for passing the currency code (according ISO 4217) in an intent
+ 	 */
+-	public static final String EXTRA_CURRENCY_CODE 	= "org.gnucash.extra.currency_code";
++	public static final String EXTRA_CURRENCY_CODE 	= "org.gnucash.android.extra.currency_code";
+ 	
+ 	/**
+ 	 * Constructor
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Money.java b/GnucashMobile/src/org/gnucash/android/data/Money.java
+index 7447a9c2..24f8ed04 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Money.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Money.java
+@@ -20,19 +20,20 @@
+ import java.math.MathContext;
+ import java.math.RoundingMode;
+ import java.text.DecimalFormat;
++import java.text.DecimalFormatSymbols;
+ import java.text.NumberFormat;
+ import java.text.ParseException;
+ import java.util.Currency;
+ import java.util.Locale;
+ 
+-
+-import android.util.Log;
+-
+ /**
+  * Money represents a money amount and a corresponding currency.
+  * Money internally uses {@link BigDecimal} to represent the amounts, which enables it 
+  * to maintain high precision afforded by BigDecimal. Money objects are immutable and
+  * most operations return new Money objects.
++ * Money String constructors should not be passed any locale-formatted numbers. Only
++ * {@link Locale#US} is supported e.g. "2.45" will be parsed as 2.45 meanwhile 
++ * "2,45" will be parsed to 245 although that could be a decimal in {@link Locale#GERMAN}
+  * 
+  * @author Ngewi Fet<ngewif@gmail.com>
+  *
+@@ -132,17 +133,7 @@ public Money(String amount){
+ 		init();
+ 		setAmount(parseToDecimal(amount));
+ 	}
+-	
+-	/**
+-	 * Overloaded constructor. 
+-	 * Initializes the currency to that specified by {@link Money#DEFAULT_CURRENCY_CODE}
+-	 * @param amount Value associated with this Money object
+-	 */
+-	public Money(double amount){
+-		init();
+-		setAmount(amount);
+-	}
+-	
++
+ 	/**
+ 	 * Initializes the amount and currency to their default values
+ 	 * @see {@link Money#DEFAULT_CURRENCY_CODE}, {@link #DEFAULT_ROUNDING_MODE}, {@link #DEFAULT_DECIMAL_PLACES}
+@@ -245,15 +236,7 @@ private void setAmount(BigDecimal amount) {
+ 	 */
+ 	private void setAmount(String amount){
+ 		setAmount(parseToDecimal(amount));
+-	}
+-	
+-	/**
+-	 * Sets the amount value of this <code>Money</code> object
+-	 * @param amount Double amount to be set
+-	 */
+-	private void setAmount(double amount){
+-		setAmount(new BigDecimal(amount));
+-	}
++	}	
+ 	
+ 	/**
+ 	 * Returns a new <code>Money</code> object whose value is the sum of the values of 
+@@ -412,20 +395,24 @@ public int compareTo(Money another) {
+ 	}
+ 
+ 	/**
+-	 * Parses a Locale specific string into a number in the default Locale
+-	 * @param formattedAmount Formatted String amount
++	 * Parses a Locale specific string into a number using format for {@link Locale#US}
++	 * @param amountString Formatted String amount
+ 	 * @return String amount formatted in the default locale
+ 	 */
+-	public static BigDecimal parseToDecimal(String formattedAmount){
+-		DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());		
+-		formatter.setParseBigDecimal(true);
+-		BigDecimal result = null;
++	public static BigDecimal parseToDecimal(String amountString){	
++		char separator = new DecimalFormatSymbols(Locale.US).getGroupingSeparator();
++		amountString = amountString.replace(Character.toString(separator), "");
++		NumberFormat formatter = NumberFormat.getInstance(Locale.US);		
++		if (formatter instanceof DecimalFormat) {
++		     ((DecimalFormat)formatter).setParseBigDecimal(true);		     
++		 }
++		BigDecimal result = null; //new BigDecimal(0);
+ 		try {
+-			result = (BigDecimal) formatter.parse(formattedAmount);
++			result = (BigDecimal) formatter.parse(amountString);
+ 			
+ 		} catch (ParseException e) {
+-			Log.e("Money", "Could not parse the amount");			
++			e.printStackTrace();		
+ 		}
+-		return result;
++		return result;		
+ 	}
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index d3c29f6c..19d48e18 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -109,19 +109,7 @@ public Transaction(Money amount, String name) {
+ 		setName(name);
+ 		setAmount(amount); //takes care of setting the type for us
+ 	}
+-	
+-	/**
+-	 * Overloaded constructor. Creates a new transaction instance with the 
+-	 * provided data and initializes the rest to default values. 
+-	 * @param amount Amount for the transaction as double
+-	 * @param name Name of the transaction
+-	 */
+-	public Transaction(double amount, String name){
+-		initDefaults();
+-		setName(name);
+-		setAmount(amount);
+-	}
+-	
++
+ 	/**
+ 	 * Overloaded constructor. Creates a new transaction instance with the 
+ 	 * provided data and initializes the rest to default values. 
+@@ -185,15 +173,7 @@ public void setAmount(String amount, String currencyCode){
+ 		this.mAmount = new Money(new BigDecimal(amount),
+ 								 Currency.getInstance(currencyCode));
+ 	}
+-	
+-	/**
+-	 * Sets the amount of the transaction
+-	 * @param amount Amount value of the transaction
+-	 */
+-	public void setAmount(double amount){
+-		setAmount(new Money(amount));
+-	}
+-	
++
+ 	/**
+ 	 * Sets the currency of the transaction
+ 	 * The currency remains in the object model and is not persisted to the database
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java b/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+index 8f49a5df..7f811a24 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+@@ -20,13 +20,13 @@ protected void setUp() throws Exception {
+ 		super.setUp();
+ 		mAdapter = new AccountsDbAdapter(getContext());
+ 		Account first = new Account(ALPHA_ACCOUNT_NAME);
+-		Transaction t1 = new Transaction(2.99, "T800");
++		Transaction t1 = new Transaction("2.99", "T800");
+ 		t1.setAccountUID(first.getUID());
+-		Transaction t2 = new Transaction(4.99, "T1000");
++		Transaction t2 = new Transaction("4.99", "T1000");
+ 		t2.setAccountUID(first.getUID());
+ 		
+ 		Account second = new Account(BRAVO_ACCOUNT_NAME);
+-		Transaction t = new Transaction(9.99, "buyout");
++		Transaction t = new Transaction("9.99", "buyout");
+ 		t.setAccountUID(second.getUID());
+ 		
+ 		mAdapter.addAccount(second);
+@@ -43,7 +43,7 @@ public void testAlphabeticalSorting(){
+ 	public void testTransactionsHaveSameCurrencyAsAccount(){
+ 		Account acc1 = new Account("Japanese", Currency.getInstance("JPY"));
+ 		acc1.setUID("simile");
+-		Transaction trx = new Transaction(2.50, "Underground");
++		Transaction trx = new Transaction("2.50", "Underground");
+ 		Transaction term = new Transaction("3.49", "Tube");
+ 		acc1.addTransaction(trx);
+ 		acc1.addTransaction(term);
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java b/GnucashMobileTest/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+index c170d0b6..cac06baa 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+@@ -23,15 +23,15 @@ protected void setUp() throws Exception {
+ 		AccountsDbAdapter accountsAdapter = new AccountsDbAdapter(mContext);
+ 		Account first = new Account(ALPHA_ACCOUNT_NAME);
+ 		first.setUID(ALPHA_ACCOUNT_UID);
+-		Transaction t1 = new Transaction(2.99, "T800");
++		Transaction t1 = new Transaction("2.99", "T800");
+ 		t1.setTime(System.currentTimeMillis() - 10000);
+-		Transaction t2 = new Transaction(4.99, "T1000");
++		Transaction t2 = new Transaction("4.99", "T1000");
+ 		t2.setTime(System.currentTimeMillis());
+ 		first.addTransaction(t1);
+ 		first.addTransaction(t2);
+ 		
+ 		Account second = new Account(BRAVO_ACCOUNT_NAME);
+-		Transaction t = new Transaction(9.99, "buyout");
++		Transaction t = new Transaction("9.99", "buyout");
+ 		second.addTransaction(t);
+ 		
+ 		accountsAdapter.addAccount(second);
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 2c67f7a1..7522721c 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -166,7 +166,7 @@ public void testDeleteAccount(){
+ 		Account acc = new Account("TO BE DELETED");
+ 		acc.setUID("to-be-deleted");
+ 		
+-		Transaction transaction = new Transaction(5.99, "hats");
++		Transaction transaction = new Transaction("5.99", "hats");
+ 		transaction.setAccountUID("to-be-deleted");
+ 		acc.addTransaction(transaction);
+ 		AccountsDbAdapter accDbAdapter = new AccountsDbAdapter(getActivity());
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/ui/OfxExportTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/OfxExportTest.java
+index ca2f6669..5eefa04f 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/ui/OfxExportTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/OfxExportTest.java
+@@ -47,7 +47,7 @@ protected void setUp() throws Exception {
+ 		mSolo = new Solo(getInstrumentation(), getActivity());	
+ 		
+ 		Account account = new Account("Exportable");		
+-		Transaction transaction = new Transaction(9.99, "Pizza");		
++		Transaction transaction = new Transaction("9.99", "Pizza");		
+ 		transaction.setDescription("What up?");
+ 		transaction.setTime(System.currentTimeMillis());
+ 		
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index abb27c2f..649be9da 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -60,7 +60,7 @@ protected void setUp() throws Exception {
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+ 		account.setUID(DUMMY_ACCOUNT_UID);
+ 		account.setCurrency(Currency.getInstance(Locale.getDefault()));
+-		mTransaction = new Transaction(9.99, TRANSACTION_NAME);
++		mTransaction = new Transaction("9.99", TRANSACTION_NAME);
+ 		mTransaction.setAccountUID(DUMMY_ACCOUNT_UID);
+ 		mTransaction.setDescription("What up?");
+ 		mTransaction.setTime(mTransactionTimeMillis);
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java b/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+index b4769d47..ac3fd9d5 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/unit/MoneyTest.java
+@@ -42,14 +42,13 @@ protected void setUp() throws Exception {
+ 	}
+ 
+ 	public void testCreation(){
+-		String amount = "12.25";
+-		if (Locale.getDefault().equals(Locale.GERMANY)) 
+-			amount = "12,25";
++		Locale.setDefault(Locale.US);
++		String amount = "12.25";		
+ 		
+ 		Money temp = new Money(amount);
+ 		assertEquals(12.25, temp.asDouble());
+ 		
+-		temp = new Money(9.95);
++		temp = new Money("9.95");
+ 		assertEquals(9.95, temp.asDouble());
+ 		
+ 		BigDecimal decimal = new BigDecimal(8);
+@@ -60,11 +59,15 @@ public void testCreation(){
+ 		assertEquals(currency, temp.getCurrency());
+ 		
+ 		amount = "15.50";
+-		if (Locale.getDefault().equals(Locale.GERMANY)) 
+-			amount = "15,50";
+ 		temp = new Money(amount,"USD");
+ 		assertEquals(15.50, temp.asDouble());
+-		assertEquals(temp.getCurrency().getCurrencyCode(), "USD");		
++		assertEquals(temp.getCurrency().getCurrencyCode(), "USD");
++		
++		//test only Locale.US parsing even under different locale
++		Locale.setDefault(Locale.GERMANY);
++		amount = "12,25";
++		temp = new Money(amount);
++		assertEquals("1225.00", temp.toPlainString());
+ 	}
+ 	
+ 	public void testAddition(){		
+@@ -161,7 +164,7 @@ public void testPrinting(){
+ 		assertEquals("15.75 " + symbolUS, money.formattedString(Locale.US));
+ 		
+ 		//always prints with 2 decimal places only
+-		Money some = new Money(9.7469);
++		Money some = new Money("9.7469");
+ 		assertEquals("9.75", some.asString());
+ 	}
+ 	

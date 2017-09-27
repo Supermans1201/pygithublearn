@@ -1,0 +1,365 @@
+From 6e0e8538be964f5555ea0cfa7cd039c2d6241481 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 9 Nov 2015 14:04:02 +0100
+Subject: [PATCH] Add test for setting default commodity during XML import
+
+Code refactoring
+---
+ .../gnucash/android/app/GnuCashApplication.java    | 20 +++++++++++----
+ .../gnucash/android/importer/GncXmlHandler.java    | 13 ++++------
+ .../java/org/gnucash/android/model/Commodity.java  |  3 +++
+ .../android/ui/account/AccountsActivity.java       | 10 +++-----
+ .../ui/settings/AccountPreferencesFragment.java    |  8 +++---
+ .../ui/settings/BackupPreferenceFragment.java      |  5 ++--
+ .../android/ui/settings/SettingsActivity.java      |  8 ++----
+ .../ui/transaction/TransactionFormFragment.java    |  3 ++-
+ .../test/unit/db/AccountsDbAdapterTest.java        | 29 +++++++++++++++++++++-
+ 9 files changed, 63 insertions(+), 36 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index bc0ae201..0b86856a 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -41,6 +41,7 @@
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Commodity;
++import org.gnucash.android.model.Money;
+ import org.gnucash.android.service.SchedulerService;
+ 
+ import java.util.Currency;
+@@ -124,7 +125,7 @@ public void onCreate(){
+         mCommoditiesDbAdapter       = new CommoditiesDbAdapter(mDb);
+         mPricesDbAdapter            = new PricesDbAdapter(mDb);
+ 
+-        Commodity.DEFAULT_COMMODITY = mCommoditiesDbAdapter.getCommodity(getDefaultCurrencyCode());
++        setDefaultCurrencyCode(getDefaultCurrencyCode());
+     }
+ 
+     public static AccountsDbAdapter getAccountsDbAdapter() {
+@@ -216,12 +217,21 @@ public static String getDefaultCurrencyCode(){
+     }
+ 
+     /**
+-     * Returns the default commodity
+-     * @return Default commodity of application
++     * Sets the default currency for the application in all relevant places:
++     * <ul>
++     *     <li>Shared preferences</li>
++     *     <li>{@link Money#DEFAULT_CURRENCY_CODE}</li>
++     *     <li>{@link Commodity#DEFAULT_COMMODITY}</li>
++     * </ul>
++     * @param currencyCode ISO 4217 currency code
+      * @see #getDefaultCurrencyCode()
+      */
+-    public static Commodity getDefaultCommodity(){
+-        return Commodity.DEFAULT_COMMODITY;
++    public static void setDefaultCurrencyCode(String currencyCode){
++        PreferenceManager.getDefaultSharedPreferences(getAppContext()).edit()
++                .putString(getAppContext().getString(R.string.key_default_currency), currencyCode)
++                .apply();
++        Money.DEFAULT_CURRENCY_CODE = currencyCode;
++        Commodity.DEFAULT_COMMODITY = mCommoditiesDbAdapter.getCommodity(currencyCode);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 514300b8..b4ac1235 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -18,13 +18,11 @@
+ package org.gnucash.android.importer;
+ 
+ import android.database.sqlite.SQLiteDatabase;
+-import android.preference.PreferenceManager;
+ import android.support.annotation.Nullable;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
+-import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.CommoditiesDbAdapter;
+@@ -378,15 +376,15 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 String currencyCode = mISO4217Currency ? characterString : NO_CURRENCY_CODE;
+                 if (mAccount != null) {
+                     mAccount.setCurrencyCode(currencyCode);
+-                }
+-                if (mTransaction != null) {
+-                    mTransaction.setCurrencyCode(currencyCode);
+                     if (mCurrencyCount.containsKey(currencyCode)) {
+                         mCurrencyCount.put(currencyCode, mCurrencyCount.get(currencyCode) + 1);
+                     } else {
+                         mCurrencyCount.put(currencyCode, 1);
+                     }
+                 }
++                if (mTransaction != null) {
++                    mTransaction.setCurrencyCode(currencyCode);
++                }
+                 if (mPrice != null) {
+                     if (mPriceCommodity) {
+                         mPrice.setCommodityUID(mCommoditiesDbAdapter.getCommodityUID(currencyCode));
+@@ -865,8 +863,7 @@ public void endDocument() throws SAXException {
+             }
+         }
+         if (mostCurrencyAppearance > 0) {
+-            PreferenceManager.getDefaultSharedPreferences(GnuCashApplication.getAppContext()).edit().putString(GnuCashApplication.getAppContext().getString(R.string.key_default_currency), mostAppearedCurrency).apply();
+-            Money.DEFAULT_CURRENCY_CODE = mostAppearedCurrency;
++            GnuCashApplication.setDefaultCurrencyCode(mostAppearedCurrency);
+         }
+     }
+ 
+@@ -881,7 +878,7 @@ private Commodity getCommodityForAccount(String accountUID){
+             return mAccountMap.get(accountUID).getCommodity();
+         } catch (Exception e) {
+             Crashlytics.logException(e);
+-            return Commodity.getInstance(Money.DEFAULT_CURRENCY_CODE);
++            return Commodity.DEFAULT_COMMODITY;
+         }
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/model/Commodity.java b/app/src/main/java/org/gnucash/android/model/Commodity.java
+index 8169f417..da0c39e2 100644
+--- a/app/src/main/java/org/gnucash/android/model/Commodity.java
++++ b/app/src/main/java/org/gnucash/android/model/Commodity.java
+@@ -15,6 +15,7 @@
+  */
+ package org.gnucash.android.model;
+ 
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.CommoditiesDbAdapter;
+ 
+ /**
+@@ -29,6 +30,8 @@
+ 
+     /**
+      * Default commodity for device locale
++     * <p>This value is set when a new application instance is created in {@link GnuCashApplication#onCreate()}.
++     * The value initialized here is just a placeholder for unit tests</p>
+      */
+     public static Commodity DEFAULT_COMMODITY = new Commodity("US Dollars", "USD", 100); //this value is a stub. Will be overwritten when the app is launched
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 6a1915a6..b80d835c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -42,7 +42,7 @@
+ import android.support.v4.app.Fragment;
+ import android.support.v4.app.FragmentActivity;
+ import android.support.v4.app.FragmentManager;
+-import android.support.v4.app.FragmentStatePagerAdapter;
++import android.support.v4.app.FragmentPagerAdapter;
+ import android.support.v4.view.PagerAdapter;
+ import android.support.v4.view.ViewPager;
+ import android.support.v7.widget.Toolbar;
+@@ -65,7 +65,6 @@
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.importer.ImportAsyncTask;
+-import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.common.BaseDrawerActivity;
+ import org.gnucash.android.ui.common.FormActivity;
+ import org.gnucash.android.ui.common.UxArgument;
+@@ -77,7 +76,6 @@
+ 
+ import java.io.FileNotFoundException;
+ import java.io.InputStream;
+-import java.util.ArrayList;
+ 
+ import butterknife.Bind;
+ import butterknife.ButterKnife;
+@@ -152,12 +150,12 @@
+     /**
+      * Configuration for rating the app
+      */
+-    public static RateThisApp.Config rateAppConfig = new RateThisApp.Config(14, 100);
++    public static RateThisApp.Config rateAppConfig = new RateThisApp.Config(30, 100);
+ 
+     /**
+      * Adapter for managing the sub-account and transaction fragment pages in the accounts view
+      */
+-    private class AccountViewPagerAdapter extends FragmentStatePagerAdapter {
++    private class AccountViewPagerAdapter extends FragmentPagerAdapter {
+ 
+         public AccountViewPagerAdapter(FragmentManager fm){
+             super(fm);
+@@ -380,8 +378,6 @@ public void setTab(int index){
+     private void init() {
+         PreferenceManager.setDefaultValues(this, R.xml.fragment_transaction_preferences, false);
+ 
+-        Money.DEFAULT_CURRENCY_CODE = GnuCashApplication.getDefaultCurrencyCode();
+-
+         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+         boolean firstRun = prefs.getBoolean(getString(R.string.key_first_run), true);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/AccountPreferencesFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
+index 81804ccc..91ffd196 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/AccountPreferencesFragment.java
+@@ -20,15 +20,13 @@
+ import android.app.Activity;
+ import android.app.AlertDialog;
+ import android.content.DialogInterface;
+-import android.content.SharedPreferences;
+ import android.os.Bundle;
+ import android.preference.Preference;
+ import android.preference.PreferenceFragment;
+-import android.preference.PreferenceManager;
+ import android.support.v7.app.ActionBar;
+-import android.support.v7.app.AppCompatActivity;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ 
+@@ -59,8 +57,8 @@ public void onCreate(Bundle savedInstanceState) {
+     @Override
+     public void onResume() {
+         super.onResume();
+-        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(getActivity());
+-        String defaultCurrency = sharedPreferences.getString(getString(R.string.key_default_currency), Money.DEFAULT_CURRENCY_CODE);
++
++        String defaultCurrency = GnuCashApplication.getDefaultCurrencyCode();
+         Preference pref = findPreference(getString(R.string.key_default_currency));
+         pref.setSummary(defaultCurrency);
+         pref.setOnPreferenceChangeListener((SettingsActivity)getActivity());
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index 0f222e71..32ff184f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -24,10 +24,9 @@
+ import android.preference.PreferenceFragment;
+ import android.preference.PreferenceManager;
+ import android.support.v7.app.ActionBar;
+-import android.support.v7.app.AppCompatActivity;
+ 
+ import org.gnucash.android.R;
+-import org.gnucash.android.model.Money;
++import org.gnucash.android.app.GnuCashApplication;
+ 
+ 
+ /**
+@@ -96,7 +95,7 @@ public void onResume() {
+ 	public boolean onPreferenceChange(Preference preference, Object newValue) {
+ 		preference.setSummary(newValue.toString());
+ 		if (preference.getKey().equals(getString(R.string.key_default_currency))){
+-			Money.DEFAULT_CURRENCY_CODE = newValue.toString();
++			GnuCashApplication.setDefaultCurrencyCode(newValue.toString());
+ 		}
+ 		
+ 		if (preference.getKey().equals(getString(R.string.key_default_export_email))){
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 2e1e6247..84eb810a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -56,7 +56,6 @@
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.importer.ImportAsyncTask;
+-import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.common.UxArgument;
+@@ -66,7 +65,6 @@
+ import java.io.File;
+ import java.io.FileInputStream;
+ import java.io.FileNotFoundException;
+-import java.io.InputStream;
+ import java.text.DateFormat;
+ import java.text.SimpleDateFormat;
+ import java.util.ArrayList;
+@@ -249,7 +247,7 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	@Override
+  	public boolean onPreferenceChange(Preference preference, Object newValue) {
+ 		if (preference.getKey().equals(getString(R.string.key_default_currency))){
+-			Money.DEFAULT_CURRENCY_CODE = newValue.toString();
++			GnuCashApplication.setDefaultCurrencyCode(newValue.toString());
+             preference.setSummary(newValue.toString());
+ 		} else if (preference.getKey().equals(getString(R.string.key_enable_passcode))) {
+             if ((Boolean) newValue) {
+@@ -289,11 +287,9 @@ public void setImbalanceAccountsHidden(boolean useDoubleEntry) {
+     }
+ 
+     private void setDefaultCurrencyListener() {
+-		SharedPreferences manager = PreferenceManager.getDefaultSharedPreferences(this);
+-		String defaultCurrency = manager.getString(getString(R.string.key_default_currency), Money.DEFAULT_CURRENCY_CODE);
+ 		@SuppressWarnings("deprecation")
+ 		Preference pref = findPreference(getString(R.string.key_default_currency));
+-		pref.setSummary(defaultCurrency);
++		pref.setSummary(GnuCashApplication.getDefaultCurrencyCode());
+ 		pref.setOnPreferenceChangeListener(this);
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index dd252045..430b233b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -57,6 +57,7 @@
+ import com.codetroopers.betterpickers.recurrencepicker.RecurrencePickerDialog;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+@@ -533,7 +534,7 @@ private void initalizeViews() {
+ 		String typePref = PreferenceManager.getDefaultSharedPreferences(getActivity()).getString(getString(R.string.key_default_transaction_type), "DEBIT");
+         mTransactionTypeSwitch.setChecked(TransactionType.valueOf(typePref));
+ 
+-		String code = Money.DEFAULT_CURRENCY_CODE;
++		String code = GnuCashApplication.getDefaultCurrencyCode();
+ 		if (mAccountUID != null){
+ 			code = mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID);
+ 		}
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+index 6ea614e3..260f98b5 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/db/AccountsDbAdapterTest.java
+@@ -5,6 +5,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -375,10 +376,36 @@ public void shouldCreateImbalanceAccountOnDemand(){
+         assertThat(mAccountsDbAdapter.getRecordsCount()).isEqualTo(2);
+     }
+ 
++
++    /**
++     * Opening an XML file should set the default currency to that used by the most accounts in the file
++     */
++    @Test
++    public void importingXml_shouldSetDefaultCurrency(){
++        GnuCashApplication.setDefaultCurrencyCode("JPY");
++
++        assertThat(GnuCashApplication.getDefaultCurrencyCode()).isEqualTo("JPY");
++        assertThat(Commodity.DEFAULT_COMMODITY).isEqualTo(Commodity.JPY);
++
++        mAccountsDbAdapter.deleteAllRecords();
++        loadDefaultAccounts();
++
++        assertThat(GnuCashApplication.getDefaultCurrencyCode()).isNotEqualTo("JPY");
++
++        Currency currency = Currency.getInstance(GnuCashApplication.getDefaultLocale());
++        String expectedCode = currency.getCurrencyCode();
++        Commodity expectedDefaultCommodity = CommoditiesDbAdapter.getInstance().getCommodity(expectedCode);
++
++        assertThat(GnuCashApplication.getDefaultCurrencyCode()).isEqualTo(expectedCode);
++        assertThat(Commodity.DEFAULT_COMMODITY).isEqualTo(expectedDefaultCommodity);
++
++        System.out.println("Default currency is now: " + expectedCode);
++    }
++
+     /**
+      * Loads the default accounts from file resource
+      */
+-    private void loadDefaultAccounts(){
++    public static void loadDefaultAccounts(){
+         try {
+             GncXmlImporter.parse(GnuCashApplication.getAppContext().getResources().openRawResource(R.raw.default_accounts));
+         } catch (ParserConfigurationException | SAXException | IOException e) {

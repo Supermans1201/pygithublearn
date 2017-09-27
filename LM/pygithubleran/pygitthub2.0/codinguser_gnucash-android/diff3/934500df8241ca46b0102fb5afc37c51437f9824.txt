@@ -1,0 +1,142 @@
+From 934500df8241ca46b0102fb5afc37c51437f9824 Mon Sep 17 00:00:00 2001
+From: Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+Date: Mon, 11 May 2015 17:56:15 +0300
+Subject: [PATCH] Require passcode to turn off passcode settings
+
+---
+ .../java/org/gnucash/android/ui/UxArgument.java    |  9 ++++--
+ .../ui/passcode/PasscodeLockScreenActivity.java    | 15 ++++++++-
+ .../ui/settings/PasscodePreferenceFragment.java    | 37 ++++++++++++++++------
+ 3 files changed, 49 insertions(+), 12 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/UxArgument.java b/app/src/main/java/org/gnucash/android/ui/UxArgument.java
+index c2d4ab0f..d275bc33 100644
+--- a/app/src/main/java/org/gnucash/android/ui/UxArgument.java
++++ b/app/src/main/java/org/gnucash/android/ui/UxArgument.java
+@@ -38,12 +38,17 @@
+ 	public static final String ORIGIN_ACCOUNT_UID = "origin_acccount_uid";
+ 
+     /**
+-     * Key for checking whether the passcode is enabled or not.
++     * Key for checking whether the passcode is enabled or not
+      */
+     public static final String ENABLED_PASSCODE         = "enabled_passcode";
+ 
+     /**
+-     * Key for storing the passcode.
++     * Key for disabling the passcode
++     */
++    public static final String DISABLE_PASSCODE         = "disable_passcode";
++
++    /**
++     * Key for storing the passcode
+      */
+     public static final String PASSCODE                 = "passcode";
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java b/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
+index 6f912d71..5818d969 100644
+--- a/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/passcode/PasscodeLockScreenActivity.java
+@@ -50,6 +50,11 @@ public void onPasscodeEntered(String pass) {
+         Log.d(TAG, "Passcode: " + passcode);
+ 
+         if (passcode.equals(pass)) {
++            if (UxArgument.DISABLE_PASSCODE.equals(getIntent().getStringExtra(UxArgument.DISABLE_PASSCODE))) {
++                setResult(RESULT_OK);
++                finish();
++                return;
++            }
+             GnuCashApplication.PASSCODE_SESSION_INIT_TIME = System.currentTimeMillis();
+             startActivity(new Intent()
+                     .setClassName(this, getIntent().getStringExtra(UxArgument.PASSCODE_CLASS_CALLER))
+@@ -64,10 +69,18 @@ public void onPasscodeEntered(String pass) {
+ 
+     @Override
+     public void onBackPressed() {
++        setResult(RESULT_CANCELED);
++
++        if (UxArgument.DISABLE_PASSCODE.equals(getIntent().getStringExtra(UxArgument.DISABLE_PASSCODE))) {
++            finish();
++            return;
++        }
++
+         GnuCashApplication.PASSCODE_SESSION_INIT_TIME = System.currentTimeMillis() - GnuCashApplication.SESSION_TIMEOUT;
+         startActivity(new Intent(Intent.ACTION_MAIN)
+                 .addCategory(Intent.CATEGORY_HOME)
+-                .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
++                .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        );
+     }
+ 
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+index 9caf94e2..1bdf905a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/PasscodePreferenceFragment.java
+@@ -33,6 +33,7 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.ui.UxArgument;
++import org.gnucash.android.ui.passcode.PasscodeLockScreenActivity;
+ import org.gnucash.android.ui.passcode.PasscodePreferenceActivity;
+ 
+ /**
+@@ -43,9 +44,13 @@
+ public class PasscodePreferenceFragment extends PreferenceFragment {
+ 
+     /**
+-     * * Request code for retrieving passcode to store
++     * Request code for retrieving passcode to store
+      */
+     public static final int PASSCODE_REQUEST_CODE = 2;
++    /**
++     * Request code for disabling passcode
++     */
++    public static final int REQUEST_DISABLE_PASSCODE = 3;
+ 
+     private SharedPreferences.Editor editor;
+     private CheckBoxPreference checkBoxPreference;
+@@ -78,7 +83,9 @@ public boolean onPreferenceChange(Preference preference, Object newValue) {
+                         if ((Boolean) newValue) {
+                             startActivityForResult(intent, PASSCODE_REQUEST_CODE);
+                         } else {
+-                            checkBoxPreference.setTitle(passcodeDisabled);
++                            Intent passIntent = new Intent(getActivity(), PasscodeLockScreenActivity.class);
++                            passIntent.putExtra(UxArgument.DISABLE_PASSCODE, UxArgument.DISABLE_PASSCODE);
++                            startActivityForResult(passIntent, REQUEST_DISABLE_PASSCODE);
+                         }
+                         editor.putBoolean(UxArgument.ENABLED_PASSCODE, (Boolean) newValue);
+                         editor.commit();
+@@ -99,13 +106,25 @@ public boolean onPreferenceClick(Preference preference) {
+     public void onActivityResult(int requestCode, int resultCode, Intent data) {
+         super.onActivityResult(requestCode, resultCode, data);
+ 
+-        if (resultCode == Activity.RESULT_OK && requestCode == PASSCODE_REQUEST_CODE && data!= null) {
+-            editor.putString(UxArgument.PASSCODE, data.getStringExtra(UxArgument.PASSCODE));
+-            Toast.makeText(getActivity(), R.string.toast_passcode_set, Toast.LENGTH_SHORT).show();
+-            checkBoxPreference.setTitle(getString(R.string.title_passcode_enabled));
+-        } else {
+-            editor.putBoolean(UxArgument.ENABLED_PASSCODE, false);
+-            checkBoxPreference.setChecked(false);
++        switch (requestCode) {
++            case PASSCODE_REQUEST_CODE:
++                if (resultCode == Activity.RESULT_OK && data != null) {
++                    editor.putString(UxArgument.PASSCODE, data.getStringExtra(UxArgument.PASSCODE));
++                    editor.putBoolean(UxArgument.ENABLED_PASSCODE, true);
++                    Toast.makeText(getActivity(), R.string.toast_passcode_set, Toast.LENGTH_SHORT).show();
++                    checkBoxPreference.setTitle(getString(R.string.title_passcode_enabled));
++                }
++                if (resultCode == Activity.RESULT_CANCELED) {
++                    editor.putBoolean(UxArgument.ENABLED_PASSCODE, false);
++                    checkBoxPreference.setChecked(false);
++                    checkBoxPreference.setTitle(getString(R.string.title_passcode_disabled));
++                }
++                break;
++            case REQUEST_DISABLE_PASSCODE:
++                boolean flag = (resultCode == Activity.RESULT_OK) ? false : true;
++                editor.putBoolean(UxArgument.ENABLED_PASSCODE, flag);
++                checkBoxPreference.setChecked(flag);
++                break;
+         }
+         editor.commit();
+     }

@@ -1,0 +1,1083 @@
+From cbeb8ec7a59030a912be779e12f9635beca86fc0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Graca?= <rivaldi8@gmail.com>
+Date: Fri, 18 Sep 2015 17:11:57 +0200
+Subject: [PATCH] Add calculator keyboard for inputting transaction \n\nFixes
+ #19, closes #271, fixes #308, closes #241
+
+---
+ app/build.gradle                                   |   5 +-
+ .../gnucash/android/app/GnuCashApplication.java    |   5 +-
+ .../main/java/org/gnucash/android/model/Money.java |   5 +
+ .../java/org/gnucash/android/ui/FormActivity.java  |  20 ++
+ .../ui/transaction/TransactionFormFragment.java    |  91 ++++--
+ .../android/ui/util/CalculatorKeyboard.java        | 314 +++++++++++++++++++++
+ .../drawable-hdpi/ic_chevron_right_white_24dp.png  | Bin 0 -> 133 bytes
+ .../drawable-mdpi/ic_chevron_right_white_24dp.png  | Bin 0 -> 113 bytes
+ .../drawable-xhdpi/ic_chevron_right_white_24dp.png | Bin 0 -> 144 bytes
+ .../ic_chevron_right_white_24dp.png                | Bin 0 -> 175 bytes
+ .../ic_chevron_right_white_24dp.png                | Bin 0 -> 206 bytes
+ .../main/res/layout/fragment_transaction_form.xml  | 282 +++++++++---------
+ app/src/main/res/xml-land/calculator_keyboard.xml  |  31 ++
+ app/src/main/res/xml/calculator_keyboard.xml       |  35 +++
+ 14 files changed, 627 insertions(+), 161 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/ui/util/CalculatorKeyboard.java
+ create mode 100644 app/src/main/res/drawable-hdpi/ic_chevron_right_white_24dp.png
+ create mode 100644 app/src/main/res/drawable-mdpi/ic_chevron_right_white_24dp.png
+ create mode 100644 app/src/main/res/drawable-xhdpi/ic_chevron_right_white_24dp.png
+ create mode 100644 app/src/main/res/drawable-xxhdpi/ic_chevron_right_white_24dp.png
+ create mode 100644 app/src/main/res/drawable-xxxhdpi/ic_chevron_right_white_24dp.png
+ create mode 100644 app/src/main/res/xml-land/calculator_keyboard.xml
+ create mode 100644 app/src/main/res/xml/calculator_keyboard.xml
+
+diff --git a/app/build.gradle b/app/build.gradle
+index c7578aaf..5f4d9ba3 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -175,7 +175,8 @@ dependencies {
+             'com.jakewharton:butterknife:7.0.1',
+             'com.kobakei:ratethisapp:0.0.3',
+             'com.squareup:android-times-square:1.6.4@aar',
+-            'com.github.techfreak:wizardpager:1.0.0'
++            'com.github.techfreak:wizardpager:1.0.0',
++            'net.objecthunter:exp4j:0.4.5'
+     )
+ 
+     compile('com.crashlytics.sdk.android:crashlytics:2.5.0@aar') {
+@@ -198,4 +199,4 @@ dependencies {
+     androidTestCompile('com.squareup.assertj:assertj-android:1.0.0'){
+         exclude group: 'com.android.support', module:'support-annotations'
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 6b54b4ba..d98a0b64 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -98,8 +98,9 @@ public void onCreate(){
+         super.onCreate();
+         GnuCashApplication.context = getApplicationContext();
+ 
+-        if (isCrashlyticsEnabled())
+-            Fabric.with(this, new Crashlytics());
++        Fabric.with(this, new Crashlytics.Builder().core(
++                new CrashlyticsCore.Builder().disabled(!isCrashlyticsEnabled()).build()).build());
++
+ 
+         mDbHelper = new DatabaseHelper(getApplicationContext());
+         try {
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 81a06b7a..c7a66e47 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -285,6 +285,11 @@ public long getDenominator() {
+ 		throw new RuntimeException("Unsupported number of fraction digits " + getScale());
+ 	}
+ 
++	/**
++	 * Returns the scale (precision) used for the decimal places of this amount.
++	 * <p>The scale used depends on the currency</p>
++	 * @return Scale of amount as integer
++	 */
+ 	private int getScale() {
+ 		int scale = mCurrency.getDefaultFractionDigits();
+ 		if (scale < 0) {
+diff --git a/app/src/main/java/org/gnucash/android/ui/FormActivity.java b/app/src/main/java/org/gnucash/android/ui/FormActivity.java
+index ba9da115..b9b76eb9 100644
+--- a/app/src/main/java/org/gnucash/android/ui/FormActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/FormActivity.java
+@@ -34,6 +34,7 @@
+ import org.gnucash.android.ui.export.ExportFormFragment;
+ import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ import org.gnucash.android.ui.transaction.SplitEditorFragment;
++import org.gnucash.android.ui.util.CalculatorKeyboard;
+ 
+ /**
+  * Activity for displaying forms in the application.
+@@ -45,6 +46,8 @@
+ 
+     private String mAccountUID;
+ 
++    private CalculatorKeyboard mOnBackListener;
++
+     public enum FormType {ACCOUNT, TRANSACTION, EXPORT, SPLIT_EDITOR}
+ 
+     @Override
+@@ -173,4 +176,21 @@ private void showFormFragment(Fragment fragment){
+         fragmentTransaction.add(R.id.fragment_container, fragment);
+         fragmentTransaction.commit();
+     }
++
++
++    public void setOnBackListener(CalculatorKeyboard keyboard) {
++        mOnBackListener = keyboard;
++    }
++
++    @Override
++    public void onBackPressed() {
++        boolean eventProcessed = false;
++
++        if (mOnBackListener != null)
++            eventProcessed = mOnBackListener.onBackPressed();
++
++        if (!eventProcessed)
++            super.onBackPressed();
++    }
++
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index ef2e23fc..a48b4b12 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -20,6 +20,7 @@
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
++import android.content.res.Configuration;
+ import android.database.Cursor;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+@@ -71,6 +72,7 @@
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.transaction.dialog.TransferFundsDialogFragment;
+ import org.gnucash.android.ui.util.AmountInputFormatter;
++import org.gnucash.android.ui.util.CalculatorKeyboard;
+ import org.gnucash.android.ui.util.OnTransferFundsListener;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ import org.gnucash.android.ui.util.TransactionTypeSwitch;
+@@ -211,11 +213,16 @@
+ 
+     private String mAccountUID;
+ 
+-    private List<Split> mSplitsList = new ArrayList<Split>();
++    private List<Split> mSplitsList = new ArrayList<>();
+ 
+     private boolean mEditMode = false;
+ 
+     /**
++     * Custom calculator keyboard
++     */
++    private CalculatorKeyboard mCalculatorKeyboard;
++
++    /**
+      * Split quantity which will be set from the funds transfer dialog
+      */
+     private Money mSplitQuantity;
+@@ -266,6 +273,12 @@ private void startTransferFunds() {
+     }
+ 
+     @Override
++    public void onConfigurationChanged(Configuration newConfig) {
++        super.onConfigurationChanged(newConfig);
++        initCalculatorKeyboard();
++    }
++
++    @Override
+ 	public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+ 		setHasOptionsMenu(true);
+@@ -290,7 +303,6 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 
+         setListeners();
+         //updateTransferAccountsList must only be called after initializing mAccountsDbAdapter
+-        // it needs mMultiCurrency to be properly initialized
+         updateTransferAccountsList();
+         mTransferAccountSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+             /**
+@@ -336,9 +348,21 @@ public void onNothingSelected(AdapterView<?> adapterView) {
+             mEditMode = true;
+ 		}
+ 
++        initCalculatorKeyboard();
+ 	}
+ 
+     /**
++     * Initializes the calculator keyboard
++     */
++    private void initCalculatorKeyboard() {
++        mCalculatorKeyboard = new CalculatorKeyboard(getActivity(), R.id.calculator_keyboard, R.xml.calculator_keyboard);
++        mCalculatorKeyboard.setCurrency(Currency.getInstance(mAccountsDbAdapter.getCurrencyCode(mAccountUID)));
++        mCalculatorKeyboard.registerEditText(R.id.input_transaction_amount);
++        // FIXME: decouple from FormActivity
++        ((FormActivity) getActivity()).setOnBackListener(mCalculatorKeyboard);
++    }
++
++    /**
+      * Extension of SimpleCursorAdapter which is used to populate the fields for the list items
+      * in the transactions suggestions (auto-complete transaction description).
+      */
+@@ -599,8 +623,8 @@ private void openSplitEditor(){
+ 	 * Sets click listeners for the dialog buttons
+ 	 */
+ 	private void setListeners() {
+-        mAmountInputFormatter = new AmountTextWatcher(mAmountEditText); //new AmountInputFormatter(mAmountEditText);
+-        mAmountEditText.addTextChangedListener(mAmountInputFormatter);
++        mAmountInputFormatter = new AmountTextWatcher(mAmountEditText);
++        //mAmountEditText.addTextChangedListener(mAmountInputFormatter);
+         mAmountEditText.setOnTouchListener(new View.OnTouchListener() {
+             @Override
+             public boolean onTouch(View v, MotionEvent event) {
+@@ -613,8 +637,12 @@ public boolean onTouch(View v, MotionEvent event) {
+                     if (event.getRawX() >= (mAmountEditText.getRight() - mAmountEditText.getCompoundDrawables()[DRAWABLE_RIGHT].getBounds().width())) {
+                         openSplitEditor();
+                         return true;
++                    } else if (!mCalculatorKeyboard.isCustomKeyboardVisible()) {
++                        mCalculatorKeyboard.showCustomKeyboard(v);
+                     }
+                 }
++
++                mAmountEditText.onTouchEvent(event);
+                 return false;
+             }
+         });
+@@ -623,15 +651,15 @@ public boolean onTouch(View v, MotionEvent event) {
+ 
+ 		mDateTextView.setOnClickListener(new View.OnClickListener() {
+ 
+-			@Override
+-			public void onClick(View v) {
+-				long dateMillis = 0;
+-				try {
+-					Date date = DATE_FORMATTER.parse(mDateTextView.getText().toString());
+-					dateMillis = date.getTime();
+-				} catch (ParseException e) {
+-					Log.e(getTag(), "Error converting input time to Date object");
+-				}
++            @Override
++            public void onClick(View v) {
++                long dateMillis = 0;
++                try {
++                    Date date = DATE_FORMATTER.parse(mDateTextView.getText().toString());
++                    dateMillis = date.getTime();
++                } catch (ParseException e) {
++                    Log.e(getTag(), "Error converting input time to Date object");
++                }
+                 Calendar calendar = Calendar.getInstance();
+                 calendar.setTimeInMillis(dateMillis);
+ 
+@@ -642,8 +670,8 @@ public void onClick(View v) {
+                         TransactionFormFragment.this,
+                         year, monthOfYear, dayOfMonth);
+                 datePickerDialog.show(getFragmentManager(), "date_picker_fragment");
+-			}
+-		});
++            }
++        });
+ 
+ 		mTimeTextView.setOnClickListener(new View.OnClickListener() {
+ 
+@@ -727,7 +755,7 @@ private void saveNewTransaction() {
+ 				mTime.get(Calendar.SECOND));
+ 		String description = mDescriptionEditText.getText().toString();
+ 		String notes = mNotesEditText.getText().toString();
+-		BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
++		BigDecimal amountBigd = new BigDecimal(mAmountEditText.getText().toString().replaceAll(",", ".").trim());
+ 
+ 		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID));
+ 		Money amount 	= new Money(amountBigd, currency).absolute();
+@@ -779,7 +807,8 @@ private void saveNewTransaction() {
+             } else {
+                 mTransaction = new Transaction(description);
+ 
+-                if (mSplitsList.isEmpty()) { //amount entered in the simple interface (not using splits Editor)
++                //****************** amount entered in the simple interface (not using splits Editor) ************************
++                if (mSplitsList.isEmpty()) {
+                     Split split = new Split(amount, mAccountUID);
+                     split.setType(mTransactionTypeButton.getTransactionType());
+                     mTransaction.addSplit(split);
+@@ -905,14 +934,17 @@ public boolean onOptionsItemSelected(MenuItem item) {
+                 return true;
+ 
+ 		case R.id.menu_save:
+-            if (mAmountEditText.getText().length() == 0) {
+-                Toast.makeText(getActivity(), R.string.toast_transanction_amount_required, Toast.LENGTH_SHORT).show();
+-            } else if (mUseDoubleEntry && mTransferAccountSpinner.getCount() == 0){
+-                Toast.makeText(getActivity(),
+-                        R.string.toast_disable_double_entry_to_save_transaction,
+-                        Toast.LENGTH_LONG).show();
+-            } else {
++            if (canSave()){
+                 saveNewTransaction();
++            } else {
++                if (mAmountEditText.getText().length() == 0) {
++                    Toast.makeText(getActivity(), R.string.toast_transanction_amount_required, Toast.LENGTH_SHORT).show();
++                }
++                if (mUseDoubleEntry && mTransferAccountSpinner.getCount() == 0){
++                    Toast.makeText(getActivity(),
++                            R.string.toast_disable_double_entry_to_save_transaction,
++                            Toast.LENGTH_LONG).show();
++                }
+             }
+ 			return true;
+ 
+@@ -922,6 +954,17 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 	}
+ 
+     /**
++     * Checks if the pre-requisites for saving the transaction are fulfilled
++     * <p>The conditions checked are that a valid amount is entered and that a transfer account is set (where applicable)</p>
++     * @return {@code true} if the transaction can be saved, {@code false} otherwise
++     */
++    private boolean canSave(){
++        mCalculatorKeyboard.evaluateEditTextExpression(mAmountEditText);
++        return (mAmountEditText.getText().length() > 0 && mAmountEditText.getError() == null)
++                || (mUseDoubleEntry && mTransferAccountSpinner.getCount() == 0);
++    }
++
++    /**
+      * Called by the split editor fragment to notify of finished editing
+      * @param splitList List of splits produced in the fragment
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/CalculatorKeyboard.java b/app/src/main/java/org/gnucash/android/ui/util/CalculatorKeyboard.java
+new file mode 100644
+index 00000000..97a4bded
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/ui/util/CalculatorKeyboard.java
+@@ -0,0 +1,314 @@
++/**
++ * Copyright 2013 Maarten Pennings extended by SimplicityApks
++ *
++ * Modified by:
++ * Copyright 2015 lex Magaz Graa <rivaldi8@gmail.com>
++ * Copyright 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * <p/>
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * <p/>
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * <p/>
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ * <p/>
++ * If you use this software in a product, an acknowledgment in the product
++ * documentation would be appreciated but is not required.
++ */
++
++package org.gnucash.android.ui.util;
++
++import android.app.Activity;
++import android.inputmethodservice.Keyboard;
++import android.inputmethodservice.KeyboardView;
++import android.inputmethodservice.KeyboardView.OnKeyboardActionListener;
++import android.support.annotation.LayoutRes;
++import android.text.Editable;
++import android.text.InputType;
++import android.util.Log;
++import android.view.HapticFeedbackConstants;
++import android.view.KeyEvent;
++import android.view.MotionEvent;
++import android.view.View;
++import android.view.View.OnClickListener;
++import android.view.View.OnFocusChangeListener;
++import android.view.View.OnTouchListener;
++import android.view.WindowManager;
++import android.view.inputmethod.InputMethodManager;
++import android.widget.EditText;
++
++import com.crashlytics.android.Crashlytics;
++
++import net.objecthunter.exp4j.Expression;
++import net.objecthunter.exp4j.ExpressionBuilder;
++
++import org.gnucash.android.app.GnuCashApplication;
++
++import java.math.BigDecimal;
++import java.math.MathContext;
++import java.text.DecimalFormat;
++import java.text.DecimalFormatSymbols;
++import java.text.NumberFormat;
++import java.util.Currency;
++import java.util.Locale;
++
++
++/**
++ * When an activity hosts a keyboardView, this class allows several EditText's to register for it.
++ *
++ * Known issues:
++ *  - It's not possible to select text.
++ *  - When in landscape, the EditText is covered by the keyboard.
++ *  - No i18n.
++ *
++ * @author Maarten Pennings, extended by SimplicityApks
++ * @date 2012 December 23
++ */
++public class CalculatorKeyboard {
++
++    public static final int KEY_CODE_DECIMAL_SEPARATOR = 46;
++    /** A link to the KeyboardView that is used to render this CalculatorKeyboard. */
++    private KeyboardView mKeyboardView;
++    /** A link to the activity that hosts the {@link #mKeyboardView}. */
++    private Activity mHostActivity;
++    private boolean hapticFeedback;
++
++    private Currency mCurrency = Currency.getInstance(GnuCashApplication.getDefaultCurrencyCode());
++
++    final String mDecimalSeparator = Character.toString(DecimalFormatSymbols.getInstance().getDecimalSeparator());
++
++    private OnKeyboardActionListener mOnKeyboardActionListener = new OnKeyboardActionListener() {
++        @Override
++        public void onKey(int primaryCode, int[] keyCodes) {
++            View focusCurrent = mHostActivity.getWindow().getCurrentFocus();
++
++            /*
++            if (focusCurrent == null || focusCurrent.getClass() != EditText.class)
++                return;
++            */
++
++            EditText edittext = (EditText) focusCurrent;
++            Editable editable = edittext.getText();
++            int start = edittext.getSelectionStart();
++            int end = edittext.getSelectionEnd();
++
++            // FIXME: use replace() down
++            // delete the selection, if chars are selected:
++            if (end > start)
++                editable.delete(start, end);
++
++            switch (primaryCode) {
++                case KEY_CODE_DECIMAL_SEPARATOR:
++                    editable.insert(start, mDecimalSeparator);
++                    break;
++                case 42:
++                case 43:
++                case 45:
++                case 47:
++                case 48:
++                case 49:
++                case 50:
++                case 51:
++                case 52:
++                case 53:
++                case 54:
++                case 55:
++                case 56:
++                case 57:
++                    //editable.replace(start, end, Character.toString((char) primaryCode));
++                    // XXX: could be android:keyOutputText attribute used instead of this?
++                    editable.insert(start, Character.toString((char) primaryCode));
++                    break;
++                case -5:
++                    int deleteStart = start > 0 ? start - 1: 0;
++                    editable.delete(deleteStart, end);
++                    break;
++                case 1001:
++                    evaluateEditTextExpression(edittext);
++                    break;
++                case 1002:
++                    // FIXME: show the keyboard too
++                    edittext.focusSearch(View.FOCUS_DOWN).requestFocus();
++                    break;
++            }
++        }
++
++        @Override
++        public void onPress(int arg0) {
++            // vibrate if haptic feedback is enabled:
++            if (hapticFeedback && arg0 != 0)
++                mKeyboardView.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
++        }
++
++        @Override public void onRelease(int primaryCode) { }
++        @Override public void onText(CharSequence text) { }
++        @Override public void swipeLeft() { }
++        @Override public void swipeRight() { }
++        @Override public void swipeDown() { }
++        @Override public void swipeUp() { }
++    };
++
++    /**
++     * Create a custom keyboard, that uses the KeyboardView (with resource id <var>viewid</var>) of the <var>host</var> activity,
++     * and load the keyboard layout from xml file <var>layoutid</var> (see {@link Keyboard} for description).
++     * Note that the <var>host</var> activity must have a <var>KeyboardView</var> in its layout (typically aligned with the bottom of the activity).
++     * Note that the keyboard layout xml file may include key codes for navigation; see the constants in this class for their values.
++     * Note that to enable EditText's to use this custom keyboard, call the {@link #registerEditText(int)}.
++     *
++     * @param host The hosting activity.
++     * @param keyboardViewId The id of the KeyboardView.
++     * @param xmlLayoutResId The id of the xml file containing the keyboard layout.
++     */
++    public CalculatorKeyboard(Activity host, int keyboardViewId, @LayoutRes int xmlLayoutResId) {
++        mHostActivity = host;
++        mKeyboardView = (KeyboardView) mHostActivity.findViewById(keyboardViewId);
++        Keyboard keyboard = new Keyboard(mHostActivity, xmlLayoutResId);
++        for (Keyboard.Key key : keyboard.getKeys()) {
++            if (key.codes[0] == KEY_CODE_DECIMAL_SEPARATOR){
++                key.label = mDecimalSeparator;
++                break;
++            }
++        }
++        mKeyboardView.setKeyboard(keyboard);
++        mKeyboardView.setPreviewEnabled(false); // NOTE Do not show the preview balloons
++        mKeyboardView.setOnKeyboardActionListener(mOnKeyboardActionListener);
++        // Hide the standard keyboard initially
++        mHostActivity.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
++    }
++
++    /** Returns whether the CalculatorKeyboard is visible. */
++    public boolean isCustomKeyboardVisible() {
++        return mKeyboardView.getVisibility() == View.VISIBLE;
++    }
++
++    /** Make the CalculatorKeyboard visible, and hide the system keyboard for view v. */
++    public void showCustomKeyboard(View v) {
++        if (v != null)
++            ((InputMethodManager) mHostActivity.getSystemService(Activity.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(v.getWindowToken(), 0);
++
++        mKeyboardView.setVisibility(View.VISIBLE);
++        mKeyboardView.setEnabled(true);
++    }
++
++    /** Make the CalculatorKeyboard invisible. */
++    public void hideCustomKeyboard() {
++        mKeyboardView.setVisibility(View.GONE);
++        mKeyboardView.setEnabled(false);
++    }
++
++    /**
++     * Register <var>EditText<var> with resource id <var>resid</var> (on the hosting activity) for using this custom keyboard.
++     *
++     * @param resid The resource id of the EditText that registers to the custom keyboard.
++     */
++    public void registerEditText(int resid) {
++        // Find the EditText 'resid'
++        final EditText edittext = (EditText) mHostActivity.findViewById(resid);
++        // Make the custom keyboard appear
++        edittext.setOnFocusChangeListener(new OnFocusChangeListener() {
++            // NOTE By setting the on focus listener, we can show the custom keyboard when the edit box gets focus, but also hide it when the edit box loses focus
++            @Override
++            public void onFocusChange(View v, boolean hasFocus) {
++                if (hasFocus)
++                    showCustomKeyboard(v);
++                else {
++                    hideCustomKeyboard();
++                    evaluateEditTextExpression((EditText) v);
++                }
++            }
++        });
++
++        edittext.setOnClickListener(new OnClickListener() {
++            // NOTE By setting the on click listener we can show the custom keyboard again,
++            // by tapping on an edit box that already had focus (but that had the keyboard hidden).
++            @Override
++            public void onClick(View v) {
++                showCustomKeyboard(v);
++            }
++        });
++
++        // Disable spell check (hex strings look like words to Android)
++        edittext.setInputType(edittext.getInputType() | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
++
++        // FIXME: for some reason, this prevents the text selection from working
++        edittext.setOnLongClickListener(new View.OnLongClickListener() {
++            @Override
++            public boolean onLongClick(View v) {
++                if (v != null)
++                    ((InputMethodManager) mHostActivity.getSystemService(Activity.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(v.getWindowToken(), 0);
++
++                return false;
++            }
++        });
++    }
++
++    /**
++     * Sets the currency to be used for this calculation
++     * @param currency Currency of the amount being computed
++     */
++    public void setCurrency(Currency currency){
++        this.mCurrency = currency;
++    }
++
++    /**
++     * Enables or disables the Haptic feedback on keyboard touches
++     * @param goEnabled true if you want haptic feedback, falso otherwise
++     */
++    public void enableHapticFeedback(boolean goEnabled) {
++        mKeyboardView.setHapticFeedbackEnabled(goEnabled);
++        hapticFeedback = goEnabled;
++    }
++
++    public boolean onBackPressed() {
++        if (isCustomKeyboardVisible()) {
++            hideCustomKeyboard();
++            return true;
++        } else
++            return false;
++    }
++
++    public void evaluateEditTextExpression(EditText editText) {
++        String amountText = editText.getText().toString();
++        amountText = amountText.replaceAll(",", ".");
++        if (amountText.trim().isEmpty())
++            return;
++
++        ExpressionBuilder expressionBuilder = new ExpressionBuilder(amountText);
++        Expression expression;
++
++        try {
++            expression = expressionBuilder.build();
++        } catch (RuntimeException e) {
++            // FIXME: i18n
++            editText.setError("Invalid expression!");
++            String msg = "Invalid expression: " + amountText;
++            Log.e(this.getClass().getSimpleName(), msg);
++            Crashlytics.log(msg);
++            return;
++        }
++
++        if (expression != null && expression.validate().isValid()) {
++            BigDecimal result = new BigDecimal(expression.evaluate());
++            result = result.setScale(mCurrency.getDefaultFractionDigits(), BigDecimal.ROUND_HALF_EVEN);
++
++            DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());
++            formatter.setMinimumFractionDigits(0);
++            formatter.setMaximumFractionDigits(mCurrency.getDefaultFractionDigits());
++            formatter.setGroupingUsed(false);
++            String resultString = formatter.format(result.doubleValue());
++
++            editText.setText(resultString);
++            editText.setSelection(resultString.length());
++        } else {
++            // FIXME: i18n
++            editText.setError("Invalid expression!");
++            // TODO: log error
++        }
++    }
++}
+diff --git a/app/src/main/res/drawable-hdpi/ic_chevron_right_white_24dp.png b/app/src/main/res/drawable-hdpi/ic_chevron_right_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f10ee461a67bba9b40bc70c6f8c468c62d969ff
+GIT binary patch
+literal 133
+zcmeAS@N?(olHy`uVBq!ia0vp^Dj>|k0wldT1B8K;kEe@ch{y4_7awvqC@`=lDjqy`
+zt?bgBcUl?E^Co`GYj}UY^}!vTz!O|)k6&pXbz<e6no+;}8-I{?tW&3g@#C2qQFTF)
+hhwe;iDtz~suW0R}yM`@_=0I~9JYD@<);T3K0RY{qFpK~I
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-mdpi/ic_chevron_right_white_24dp.png b/app/src/main/res/drawable-mdpi/ic_chevron_right_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4f3c6d4c2a2afc9aa3677080a7ec573dac7e27f
+GIT binary patch
+literal 113
+zcmeAS@N?(olHy`uVBq!ia0vp^5+KaM0wlfaz7_*13r`ov5R22v2@<R+jsJW9OM3*a
+z`~Cm?|Nl!eI~8KRRbECd^0+SKyGTsPlt=Gric1W$=P7qaF$RX!lRYm~`*^tn&0z3!
+L^>bP0l+XkK{KX?Y
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xhdpi/ic_chevron_right_white_24dp.png b/app/src/main/res/drawable-xhdpi/ic_chevron_right_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..93dec392d64168f33fada4a4aa7bd9905e3eb6c1
+GIT binary patch
+literal 144
+zcmeAS@N?(olHy`uVBq!ia0vp^1|ZDA0wn)(8}b0Da8DP<kch)?uk7S)a1dd>cwfvt
+z*@J~!)tS+m>1CQ*RAwCGyfdMbOnCUBivF>5sNVRQBIFaJ<}>4m<v|(VCC{fHeEz=i
+sdHD0{M%^0T&@C_i%=S3v9dv_vxgxKP#qrApKr0wLUHx3vIVCg!0H@|LM*si-
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xxhdpi/ic_chevron_right_white_24dp.png b/app/src/main/res/drawable-xxhdpi/ic_chevron_right_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..7920aa3d2fc5bde88efb612bcb70d365001c7a58
+GIT binary patch
+literal 175
+zcmeAS@N?(olHy`uVBq!ia0vp^9w5xY0wn)GsXhaw$~;{hLo)8YJ$IYe!GXc$;@bwU
+zfLDwB`u*HEPP!dxXHkB)@<9tw9m5@$z>6z`v!4Y8E$(&pTpN@>eagzod%Rdxy{2dc
+zE^>LfG9X`MQSmL!mo+PmFDxux8N9R9&8mIwomHEsEDB8zFM6S(I{jQ!(JP=)57gDp
+W=X<x66c;Q9ne6H6=d#Wzp$Py<7DNpI
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/drawable-xxxhdpi/ic_chevron_right_white_24dp.png b/app/src/main/res/drawable-xxxhdpi/ic_chevron_right_white_24dp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..6858f02b1dece534f9262dc2ac2ed13301d1be47
+GIT binary patch
+literal 206
+zcmeAS@N?(olHy`uVBq!ia0vp^2_VeD0wg^q?%xcgrh2+KhE&{od;K6MlOu!k#Y~6X
+zpx+W(&9|<u2%M1Wuh-G|UF(E>8V^t@!wntd&6WQwJ+p+1PTqbq@BWMl+0$kT6`h(j
+zujNhAWCh127EU1*j|pH#z0`*Fd<OUb=zf0xY<B*>pZ4?r19|VC$)7R5|L5HPQl0ue
+y$thvy<2^HG@At@<^MB$6tN&9k*vJE|X^`?i5X2&#ENa&Vvenbo&t;ucLK6T|$WlN6
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/layout/fragment_transaction_form.xml b/app/src/main/res/layout/fragment_transaction_form.xml
+index f1ec7468..d2b66c4a 100644
+--- a/app/src/main/res/layout/fragment_transaction_form.xml
++++ b/app/src/main/res/layout/fragment_transaction_form.xml
+@@ -15,136 +15,152 @@
+  limitations under the License.
+ -->
+ 
+-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+-	android:layout_width="match_parent"
+-	android:layout_height="match_parent">
+-
+-	<TableLayout android:id="@+id/fragment_transaction_form"
+-		android:layout_width="match_parent"
+-		android:layout_height="wrap_content"
+-		android:padding="@dimen/dialog_padding"
+-		android:stretchColumns="1"
+-		android:orientation="vertical" >
+-
+-		<TableRow style="@style/FormRow">
+-			<AutoCompleteTextView
+-				android:id="@+id/input_transaction_name"
+-				android:layout_width="match_parent"
+-				android:layout_height="wrap_content"
+-				android:layout_span="2"
+-				android:hint="@string/label_transaction_name"
+-				android:inputType="textCapSentences"
+-				android:imeOptions="actionNext"
+-				android:nextFocusDown="@+id/input_transaction_amount"
+-				android:background="@android:color/transparent"
+-				android:textSize="22sp" />
+-		</TableRow>
+-
+-		<View style="@style/Divider" android:layout_marginLeft="0dp" />
+-
+-		<TableRow style="@style/FormRow">
+-			<TextView
+-				android:id="@+id/currency_symbol"
+-				style="@style/FormIcon"
+-				android:gravity="center"
+-				android:textColor="@color/debit_red"
+-				android:textSize="22dp"
+-				android:text="$" />
+-
+-			<EditText
+-				android:id="@+id/input_transaction_amount"
+-				android:layout_width="0dp"
+-				android:layout_weight="3"
+-				android:layout_height="wrap_content"
+-				android:hint="@string/label_transaction_amount"
+-				android:inputType="number"
+-				android:nextFocusDown="@+id/input_description"
+-				android:drawableRight="@drawable/content_split_holo_light"
+-				android:drawableEnd="@drawable/content_split_holo_light"
+-				android:background="@android:color/transparent"
+-				android:textColor="@color/debit_red"
+-				android:textSize="20sp" />
+-
+-			<org.gnucash.android.ui.util.TransactionTypeSwitch
+-				android:id="@+id/input_transaction_type"
+-				android:layout_width="0dp"
+-				android:layout_weight="2"
+-				android:layout_height="wrap_content"
+-				android:textOn="@string/label_debit"
+-				android:textOff="@string/label_credit"
+-				android:gravity="end|center_vertical"
+-				android:textColor="@color/debit_red"
+-				android:textSize="14sp"
+-				android:checked="true"/>
+-
+-		</TableRow>
+-		<View style="@style/Divider" />
+-		<TableRow android:id="@+id/layout_double_entry"
+-			style="@style/FormRow" >
+-
+-			<ImageView style="@style/FormIcon"
+-				android:src="@drawable/ic_action_forward"/>
+-			<Spinner
+-				android:id="@+id/input_transfer_account_spinner"
+-				android:layout_width="0dp"
+-				android:layout_weight="5"
+-				android:layout_height="wrap_content"  />
+-		</TableRow>
+-		<View style="@style/Divider" />
+-		<TableRow style="@style/FormRow" >
+-
+-			<ImageView style="@style/FormIcon"
+-				android:src="@drawable/ic_action_time"/>
+-
+-			<TextView android:id="@+id/input_date"
+-				android:layout_width="0dp"
+-				android:layout_weight="3"
+-				android:layout_height="wrap_content"
+-				android:gravity="center"      />
+-
+-			<TextView android:id="@+id/input_time"
+-				android:layout_width="0dp"
+-				android:layout_weight="2"
+-				android:layout_height="wrap_content"
+-				android:gravity="center"        />
+-		</TableRow>
+-		<View style="@style/Divider" />
+-
+-		<TableRow style="@style/FormRow">
+-			<ImageView style="@style/FormIcon"
+-				android:src="@drawable/ic_action_sort_by_size"/>
+-
+-			<EditText android:id="@+id/input_description"
+-				android:layout_width="0dp"
+-				android:layout_weight="5"
+-				android:layout_height="wrap_content"
+-				android:singleLine="false"
+-				android:background="@android:color/transparent"
+-				android:hint="@string/label_transaction_description"
+-				android:inputType="textMultiLine|textCapSentences" />
+-		</TableRow>
+-		<View style="@style/Divider" />
+-		<TableRow style="@style/FormRow">
+-
+-			<ImageView style="@style/FormIcon"
+-				android:src="@drawable/ic_action_rotate_right"/>
+-
+-			<TextView android:id="@+id/input_recurrence"
+-				android:layout_width="0dp"
+-				android:layout_height="wrap_content"
+-				android:layout_weight="5"
+-				android:gravity="center"
+-				android:text="@string/label_tap_to_create_schedule"
+-				style="@style/Dropdown.TextView" />
+-
+-		</TableRow>
+-
+-		<CheckBox android:id="@+id/checkbox_save_template"
+-			android:layout_width="match_parent"
+-			android:layout_height="wrap_content"
+-			android:layout_marginBottom="@dimen/form_row_bottom_margin"
+-			android:visibility="gone"
+-			android:text="@string/label_save_template" />
+-		<!-- Not exposing the transaction template checkbox to the UI at this time -->
+-	</TableLayout>
+-</ScrollView>
+\ No newline at end of file
++<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent">
++
++    <ScrollView
++        android:layout_width="match_parent"
++        android:layout_height="match_parent">
++        android:padding="@dimen/dialog_padding"
++        android:stretchColumns="1"
++        android:orientation="vertical" >
++
++        <TableLayout android:id="@+id/fragment_transaction_form"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:padding="@dimen/dialog_padding"
++            android:stretchColumns="1"
++            android:orientation="vertical" >
++
++            <TableRow style="@style/FormRow">
++                <AutoCompleteTextView
++                    android:id="@+id/input_transaction_name"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_span="2"
++                    android:hint="@string/label_transaction_name"
++                    android:inputType="textCapSentences"
++                    android:imeOptions="actionNext"
++                    android:nextFocusDown="@+id/input_transaction_amount"
++                    android:background="@android:color/transparent"
++                    android:textSize="22sp" />
++            </TableRow>
++
++            <View style="@style/Divider" android:layout_marginLeft="0dp" />
++            <TableRow style="@style/FormRow">
++                <TextView
++                    android:id="@+id/currency_symbol"
++                    style="@style/FormIcon"
++                    android:gravity="center"
++                    android:textColor="@color/debit_red"
++                    android:textSize="22dp"
++                    android:text="$" />
++
++                <EditText
++                    android:id="@+id/input_transaction_amount"
++                    android:layout_width="0dp"
++                    android:layout_weight="3"
++                    android:layout_height="wrap_content"
++                    android:hint="@string/label_transaction_amount"
++                    android:inputType="none"
++                    android:nextFocusDown="@+id/input_description"
++                    android:drawableRight="@drawable/content_split_holo_light"
++                    android:drawableEnd="@drawable/content_split_holo_light"
++                    android:background="@android:color/transparent"
++                    android:textColor="@color/debit_red"
++                    android:textSize="20sp" />
++
++                <org.gnucash.android.ui.util.TransactionTypeSwitch
++                    android:id="@+id/input_transaction_type"
++                    android:layout_width="0dp"
++                    android:layout_weight="2"
++                    android:layout_height="wrap_content"
++                    android:textOn="@string/label_debit"
++                    android:textOff="@string/label_credit"
++                    android:gravity="end|center_vertical"
++                    android:textColor="@color/debit_red"
++                    android:textSize="14sp"
++                    android:checked="true"/>
++
++            </TableRow>
++            <View style="@style/Divider" />
++            <TableRow android:id="@+id/layout_double_entry"
++                style="@style/FormRow" >
++
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_forward"/>
++                <Spinner
++                    android:id="@+id/input_transfer_account_spinner"
++                    android:layout_width="0dp"
++                    android:layout_weight="5"
++                    android:layout_height="wrap_content"  />
++            </TableRow>
++            <View style="@style/Divider" />
++            <TableRow style="@style/FormRow" >
++
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_time"/>
++
++                <TextView android:id="@+id/input_date"
++                    android:layout_width="0dp"
++                    android:layout_weight="3"
++                    android:layout_height="wrap_content"
++                    android:gravity="center"      />
++
++                <TextView android:id="@+id/input_time"
++                    android:layout_width="0dp"
++                    android:layout_weight="2"
++                    android:layout_height="wrap_content"
++                    android:gravity="center"        />
++            </TableRow>
++            <View style="@style/Divider" />
++
++            <TableRow style="@style/FormRow">
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_sort_by_size"/>
++
++                <EditText android:id="@+id/input_description"
++                    android:layout_width="0dp"
++                    android:layout_weight="5"
++                    android:layout_height="wrap_content"
++                    android:singleLine="false"
++                    android:background="@android:color/transparent"
++                    android:hint="@string/label_transaction_description"
++                    android:inputType="textMultiLine|textCapSentences" />
++            </TableRow>
++            <View style="@style/Divider" />
++            <TableRow style="@style/FormRow">
++
++                <ImageView style="@style/FormIcon"
++                    android:src="@drawable/ic_action_rotate_right"/>
++
++                <TextView android:id="@+id/input_recurrence"
++                    android:layout_width="0dp"
++                    android:layout_height="wrap_content"
++                    android:layout_weight="5"
++                    android:gravity="center"
++                    android:text="@string/label_tap_to_create_schedule"
++                    style="@style/Dropdown.TextView" />
++
++            </TableRow>
++
++            <CheckBox android:id="@+id/checkbox_save_template"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginBottom="@dimen/form_row_bottom_margin"
++                android:visibility="gone"
++                android:text="@string/label_save_template" />
++            <!-- Not exposing the transaction template checkbox to the UI at this time -->
++        </TableLayout>
++    </ScrollView>
++    <android.inputmethodservice.KeyboardView android:id="@+id/calculator_keyboard"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_alignParentBottom="true"
++        android:layout_alignParentLeft="true"
++        android:layout_alignParentRight="true"
++        android:focusable="true"
++        android:focusableInTouchMode="true"
++        android:visibility="gone" />
++</RelativeLayout>
+diff --git a/app/src/main/res/xml-land/calculator_keyboard.xml b/app/src/main/res/xml-land/calculator_keyboard.xml
+new file mode 100644
+index 00000000..ecc1d5b0
+--- /dev/null
++++ b/app/src/main/res/xml-land/calculator_keyboard.xml
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- FIXME: make locale independent -->
++<Keyboard xmlns:android="http://schemas.android.com/apk/res/android"
++    android:keyWidth="20%p"
++    android:keyHeight="15%p">
++
++    <Row>
++        <Key android:codes="53" android:keyLabel="5" android:keyEdgeFlags="left" />
++        <Key android:codes="54" android:keyLabel="6" />
++        <Key android:codes="55" android:keyLabel="7" />
++        <Key android:codes="56" android:keyLabel="8" />
++        <Key android:codes="57" android:keyLabel="9" />
++        <Key android:codes="42" android:keyLabel="*" />
++        <Key android:codes="47" android:keyLabel="/" android:keyEdgeFlags="right" />
++        <Key android:codes="46" android:keyLabel="." />
++        <Key android:codes="-5" android:keyIcon="@drawable/ic_backspace_normal_dark"
++            android:isRepeatable="true" android:keyEdgeFlags="right"/>
++    </Row>
++    <Row>
++        <Key android:codes="48" android:keyLabel="0" android:keyEdgeFlags="left" />
++        <Key android:codes="49" android:keyLabel="1" />
++        <Key android:codes="50" android:keyLabel="2" />
++        <Key android:codes="51" android:keyLabel="3" />
++        <Key android:codes="52" android:keyLabel="4" android:keyEdgeFlags="left" />
++        <Key android:codes="43" android:keyLabel="+" />
++        <Key android:codes="45" android:keyLabel="-" android:keyEdgeFlags="right" />
++        <Key android:codes="1001" android:keyLabel="=" android:horizontalGap="20%" />
++        <Key android:codes="1002" android:keyIcon="@drawable/ic_chevron_right_white_24dp"
++            android:keyEdgeFlags="right" />
++    </Row>
++</Keyboard>
+\ No newline at end of file
+diff --git a/app/src/main/res/xml/calculator_keyboard.xml b/app/src/main/res/xml/calculator_keyboard.xml
+new file mode 100644
+index 00000000..55699bd6
+--- /dev/null
++++ b/app/src/main/res/xml/calculator_keyboard.xml
+@@ -0,0 +1,35 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- FIXME: make locale independent -->
++<Keyboard xmlns:android="http://schemas.android.com/apk/res/android"
++    android:keyWidth="20%p"
++    android:keyHeight="10%p">
++
++    <Row>
++        <Key android:codes="55" android:keyLabel="7" android:keyEdgeFlags="left" />
++        <Key android:codes="56" android:keyLabel="8" />
++        <Key android:codes="57" android:keyLabel="9" />
++        <Key android:codes="-5" android:keyIcon="@drawable/ic_backspace_normal_dark"
++            android:isRepeatable="true" />
++    </Row>
++    <Row>
++        <Key android:codes="52" android:keyLabel="4" android:keyEdgeFlags="left" />
++        <Key android:codes="53" android:keyLabel="5" />
++        <Key android:codes="54" android:keyLabel="6" />
++        <Key android:codes="42" android:keyLabel="*" />
++        <Key android:codes="47" android:keyLabel="/" android:keyEdgeFlags="right" />
++    </Row>
++    <Row>
++        <Key android:codes="49" android:keyLabel="1" android:keyEdgeFlags="left" />
++        <Key android:codes="50" android:keyLabel="2" />
++        <Key android:codes="51" android:keyLabel="3" />
++        <Key android:codes="43" android:keyLabel="+" />
++        <Key android:codes="45" android:keyLabel="-" android:keyEdgeFlags="right" />
++    </Row>
++    <Row>
++        <Key android:codes="48" android:keyLabel="0" android:keyEdgeFlags="left" />
++        <Key android:codes="46" android:keyLabel="." />
++        <Key android:codes="1001" android:keyLabel="=" android:horizontalGap="20%" />
++        <Key android:codes="1002" android:keyIcon="@drawable/ic_chevron_right_white_24dp"
++            android:keyEdgeFlags="right" />
++    </Row>
++</Keyboard>
+\ No newline at end of file

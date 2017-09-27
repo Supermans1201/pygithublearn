@@ -1,0 +1,764 @@
+From 67569db041105238925a54808c049e2492259614 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 7 Feb 2013 00:22:46 +0100
+Subject: [PATCH] Updated links to repository in pom Updated development
+ version snapshot Updated build instructions Take sub-accounts into
+ consideration when computing account balance Refactored database adapters
+
+---
+ .gitignore                                         |  4 +-
+ README.md                                          | 41 ++++++-----
+ app/pom.xml                                        |  2 +-
+ app/src/org/gnucash/android/data/Account.java      |  4 +-
+ app/src/org/gnucash/android/data/Money.java        | 11 ++-
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 85 +++++++++++++++++-----
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 42 ++++++++++-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 43 +++++++----
+ .../android/ui/accounts/AccountsListFragment.java  |  9 +--
+ .../ui/transactions/BulkMoveDialogFragment.java    |  2 +-
+ .../ui/transactions/TransactionsActivity.java      |  4 +-
+ .../TransactionsDeleteConfirmationDialog.java      |  4 +-
+ .../ui/transactions/TransactionsListFragment.java  |  2 +-
+ .../ui/widget/WidgetConfigurationActivity.java     |  2 +-
+ integration-tests/pom.xml                          | 10 +--
+ .../android/test/db/AccountsDbAdapterTest.java     |  4 +-
+ .../android/test/db/TransactionsDbAdapterTest.java |  2 +-
+ .../android/test/ui/AccountsActivityTest.java      |  2 +-
+ .../org/gnucash/android/test/ui/OfxExportTest.java |  2 +-
+ .../android/test/ui/TransactionsActivityTest.java  |  2 +-
+ .../org/gnucash/android/test/unit/MoneyTest.java   |  2 +-
+ pom.xml                                            | 12 +--
+ 22 files changed, 196 insertions(+), 95 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index 90c62dbb..44ee22b1 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -6,8 +6,10 @@ gen
+ bin
+ dist
+ target
++#IntelliJ
+ gen-external-apklibs
+ *.iml
+ *.ipr
+ .idea/
+-*.iws
+\ No newline at end of file
++*.iws
++out/
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index b8f6e8b6..a4012599 100644
+--- a/README.md
++++ b/README.md
+@@ -13,30 +13,33 @@ There are different ways to get the Gnucash app for Android; through the app sto
+ 
+ ### App Store
+ 
+-Gnucash for Android is now available in the Google Play Store
+ <a href="http://play.google.com/store/apps/details?id=org.gnucash.android">
+   <img alt="Android app on Google Play" src="http://developer.android.com/images/brand/en_generic_rgb_wo_60.png" />
+-</a>
++</a>
+ 
+-### Eclipse
+-
+-You can also build and install the Gnucash for Android application from source. This is of particular interest for those who want to contribute or those who wish to live on the bleeding edge. 
+-
+-The Android SDK primarily supports Eclipse for development and consequently, all the subprojects in the GnucashMobile folder are Eclipse Android projects. In order to compile the application, you need to import the com_actionbarsherlock and GnucashMobile projects into your eclipse workspace. Then you can just invoke "Run as Android application" from eclipse in order to build and install the application on your Android device.
+-
+-If you are interested in running the Robotium tests, also import the GnucashTest project into your workspace and run it as "Android JUnit Test".
+ 
+-### Maven
+-
+-Gnucash for Android also supports the Apache Maven build automation tool. 
+-This method is more interesting if you do not want to download and install eclipse and the necessary Android plugins. It is especially interesting if you already have maven installed.
+-There are a few steps you need in order to get up and running with maven. 
++## Building
++
++The build requires [Maven](http://maven.apache.org/download.html)
++v3.0.3+ and the [Android SDK](http://developer.android.com/sdk/index.html)
++to be installed in your development environment. In addition you'll need to set
++the `ANDROID_HOME` environment variable to the location of your SDK:
++
++    export ANDROID_HOME=/home/roberto/tools/android-sdk
++
++After satisfying those requirements, the build is pretty simple:
++
++* Run `mvn clean package` from the `app` directory to build the APK only
++* Run `mvn clean install` from the root directory to build the app and also run
++  the integration tests, this requires a connected Android device or running
++  emulator. (see this [blog post](http://goo.gl/TprMw) for details)
++
++You might find that your device doesn't let you install your build if you
++already have the version from the Android Market installed.  This is standard
++Android security as it it won't let you directly replace an app that's been
++signed with a different key.  Manually uninstall Gauges from your device and
++you will then be able to install your own built version.
+ 
+-* Download and install [Maven](http://maven.apache.org/download.html) (follow the instructions on the website)
+-* Clone the GnucashMobile source using: git clone git://github.com/codinguser/GnucashMobile.git
+-* Open a terminal in the GnucashMobile folder and run *mvn clean install*
+-(**Note**: If you also want to run the tests, see this [blog post](http://goo.gl/TprMw) for details )
+-* To install the application on your phone, switch to the GnucashMobile subfolder and run *mvn android:deploy*
+ 
+ #Licence
+ Gnucash for Android is free software; you can redistribute it and/or 
+diff --git a/app/pom.xml b/app/pom.xml
+index e6916eb9..a021c172 100644
+--- a/app/pom.xml
++++ b/app/pom.xml
+@@ -22,7 +22,7 @@
+     <description>Gnucash Android companion application</description>
+ 
+     <parent>
+-        <version>1.1.2</version>
++        <version>1.1.3-SNAPSHOT</version>
+         <groupId>org.gnucash.android</groupId>
+         <artifactId>gnucash-android-parent</artifactId>
+     </parent>
+diff --git a/app/src/org/gnucash/android/data/Account.java b/app/src/org/gnucash/android/data/Account.java
+index 46bb0ecd..383bbe54 100644
+--- a/app/src/org/gnucash/android/data/Account.java
++++ b/app/src/org/gnucash/android/data/Account.java
+@@ -31,7 +31,7 @@
+  * An account represents a transaction account in with {@link Transaction}s may be recorded
+  * Accounts have different types as specified by {@link AccountType} and also a currency with
+  * which transactions may be recorded in the account
+- * By default, an account is made an {@link AccountType#CHECKING} and the default currency is
++ * By default, an account is made an {@link AccountType#CASH} and the default currency is
+  * the currency of the Locale of the device on which the software is running. US Dollars is used
+  * if the platform locale cannot be determined.
+  * 
+@@ -74,7 +74,7 @@
+ 	
+ 	/**
+ 	 * Type of account
+-	 * Defaults to {@link AccountType#CHECKING}
++	 * Defaults to {@link AccountType#CASH}
+ 	 */
+ 	private AccountType mAccountType = AccountType.CASH;
+ 	
+diff --git a/app/src/org/gnucash/android/data/Money.java b/app/src/org/gnucash/android/data/Money.java
+index 4d69cc50..0aae2528 100644
+--- a/app/src/org/gnucash/android/data/Money.java
++++ b/app/src/org/gnucash/android/data/Money.java
+@@ -143,7 +143,16 @@ public Money(BigDecimal amount){
+ 		init();
+ 		setAmount(amount);
+ 	}
+-	
++
++    /**
++     * Creates a new Money instance with 0 amount and the <code>currencyCode</code>
++     * @param currencyCode Currency to use for this money instance
++     * @return Money object with value 0 and currency <code>currencyCode</code>
++     */
++    public static Money createInstance(String currencyCode){
++        return new Money("0", currencyCode);
++    }
++
+ 	/**
+ 	 * Initializes the amount and currency to their default values
+ 	 * @see {@link Money#DEFAULT_CURRENCY_CODE}, {@link #DEFAULT_ROUNDING_MODE}, {@link #DEFAULT_DECIMAL_PLACES}
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index ea4ac62d..3a3acb11 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -16,10 +16,7 @@
+ 
+ package org.gnucash.android.db;
+ 
+-import java.util.Currency;
+-import java.util.Iterator;
+-import java.util.LinkedList;
+-import java.util.List;
++import java.util.*;
+ 
+ import org.gnucash.android.data.Account;
+ import org.gnucash.android.data.Money;
+@@ -52,14 +49,14 @@ public AccountsDbAdapter(Context context) {
+ 		super(context);
+ 		mTransactionsAdapter = new TransactionsDbAdapter(context);
+ 	}
+-	
++
+ 	@Override
+-	public void close() {		
++	public void close() {
+ 		super.close();
+ 		mTransactionsAdapter.close();
+ 	}
+-	
+-	/**
++
++    /**
+ 	 * Adds an account to the database. 
+ 	 * If an account already exists in the database with the same unique ID, 
+ 	 * then just update that account. 
+@@ -110,7 +107,7 @@ public boolean destructiveDeleteAccount(long rowId){
+ 		
+ 		while (c.moveToNext()){
+ 			long id = c.getLong(DatabaseAdapter.COLUMN_ROW_ID);
+-			result &= mTransactionsAdapter.deleteTransaction(id);
++			result &= mTransactionsAdapter.deleteRecord(id);
+ 		}
+ 		result &= deleteRecord(DatabaseHelper.ACCOUNTS_TABLE_NAME, rowId);
+ 		return result;
+@@ -283,7 +280,7 @@ public String getName(long accountID) {
+ 	 */
+ 	public List<Account> getAllAccounts(){
+ 		LinkedList<Account> accounts = new LinkedList<Account>();
+-		Cursor c = fetchAllAccounts();
++		Cursor c = fetchAllRecords();
+ 		
+ 		if (c == null)
+ 			return accounts;
+@@ -316,15 +313,27 @@ public String getName(long accountID) {
+ 	 * Returns a cursor to all account records in the database
+ 	 * @return {@link Cursor} to all account records
+ 	 */
+-	public Cursor fetchAllAccounts(){
++    @Override
++	public Cursor fetchAllRecords(){
+ 		Log.v(TAG, "Fetching all accounts from db");
+-		Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
+-				null, null, null, null, null, 
+-				DatabaseHelper.KEY_NAME + " ASC");
++		Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                null, null, null, null, null,
++                DatabaseHelper.KEY_NAME + " ASC");
+ 		return cursor;
+ 	}
+ 
+-	/**
++
++    @Override
++    public Cursor fetchRecord(long rowId) {
++        return fetchRecord(DatabaseHelper.ACCOUNTS_TABLE_NAME, rowId);
++    }
++
++    @Override
++    public boolean deleteRecord(long rowId) {
++        return deleteRecord(DatabaseHelper.ACCOUNTS_TABLE_NAME, rowId);
++    }
++
++    /**
+ 	 * Returns a Cursor set of accounts which fulfill <code>condition</code>
+ 	 * @param condition SQL WHERE statement without the 'WHERE' itself
+ 	 * @return Cursor set of accounts which fulfill <code>condition</code>
+@@ -347,16 +356,51 @@ public Cursor fetchAccounts(String condition){
+ 	public Money getAllAccountsBalance(){
+ 		return mTransactionsAdapter.getAllTransactionsSum();
+ 	}
+-	
++
++    /**
++     * Returns the balance of an account while taking sub-accounts into consideration
++     * @return Account Balance of an account including sub-accounts
++     */
++    public Money getAccountBalance(long accountId){
++        List<Long> subAccounts = fetchSubAccounts(accountId);
++        Money balance = Money.createInstance(getCurrencyCode(accountId));
++        for (long id : subAccounts){
++            //recurse because arbitrary nesting depth is allowed
++            balance = balance.add(getAccountBalance(id));
++        }
++        return balance.add(mTransactionsAdapter.getTransactionsSum(accountId));
++    }
++
++    /**
++     * Returns a list of IDs for the sub-accounts for account <code>accountId</code>
++     * @param accountId Account ID whose sub-accounts are to be retrieved
++     * @return List of IDs for the sub-accounts for account <code>accountId</code>
++     */
++    public List<Long> fetchSubAccounts(long accountId){
++        List<Long> subAccounts = new ArrayList<Long>();
++        Cursor cursor = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME,
++                new String[]{DatabaseHelper.KEY_ROW_ID}, DatabaseHelper.KEY_PARENT_ACCOUNT_UID + " = ?",
++                new String[]{getAccountUID(accountId)}, null, null, null);
++
++        if (cursor != null){
++            while (cursor.moveToNext()){
++                subAccounts.add(cursor.getLong(0));
++            }
++            cursor.close();
++        }
++
++        return subAccounts;
++    }
++
+ 	/**
+ 	 * Returns the balance for all transactions while taking double entry into consideration
+ 	 * This means that double transactions will be counted twice
+ 	 * @return Total balance of the accounts while using double entry
+ 	 */
+ 	public Money getDoubleEntryAccountsBalance(){
+-		//FIXME: This does not take account currency into consideration
++        //TODO: take currency into consideration
+ 		Cursor c = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
+-				new String[]{DatabaseHelper.KEY_ROW_ID}, 
++				new String[]{DatabaseHelper.KEY_ROW_ID},
+ 				null, null, null, null, null);
+ 		Money totalSum = new Money();
+ 		if (c != null){
+@@ -410,9 +454,10 @@ public String getCurrencyCode(String accountUID){
+ 	/**
+ 	 * Deletes all accounts and their transactions from the database
+ 	 */
+-	public void deleteAllAccounts(){
+-		mDb.delete(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, null);
++    @Override
++	public int deleteAllRecords(){
+ 		mDb.delete(DatabaseHelper.TRANSACTIONS_TABLE_NAME, null, null);
++        return mDb.delete(DatabaseHelper.ACCOUNTS_TABLE_NAME, null, null);
+ 	}
+ 
+ 
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index ec2d0f74..f943645d 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -29,7 +29,7 @@
+  * @author Ngewi Fet <ngewif@gmail.com>
+  *
+  */
+-public class DatabaseAdapter {
++public abstract class DatabaseAdapter {
+ 	/**
+ 	 * Tag for logging
+ 	 */
+@@ -108,7 +108,7 @@ public void close(){
+ 	 * @param rowId ID of record to be retrieved
+ 	 * @return {@link Cursor} to record retrieved
+ 	 */
+-	public Cursor fetchRecord(String tableName, long rowId){
++	protected Cursor fetchRecord(String tableName, long rowId){
+ 		return mDb.query(tableName, null, DatabaseHelper.KEY_ROW_ID + "=" + rowId, 
+ 				null, null, null, null);
+ 	}
+@@ -118,7 +118,7 @@ public Cursor fetchRecord(String tableName, long rowId){
+ 	 * @param tableName Name of table in database
+ 	 * @return {@link Cursor} to all records in table <code>tableName</code>
+ 	 */
+-	public Cursor fetchAllRecords(String tableName){
++	protected Cursor fetchAllRecords(String tableName){
+ 		return mDb.query(tableName, 
+         		null, null, null, null, null, null);
+ 	}
+@@ -129,8 +129,42 @@ public Cursor fetchAllRecords(String tableName){
+ 	 * @param rowId ID of record to be deleted
+ 	 * @return <code>true</code> if deletion was successful, <code>false</code> otherwise
+ 	 */
+-	public boolean deleteRecord(String tableName, long rowId){
++	protected boolean deleteRecord(String tableName, long rowId){
+ 		return mDb.delete(tableName, DatabaseHelper.KEY_ROW_ID + "=" + rowId, null) > 0;
+ 	}
+ 
++    /**
++     * Deletes all records in the database
++     * @return Number of deleted records
++     */
++    protected int deleteAllRecords(String tableName){
++        return mDb.delete(tableName, null, null);
++    }
++
++    /**
++     * Retrieves record with id <code>rowId</code> from table
++     * @param rowId ID of record to be retrieved
++     * @return {@link Cursor} to record retrieved
++     */
++    public abstract Cursor fetchRecord(long rowId);
++
++    /**
++     * Retrieves all records from database table corresponding to this adapter
++     * @return {@link Cursor} to all records in table
++     */
++    public abstract Cursor fetchAllRecords();
++
++    /**
++     * Deletes record with ID <code>rowID</code> from database table
++     * @param rowId ID of record to be deleted
++     * @return <code>true</code> if deletion was successful, <code>false</code> otherwise
++     */
++    public abstract boolean deleteRecord(long rowId);
++
++    /**
++     * Deletes all records in the database table
++     * @return Count of database records which have been deleted
++     */
++    public abstract int deleteAllRecords();
++
+ }
+diff --git a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index 5b2da60a..980d36ac 100644
+--- a/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -80,7 +80,7 @@ public long addTransaction(Transaction transaction){
+ 		return rowId;
+ 	}
+ 
+-	/**
++    /**
+ 	 * Fetch a transaction from the database which has a unique ID <code>uid</code>
+ 	 * @param uid Unique Identifier of transaction to be retrieved
+ 	 * @return Database row ID of transaction with UID <code>uid</code>
+@@ -235,7 +235,8 @@ public String getCurrencyCode(long accountId){
+ 	 * @param rowId Long database record id
+ 	 * @return <code>true</code> if deletion was successful, <code>false</code> otherwise
+ 	 */
+-	public boolean deleteTransaction(long rowId){
++    @Override
++	public boolean deleteRecord(long rowId){
+ 		Log.d(TAG, "Delete transaction with record Id: " + rowId);
+ 		return deleteRecord(DatabaseHelper.TRANSACTIONS_TABLE_NAME, rowId);
+ 	}
+@@ -254,8 +255,9 @@ public boolean deleteTransaction(String uid){
+ 	 * Deletes all transactions in the database
+ 	 * @return Number of affected transaction records
+ 	 */
+-	public int deleteAllTransactions(){
+-		return mDb.delete(DatabaseHelper.TRANSACTIONS_TABLE_NAME, null, null);
++    @Override
++	public int deleteAllRecords(){
++		return deleteAllRecords(DatabaseHelper.TRANSACTIONS_TABLE_NAME);
+ 	}
+ 	
+ 	/**
+@@ -307,24 +309,22 @@ public long getAllTransactionsCount(){
+ 	
+ 	/**
+ 	 * Returns the sum of transactions belonging to the account with id <code>accountId</code>
++     * Double entry accounting is taken into account and the balance reflects the transfer transactions.
++     * This means if the accounts are properly balanced, this method should return 0
+ 	 * @param accountId Record ID of the account
+ 	 * @return Sum of transactions belonging to the account
+ 	 */
+ 	public Money getTransactionsSum(long accountId){
+-		Cursor c = fetchAllTransactionsForAccount(accountId); 
+-//		mDb.query(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
+-//				new String[]{DatabaseHelper.KEY_AMOUNT}, 
+-//				DatabaseHelper.KEY_ACCOUNT_UID + "= '" + getAccountUID(accountId) + "'", 
+-//				null, null, null, null);
++		Cursor c = fetchAllTransactionsForAccount(accountId);
+ 
+ 		//transactions will have the currency of the account
+ 		String currencyCode = getCurrencyCode(accountId);
+-		
++
++        Money amountSum = new Money("0", currencyCode);
++
+ 		if (c == null || c.getCount() <= 0)
+-			return new Money("0", currencyCode);		
+-		
+-		Money amountSum = new Money("0", currencyCode);
+-		
++			return amountSum;
++
+ 		while(c.moveToNext()){
+ 			Money money = new Money(c.getString(DatabaseAdapter.COLUMN_AMOUNT), currencyCode);
+ 			String doubleEntryAccountUID = c.getString(DatabaseAdapter.COLUMN_DOUBLE_ENTRY_ACCOUNT_UID);
+@@ -347,7 +347,9 @@ public Money getTransactionsSum(long accountId){
+ 	 * @see AccountsDbAdapter#getDoubleEntryAccountsBalance()
+ 	 */
+ 	public Money getAllTransactionsSum(){
+-		String query = "SELECT TOTAL(" + DatabaseHelper.KEY_AMOUNT +") FROM " + DatabaseHelper.TRANSACTIONS_TABLE_NAME;
++        //TODO: Take double entry into account
++		String query = "SELECT TOTAL(" + DatabaseHelper.KEY_AMOUNT
++                + ") FROM " + DatabaseHelper.TRANSACTIONS_TABLE_NAME;
+ 		Cursor c = mDb.rawQuery(query, null); 
+ //				new String[]{DatabaseHelper.KEY_AMOUNT, DatabaseHelper.TRANSACTIONS_TABLE_NAME});
+ 		double result = 0;
+@@ -438,4 +440,15 @@ public long getAccountID(String accountUID){
+ 		}
+ 		return id;
+ 	}
++
++    @Override
++    public Cursor fetchAllRecords() {
++        return fetchAllRecords(DatabaseHelper.TRANSACTIONS_TABLE_NAME);
++    }
++
++    @Override
++    public Cursor fetchRecord(long rowId) {
++        return fetchRecord(DatabaseHelper.TRANSACTIONS_TABLE_NAME, rowId);
++    }
++
+ }
+diff --git a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 3b0bd5fe..6d56be56 100644
+--- a/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/app/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -87,11 +87,6 @@
+ 	AccountsCursorAdapter mAccountsCursorAdapter;
+ 	
+ 	/**
+-	 * Dialog fragment for adding new accounts
+-	 */
+-	AddAccountFragment mAddAccountFragment;
+-	
+-	/**
+ 	 * Database adapter for loading Account records from the database
+ 	 */
+ 	private AccountsDbAdapter mAccountsDbAdapter;	
+@@ -503,7 +498,7 @@ public void bindView(View v, Context context, Cursor cursor) {
+ 					.findViewById(R.id.transactions_summary);
+ 			final long accountId = cursor.getLong(DatabaseAdapter.COLUMN_ROW_ID);
+ 			
+-			Money balance = transactionsDBAdapter.getTransactionsSum(accountId);
++			Money balance = mAccountsDbAdapter.getAccountBalance(accountId);//transactionsDBAdapter.getTransactionsSum(accountId);
+ 			summary.setText(balance.formattedString(Locale.getDefault()));
+ 			int fontColor = balance.isNegative() ? getResources().getColor(R.color.debit_red) : 
+ 				getResources().getColor(R.color.credit_green);
+@@ -537,7 +532,7 @@ public AccountsCursorLoader(Context context) {
+ 		@Override
+ 		public Cursor loadInBackground() {			
+ 			mDatabaseAdapter = new AccountsDbAdapter(getContext());	
+-			Cursor cursor = ((AccountsDbAdapter) mDatabaseAdapter).fetchAllAccounts();		
++			Cursor cursor = ((AccountsDbAdapter) mDatabaseAdapter).fetchAllRecords();
+ 			if (cursor != null)
+ 				registerContentObserver(cursor);
+ 			return cursor;
+diff --git a/app/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java b/app/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
+index 12566359..9094d128 100644
+--- a/app/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/BulkMoveDialogFragment.java
+@@ -101,7 +101,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		getDialog().setTitle(title);
+ 		
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		Cursor cursor = mAccountsDbAdapter.fetchAllAccounts();
++		Cursor cursor = mAccountsDbAdapter.fetchAllRecords();
+ 		
+ 		String[] from = new String[] {DatabaseHelper.KEY_NAME};
+ 		int[] to = new int[] {android.R.id.text1};
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+index 85d57b5e..6a66a359 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsActivity.java
+@@ -158,7 +158,7 @@ protected void onCreate(Bundle savedInstanceState) {
+ 	private void setupActionBarNavigation() {
+ 		// set up spinner adapter for navigation list
+ 		mAccountsDbAdapter = new AccountsDbAdapter(this);
+-		Cursor accountsCursor = mAccountsDbAdapter.fetchAllAccounts();
++		Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecords();
+ 		mSpinnerAdapter = new SimpleCursorAdapter(getSupportActionBar()
+ 				.getThemedContext(), R.layout.sherlock_spinner_item,
+ 				accountsCursor, new String[] { DatabaseHelper.KEY_NAME },
+@@ -181,7 +181,7 @@ private void setupActionBarNavigation() {
+ 	public void updateNavigationSelection() {
+ 		// set the selected item in the spinner
+ 		int i = 0;
+-		Cursor accountsCursor = mAccountsDbAdapter.fetchAllAccounts();
++		Cursor accountsCursor = mAccountsDbAdapter.fetchAllRecords();
+ 		accountsCursor.moveToFirst();
+ 		do {
+ 			long id = accountsCursor.getLong(DatabaseAdapter.COLUMN_ROW_ID);			
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsDeleteConfirmationDialog.java b/app/src/org/gnucash/android/ui/transactions/TransactionsDeleteConfirmationDialog.java
+index 20dff644..11dd7419 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsDeleteConfirmationDialog.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsDeleteConfirmationDialog.java
+@@ -41,9 +41,9 @@ public Dialog onCreateDialog(Bundle savedInstanceState) {
+                         public void onClick(DialogInterface dialog, int whichButton) {
+                         	TransactionsDbAdapter adapter = new TransactionsDbAdapter(getSherlockActivity());                            
+                             if (rowId == 0){
+-	                        	adapter.deleteAllTransactions();	                            
++	                        	adapter.deleteAllRecords();
+                             } else {
+-                            	adapter.deleteTransaction(rowId);
++                            	adapter.deleteRecord(rowId);
+                             }
+                             adapter.close();
+                             if (getTargetFragment() instanceof AccountsListFragment){                            	
+diff --git a/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java b/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+index 288ef6fe..e66e8783 100644
+--- a/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
++++ b/app/src/org/gnucash/android/ui/transactions/TransactionsListFragment.java
+@@ -143,7 +143,7 @@ public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+ 
+ 			case R.id.context_menu_delete:
+ 				for (long id : mSelectedIds.values()) {
+-					mTransactionsDbAdapter.deleteTransaction(id);					
++					mTransactionsDbAdapter.deleteRecord(id);
+ 				}				
+ 				refreshList();
+ 				mode.finish();
+diff --git a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 374c20f2..daf88b61 100644
+--- a/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -73,7 +73,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 		String[] from = new String[] {DatabaseHelper.KEY_NAME};
+ 		int[] to = new int[] {android.R.id.text1};
+ 		mAccountsDbAdapter = new AccountsDbAdapter(this);
+-		Cursor cursor = mAccountsDbAdapter.fetchAllAccounts();
++		Cursor cursor = mAccountsDbAdapter.fetchAllRecords();
+ 		
+ 		if (cursor.getCount() <= 0){
+ 			Toast.makeText(this, R.string.error_no_accounts, Toast.LENGTH_LONG).show();
+diff --git a/integration-tests/pom.xml b/integration-tests/pom.xml
+index 5a4d18f8..6e7c96c0 100644
+--- a/integration-tests/pom.xml
++++ b/integration-tests/pom.xml
+@@ -17,7 +17,7 @@
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+     <parent>
+-		<version>1.1.2</version>
++		<version>1.1.3-SNAPSHOT</version>
+ 		<groupId>org.gnucash.android</groupId>
+ 		<artifactId>gnucash-android-parent</artifactId>
+ 	</parent>
+@@ -55,8 +55,8 @@
+             <!-- the target apk, which we will test. will automatically be deployed to device in pre-integration-test
+             phase. -->
+             <groupId>org.gnucash.android</groupId>
+-            <artifactId>gnucash-android-app</artifactId>
+-            <version>1.1.1-SNAPSHOT</version>
++            <artifactId>gnucash-android</artifactId>
++            <version>1.1.3-SNAPSHOT</version>
+             <type>apk</type>       
+             <scope>provided</scope>     
+         </dependency>
+@@ -64,8 +64,8 @@
+ 		<dependency>
+             <!-- optional: compile time dependency, in this case so that we can read from the R.java for example. -->
+             <groupId>org.gnucash.android</groupId>
+-            <artifactId>gnucash-android-app</artifactId>
+-            <version>1.1.1-SNAPSHOT</version>
++            <artifactId>gnucash-android</artifactId>
++            <version>1.1.3-SNAPSHOT</version>
+             <scope>provided</scope>
+             <type>jar</type>
+         </dependency>
+diff --git a/integration-tests/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java b/integration-tests/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+index 96063718..5f15b7d7 100644
+--- a/integration-tests/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
++++ b/integration-tests/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+@@ -19,7 +19,7 @@
+ 	protected void setUp() throws Exception {		
+ 		super.setUp();
+ 		mAdapter = new AccountsDbAdapter(getContext());
+-		mAdapter.deleteAllAccounts();
++		mAdapter.deleteAllRecords();
+ 		Account first = new Account(ALPHA_ACCOUNT_NAME);
+ 		Transaction t1 = new Transaction("2.99", "T800");
+ 		t1.setAccountUID(first.getUID());
+@@ -61,7 +61,7 @@ public void testTransactionsHaveSameCurrencyAsAccount(){
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		super.tearDown();
+-		mAdapter.deleteAllAccounts();
++		mAdapter.deleteAllRecords();
+ 		mAdapter.close();
+ 	}
+ }
+diff --git a/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java b/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+index cac06baa..3ebf6e34 100644
+--- a/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
++++ b/integration-tests/src/org/gnucash/android/test/db/TransactionsDbAdapterTest.java
+@@ -48,7 +48,7 @@ public void testTransactionsAreTimeSorted(){
+ 	protected void tearDown() throws Exception {
+ 		super.tearDown();
+ 		AccountsDbAdapter accAdapter = new AccountsDbAdapter(mContext);
+-		accAdapter.deleteAllAccounts();
++		accAdapter.deleteAllRecords();
+ 		accAdapter.close();
+ 	}
+ }
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/AccountsActivityTest.java b/integration-tests/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+index d5826812..bf62bc5f 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -235,7 +235,7 @@ public void testIntentAccountCreation(){
+ 	
+ 	protected void tearDown() throws Exception {
+ 		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.deleteAllAccounts();
++		adapter.deleteAllRecords();
+ 		adapter.close();
+ 		
+ 		mSolo.finishOpenedActivities();		
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/OfxExportTest.java b/integration-tests/src/org/gnucash/android/test/ui/OfxExportTest.java
+index ca7744a2..26ab4674 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/OfxExportTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/OfxExportTest.java
+@@ -186,7 +186,7 @@ public void testValidityOfExport(){
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.deleteAllAccounts();
++		adapter.deleteAllRecords();
+ 		adapter.close();
+ 		mSolo.finishOpenedActivities();
+ 		super.tearDown();
+diff --git a/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java b/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 38479569..61c4332c 100644
+--- a/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/integration-tests/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -399,7 +399,7 @@ public void testIntentTransactionRecording(){
+ 	@Override
+ 	protected void tearDown() throws Exception {	
+ 		AccountsDbAdapter adapter = new AccountsDbAdapter(getActivity());
+-		adapter.deleteAllAccounts();
++		adapter.deleteAllRecords();
+ 		adapter.close();
+ 		
+ 		mSolo.finishOpenedActivities();
+diff --git a/integration-tests/src/org/gnucash/android/test/unit/MoneyTest.java b/integration-tests/src/org/gnucash/android/test/unit/MoneyTest.java
+index ac3fd9d5..20b490e2 100644
+--- a/integration-tests/src/org/gnucash/android/test/unit/MoneyTest.java
++++ b/integration-tests/src/org/gnucash/android/test/unit/MoneyTest.java
+@@ -27,7 +27,7 @@
+ public class MoneyTest extends TestCase {
+ 
+ 	private static final String CURRENCY_CODE = "EUR";
+-	private Money 	money; 
++	private Money 	money;
+ 	private int 	mHashcode;
+ 	private double 	amount = 15.75;
+ 	
+diff --git a/pom.xml b/pom.xml
+index 5202c866..801e80cf 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -17,7 +17,7 @@
+ 
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+-	<version>1.1.2</version>
++	<version>1.1.3-SNAPSHOT</version>
+     <groupId>org.gnucash.android</groupId>
+     <artifactId>gnucash-android-parent</artifactId>
+     <name>GnuCash Android parent</name>
+@@ -55,7 +55,7 @@
+     </build>
+ 
+     <issueManagement>
+-        <url>https://github.com/codinguser/GnucashMobile/issues</url>
++        <url>https://github.com/codinguser/gnucash-android/issues</url>
+         <system>GitHub Issues</system>
+     </issueManagement>
+ 
+@@ -68,16 +68,16 @@
+     </licenses>
+ 
+     <scm>
+-        <url>https://github.com/codinguser/GnucashMobile</url>
+-        <connection>scm:git:git://github.com/codinguser/GnucashMobile.git</connection>
+-        <developerConnection>scm:git:git@github.com:codinguser/GnucashMobile.git</developerConnection>
++        <url>https://github.com/codinguser/gnucash-android</url>
++        <connection>scm:git:git://github.com/codinguser/gnucash-android.git</connection>
++        <developerConnection>scm:git:git@github.com:codinguser/gnucash-android.git</developerConnection>
+     </scm>
+ 
+     <developers>
+         <developer>
+             <name>Ngewi Fet</name>
+             <email>ngewif@gmail.com</email>
+-            <url>https://github.com/codinguser</url>
++            <url>http://www.codinguser.com</url>
+             <id>codinguser</id>
+         </developer>
+     </developers>

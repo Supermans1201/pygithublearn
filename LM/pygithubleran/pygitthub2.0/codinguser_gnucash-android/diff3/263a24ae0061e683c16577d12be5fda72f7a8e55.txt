@@ -1,0 +1,290 @@
+From 263a24ae0061e683c16577d12be5fda72f7a8e55 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 6 Mar 2015 15:36:54 +0100
+Subject: [PATCH] Fixed: crash when changing the account in the nav bar from
+ placeholder account to non-placeholder account
+
+Fixed: Changing the account in the nav bar has no effect when creating transaction  - now it uses the updated account
+Fixed: TransactionActivityTests not running
+Added test for "on delete cascade" foreign key constraint between accounts and splits
+Added @nonnull annotations to some methods in DatabaseAdapter
+---
+ .../android/test/db/AccountsDbAdapterTest.java     | 44 +++++++++++++++++++---
+ .../android/test/ui/TransactionsActivityTest.java  | 11 +++---
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 13 +++----
+ .../ui/transaction/TransactionFormFragment.java    | 14 +++----
+ .../ui/transaction/TransactionsActivity.java       | 11 +++---
+ .../ui/transaction/TransactionsListFragment.java   |  2 +-
+ 6 files changed, 63 insertions(+), 32 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/db/AccountsDbAdapterTest.java b/app/src/androidTest/java/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+index b98e70e3..8646307f 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/db/AccountsDbAdapterTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+@@ -7,6 +7,8 @@
+ import org.gnucash.android.db.SplitsDbAdapter;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.model.Account;
++import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Split;
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ 
+@@ -40,11 +42,9 @@ protected void setUp() throws Exception {
+         mAccountsDbAdapter = new AccountsDbAdapter(mDb, mTransactionsDbAdapter);
+ 		mAccountsDbAdapter.deleteAllRecords();
+ 		Account first = new Account(ALPHA_ACCOUNT_NAME);
+-		Transaction t1 = new Transaction("T800");
+-		Transaction t2 = new Transaction("T1000");
+-		
++        first.setUID(ALPHA_ACCOUNT_NAME);
+ 		Account second = new Account(BRAVO_ACCOUNT_NAME);
+-		Transaction t = new Transaction("buyout");
++        second.setUID(BRAVO_ACCOUNT_NAME);
+ 		
+ 		mAccountsDbAdapter.addAccount(second);
+ 		mAccountsDbAdapter.addAccount(first);
+@@ -73,7 +73,41 @@ public void testTransactionsHaveSameCurrencyAsAccount(){
+ 			assertEquals("JPY", t.getBalance(acc1.getUID()).getCurrency().getCurrencyCode());
+ 		}
+ 	}
+-	
++
++    public void testAddAccountWithTransaction(){
++        Account account1 = new Account("AlphaAccount");
++        Account account2 = new Account("BetaAccount");
++        Transaction transaction = new Transaction("MyTransaction");
++        Split split = new Split(Money.getZeroInstance(), account1.getUID());
++        transaction.addSplit(split);
++        transaction.addSplit(split.createPair(account2.getUID()));
++
++        long id1 = mAccountsDbAdapter.addAccount(account1);
++        long id2 = mAccountsDbAdapter.addAccount(account2);
++
++        assertTrue(id1 > 0);
++        assertTrue(id2 > 0);
++    }
++
++    /**
++     * Tests the foreign key constraint "ON DELETE CASCADE" between accounts and splits
++     */
++    public void testDeletingAccountShouldDeleteSplits(){
++        Transaction transaction = new Transaction("TestTrn");
++        Split split = new Split(Money.getZeroInstance(), ALPHA_ACCOUNT_NAME);
++        transaction.addSplit(split);
++        transaction.addSplit(split.createPair(BRAVO_ACCOUNT_NAME));
++
++        long id = mTransactionsDbAdapter.addTransaction(transaction);
++        assertTrue(id > 0);
++
++        mAccountsDbAdapter.deleteRecord(ALPHA_ACCOUNT_NAME);
++
++        Transaction trxn = mTransactionsDbAdapter.getTransaction(transaction.getUID());
++        assertEquals(1, trxn.getSplits().size());
++        assertEquals(BRAVO_ACCOUNT_NAME, trxn.getSplits().get(0).getAccountUID());
++    }
++
+ 	@Override
+ 	protected void tearDown() throws Exception {
+ 		super.tearDown();
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 144b5fff..0ba4e2b6 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -99,6 +99,11 @@ protected void setUp() throws Exception {
+         account2.setUID(TRANSFER_ACCOUNT_UID);
+         account2.setCurrency(Currency.getInstance(CURRENCY_CODE));
+ 
++        long id1 = mAccountsDbAdapter.addAccount(account);
++        long id2 = mAccountsDbAdapter.addAccount(account2);
++        assertTrue(id1 > 0);
++        assertTrue(id2 > 0);
++
+         mTransaction = new Transaction(TRANSACTION_NAME);
+         mTransaction.setNote("What up?");
+         mTransaction.setTime(mTransactionTimeMillis);
+@@ -109,11 +114,7 @@ protected void setUp() throws Exception {
+         mTransaction.addSplit(split.createPair(TRANSFER_ACCOUNT_UID));
+         account.addTransaction(mTransaction);
+ 
+-        //FIXME: Accounts are not saved to database because FOREIGN_KEY constraint on Split table fails
+-        long id1 = mAccountsDbAdapter.addAccount(account);
+-        long id2 = mAccountsDbAdapter.addAccount(account2);
+-        assertTrue(id1 > 0);
+-        assertTrue(id2 > 0);
++        mTransactionsDbAdapter.addTransaction(mTransaction);
+ 
+         Intent intent = new Intent(Intent.ACTION_VIEW);
+         intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, DUMMY_ACCOUNT_UID);
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 6a06ac6b..8722173a 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -52,7 +52,7 @@
+      * Opens the database adapter with an existing database
+      * @param db SQLiteDatabase object
+      */
+-    public DatabaseAdapter(SQLiteDatabase db, String tableName) {
++    public DatabaseAdapter(SQLiteDatabase db, @NonNull String tableName) {
+         this.mTableName = tableName;
+         this.mDb = db;
+         if (!db.isOpen() || db.isReadOnly())
+@@ -237,10 +237,7 @@ public int deleteAllRecords(){
+      * @param uid GUID of the record
+      * @return Long record ID
+      */
+-    public long getID(String uid){
+-        if (uid == null)
+-            return 0;
+-
++    public long getID(@NonNull String uid){
+         Cursor cursor = mDb.query(mTableName,
+                 new String[] {DatabaseSchema.CommonColumns._ID},
+                 DatabaseSchema.CommonColumns.COLUMN_UID + " = ?",
+@@ -291,7 +288,7 @@ public String getUID(long id){
+      * @return Currency code of the account. "" if accountUID
+      *      does not exist in DB
+      */
+-    public String getAccountCurrencyCode(String accountUID) {
++    public String getAccountCurrencyCode(@NonNull String accountUID) {
+         Cursor cursor = mDb.query(DatabaseSchema.AccountEntry.TABLE_NAME,
+                 new String[] {DatabaseSchema.AccountEntry.COLUMN_CURRENCY},
+                 DatabaseSchema.AccountEntry.COLUMN_UID + "= ?",
+@@ -313,7 +310,7 @@ public String getAccountCurrencyCode(String accountUID) {
+      * @return {@link org.gnucash.android.model.AccountType} of the account.
+      * @throws java.lang.IllegalArgumentException if accountUID does not exist in DB,
+      */
+-    public AccountType getAccountType(String accountUID){
++    public AccountType getAccountType(@NonNull String accountUID){
+         String type = "";
+         Cursor c = mDb.query(DatabaseSchema.AccountEntry.TABLE_NAME,
+                 new String[]{DatabaseSchema.AccountEntry.COLUMN_TYPE},
+@@ -374,7 +371,7 @@ public int updateRecord(@NonNull String tableName, @NonNull String uid, String c
+      * @return <code>true</code> if deletion was successful, <code>false</code> otherwise
+      * @see #deleteRecord(long)
+      */
+-    public boolean deleteRecord(String uid){
++    public boolean deleteRecord(@NonNull String uid){
+         return deleteRecord(getID(uid));
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index aaf01ea1..63bf27b0 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -432,10 +432,9 @@ private void initalizeViews() {
+      * Only accounts with the same currency can be transferred to
+      */
+ 	private void updateTransferAccountsList(){
+-		String accountUID = ((TransactionsActivity)getActivity()).getCurrentAccountUID();
+ 
+-		String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + accountUID
+-                            + "' AND " + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(accountUID)
++		String conditions = "(" + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountUID
++                            + "' AND " + (mMultiCurrency ? "" : (DatabaseSchema.AccountEntry.COLUMN_CURRENCY + " = '" + mAccountsDbAdapter.getCurrencyCode(mAccountUID)
+                             + "' AND ")) + DatabaseSchema.AccountEntry.COLUMN_UID + " != '" + mAccountsDbAdapter.getGnuCashRootAccountUID()
+                             + "' AND " + DatabaseSchema.AccountEntry.COLUMN_PLACEHOLDER + " = 0"
+                             + ")";
+@@ -591,7 +590,7 @@ public void onAccountChanged(String newAccountUID) {
+ 
+         mAccountType = accountsDbAdapter.getAccountType(newAccountUID);
+         mTransactionTypeButton.setAccountType(mAccountType);
+-
++        mAccountUID = newAccountUID;
+         updateTransferAccountsList();
+     }
+ 
+@@ -611,15 +610,14 @@ private void saveNewTransaction() {
+ 		String notes = mNotesEditText.getText().toString();
+ 		BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
+ 
+-		String accountUID 	= ((TransactionsActivity) getSherlockActivity()).getCurrentAccountUID();
+-		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(accountUID));
++		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID));
+ 		Money amount 	= new Money(amountBigd, currency).absolute();
+ 
+         //capture any edits which were done directly (not using split editor)
+         if (mSplitsList.size() == 2 && mSplitsList.get(0).isPairOf(mSplitsList.get(1))) {
+             //if it is a simple transfer where the editor was not used, then respect the button
+             for (Split split : mSplitsList) {
+-                if (split.getAccountUID().equals(accountUID)){
++                if (split.getAccountUID().equals(mAccountUID)){
+                     split.setType(mTransactionTypeButton.getTransactionType());
+                     split.setAmount(amount);
+                 } else {
+@@ -636,7 +634,7 @@ private void saveNewTransaction() {
+ 			mTransaction = new Transaction(description);
+ 
+             if (mSplitsList.isEmpty()) { //amount entered in the simple interface (not using splits Editor)
+-                Split split = new Split(amount, accountUID);
++                Split split = new Split(amount, mAccountUID);
+                 split.setType(mTransactionTypeButton.getTransactionType());
+                 mTransaction.addSplit(split);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 4efc6be3..9a498bd1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -33,7 +33,6 @@
+ import android.util.SparseArray;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import android.view.inputmethod.InputMethodManager;
+ import android.widget.SpinnerAdapter;
+ import android.widget.TextView;
+ 
+@@ -147,11 +146,12 @@ public boolean onNavigationItemSelected(int position, long itemId) {
+ 		    	//if we do not return, the transactions list fragment could also be found (although it's not visible)
+ 		    	return true;
+ 		    }
+-
++            //refresh any fragments in the tab with the new account UID
+             refresh();
+             return true;
+ 		  }
+ 	};
++    private PagerAdapter mPagerAdapter;
+ 
+ 
+     /**
+@@ -265,6 +265,7 @@ public void refresh(String accountUID) {
+     public void refresh(){
+         refresh(mAccountUID);
+         setTitleIndicatorColor();
++        mPagerAdapter.notifyDataSetChanged();
+     }
+ 
+ 	@Override
+@@ -291,8 +292,8 @@ protected void onCreate(Bundle savedInstanceState) {
+         } else {	//load the transactions list
+             mSectionHeaderTransactions.setVisibility(View.GONE);
+ 
+-            PagerAdapter pagerAdapter = new AccountViewPagerAdapter(getSupportFragmentManager());
+-            mPager.setAdapter(pagerAdapter);
++            mPagerAdapter = new AccountViewPagerAdapter(getSupportFragmentManager());
++            mPager.setAdapter(mPagerAdapter);
+             mTitlePageIndicator.setViewPager(mPager);
+ 
+             mPager.setCurrentItem(INDEX_TRANSACTIONS_FRAGMENT);
+@@ -473,7 +474,7 @@ public Fragment getCurrentPagerFragment(){
+ 	public String getCurrentAccountUID(){
+ 		return mAccountUID;
+ 	}
+-	
++
+ 	/**
+ 	 * Opens a fragment to create a new transaction. 
+ 	 * Is called from the XML views
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index da81d34f..2a8c1ed2 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -203,7 +203,7 @@ public void onAttach(Activity activity) {
+ 	public void onResume() {
+ 		super.onResume();
+ 		((TransactionsActivity)getSherlockActivity()).updateNavigationSelection();		
+-		refresh(((TransactionsActivity) getActivity()).getCurrentAccountUID());
++		refresh();
+ 	}
+ 	
+ 	@Override

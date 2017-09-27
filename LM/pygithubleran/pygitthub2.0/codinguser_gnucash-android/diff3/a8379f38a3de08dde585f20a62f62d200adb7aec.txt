@@ -1,0 +1,314 @@
+From a8379f38a3de08dde585f20a62f62d200adb7aec Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 18 May 2016 16:19:42 +0200
+Subject: [PATCH] Move backups and exports on SD card into a book-specific
+ folder
+
+---
+ .../android/test/ui/ExportTransactionsTest.java    |   2 +-
+ .../org/gnucash/android/db/MigrationHelper.java    | 114 ++++++++++++++++-----
+ .../gnucash/android/export/ExportAsyncTask.java    |   4 +-
+ .../java/org/gnucash/android/export/Exporter.java  |  39 +++++--
+ .../gnucash/android/export/xml/GncXmlExporter.java |   7 +-
+ .../ui/settings/BackupPreferenceFragment.java      |   4 +-
+ 6 files changed, 126 insertions(+), 44 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index f14b93fd..47b67dc8 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -200,7 +200,7 @@ public void testExport(ExportFormat format){
+ 			}
+ 		}
+ 
+-		File folder = new File(Exporter.EXPORT_FOLDER_PATH);
++		File folder = new File(Exporter.getExportFolderPath());
+ 		folder.mkdirs();
+ 		assertThat(folder).exists();
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 184c22ec..c57fcd04 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -196,7 +196,7 @@ public void run() {
+                 for (File src : oldExportFolder.listFiles()) {
+                     if (src.isDirectory())
+                         continue;
+-                    File dst = new File(Exporter.EXPORT_FOLDER_PATH + "/" + src.getName());
++                    File dst = new File(Exporter.BASE_FOLDER_PATH + "/exports/" + src.getName());
+                     try {
+                         MigrationHelper.moveFile(src, dst);
+                     } catch (IOException e) {
+@@ -212,7 +212,7 @@ public void run() {
+             File oldBackupFolder = new File(oldExportFolder, "backup");
+             if (oldBackupFolder.exists()){
+                 for (File src : new File(oldExportFolder, "backup").listFiles()) {
+-                    File dst = new File(Exporter.BACKUP_FOLDER_PATH + "/" + src.getName());
++                    File dst = new File(Exporter.BASE_FOLDER_PATH + "/backups/" + src.getName());
+                     try {
+                         MigrationHelper.moveFile(src, dst);
+                     } catch (IOException e) {
+@@ -227,6 +227,48 @@ public void run() {
+         }
+     };
+ 
++    /**
++     * Moves all files from one directory  into another.
++     * The destination directory is assumed to already exist
++     */
++    static class RecursiveMoveFiles implements Runnable {
++        File mSource;
++        File mDestination;
++
++        /**
++         * Constructor, specify origin and target directories
++         * @param src Source directory/file. If directory, all files within it will be moved
++         * @param dst Destination directory/file. If directory, it should already exist
++         */
++        RecursiveMoveFiles(File src, File dst){
++            mSource = src;
++            mDestination = dst;
++        }
++
++        private boolean copy(File src, File dst){
++            boolean results = true;
++            if (src.isDirectory()){
++                dst.mkdirs(); //we assume it works everytime. Great, right?
++                for (File file : src.listFiles()) {
++                    File target = new File(dst, file.getName());
++                    results &= copy(file, target);
++                }
++            } else {
++                try {
++                    moveFile(src, dst);
++                } catch (IOException e) {
++                    results = false;
++                    Log.d(LOG_TAG, "Error moving file: " + src.getAbsolutePath());
++                }
++            }
++            return results;
++        }
++
++        @Override
++        public void run() {
++            copy(mSource, mDestination);
++        }
++    }
+ 
+     /**
+      * Imports commodities into the database from XML resource file
+@@ -493,8 +535,8 @@ static int upgradeDbToVersion7(SQLiteDatabase db) {
+     static int upgradeDbToVersion8(SQLiteDatabase db) {
+         Log.i(DatabaseHelper.LOG_TAG, "Upgrading database to version 8");
+         int oldVersion = 7;
+-        new File(Exporter.BACKUP_FOLDER_PATH).mkdirs();
+-        new File(Exporter.EXPORT_FOLDER_PATH).mkdirs();
++        new File(Exporter.BASE_FOLDER_PATH + "/backups/").mkdirs();
++        new File(Exporter.BASE_FOLDER_PATH + "/exports/").mkdirs();
+         //start moving the files in background thread before we do the database stuff
+         new Thread(moveExportedFilesToNewDefaultLocation).start();
+ 
+@@ -1434,34 +1476,58 @@ static int upgradeDbToVersion13(SQLiteDatabase db){
+ 
+             db.execSQL("DROP TABLE " + SplitEntry.TABLE_NAME + "_bak");
+ 
++            db.setTransactionSuccessful();
++            oldVersion = 13;
++        } finally {
++            db.endTransaction();
++        }
+ 
+-            //Migrate book-specific preferences away from shared preferences
+-            Context context = GnuCashApplication.getAppContext();
+-            String keyUseDoubleEntry = context.getString(R.string.key_use_double_entry);
+-            String keySaveOpeningBalance = context.getString(R.string.key_save_opening_balances);
+-            String keyLastExportTime = PreferencesHelper.PREFERENCE_LAST_EXPORT_TIME_KEY;
+ 
+-            SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
+-            String lastExportTime = sharedPrefs.getString(keyLastExportTime, TimestampHelper.getTimestampFromEpochZero().toString());
+-            boolean useDoubleEntry = sharedPrefs.getBoolean(keyUseDoubleEntry, true);
+-            boolean saveOpeningBalance = sharedPrefs.getBoolean(keySaveOpeningBalance, false);
++        //Migrate book-specific preferences away from shared preferences
++        Log.d(LOG_TAG, "Migrating shared preferences into book preferences");
++        Context context = GnuCashApplication.getAppContext();
++        String keyUseDoubleEntry = context.getString(R.string.key_use_double_entry);
++        String keySaveOpeningBalance = context.getString(R.string.key_save_opening_balances);
++        String keyLastExportTime = PreferencesHelper.PREFERENCE_LAST_EXPORT_TIME_KEY;
+ 
++        SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(context);
++        String lastExportTime = sharedPrefs.getString(keyLastExportTime, TimestampHelper.getTimestampFromEpochZero().toString());
++        boolean useDoubleEntry = sharedPrefs.getBoolean(keyUseDoubleEntry, true);
++        boolean saveOpeningBalance = sharedPrefs.getBoolean(keySaveOpeningBalance, false);
+ 
+-            SharedPreferences bookPrefs = PreferenceActivity.getActiveBookSharedPreferences(context);
+-            bookPrefs.edit()
+-                    .putString(keyLastExportTime, lastExportTime)
+-                    .putBoolean(keyUseDoubleEntry, useDoubleEntry)
+-                    .putBoolean(keySaveOpeningBalance, saveOpeningBalance)
+-                    .apply();
+ 
++        SharedPreferences bookPrefs = PreferenceActivity.getActiveBookSharedPreferences(context);
++        bookPrefs.edit()
++                .putString(keyLastExportTime, lastExportTime)
++                .putBoolean(keyUseDoubleEntry, useDoubleEntry)
++                .putBoolean(keySaveOpeningBalance, saveOpeningBalance)
++                .apply();
+ 
+-            //// TODO: 18.05.2016 Move backup files from external storage?
++        String activeBookUID = BooksDbAdapter.getInstance().getActiveBookUID();
+ 
+-            db.setTransactionSuccessful();
+-            oldVersion = 13;
+-        } finally {
+-            db.endTransaction();
++
++        //// TODO: 18.05.2016 Move backup files from external storage?
++        Log.d(LOG_TAG, "Moving export and backup files to book-specific folders");
++        File newBasePath = new File(Exporter.BASE_FOLDER_PATH + "/" + activeBookUID);
++        newBasePath.mkdirs();
++
++        File src = new File(Exporter.BASE_FOLDER_PATH + "/backups/");
++        File dst = new File(Exporter.BASE_FOLDER_PATH + "/" + activeBookUID + "/backups/");
++        new Thread(new RecursiveMoveFiles(src, dst)).start();
++
++        src = new File(Exporter.BASE_FOLDER_PATH + "/exports/");
++        dst = new File(Exporter.BASE_FOLDER_PATH + "/" + activeBookUID + "/exports/");
++        new Thread(new RecursiveMoveFiles(src, dst)).start();
++
++        String activeBookName = BooksDbAdapter.getInstance().getActiveBookDisplayName();
++        File nameFile = new File(newBasePath, activeBookName.replaceAll("[^a-zA-Z0-9.-]", "_"));
++        try {
++            nameFile.createNewFile();
++        } catch (IOException e) {
++            Log.e(LOG_TAG, "Error creating name file for the database: " + nameFile.getName());
++            e.printStackTrace();
+         }
++
+         return oldVersion;
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 10ec21c1..442f7d70 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -409,11 +409,11 @@ private void moveExportToOwnCloud() {
+      */
+     private List<String> moveExportToSDCard() {
+         Log.i(TAG, "Moving exported file to external storage");
+-        new File(Exporter.EXPORT_FOLDER_PATH).mkdirs();
++        new File(Exporter.getExportFolderPath());
+         List<String> dstFiles = new ArrayList<>();
+ 
+         for (String src: mExportedFiles) {
+-            String dst = Exporter.EXPORT_FOLDER_PATH + stripPathPart(src);
++            String dst = Exporter.getExportFolderPath() + stripPathPart(src);
+             try {
+                 moveFile(src, dst);
+                 dstFiles.add(dst);
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 51eba4b0..34c26f7b 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -28,6 +28,7 @@
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.BudgetAmountsDbAdapter;
+ import org.gnucash.android.db.adapter.BudgetsDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+@@ -60,17 +61,7 @@
+     /**
+      * Application folder on external storage
+      */
+-    private static final String BASE_FOLDER_PATH = Environment.getExternalStorageDirectory() + "/" + BuildConfig.APPLICATION_ID;
+-
+-    /**
+-     * Folder where exports like QIF and OFX will be saved for access by external programs
+-     */
+-    public static final String EXPORT_FOLDER_PATH =  BASE_FOLDER_PATH + "/exports/";
+-
+-    /**
+-     * Folder where XML backups will be saved
+-     */
+-    public static final String BACKUP_FOLDER_PATH = BASE_FOLDER_PATH + "/backups/";
++    public static final String BASE_FOLDER_PATH = Environment.getExternalStorageDirectory() + "/" + BuildConfig.APPLICATION_ID;
+ 
+     /**
+      * Export options
+@@ -200,6 +191,32 @@ protected String getExportCacheFilePath(){
+     }
+ 
+     /**
++     * Returns that path to the export folder for the currently active book.
++     * This is the folder where exports like QIF and OFX will be saved for access by external programs
++     * @return Absolute path to export folder for active book
++     */
++    public static String getExportFolderPath(){
++        String path = BASE_FOLDER_PATH + "/" + BooksDbAdapter.getInstance().getActiveBookUID() + "/exports/";
++        File file = new File(path);
++        if (!file.exists())
++            file.mkdirs();
++        return path;
++    }
++
++    /**
++     * Returns the path to the backups folder for the currently active book
++     * @return Absolute path to backup folder for active book
++     */
++    public static String getBackupFolderPath(){
++        String path = BASE_FOLDER_PATH + "/" + BooksDbAdapter.getInstance().getActiveBookUID() + "/backups/";
++        File file = new File(path);
++        if (!file.exists())
++            file.mkdirs();
++        return path;
++    }
++
++
++    /**
+      * Returns the MIME type for this exporter.
+      * @return MIME type as string
+      */
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index f55007ae..cd3cc5ef 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -900,7 +900,7 @@ public String getExportMimeType(){
+     }
+ 
+     /**
+-     * Creates a backup of current database contents to the directory {@link Exporter#BACKUP_FOLDER_PATH}
++     * Creates a backup of current database contents to the directory {@link Exporter#getBackupFolderPath()}
+      * @return {@code true} if backup was successful, {@code false} otherwise
+      */
+     public static boolean createBackup(){
+@@ -925,10 +925,9 @@ public static boolean createBackup(){
+      * Returns the full path of a file to make database backup.
+      * Backups are done in XML format and are zipped (with ".zip" extension).
+      * @return the file path for backups of the database.
+-     * @see #BACKUP_FOLDER_PATH
++     * @see #getBackupFolderPath()
+      */
+     private static String getBackupFilePath(){
+-        new File(BACKUP_FOLDER_PATH).mkdirs();
+-        return BACKUP_FOLDER_PATH + buildExportFilename(ExportFormat.XML) + ".zip";
++        return Exporter.getBackupFolderPath() + buildExportFilename(ExportFormat.XML) + ".zip";
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index 2c2e1649..c8ea6d28 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -353,10 +353,10 @@ public void onConnectionFailed(ConnectionResult connectionResult) {
+ 	 */
+ 	private void restoreBackup() {
+ 		Log.i("Settings", "Opening GnuCash XML backups for restore");
+-		File[] backupFiles = new File(Exporter.BACKUP_FOLDER_PATH).listFiles();
++		File[] backupFiles = new File(Exporter.getBackupFolderPath()).listFiles();
+ 		if (backupFiles == null){
+ 			Toast.makeText(getActivity(), R.string.toast_backup_folder_not_found, Toast.LENGTH_LONG).show();
+-			new File(Exporter.BACKUP_FOLDER_PATH).mkdirs();
++			new File(Exporter.getBackupFolderPath());
+ 			return;
+ 		}
+ 

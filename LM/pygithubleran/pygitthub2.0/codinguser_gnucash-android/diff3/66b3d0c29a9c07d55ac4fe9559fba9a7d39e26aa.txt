@@ -1,0 +1,607 @@
+From 57241e8c064302a215aa74501e0dc1ba31e6a096 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 5 Sep 2016 15:05:42 +0200
+Subject: [PATCH 1/8] Fix crash when scheduled service does not find
+ transaction
+
+Fix crash when closing Accounts list
+Update CHANGELOG for v2.2.2
+---
+ CHANGELOG.md                                                      | 8 +++++++-
+ .../java/org/gnucash/android/service/ScheduledActionService.java  | 8 +++++++-
+ .../java/org/gnucash/android/ui/account/AccountsListFragment.java | 3 ++-
+ 3 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3c0bdc9b..9bcb4529 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,9 @@
+ Change Log
+ ===============================================================================
++Version 2.1.1 *(2016-09-05)*
++----------------------------
++* Fixed: Bug cause crash during start-up for devices with no scheduled transactions
++
+ Version 2.1.0 *(2016-09-01)*
+ ----------------------------
+ * Feature: Use multiple GnuCash books in single application
+@@ -15,7 +19,9 @@ Version 2.1.0 *(2016-09-01)*
+ Version 2.0.7 *(2016-05-05)*
+ ----------------------------
+ * Fixed: Currency exchange rate does not accept very small rates (> 2 decimal places)
+-* Improved: Updated translations for Japanese, Polish, French, Version 2.0.6 *(2016-02-20)*
++* Improved: Updated translations for Japanese, Polish, French,
++
++Version 2.0.6 *(2016-02-20)*
+ ----------------------------
+ * Fixed: Saving transaction gets slower with increase in size of database
+ * Fixed: Imbalance amount wrongly computed in split editor (for some accounts)
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index b8de7c52..be88db56 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -187,7 +187,13 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+         int executionCount = 0;
+         String actionUID = scheduledAction.getActionUID();
+         TransactionsDbAdapter transactionsDbAdapter = new TransactionsDbAdapter(db, new SplitsDbAdapter(db));
+-        Transaction trxnTemplate = transactionsDbAdapter.getRecord(actionUID);
++        Transaction trxnTemplate = null;
++        try {
++            trxnTemplate = transactionsDbAdapter.getRecord(actionUID);
++        } catch (IllegalArgumentException ex){ //if the record could not be found, abort
++            return executionCount;
++        }
++
+ 
+         long now = System.currentTimeMillis();
+         //if there is an end time in the past, we execute all schedules up to the end time.
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 9a4b0a9d..e07a973d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -318,7 +318,8 @@ public void onSaveInstanceState(Bundle outState) {
+     @Override
+     public void onDestroy() {
+         super.onDestroy();
+-        mAccountRecyclerAdapter.swapCursor(null);
++        if (mAccountRecyclerAdapter != null)
++            mAccountRecyclerAdapter.swapCursor(null);
+     }
+ 
+     /**
+
+From 1794882757a37c108c4b4cf40f6876aa7a51c87d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Mon, 12 Sep 2016 19:09:47 +0200
+Subject: [PATCH 2/8] Fix saving transactions in single entry mode.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/577
+---
+ .../org/gnucash/android/ui/transaction/TransactionFormFragment.java  | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 67e34d4b..958fc62f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -938,8 +938,9 @@ public boolean onOptionsItemSelected(MenuItem item) {
+      * @return {@code true} if the transaction can be saved, {@code false} otherwise
+      */
+     private boolean canSave(){
+-        return (mAmountEditText.isInputValid())
+-                && (mUseDoubleEntry && mTransferAccountSpinner.getCount() > 0);
++        return (mUseDoubleEntry && mAmountEditText.isInputValid()
++                                && mTransferAccountSpinner.getCount() > 0)
++               || (!mUseDoubleEntry && mAmountEditText.isInputValid());
+     }
+ 
+     /**
+
+From dae1caf7078bdd3e425e25cbfd5a37eb2309e0e6 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 15 Sep 2016 11:57:46 +0200
+Subject: [PATCH 3/8] Fix breaking tests
+
+- Incomplete scheduled transactions do not throw exceptions when processed
+- Set end time for a scheduled transaction to make test reliable over time (in terms of number of created transactions)
+---
+ .../java/org/gnucash/android/service/ScheduledActionService.java | 8 +++++---
+ .../android/test/unit/service/ScheduledActionServiceTest.java    | 9 ++++++++-
+ 2 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index be88db56..a608592a 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -142,10 +142,11 @@ private static void executeScheduledEvent(ScheduledAction scheduledAction, SQLit
+         ContentValues contentValues = new ContentValues();
+         contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_LAST_RUN, System.currentTimeMillis());
+         contentValues.put(DatabaseSchema.ScheduledActionEntry.COLUMN_EXECUTION_COUNT, executionCount);
+-        new ScheduledActionDbAdapter(db, new RecurrenceDbAdapter(db)).updateRecord(scheduledAction.getUID(), contentValues);
++        db.update(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, contentValues,
++                DatabaseSchema.ScheduledActionEntry.COLUMN_UID + "=?", new String[]{scheduledAction.getUID()});
+ 
+-        //set the values in the object because they will be checked for the next iteration in the calling loop
+-        scheduledAction.setExecutionCount(executionCount);
++        //set the execution count in the object because it will be checked for the next iteration in the calling loop
++        scheduledAction.setExecutionCount(executionCount); //this call is important, do not remove!!
+     }
+ 
+     /**
+@@ -191,6 +192,7 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+         try {
+             trxnTemplate = transactionsDbAdapter.getRecord(actionUID);
+         } catch (IllegalArgumentException ex){ //if the record could not be found, abort
++            Log.e(LOG_TAG, "Scheduled action with UID " + actionUID + " could not be found in the db with path " + db.getPath());
+             return executionCount;
+         }
+ 
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 08e5f3a5..03d7de56 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -16,6 +16,7 @@
+ package org.gnucash.android.test.unit.service;
+ 
+ import android.database.sqlite.SQLiteDatabase;
++import android.support.annotation.NonNull;
+ 
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.R;
+@@ -187,6 +188,9 @@ public void missedScheduledTransactions_shouldBeGenerated(){
+         ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
+         DateTime startTime = new DateTime(2016, 6, 6, 9, 0);
+         scheduledAction.setStartTime(startTime.getMillis());
++        DateTime endTime = new DateTime(2016, 9, 12, 8, 0); //end just before last appointment
++        scheduledAction.setEndTime(endTime.getMillis());
++
+         scheduledAction.setActionUID(mActionUID);
+ 
+         scheduledAction.setRecurrence(PeriodType.WEEK, 2);
+@@ -257,7 +261,7 @@ public void scheduledTransactionsWithEndTimeInPast_shouldBeExecuted(){
+     /**
+      * Test that only scheduled actions with action UIDs are processed
+      */
+-    @Test(expected = IllegalArgumentException.class)
++    @Test //(expected = IllegalArgumentException.class)
+     public void recurringTransactions_shouldHaveScheduledActionUID(){
+         ScheduledAction scheduledAction = new ScheduledAction(ScheduledAction.ActionType.TRANSACTION);
+         DateTime startTime = new DateTime(2016, 7, 4, 12 ,0);
+@@ -270,6 +274,9 @@ public void recurringTransactions_shouldHaveScheduledActionUID(){
+         List<ScheduledAction> actions = new ArrayList<>();
+         actions.add(scheduledAction);
+         ScheduledActionService.processScheduledActions(actions, mDb);
++
++        //no change in the database since no action UID was specified
++        assertThat(transactionsDbAdapter.getRecordsCount()).isZero();
+     }
+ 
+     @Test
+
+From 54cfecd61ce4cf4feaf78c0de1b747ed454c7beb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Thu, 15 Sep 2016 20:17:04 +0200
+Subject: [PATCH 4/8] Run scheduled exports according to their recurrence.
+
+They were always executed twice a day.
+
+Fixes https://github.com/codinguser/gnucash-android/issues/583
+---
+ .../android/service/ScheduledActionService.java    |  3 +++
+ .../unit/service/ScheduledActionServiceTest.java   | 31 ++++++++++++++++++++++
+ 2 files changed, 34 insertions(+)
+
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index a608592a..df4f4175 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -164,6 +164,9 @@ private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase
+         if (endTime > 0 && endTime < now)
+             return executionCount;
+ 
++        if (scheduledAction.computeNextScheduledExecutionTime() > now)
++            return 0;
++
+         ExportParams params = ExportParams.parseCsv(scheduledAction.getTag());
+         try {
+             //wait for async task to finish before we proceed (we are holding a wake lock)
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 03d7de56..3827398d 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -44,6 +44,7 @@
+ import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
+ import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
+ import org.joda.time.DateTime;
++import org.joda.time.LocalDateTime;
+ import org.joda.time.Weeks;
+ import org.junit.After;
+ import org.junit.Before;
+@@ -304,6 +305,36 @@ public void scheduledBackups_shouldRunOnlyOnce(){
+         assertThat(backupFiles[0]).exists().hasExtension("gnca");
+     }
+ 
++    /**
++     * Tests that a scheduled backup isn't executed before the next scheduled
++     * execution according to its recurrence.
++     *
++     * <p>Tests for bug https://github.com/codinguser/gnucash-android/issues/583</p>
++     */
++    @Test
++    public void scheduledBackups_shouldNotRunBeforeNextScheduledExecution(){
++        ScheduledAction scheduledBackup = new ScheduledAction(ScheduledAction.ActionType.BACKUP);
++        scheduledBackup.setStartTime(LocalDateTime.now().minusDays(2).toDate().getTime());
++        scheduledBackup.setExecutionCount(1);
++        scheduledBackup.setRecurrence(PeriodType.WEEK, 1);
++
++        ExportParams backupParams = new ExportParams(ExportFormat.XML);
++        backupParams.setExportTarget(ExportParams.ExportTarget.SD_CARD);
++        scheduledBackup.setTag(backupParams.toCsv());
++
++        File backupFolder = new File(
++                Exporter.getExportFolderPath(BooksDbAdapter.getInstance().getActiveBookUID()));
++        assertThat(backupFolder).exists();
++        assertThat(backupFolder.listFiles()).isEmpty();
++
++        List<ScheduledAction> actions = new ArrayList<>();
++        actions.add(scheduledBackup);
++        ScheduledActionService.processScheduledActions(actions, mDb);
++
++        assertThat(scheduledBackup.getExecutionCount()).isEqualTo(1);
++        assertThat(backupFolder.listFiles()).hasSize(0);
++    }
++
+     @After
+     public void tearDown(){
+         TransactionsDbAdapter.getInstance().deleteAllRecords();
+
+From a363eebaff01f7fdadbda5edc661aa35133a450a Mon Sep 17 00:00:00 2001
+From: Eric Daly <edaly@hpsnet.com>
+Date: Thu, 15 Sep 2016 09:53:25 -0400
+Subject: [PATCH 5/8] Make success text color green in ownCloud dialog
+
+---
+ .../gnucash/android/ui/settings/dialog/OwnCloudDialogFragment.java | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/dialog/OwnCloudDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/dialog/OwnCloudDialogFragment.java
+index aa64c05c..88ef7d84 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/dialog/OwnCloudDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/dialog/OwnCloudDialogFragment.java
+@@ -6,6 +6,7 @@
+ import android.os.Bundle;
+ import android.os.Handler;
+ import android.support.v4.app.DialogFragment;
++import android.support.v4.content.ContextCompat;
+ import android.support.v7.preference.CheckBoxPreference;
+ import android.support.v7.preference.Preference;
+ import android.util.Log;
+@@ -180,19 +181,23 @@ public void onRemoteOperationFinish(RemoteOperation caller, RemoteOperationResul
+                     Log.e("OC", result.getLogMessage(), result.getException());
+ 
+                     if (caller instanceof GetRemoteStatusOperation) {
++                        mServerError.setTextColor(ContextCompat.getColor(getContext(), R.color.debit_red));
+                         mServerError.setText(getString(R.string.owncloud_server_invalid));
+                         mServerError.setVisibility(View.VISIBLE);
+ 
+                     } else if (caller instanceof GetRemoteUserNameOperation &&
+                             mServerError.getText().toString().equals(getString(R.string.owncloud_server_ok))) {
++                        mUsernameError.setTextColor(ContextCompat.getColor(getContext(), R.color.debit_red));
+                         mUsernameError.setText(getString(R.string.owncloud_user_invalid));
+                         mUsernameError.setVisibility(View.VISIBLE);
+                     }
+                 } else {
+                     if (caller instanceof GetRemoteStatusOperation) {
++                        mServerError.setTextColor(ContextCompat.getColor(getContext(), R.color.theme_primary));
+                         mServerError.setText(getString(R.string.owncloud_server_ok));
+                         mServerError.setVisibility(View.VISIBLE);
+                     } else if (caller instanceof GetRemoteUserNameOperation) {
++                        mUsernameError.setTextColor(ContextCompat.getColor(getContext(), R.color.theme_primary));
+                         mUsernameError.setText(getString(R.string.owncloud_user_ok));
+                         mUsernameError.setVisibility(View.VISIBLE);
+                     }
+@@ -208,9 +213,11 @@ public void onRemoteOperationFinish(RemoteOperation caller, RemoteOperationResul
+         gu.execute(mClient, listener, mHandler);
+ 
+         if (FileUtils.isValidPath(mOC_dir, false)) {
++            mDirError.setTextColor(ContextCompat.getColor(getContext(), R.color.theme_primary));
+             mDirError.setText(getString(R.string.owncloud_dir_ok));
+             mDirError.setVisibility(View.VISIBLE);
+         } else {
++            mDirError.setTextColor(ContextCompat.getColor(getContext(), R.color.debit_red));
+             mDirError.setText(getString(R.string.owncloud_dir_invalid));
+             mDirError.setVisibility(View.VISIBLE);
+         }
+
+From 404759620a5a33cecf0bf836fe5802401eacf4d6 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 15 Sep 2016 16:30:13 +0200
+Subject: [PATCH 6/8] Close databases after scheduled service is run
+
+---
+ .../java/org/gnucash/android/service/ScheduledActionService.java    | 6 +++++-
+ app/src/main/java/org/gnucash/android/util/RecursiveMoveFiles.java  | 2 +-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index df4f4175..fb70d62a 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -82,6 +82,10 @@ protected void onHandleIntent(Intent intent) {
+                 Log.i(LOG_TAG, String.format("Processing %d total scheduled actions for Book: %s",
+                         scheduledActions.size(), book.getDisplayName()));
+                 processScheduledActions(scheduledActions, db);
++
++                //close all databases except the currently active database
++                if (!db.getPath().equals(GnuCashApplication.getActiveDb().getPath()))
++                    db.close();
+             }
+ 
+             Log.i(LOG_TAG, "Completed service @ " + java.text.DateFormat.getDateTimeInstance().format(new Date()));
+@@ -195,7 +199,7 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+         try {
+             trxnTemplate = transactionsDbAdapter.getRecord(actionUID);
+         } catch (IllegalArgumentException ex){ //if the record could not be found, abort
+-            Log.e(LOG_TAG, "Scheduled action with UID " + actionUID + " could not be found in the db with path " + db.getPath());
++            Log.e(LOG_TAG, "Scheduled transaction with UID " + actionUID + " could not be found in the db with path " + db.getPath());
+             return executionCount;
+         }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/util/RecursiveMoveFiles.java b/app/src/main/java/org/gnucash/android/util/RecursiveMoveFiles.java
+index 04ece4f8..cf950ec3 100644
+--- a/app/src/main/java/org/gnucash/android/util/RecursiveMoveFiles.java
++++ b/app/src/main/java/org/gnucash/android/util/RecursiveMoveFiles.java
+@@ -74,7 +74,7 @@ private boolean copy(File src, File dst) throws IOException {
+      */
+     private int recursiveMove(File src, File dst){
+         int copyCount = 0;
+-        if (src.isDirectory()){
++        if (src.isDirectory() && src.listFiles() != null){
+             dst.mkdirs(); //we assume it works everytime. Great, right?
+             for (File file : src.listFiles()) {
+                 File target = new File(dst, file.getName());
+
+From 3c93448aae752fcd46e1e9f2e514d37d97d2f230 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 19 Sep 2016 16:27:51 +0200
+Subject: [PATCH 7/8] Update German and Brazilian Portuguese strings
+
+Smaller updates to strings for Japanese, Spanish, Italian and Russian
+---
+ app/src/main/res/values-de/strings.xml     | 30 ++++++++++++-------------
+ app/src/main/res/values-es/strings.xml     |  2 +-
+ app/src/main/res/values-it-rIT/strings.xml |  2 +-
+ app/src/main/res/values-ja-rJP/strings.xml |  2 +-
+ app/src/main/res/values-pt-rPT/strings.xml | 36 +++++++++++++++---------------
+ app/src/main/res/values-ru/strings.xml     |  2 +-
+ 6 files changed, 37 insertions(+), 37 deletions(-)
+
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index bfc9863a..38659a21 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -459,20 +459,20 @@ No user-identifiable information will be collected as part of this process!</str
+     <item quantity="other">%d Buchungen</item>
+   </plurals>
+   <string-array name="report_account_types">
+-    <item>EXPENSE</item>
+-    <item>INCOME</item>
++    <item>AUFWENDUNGEN</item>
++    <item>ERTRGE</item>
+   </string-array>
+-  <string name="toast_connected_to_google_drive">Connected to Google Drive</string>
+-  <string name="toast_unable_to_connect_to_google_drive">Unable to connect to Google Drive</string>
+-  <string name="toast_enter_amount_to_split">Please enter an amount to split</string>
+-  <string name="label_export_target_external_service">external service</string>
+-  <string name="toast_updated_transaction_recurring_schedule">Updated transaction recurring schedule</string>
+-  <string name="label_export_transactions_since_date">Since</string>
+-  <string name="switch_export_transactions_from_all_time">All time</string>
+-  <string name="label_recommend_app">Recommend in Play Store</string>
+-  <string name="repeat_until_date">until %1$s</string>
+-  <string name="repeat_on_weekday">on %1$s</string>
+-  <string name="repeat_x_times">for %1$s times</string>
+-  <string name="menu_show_compact_view">Compact View</string>
+-  <string name="book_default_name">Book %1$d</string>
++  <string name="toast_connected_to_google_drive">Verbunden mit Google Drive</string>
++  <string name="toast_unable_to_connect_to_google_drive">Keine Verbindung zu Google Drive</string>
++  <string name="toast_enter_amount_to_split">Bitte geben Sie einen aufzuteilenden Betrag ein</string>
++  <string name="label_export_target_external_service">externer Dienst</string>
++  <string name="toast_updated_transaction_recurring_schedule">Aktualisierte Buchung aus wiederkehrendem Zeitplan</string>
++  <string name="label_export_transactions_since_date">Seit</string>
++  <string name="switch_export_transactions_from_all_time">Zeitlich unbegrenzt</string>
++  <string name="label_recommend_app">Im Play Store empfehlen</string>
++  <string name="repeat_until_date">bis %1$s</string>
++  <string name="repeat_on_weekday">am %1$s</string>
++  <string name="repeat_x_times">%1$s mal</string>
++  <string name="menu_show_compact_view">Kompakte Ansicht</string>
++  <string name="book_default_name">Buch %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index 450a2052..3497cb80 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -472,5 +472,5 @@ Este proceso solo recoge informacin que no permite identificar al usuario</str
+   <string name="repeat_on_weekday">en %1$s</string>
+   <string name="repeat_x_times">%1$s veces</string>
+   <string name="menu_show_compact_view">Vista compacta</string>
+-  <string name="book_default_name">Book %1$d</string>
++  <string name="book_default_name">Libro %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-it-rIT/strings.xml b/app/src/main/res/values-it-rIT/strings.xml
+index 5ba00961..85e3fb2d 100644
+--- a/app/src/main/res/values-it-rIT/strings.xml
++++ b/app/src/main/res/values-it-rIT/strings.xml
+@@ -474,5 +474,5 @@
+   <string name="repeat_on_weekday">il %1$s</string>
+   <string name="repeat_x_times">per %1$s volte</string>
+   <string name="menu_show_compact_view">Visualizzazione compatta</string>
+-  <string name="book_default_name">Book %1$d</string>
++  <string name="book_default_name">Libro %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-ja-rJP/strings.xml b/app/src/main/res/values-ja-rJP/strings.xml
+index 52068efd..d4ea955d 100644
+--- a/app/src/main/res/values-ja-rJP/strings.xml
++++ b/app/src/main/res/values-ja-rJP/strings.xml
+@@ -463,5 +463,5 @@
+   <string name="repeat_on_weekday">%1$s </string>
+   <string name="repeat_x_times">%1$s </string>
+   <string name="menu_show_compact_view"></string>
+-  <string name="book_default_name">Book %1$d</string>
++  <string name="book_default_name"> %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rPT/strings.xml b/app/src/main/res/values-pt-rPT/strings.xml
+index 07b38733..329c7ff7 100644
+--- a/app/src/main/res/values-pt-rPT/strings.xml
++++ b/app/src/main/res/values-pt-rPT/strings.xml
+@@ -416,7 +416,7 @@ Neste processo no sero recolhidas informaes do utilizador!</string>
+   <!-- Passcode lock -->
+   <string name="digit_one">1</string>
+   <!-- In the English locale, digit 1 has no text on it. This is simply empty space. If your locale has text on digit 1, then translate-->
+-  <string name="digit_one_text"></string>
++  <string name="digit_one_text"> </string>
+   <string name="digit_two">2</string>
+   <string name="digit_two_text">ABC</string>
+   <string name="digit_three">3</string>
+@@ -449,27 +449,27 @@ Neste processo no sero recolhidas informaes do utilizador!</string>
+   <string name="label_inside_account_with_name">em %1$s</string>
+   <plurals name="book_account_stats">
+     <item quantity="one">%d conta</item>
+-    <item quantity="other">%d accounts</item>
++    <item quantity="other">%d contas</item>
+   </plurals>
+   <plurals name="book_transaction_stats">
+     <item quantity="one">%d transao</item>
+-    <item quantity="other">%d transactions</item>
++    <item quantity="other">%d transaes</item>
+   </plurals>
+   <string-array name="report_account_types">
+-    <item>EXPENSE</item>
+-    <item>INCOME</item>
++    <item>DESPESA</item>
++    <item>RECEITA</item>
+   </string-array>
+-  <string name="toast_connected_to_google_drive">Connected to Google Drive</string>
+-  <string name="toast_unable_to_connect_to_google_drive">Unable to connect to Google Drive</string>
+-  <string name="toast_enter_amount_to_split">Please enter an amount to split</string>
+-  <string name="label_export_target_external_service">external service</string>
+-  <string name="toast_updated_transaction_recurring_schedule">Updated transaction recurring schedule</string>
+-  <string name="label_export_transactions_since_date">Since</string>
+-  <string name="switch_export_transactions_from_all_time">All time</string>
+-  <string name="label_recommend_app">Recommend in Play Store</string>
+-  <string name="repeat_until_date">until %1$s</string>
+-  <string name="repeat_on_weekday">on %1$s</string>
+-  <string name="repeat_x_times">for %1$s times</string>
+-  <string name="menu_show_compact_view">Compact View</string>
+-  <string name="book_default_name">Book %1$d</string>
++  <string name="toast_connected_to_google_drive">Ligado ao Google Drive</string>
++  <string name="toast_unable_to_connect_to_google_drive">No  possvel estabelecer ligao ao Google Drive</string>
++  <string name="toast_enter_amount_to_split">Por favor introduza um montante a dividir</string>
++  <string name="label_export_target_external_service">servio externo</string>
++  <string name="toast_updated_transaction_recurring_schedule">Transao atualizada agendamento recorrente</string>
++  <string name="label_export_transactions_since_date">Desde</string>
++  <string name="switch_export_transactions_from_all_time">Todo o tempo</string>
++  <string name="label_recommend_app">Recomendado na Play Store</string>
++  <string name="repeat_until_date">desde%1$s</string>
++  <string name="repeat_on_weekday">na %1$s</string>
++  <string name="repeat_x_times">para %1$s vezes</string>
++  <string name="menu_show_compact_view">Vista Compacta</string>
++  <string name="book_default_name">Livro %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index da95b50a..75f12c45 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -482,5 +482,5 @@
+   <string name="repeat_on_weekday"> %1$s</string>
+   <string name="repeat_x_times"> %1$s </string>
+   <string name="menu_show_compact_view"> </string>
+-  <string name="book_default_name">Book %1$d</string>
++  <string name="book_default_name"> %1$d</string>
+ </resources>
+
+From ad229abb6c138730233cd0b26365235a3aea8d2d Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 19 Sep 2016 16:38:05 +0200
+Subject: [PATCH 8/8] Update version number for v2.1.2 release
+
+Update CHANGELOG
+Update contribution guidelines and issue template
+---
+ .github/CONTRIBUTING.md   | 7 +++++++
+ .github/ISSUE_TEMPLATE.md | 6 +++---
+ CHANGELOG.md              | 8 ++++++++
+ app/build.gradle          | 2 +-
+ 4 files changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/.github/CONTRIBUTING.md b/.github/CONTRIBUTING.md
+index fbb47355..06e1cab8 100644
+--- a/.github/CONTRIBUTING.md
++++ b/.github/CONTRIBUTING.md
+@@ -5,8 +5,15 @@ GnuCash Android is built by people like you! Please [join us](https://github.com
+ * You can maintain your stable installation of GnuCash and test with another installation.
+ The two instances of GnuCash Android will live side-by-side on your device and not affect each other. You can install the development version by executing `gradle installDD` inside the root project directory
+ * The latest changes are in the `develop` branch.
++  * Always rebase develop before working on a fix or issuing a pull request
+ * The master branch contains only stable releases.
+   * Pull requests to the `master` branch will be rejected.
++* The `hotfix/patches` branch is reserved for very small fixes to the current release
++  * This branch may diverge significantly from the `develop` branch
++  * When working on a hotfix, always rebase and start off the `origin/hotfix/patches` branch
++  * Examples of such are typos, translation updates, critical bugs (e.g. cannot save transactions)
++  * Any bigger changes should be made to develop
++
+ * Make a new branch for every feature you're working on.
+ * Try to make clean commits that are easily readable (including descriptive commit messages!)
+ * Test before you push make sure all test pass on your machine.
+diff --git a/.github/ISSUE_TEMPLATE.md b/.github/ISSUE_TEMPLATE.md
+index a1624715..0c9d370c 100644
+--- a/.github/ISSUE_TEMPLATE.md
++++ b/.github/ISSUE_TEMPLATE.md
+@@ -1,12 +1,12 @@
++#### Steps to reproduce the behaviour
++1. <!-- List the detail steps to reproduce the problem here -->
++
+ #### Expected behaviour
+ 
+ 
+ #### Actual behaviour
+ 
+ 
+-#### Steps to reproduce the behaviour
+-1. <!-- List the detail steps to reproduce the problem here -->
+-
+ #### Software specifications
+ * GnuCash Android version:
+ * System Android version:
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 9bcb4529..3cf2c62d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,13 @@
+ Change Log
+ ===============================================================================
++Version 2.1.2 *(2016-09-21)*
++----------------------------
++* Fixed: Scheduled exports always run daily (no matter the actual schedule)
++* Fixed: New transactions cannot be saved in single-entry mode
++* Fixed: ownCloud connect success messages displayed in red (now green)
++* Fixed: Crash when scheduled action service cannot find transaction in db
++* Improved: German and Brazilian Portuguese translations
++
+ Version 2.1.1 *(2016-09-05)*
+ ----------------------------
+ * Fixed: Bug cause crash during start-up for devices with no scheduled transactions
+diff --git a/app/build.gradle b/app/build.gradle
+index c6e330fb..1d5200fa 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -7,7 +7,7 @@ apply plugin: 'io.fabric'
+ 
+ def versionMajor = 2
+ def versionMinor = 1
+-def versionPatch = 1
++def versionPatch = 2
+ def versionBuild = 0
+ 
+ def buildTime() {

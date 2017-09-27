@@ -1,0 +1,1615 @@
+From edf7ae5f04342a12c57b533612d276136203b033 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 3 Aug 2016 22:53:19 +0200
+Subject: [PATCH 1/5] Add tests for GitHub issue #506 bug
+
+Test that opening a multi-currency transaction and saving it again should not modify the transaction
+Test that opening a multicurrency transaction and then changing it to be no longer multi-currency should maintain consistent amount for the split value and quantity
+
+Fix getImbalance() method of transactions to ignore multicurrency transactions.
+---
+ .../android/test/ui/TransactionsActivityTest.java  | 266 ++++++++++++++++++---
+ .../android/db/adapter/TransactionsDbAdapter.java  |   4 +-
+ .../gnucash/android/importer/GncXmlHandler.java    |   4 +-
+ .../org/gnucash/android/model/Transaction.java     |  17 +-
+ 4 files changed, 247 insertions(+), 44 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 6a52692b..1694ae59 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -71,6 +71,7 @@
+ import static android.support.test.espresso.matcher.ViewMatchers.isChecked;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
+ import static android.support.test.espresso.matcher.ViewMatchers.withId;
++import static android.support.test.espresso.matcher.ViewMatchers.withParent;
+ import static android.support.test.espresso.matcher.ViewMatchers.withText;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.hamcrest.Matchers.allOf;
+@@ -82,8 +83,8 @@
+ public class TransactionsActivityTest {
+     private static final String TRANSACTION_AMOUNT = "9.99";
+ 	private static final String TRANSACTION_NAME = "Pizza";
+-	private static final String DUMMY_ACCOUNT_UID = "transactions-account";
+-	private static final String DUMMY_ACCOUNT_NAME = "Transactions Account";
++	private static final String TRANSACTIONS_ACCOUNT_UID = "transactions-account";
++	private static final String TRANSACTIONS_ACCOUNT_NAME = "Transactions Account";
+ 
+     private static final String TRANSFER_ACCOUNT_NAME   = "Transfer account";
+     private static final String TRANSFER_ACCOUNT_UID    = "transfer_account";
+@@ -109,8 +110,8 @@
+ 	private Account mTransferAccount;
+ 
+ 	public TransactionsActivityTest() {
+-		mBaseAccount = new Account(DUMMY_ACCOUNT_NAME, COMMODITY);
+-		mBaseAccount.setUID(DUMMY_ACCOUNT_UID);
++		mBaseAccount = new Account(TRANSACTIONS_ACCOUNT_NAME, COMMODITY);
++		mBaseAccount.setUID(TRANSACTIONS_ACCOUNT_UID);
+ 
+ 		mTransferAccount = new Account(TRANSFER_ACCOUNT_NAME, COMMODITY);
+ 		mTransferAccount.setUID(TRANSFER_ACCOUNT_UID);
+@@ -120,7 +121,7 @@ public TransactionsActivityTest() {
+ 		mTransaction.setCommodity(COMMODITY);
+ 		mTransaction.setNote("What up?");
+ 		mTransaction.setTime(mTransactionTimeMillis);
+-		Split split = new Split(new Money(TRANSACTION_AMOUNT, CURRENCY_CODE), DUMMY_ACCOUNT_UID);
++		Split split = new Split(new Money(TRANSACTION_AMOUNT, CURRENCY_CODE), TRANSACTIONS_ACCOUNT_UID);
+ 		split.setType(TransactionType.DEBIT);
+ 
+ 		mTransaction.addSplit(split);
+@@ -156,10 +157,10 @@ public void setUp() throws Exception {
+ 		assertThat(mTransactionsDbAdapter.getRecordsCount()).isEqualTo(1);
+ 
+ 		Intent intent = new Intent(Intent.ACTION_VIEW);
+-		intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, DUMMY_ACCOUNT_UID);
++		intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, TRANSACTIONS_ACCOUNT_UID);
+ 		mTransactionsActivity = mActivityRule.launchActivity(intent);
+ 
+-		refreshTransactionsList();
++		//refreshTransactionsList();
+ 	}
+ 
+ 
+@@ -168,7 +169,7 @@ private void validateTransactionListDisplayed(){
+ 	}
+ 	
+ 	private int getTransactionCount(){
+-        return mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID).size();
++        return mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID).size();
+ 	}
+ 	
+ 	private void validateTimeInput(long timeMillis){
+@@ -183,7 +184,7 @@ private void validateTimeInput(long timeMillis){
+ 	public void testAddTransactionShouldRequireAmount(){
+ 		validateTransactionListDisplayed();
+ 		
+-		int beforeCount = mTransactionsDbAdapter.getTransactionsCount(DUMMY_ACCOUNT_UID);
++		int beforeCount = mTransactionsDbAdapter.getTransactionsCount(TRANSACTIONS_ACCOUNT_UID);
+         onView(withId(R.id.fab_create_transaction)).perform(click());
+ 
+ 		onView(withId(R.id.input_transaction_name))
+@@ -198,7 +199,7 @@ public void testAddTransactionShouldRequireAmount(){
+ 
+ 		assertToastDisplayed(R.string.toast_transanction_amount_required);
+ 
+-		int afterCount = mTransactionsDbAdapter.getTransactionsCount(DUMMY_ACCOUNT_UID);
++		int afterCount = mTransactionsDbAdapter.getTransactionsCount(TRANSACTIONS_ACCOUNT_UID);
+ 		assertThat(afterCount).isEqualTo(beforeCount);
+ 
+ 	}
+@@ -230,7 +231,7 @@ private void validateEditTransactionFields(Transaction transaction){
+ 
+ 		onView(withId(R.id.input_transaction_name)).check(matches(withText(transaction.getDescription())));
+ 
+-		Money balance = transaction.getBalance(DUMMY_ACCOUNT_UID);
++		Money balance = transaction.getBalance(TRANSACTIONS_ACCOUNT_UID);
+ 		NumberFormat formatter = NumberFormat.getInstance(Locale.getDefault());
+ 		formatter.setMinimumFractionDigits(2);
+ 		formatter.setMaximumFractionDigits(2);
+@@ -266,7 +267,7 @@ public void testAddTransaction(){
+ 
+         validateTransactionListDisplayed();
+ 
+-        List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++        List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID);
+         assertThat(transactions).hasSize(2);
+         Transaction transaction = transactions.get(0);
+ 		assertThat(transaction.getSplits()).hasSize(2);
+@@ -409,11 +410,11 @@ public void childAccountsShouldUseParentTransferAccountSetting(){
+ 		mAccountsDbAdapter.addRecord(new Account("Higher account"), DatabaseAdapter.UpdateMethod.insert);
+ 
+ 		Account childAccount = new Account("Child Account");
+-		childAccount.setParentUID(DUMMY_ACCOUNT_UID);
++		childAccount.setParentUID(TRANSACTIONS_ACCOUNT_UID);
+ 		mAccountsDbAdapter.addRecord(childAccount, DatabaseAdapter.UpdateMethod.insert);
+ 		ContentValues contentValues = new ContentValues();
+ 		contentValues.put(DatabaseSchema.AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID, transferAccount.getUID());
+-		mAccountsDbAdapter.updateRecord(DUMMY_ACCOUNT_UID, contentValues);
++		mAccountsDbAdapter.updateRecord(TRANSACTIONS_ACCOUNT_UID, contentValues);
+ 
+ 		Intent intent = new Intent(mTransactionsActivity, TransactionsActivity.class);
+ 		intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+@@ -445,11 +446,11 @@ public void testToggleTransactionType(){
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+ 		
+-		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID);
+ 		assertThat(transactions).hasSize(1);
+ 		Transaction trx = transactions.get(0);
+ 		assertThat(trx.getSplits()).hasSize(2); //auto-balancing of splits
+-		assertThat(trx.getBalance(DUMMY_ACCOUNT_UID).isNegative()).isTrue();
++		assertThat(trx.getBalance(TRANSACTIONS_ACCOUNT_UID).isNegative()).isTrue();
+ 	}
+ 
+ 	@Test
+@@ -461,17 +462,29 @@ public void testOpenTransactionEditShouldNotModifyTransaction(){
+ 
+ 		clickOnView(R.id.menu_save);
+ 
+-		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID);
+ 
+ 		assertThat(transactions).hasSize(1);
+-		Transaction trx = transactions.get(0);
+-		assertThat(TRANSACTION_NAME).isEqualTo(trx.getDescription());
++		Transaction transaction = transactions.get(0);
++		assertThat(TRANSACTION_NAME).isEqualTo(transaction.getDescription());
+ 		Date expectedDate = new Date(mTransactionTimeMillis);
+-		Date trxDate = new Date(trx.getTimeMillis());
++		Date trxDate = new Date(transaction.getTimeMillis());
+ 		assertThat(TransactionFormFragment.DATE_FORMATTER.format(expectedDate))
+ 				.isEqualTo(TransactionFormFragment.DATE_FORMATTER.format(trxDate));
+ 		assertThat(TransactionFormFragment.TIME_FORMATTER.format(expectedDate))
+ 				.isEqualTo(TransactionFormFragment.TIME_FORMATTER.format(trxDate));
++
++		Split baseSplit = transaction.getSplits(TRANSACTIONS_ACCOUNT_UID).get(0);
++		Money expectedAmount = new Money(TRANSACTION_AMOUNT, CURRENCY_CODE);
++		assertThat(baseSplit.getValue()).isEqualTo(expectedAmount);
++		assertThat(baseSplit.getQuantity()).isEqualTo(expectedAmount);
++		assertThat(baseSplit.getType()).isEqualTo(TransactionType.DEBIT);
++
++		Split transferSplit = transaction.getSplits(TRANSFER_ACCOUNT_UID).get(0);
++		assertThat(transferSplit.getValue()).isEqualTo(expectedAmount);
++		assertThat(transferSplit.getQuantity()).isEqualTo(expectedAmount);
++		assertThat(transferSplit.getType()).isEqualTo(TransactionType.CREDIT);
++
+ 	}
+ 
+ 	@Test
+@@ -479,7 +492,7 @@ public void testDeleteTransaction(){
+ 		onView(withId(R.id.options_menu)).perform(click());
+ 		onView(withText(R.string.menu_delete)).perform(click());
+ 
+-		long id = mAccountsDbAdapter.getID(DUMMY_ACCOUNT_UID);
++		long id = mAccountsDbAdapter.getID(TRANSACTIONS_ACCOUNT_UID);
+ 		assertThat(0).isEqualTo(mTransactionsDbAdapter.getTransactionsCount(id));
+ 	}
+ 
+@@ -496,7 +509,7 @@ public void testMoveTransaction(){
+ 
+ 		onView(withId(R.id.btn_save)).perform(click());
+ 
+-		assertThat(mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID)).hasSize(0);
++		assertThat(mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID)).hasSize(0);
+ 
+ 		assertThat(mTransactionsDbAdapter.getAllTransactionsForAccount(account.getUID())).hasSize(1);
+ 
+@@ -522,7 +535,7 @@ public void editingSplit_shouldNotSetAmountToZero(){
+ 
+ 		onView(withId(R.id.btn_split_editor)).perform(click());
+ 
+-//		onView(withSpinnerText(DUMMY_ACCOUNT_NAME)).perform(click()); //// FIXME: 03.11.2015 properly select the spinner
++//		onView(withSpinnerText(TRANSACTIONS_ACCOUNT_NAME)).perform(click()); //// FIXME: 03.11.2015 properly select the spinner
+ 		onData(withId(R.id.input_accounts_spinner))
+ 				.inAdapterView(withId(R.id.split_list_layout))
+ 				.atPosition(1)
+@@ -536,7 +549,7 @@ public void editingSplit_shouldNotSetAmountToZero(){
+ 		//split should have moved from account, it should now be empty
+ 		onView(withId(R.id.empty_view)).check(matches(isDisplayed()));
+ 
+-		assertThat(mAccountsDbAdapter.getAccountBalance(DUMMY_ACCOUNT_UID)).isEqualTo(Money.createZeroInstance(CURRENCY_CODE));
++		assertThat(mAccountsDbAdapter.getAccountBalance(TRANSACTIONS_ACCOUNT_UID)).isEqualTo(Money.createZeroInstance(CURRENCY_CODE));
+ 
+ 		//split
+ 		assertThat(mAccountsDbAdapter.getAccountBalance(account.getUID())).isEqualTo(new Money("1024", CURRENCY_CODE));
+@@ -544,12 +557,12 @@ public void editingSplit_shouldNotSetAmountToZero(){
+ 
+ 	@Test
+ 	public void testDuplicateTransaction(){
+-		assertThat(mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID)).hasSize(1);
++		assertThat(mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID)).hasSize(1);
+ 
+ 		onView(withId(R.id.options_menu)).perform(click());
+ 		onView(withText(R.string.menu_duplicate_transaction)).perform(click());
+ 
+-		List<Transaction> dummyAccountTrns = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++		List<Transaction> dummyAccountTrns = mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID);
+ 		assertThat(dummyAccountTrns).hasSize(2);
+ 
+ 		assertThat(dummyAccountTrns.get(0).getDescription()).isEqualTo(dummyAccountTrns.get(1).getDescription());
+@@ -559,33 +572,224 @@ public void testDuplicateTransaction(){
+ 	//TODO: add normal transaction recording
+ 	@Test
+ 	public void testLegacyIntentTransactionRecording(){
+-		int beforeCount = mTransactionsDbAdapter.getTransactionsCount(DUMMY_ACCOUNT_UID);
++		int beforeCount = mTransactionsDbAdapter.getTransactionsCount(TRANSACTIONS_ACCOUNT_UID);
+ 		Intent transactionIntent = new Intent(Intent.ACTION_INSERT);
+ 		transactionIntent.setType(Transaction.MIME_TYPE);
+ 		transactionIntent.putExtra(Intent.EXTRA_TITLE, "Power intents");
+ 		transactionIntent.putExtra(Intent.EXTRA_TEXT, "Intents for sale");
+ 		transactionIntent.putExtra(Transaction.EXTRA_AMOUNT, new BigDecimal(4.99));
+-		transactionIntent.putExtra(Transaction.EXTRA_ACCOUNT_UID, DUMMY_ACCOUNT_UID);
++		transactionIntent.putExtra(Transaction.EXTRA_ACCOUNT_UID, TRANSACTIONS_ACCOUNT_UID);
+ 		transactionIntent.putExtra(Transaction.EXTRA_TRANSACTION_TYPE, TransactionType.DEBIT.name());
+ 		transactionIntent.putExtra(Account.EXTRA_CURRENCY_CODE, "USD");
+ 
+ 		new TransactionRecorder().onReceive(mTransactionsActivity, transactionIntent);
+ 
+-		int afterCount = mTransactionsDbAdapter.getTransactionsCount(DUMMY_ACCOUNT_UID);
++		int afterCount = mTransactionsDbAdapter.getTransactionsCount(TRANSACTIONS_ACCOUNT_UID);
+ 		
+ 		assertThat(beforeCount + 1).isEqualTo(afterCount);
+ 		
+-		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID);
+ 		
+ 		for (Transaction transaction : transactions) {
+ 			if (transaction.getDescription().equals("Power intents")){
+ 				assertThat("Intents for sale").isEqualTo(transaction.getNote());
+-				assertThat(4.99).isEqualTo(transaction.getBalance(DUMMY_ACCOUNT_UID).asDouble());
++				assertThat(4.99).isEqualTo(transaction.getBalance(TRANSACTIONS_ACCOUNT_UID).asDouble());
+ 			}
+ 		}
+ 	}
+ 
+ 	/**
++	 * Opening a transactions and then hitting save button without changing anything should have no side-effects
++	 * This is similar to the test @{@link #testOpenTransactionEditShouldNotModifyTransaction()}
++	 * with the difference that this test checks multi-currency transactions
++	 */
++	@Test
++	public void openingAndSavingMultiCurrencyTransaction_shouldNotModifyTheSplits(){
++		Commodity bgnCommodity = CommoditiesDbAdapter.getInstance().getCommodity("BGN");
++		Account account = new Account("Zen Account", bgnCommodity);
++
++		mAccountsDbAdapter.addRecord(account);
++
++		onView(withId(R.id.fab_create_transaction)).perform(click());
++		String trnDescription = "Multi-currency trn";
++		onView(withId(R.id.input_transaction_name)).perform(typeText(trnDescription));
++		onView(withId(R.id.input_transaction_amount)).perform(typeText("10"));
++		Espresso.closeSoftKeyboard();
++
++		onView(withId(R.id.input_transfer_account_spinner)).perform(click());
++		onView(withText(account.getFullName())).perform(click());
++
++		//at this point, the transfer funds dialog should be shown
++		onView(withText(R.string.msg_provide_exchange_rate)).check(matches(isDisplayed()));
++		onView(withId(R.id.radio_converted_amount)).perform(click());
++		onView(withId(R.id.input_converted_amount)).perform(typeText("5"));
++
++		Espresso.closeSoftKeyboard();
++		onView(withId(R.id.btn_save)).perform(click()); //close currency exchange dialog
++		onView(withId(R.id.menu_save)).perform(click()); //save transaction
++
++		List<Transaction> transactions = mTransactionsDbAdapter.getAllTransactionsForAccount(account.getUID());
++		assertThat(transactions).hasSize(1);
++		Transaction transaction = transactions.get(0);
++		assertThat(transaction.getSplits()).hasSize(2);
++		assertThat(transaction.getSplits()).extracting("mAccountUID")
++				.contains(account.getUID()).contains(mBaseAccount.getUID());
++
++
++		onView(allOf(withParent(hasDescendant(withText(trnDescription))),
++				withId(R.id.edit_transaction))).perform(click());
++
++		//do nothing to the transaction, just save it
++		onView(withId(R.id.menu_save)).perform(click());
++
++		transaction = mTransactionsDbAdapter.getRecord(transaction.getUID());
++
++		Split baseSplit = transaction.getSplits(mBaseAccount.getUID()).get(0);
++		Money expectedValueAmount = new Money(BigDecimal.TEN, COMMODITY);
++		assertThat(baseSplit.getValue()).isEqualTo(expectedValueAmount);
++		assertThat(baseSplit.getQuantity()).isEqualTo(expectedValueAmount);
++
++		Split transferSplit = transaction.getSplits(account.getUID()).get(0);
++		Money convertedQuantity = new Money("5", "BGN");
++		assertThat(transferSplit.getValue()).isEqualTo(expectedValueAmount);
++		assertThat(transferSplit.getQuantity()).isEqualTo(convertedQuantity);
++	}
++
++	/**
++	 * If a multi-currency transaction is edited so that it is no longer multicurrency, then the
++	 * values for split and quantity should be adjusted accordingly so that they are consistent
++	 * <p>
++	 *     Basically the test works like this:
++	 *     <ol>
++	 *         <li>Create a multicurrency transaction</li>
++	 *         <li>Change the transfer account so that both splits are of the same currency</li>
++	 *         <li>We now expect both the values and quantities of the splits to be the same</li>
++	 *     </ol>
++	 * </p>
++	 */
++	@Test
++	public void testEditingTransferAccountOfMultiCurrencyTransaction(){
++		mTransactionsDbAdapter.deleteAllRecords(); //clean slate
++		Commodity euroCommodity = CommoditiesDbAdapter.getInstance().getCommodity("EUR");
++		Account euroAccount = new Account("Euro Account", euroCommodity);
++
++		mAccountsDbAdapter.addRecord(euroAccount);
++
++		Money expectedValue = new Money(BigDecimal.TEN, COMMODITY);
++		Money expectedQty = new Money("5", "EUR");
++
++		String trnDescription = "Multicurrency Test Trn";
++		Transaction multiTransaction = new Transaction(trnDescription);
++		Split split1 = new Split(expectedValue, TRANSACTIONS_ACCOUNT_UID);
++		split1.setType(TransactionType.DEBIT);
++		Split split2 = new Split(expectedValue, expectedQty, euroAccount.getUID());
++		split2.setType(TransactionType.CREDIT);
++		multiTransaction.addSplit(split1);
++		multiTransaction.addSplit(split2);
++		multiTransaction.setCommodity(COMMODITY);
++
++		mTransactionsDbAdapter.addRecord(multiTransaction);
++
++		Transaction savedTransaction = mTransactionsDbAdapter.getRecord(multiTransaction.getUID());
++		assertThat(savedTransaction.getSplits()).extracting("mQuantity").contains(expectedQty);
++		assertThat(savedTransaction.getSplits()).extracting("mValue").contains(expectedValue);
++
++		refreshTransactionsList();
++		onView(withText(trnDescription)).check(matches(isDisplayed())); //transaction was added
++		onView(allOf(withParent(hasDescendant(withText(trnDescription))),
++				withId(R.id.edit_transaction))).perform(click());
++
++		//now change the transfer account to be no longer multi-currency
++		onView(withId(R.id.input_transfer_account_spinner)).perform(click());
++		onView(withText(mTransferAccount.getFullName())).perform(click());
++
++		onView(withId(R.id.menu_save)).perform(click());
++
++		//no splits should be in the euro account anymore
++		List<Transaction> euroTransxns = mTransactionsDbAdapter.getAllTransactionsForAccount(euroAccount.getUID());
++		assertThat(euroTransxns).hasSize(0);
++
++		List<Transaction> transferAcctTrns = mTransactionsDbAdapter.getAllTransactionsForAccount(mTransferAccount.getUID());
++		assertThat(transferAcctTrns).hasSize(1);
++
++		Transaction singleCurrencyTrn = transferAcctTrns.get(0);
++		assertThat(singleCurrencyTrn.getUID()).isEqualTo(multiTransaction.getUID()); //should be the same one, just different splits
++
++		//the crux of the test. All splits should now have value and quantity of USD $10
++		List<Split> allSplits = singleCurrencyTrn.getSplits();
++		assertThat(allSplits).extracting("mAccountUID")
++				.contains(mTransferAccount.getUID())
++				.doesNotContain(euroAccount.getUID());
++		assertThat(allSplits).extracting("mValue").contains(expectedValue).doesNotContain(expectedQty);
++		assertThat(allSplits).extracting("mQuantity").contains(expectedValue).doesNotContain(expectedQty);
++	}
++
++	/**
++	 * In this test we check that editing a transaction and switching the transfer account to one
++	 * which is of a different currency and then back again should not have side-effects.
++	 * The split value and quantity should remain consistent.
++	 */
++	@Test
++	public void editingTransferAccount_shouldKeepSplitAmountsConsistent() {
++		mTransactionsDbAdapter.deleteAllRecords(); //clean slate
++		Commodity euroCommodity = CommoditiesDbAdapter.getInstance().getCommodity("EUR");
++		Account euroAccount = new Account("Euro Account", euroCommodity);
++
++		mAccountsDbAdapter.addRecord(euroAccount);
++
++		Money expectedValue = new Money(BigDecimal.TEN, COMMODITY);
++		Money expectedQty = new Money("5", "EUR");
++
++		String trnDescription = "Multicurrency Test Trn";
++		Transaction multiTransaction = new Transaction(trnDescription);
++		Split split1 = new Split(expectedValue, TRANSACTIONS_ACCOUNT_UID);
++		split1.setType(TransactionType.DEBIT);
++		Split split2 = new Split(expectedValue, expectedQty, euroAccount.getUID());
++		split2.setType(TransactionType.CREDIT);
++		multiTransaction.addSplit(split1);
++		multiTransaction.addSplit(split2);
++		multiTransaction.setCommodity(COMMODITY);
++
++		mTransactionsDbAdapter.addRecord(multiTransaction);
++
++		Transaction savedTransaction = mTransactionsDbAdapter.getRecord(multiTransaction.getUID());
++		assertThat(savedTransaction.getSplits()).extracting("mQuantity").contains(expectedQty);
++		assertThat(savedTransaction.getSplits()).extracting("mValue").contains(expectedValue);
++
++		refreshTransactionsList();
++
++		//open transaction for editing
++		onView(withText(trnDescription)).check(matches(isDisplayed())); //transaction was added
++		onView(allOf(withParent(hasDescendant(withText(trnDescription))),
++				withId(R.id.edit_transaction))).perform(click());
++
++		onView(withId(R.id.input_transfer_account_spinner)).perform(click());
++		onView(withText(TRANSFER_ACCOUNT_NAME)).perform(click());
++
++		onView(withId(R.id.input_transfer_account_spinner)).perform(click());
++		onView(withText(euroAccount.getFullName())).perform(click());
++		onView(withId(R.id.input_converted_amount)).perform(typeText("5"));
++		Espresso.closeSoftKeyboard();
++		onView(withId(R.id.btn_save)).perform(click());
++
++		onView(withId(R.id.input_transfer_account_spinner)).perform(click());
++		onView(withText(TRANSFER_ACCOUNT_NAME)).perform(click());
++
++		onView(withId(R.id.menu_save)).perform(click());
++
++		Money transferBalance = mAccountsDbAdapter.getAccountBalance(TRANSFER_ACCOUNT_UID);
++		assertThat(transferBalance).isEqualTo(expectedValue);
++
++		Transaction editedTransaction = mTransactionsDbAdapter.getRecord(multiTransaction.getUID());
++		assertThat(editedTransaction.getBalance(TRANSFER_ACCOUNT_UID)).isEqualTo(expectedValue);
++
++		Split transferAcctSplit = editedTransaction.getSplits(TRANSFER_ACCOUNT_UID).get(0);
++		assertThat(transferAcctSplit.getQuantity()).isEqualTo(expectedValue);
++		assertThat(transferAcctSplit.getValue()).isEqualTo(expectedValue);
++
++	}
++
++	/**
+ 	 * Simple wrapper for clicking on views with espresso
+ 	 * @param viewId View resource ID
+ 	 */
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+index 1a9fb18c..da9341b3 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+@@ -97,10 +97,10 @@ public SplitsDbAdapter getSplitDbAdapter() {
+ 	 */
+     @Override
+ 	public void addRecord(@NonNull Transaction transaction, UpdateMethod updateMethod){
+-        Log.d(LOG_TAG, "Replacing transaction in db");
++        Log.d(LOG_TAG, "Adding transaction to the db via " + updateMethod.name());
+         mDb.beginTransaction();
+         try {
+-            Split imbalanceSplit = transaction.getAutoBalanceSplit();
++            Split imbalanceSplit = transaction.createAutoBalanceSplit();
+             if (imbalanceSplit != null){
+                 String imbalanceAccountUID = AccountsDbAdapter.getInstance().getOrCreateImbalanceAccountUID(transaction.getCurrency());
+                 imbalanceSplit.setAccountUID(imbalanceAccountUID);
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index a358561f..4a610ea6 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -688,7 +688,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_TRANSACTION:
+                 mTransaction.setTemplate(mInTemplates);
+-                Split imbSplit = mTransaction.getAutoBalanceSplit();
++                Split imbSplit = mTransaction.createAutoBalanceSplit();
+                 if (imbSplit != null) {
+                     mAutoBalanceSplits.add(imbSplit);
+                 }
+@@ -899,7 +899,7 @@ public void endDocument() throws SAXException {
+ 
+         // Set the account for created balancing splits to correct imbalance accounts
+         for (Split split: mAutoBalanceSplits) {
+-            // XXX: yes, getAccountUID() returns a currency code in this case (see Transaction.getAutoBalanceSplit())
++            // XXX: yes, getAccountUID() returns a currency code in this case (see Transaction.createAutoBalanceSplit())
+             String currencyCode = split.getAccountUID();
+             Account imbAccount = mapImbalanceAccount.get(currencyCode);
+             if (imbAccount == null) {
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index e3ee904b..2f661676 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -171,19 +171,18 @@ private void initDefaults(){
+ 	}
+ 
+     /**
+-     * Creates a split which will balance the transaction
+-     * <p><b>Note:</b>If a transaction has splits with different currencies, not auto-balancing will be performed.</p>
++     * Creates a split which will balance the transaction, in value.
++     * <p><b>Note:</b>If a transaction has splits with different currencies, no auto-balancing will be performed.</p>
+      *
+      * <p>The added split will not use any account in db, but will use currency code as account UID.
+      * The added split will be returned, to be filled with proper account UID later.</p>
+      * @return Split whose amount is the imbalance of this transaction
+      */
+-    public Split getAutoBalanceSplit(){
+-        Money imbalance = getImbalance();
++    public Split createAutoBalanceSplit(){
++        Money imbalance = getImbalance(); //returns imbalance of 0 for multicurrency transactions
+         if (!imbalance.isAmountZero()){
+-            Currency currency = Currency.getInstance(mCurrencyCode);
+-            Split split = new Split(imbalance.negate(),
+-                    currency.getCurrencyCode());
++            Split split = new Split(imbalance.negate(), mCurrencyCode); //yes, this is on purpose
++            //the account UID is set to the currency. This should be overridden before saving to db
+             addSplit(split);
+             return split;
+         }
+@@ -250,13 +249,13 @@ public Money getBalance(String accountUID){
+     /**
+      * Computes the imbalance amount for the given transaction.
+      * In double entry, all transactions should resolve to zero. But imbalance occurs when there are unresolved splits.
+-     * <p>If it is a multi-currency transaction, an imbalance of zero will be returned</p>
++     * <p><b>Note:</b> If this is a multi-currency transaction, an imbalance of zero will be returned</p>
+      * @return Money imbalance of the transaction or zero if it is a multi-currency transaction
+      */
+     public Money getImbalance(){
+         Money imbalance = Money.createZeroInstance(mCurrencyCode);
+         for (Split split : mSplitList) {
+-            if (!split.getValue().getCurrency().getCurrencyCode().equals(mCurrencyCode)) {
++            if (!split.getQuantity().getCurrency().getCurrencyCode().equals(mCurrencyCode)) {
+                 // this may happen when importing XML exported from GNCA before 2.0.0
+                 // these transactions should only be imported from XML exported from GNC desktop
+                 // so imbalance split should not be generated for them
+
+From 6ee97a12912175030d45c5d8822c11e9e1bcfa76 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 4 Aug 2016 08:36:32 +0200
+Subject: [PATCH 2/5] Add equals() and hashcode() methods for Splits
+
+Add test for simple adding of multicurrency transactions
+---
+ .../android/test/ui/TransactionsActivityTest.java  | 57 +++++++++++++++++++++-
+ .../main/java/org/gnucash/android/model/Split.java | 31 ++++++++++++
+ 2 files changed, 87 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 1694ae59..5b4fe1d4 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -276,6 +276,56 @@ public void testAddTransaction(){
+     }
+ 
+ 	@Test
++	public void testAddMultiCurrencyTransaction(){
++		Commodity euro = Commodity.getInstance("EUR");
++		Account euroAccount = new Account("Euro Konto", euro);
++		mAccountsDbAdapter.addRecord(euroAccount);
++
++		int transactionCount = mTransactionsDbAdapter.getTransactionsCount(TRANSACTIONS_ACCOUNT_UID);
++		setDoubleEntryEnabled(true);
++		setDefaultTransactionType(TransactionType.DEBIT);
++		validateTransactionListDisplayed();
++
++		onView(withId(R.id.fab_create_transaction)).perform(click());
++
++		String transactionName = "Multicurrency lunch";
++		onView(withId(R.id.input_transaction_name)).perform(typeText(transactionName));
++		onView(withId(R.id.input_transaction_amount)).perform(typeText("10"));
++		Espresso.pressBack(); //close calculator keyboard
++
++		onView(withId(R.id.input_transfer_account_spinner)).perform(click());
++		onView(withText(euroAccount.getFullName())).check(matches(isDisplayed())).perform(click());
++
++		onView(withId(R.id.menu_save)).perform(click());
++
++		onView(withText(R.string.msg_provide_exchange_rate)).check(matches(isDisplayed()));
++		onView(withId(R.id.radio_converted_amount)).perform(click());
++		onView(withId(R.id.input_converted_amount)).perform(typeText("5"));
++		Espresso.closeSoftKeyboard();
++		onView(withId(R.id.btn_save)).perform(click());
++
++		onView(withId(R.id.menu_save)).perform(click());
++
++		List<Transaction> allTransactions = mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID);
++		assertThat(allTransactions).hasSize(transactionCount+1);
++		Transaction multiTrans = allTransactions.get(0);
++
++		assertThat(multiTrans.getSplits()).extracting("mAccountUID")
++				.contains(TRANSACTIONS_ACCOUNT_UID)
++				.contains(euroAccount.getUID());
++
++		Split euroSplit = multiTrans.getSplits(euroAccount.getUID()).get(0);
++		Money expectedQty = new Money("5", euro.getCurrencyCode());
++		Money expectedValue = new Money(BigDecimal.TEN, COMMODITY);
++		assertThat(euroSplit.getQuantity()).isEqualTo(expectedQty);
++		assertThat(euroSplit.getValue()).isEqualTo(expectedValue);
++
++		Split usdSplit = multiTrans.getSplits(TRANSACTIONS_ACCOUNT_UID).get(0);
++		assertThat(usdSplit.getQuantity()).isEqualTo(expectedValue);
++		assertThat(usdSplit.getValue()).isEqualTo(expectedValue);
++	}
++
++	@Test
+ 	public void testEditTransaction(){
+ 		validateTransactionListDisplayed();
+ 
+@@ -283,8 +333,13 @@ public void testEditTransaction(){
+ 		
+ 		validateEditTransactionFields(mTransaction);
+ 
+-		onView(withId(R.id.input_transaction_name)).perform(clearText(), typeText("Pasta"));
++		String trnName = "Pasta";
++		onView(withId(R.id.input_transaction_name)).perform(clearText(), typeText(trnName));
+ 		onView(withId(R.id.menu_save)).perform(click());
++
++		Transaction editedTransaction = mTransactionsDbAdapter.getRecord(mTransaction.getUID());
++		assertThat(editedTransaction.getDescription()).isEqualTo(trnName);
++		assertThat(editedTransaction.getSplits()).isEqualTo(mTransaction.getSplits());
+ 	}
+ 
+ 	/**
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 94eaf370..09292110 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -441,4 +441,35 @@ public static Split parseSplit(String splitCsvString) {
+             return split;
+         }
+     }
++
++    @Override
++    public boolean equals(Object o) {
++        if (this == o) return true;
++        if (o == null || getClass() != o.getClass()) return false;
++        if (!super.equals(o)) return false;
++
++        Split split = (Split) o;
++
++        if (mReconcileState != split.mReconcileState) return false;
++        if (!mValue.equals(split.mValue)) return false;
++        if (!mQuantity.equals(split.mQuantity)) return false;
++        if (!mTransactionUID.equals(split.mTransactionUID)) return false;
++        if (!mAccountUID.equals(split.mAccountUID)) return false;
++        if (mSplitType != split.mSplitType) return false;
++        return mMemo != null ? mMemo.equals(split.mMemo) : split.mMemo == null;
++
++    }
++
++    @Override
++    public int hashCode() {
++        int result = super.hashCode();
++        result = 31 * result + mValue.hashCode();
++        result = 31 * result + mQuantity.hashCode();
++        result = 31 * result + mTransactionUID.hashCode();
++        result = 31 * result + mAccountUID.hashCode();
++        result = 31 * result + mSplitType.hashCode();
++        result = 31 * result + (mMemo != null ? mMemo.hashCode() : 0);
++        result = 31 * result + (int) mReconcileState;
++        return result;
++    }
+ }
+
+From 96a204564147d54ca0b2ec8b393fb5c3aa33c5d1 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 4 Aug 2016 21:54:26 +0200
+Subject: [PATCH 3/5] Fix issue where editing the transfer account of a
+ transaction could cause inconsistency in the split value and quantity
+
+Splits now implement Parcelable - easing passing of data between TransactionForm and SplitEditor
+Update the transaction UID of all splits whenever the UID of a transaction is set
+Add tests for multi-currency transaction creation and editing
+
+- fixes #506
+- closes #524
+---
+ .../android/test/ui/TransactionsActivityTest.java  |  45 +++-
+ .../android/db/adapter/PricesDbAdapter.java        |  10 +-
+ .../main/java/org/gnucash/android/model/Split.java | 110 ++++++++-
+ .../org/gnucash/android/model/Transaction.java     |  13 ++
+ .../org/gnucash/android/ui/common/UxArgument.java  |   6 -
+ .../ui/transaction/SplitEditorFragment.java        |  25 +-
+ .../ui/transaction/TransactionFormFragment.java    | 257 ++++++++++++---------
+ .../android/ui/util/widget/CalculatorEditText.java |   4 +-
+ .../gnucash/android/test/unit/model/SplitTest.java |   1 +
+ .../android/test/unit/model/TransactionTest.java   |  24 ++
+ 10 files changed, 343 insertions(+), 152 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 5b4fe1d4..27ccf936 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -191,10 +191,13 @@ public void testAddTransactionShouldRequireAmount(){
+ 				.check(matches(isDisplayed()))
+ 				.perform(typeText("Lunch"));
+ 
+-		onView(withId(R.id.menu_save)).perform(click());
++		Espresso.closeSoftKeyboard();
++
++		onView(withId(R.id.menu_save))
++				.check(matches(isDisplayed()))
++				.perform(click());
+ 		onView(withText(R.string.title_add_transaction)).check(matches(isDisplayed()));
+ 
+-		Espresso.closeSoftKeyboard();
+ 		sleep(1000);
+ 
+ 		assertToastDisplayed(R.string.toast_transanction_amount_required);
+@@ -294,7 +297,9 @@ public void testAddMultiCurrencyTransaction(){
+ 		Espresso.pressBack(); //close calculator keyboard
+ 
+ 		onView(withId(R.id.input_transfer_account_spinner)).perform(click());
+-		onView(withText(euroAccount.getFullName())).check(matches(isDisplayed())).perform(click());
++		onView(withText(euroAccount.getFullName()))
++				.check(matches(isDisplayed()))
++				.perform(click());
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+ 
+@@ -309,7 +314,7 @@ public void testAddMultiCurrencyTransaction(){
+ 		List<Transaction> allTransactions = mTransactionsDbAdapter.getAllTransactionsForAccount(TRANSACTIONS_ACCOUNT_UID);
+ 		assertThat(allTransactions).hasSize(transactionCount+1);
+ 		Transaction multiTrans = allTransactions.get(0);
+-
++		assertThat(multiTrans.getSplits()).hasSize(2);
+ 		assertThat(multiTrans.getSplits()).extracting("mAccountUID")
+ 				.contains(TRANSACTIONS_ACCOUNT_UID)
+ 				.contains(euroAccount.getUID());
+@@ -339,7 +344,15 @@ public void testEditTransaction(){
+ 
+ 		Transaction editedTransaction = mTransactionsDbAdapter.getRecord(mTransaction.getUID());
+ 		assertThat(editedTransaction.getDescription()).isEqualTo(trnName);
+-		assertThat(editedTransaction.getSplits()).isEqualTo(mTransaction.getSplits());
++		assertThat(editedTransaction.getSplits()).hasSize(2);
++
++		Split split = mTransaction.getSplits(TRANSACTIONS_ACCOUNT_UID).get(0);
++		Split editedSplit = editedTransaction.getSplits(TRANSACTIONS_ACCOUNT_UID).get(0);
++		assertThat(split.isEquivalentTo(editedSplit)).isTrue();
++
++		split = mTransaction.getSplits(TRANSFER_ACCOUNT_UID).get(0);
++		editedSplit = editedTransaction.getSplits(TRANSFER_ACCOUNT_UID).get(0);
++		assertThat(split.isEquivalentTo(editedSplit)).isTrue();
+ 	}
+ 
+ 	/**
+@@ -403,8 +416,7 @@ public void testSplitEditor(){
+ 
+ 		onView(withId(R.id.split_list_layout)).check(matches(allOf(isDisplayed(), hasDescendant(withId(R.id.input_split_amount)))));
+ 
+-		onView(withId(R.id.menu_add_split)).perform(click());
+-
++		onView(allOf(withId(R.id.input_split_amount), withText("-499"))).perform(clearText());
+ 		onView(allOf(withId(R.id.input_split_amount), withText(""))).perform(typeText("400"));
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+@@ -798,9 +810,9 @@ public void editingTransferAccount_shouldKeepSplitAmountsConsistent() {
+ 		String trnDescription = "Multicurrency Test Trn";
+ 		Transaction multiTransaction = new Transaction(trnDescription);
+ 		Split split1 = new Split(expectedValue, TRANSACTIONS_ACCOUNT_UID);
+-		split1.setType(TransactionType.DEBIT);
++		split1.setType(TransactionType.CREDIT);
+ 		Split split2 = new Split(expectedValue, expectedQty, euroAccount.getUID());
+-		split2.setType(TransactionType.CREDIT);
++		split2.setType(TransactionType.DEBIT);
+ 		multiTransaction.addSplit(split1);
+ 		multiTransaction.addSplit(split2);
+ 		multiTransaction.setCommodity(COMMODITY);
+@@ -811,6 +823,10 @@ public void editingTransferAccount_shouldKeepSplitAmountsConsistent() {
+ 		assertThat(savedTransaction.getSplits()).extracting("mQuantity").contains(expectedQty);
+ 		assertThat(savedTransaction.getSplits()).extracting("mValue").contains(expectedValue);
+ 
++		assertThat(savedTransaction.getSplits(TRANSACTIONS_ACCOUNT_UID).get(0)
++				.isEquivalentTo(multiTransaction.getSplits(TRANSACTIONS_ACCOUNT_UID).get(0)))
++				.isTrue();
++
+ 		refreshTransactionsList();
+ 
+ 		//open transaction for editing
+@@ -832,10 +848,17 @@ public void editingTransferAccount_shouldKeepSplitAmountsConsistent() {
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+ 
++		Transaction editedTransaction = mTransactionsDbAdapter.getRecord(multiTransaction.getUID());
++		assertThat(editedTransaction.getSplits(TRANSACTIONS_ACCOUNT_UID).get(0)
++				.isEquivalentTo(savedTransaction.getSplits(TRANSACTIONS_ACCOUNT_UID).get(0)))
++				.isTrue();
++
++		Money firstAcctBalance = mAccountsDbAdapter.getAccountBalance(TRANSACTIONS_ACCOUNT_UID);
++		assertThat(firstAcctBalance).isEqualTo(editedTransaction.getBalance(TRANSACTIONS_ACCOUNT_UID));
++
+ 		Money transferBalance = mAccountsDbAdapter.getAccountBalance(TRANSFER_ACCOUNT_UID);
+-		assertThat(transferBalance).isEqualTo(expectedValue);
++		assertThat(transferBalance).isEqualTo(editedTransaction.getBalance(TRANSFER_ACCOUNT_UID));
+ 
+-		Transaction editedTransaction = mTransactionsDbAdapter.getRecord(multiTransaction.getUID());
+ 		assertThat(editedTransaction.getBalance(TRANSFER_ACCOUNT_UID)).isEqualTo(expectedValue);
+ 
+ 		Split transferAcctSplit = editedTransaction.getSplits(TRANSFER_ACCOUNT_UID).get(0);
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/PricesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/PricesDbAdapter.java
+index 3a391619..5f89148e 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/PricesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/PricesDbAdapter.java
+@@ -77,10 +77,14 @@ public Price buildModelInstance(@NonNull final Cursor cursor) {
+     }
+ 
+     /**
+-     * get the price for commodity / currency pair
++     * Get the price for commodity / currency pair.
++     * The price can be used to convert from one commodity to another. The 'commodity' is the origin and the 'currency' is the target for the conversion.
+      *
+-     * Pair is used instead of Price because we must sometimes invert the commodity/currency in DB,
+-     * rendering the Price UID invalid.
++     * <p>Pair is used instead of Price object because we must sometimes invert the commodity/currency in DB,
++     * rendering the Price UID invalid.</p>
++     *
++     * @param commodityUID GUID of the commodity which is starting point for conversion
++     * @param currencyUID GUID of target commodity for the conversion
+      *
+      * @return The numerator/denominator pair for commodity / currency pair
+      */
+diff --git a/app/src/main/java/org/gnucash/android/model/Split.java b/app/src/main/java/org/gnucash/android/model/Split.java
+index 09292110..a3101e47 100644
+--- a/app/src/main/java/org/gnucash/android/model/Split.java
++++ b/app/src/main/java/org/gnucash/android/model/Split.java
+@@ -1,6 +1,8 @@
+ package org.gnucash.android.model;
+ 
+ 
++import android.os.Parcel;
++import android.os.Parcelable;
+ import android.support.annotation.NonNull;
+ 
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+@@ -17,7 +19,7 @@
+  *
+  * @author Ngewi Fet <ngewif@gmail.com>
+  */
+-public class Split extends BaseModel{
++public class Split extends BaseModel implements Parcelable{
+ 
+     /**
+      * Flag indicating that the split has been reconciled
+@@ -89,12 +91,13 @@ public Split(@NonNull Money value, @NonNull Money quantity, String accountUID){
+ 
+     /**
+      * Initialize split with a value amount and account
+-     * @param amount Money value amount of this split. Value is always in the currency the owning transaction
+-     * @param accountUID String UID of transfer account
++     * @param amount Money value amount of this split. Value is always in the currency the owning transaction.
++     *               This amount will be assigned as both the value and the quantity of this split
++     * @param accountUID String UID of owning account
+      */
+     public Split(@NonNull Money amount, String accountUID){
+-        setQuantity(amount);
+         setValue(amount);
++        setQuantity(new Money(amount));
+         setAccountUID(accountUID);
+         //NOTE: This is a rather simplististic approach to the split type.
+         //It typically also depends on the account type of the account. But we do not want to access
+@@ -442,6 +445,34 @@ public static Split parseSplit(String splitCsvString) {
+         }
+     }
+ 
++    /**
++     * Two splits are considered equivalent if all the fields (excluding GUID and timestamps - created, modified, reconciled) are equal.
++     * Any two splits which are equal are also equivalent, but the reverse is not true
++     * <p>The difference with to {@link #equals(Object)} is that the GUID of the split is not considered.
++     * This is useful in cases where a new split is generated for a transaction with the same properties,
++     * but a new GUID is generated e.g. when editing a transaction and modifying the splits</p>
++     *
++     * @param split Other split for which to test equivalence
++     * @return {@code true} if both splits are equivalent, {@code false} otherwise
++     */
++    public boolean isEquivalentTo(Split split){
++        if (this == split) return true;
++        if (super.equals(split)) return true;
++
++        if (mReconcileState != split.mReconcileState) return false;
++        if (!mValue.equals(split.mValue)) return false;
++        if (!mQuantity.equals(split.mQuantity)) return false;
++        if (!mTransactionUID.equals(split.mTransactionUID)) return false;
++        if (!mAccountUID.equals(split.mAccountUID)) return false;
++        if (mSplitType != split.mSplitType) return false;
++        return mMemo != null ? mMemo.equals(split.mMemo) : split.mMemo == null;
++    }
++
++    /**
++     * Two splits are considered equal if all their properties excluding timestampes (created, modified, reconciled) are equal.
++     * @param o Other split to compare for equality
++     * @return {@code true} if this split is equal to {@code o}, {@code false} otherwise
++     */
+     @Override
+     public boolean equals(Object o) {
+         if (this == o) return true;
+@@ -457,7 +488,6 @@ public boolean equals(Object o) {
+         if (!mAccountUID.equals(split.mAccountUID)) return false;
+         if (mSplitType != split.mSplitType) return false;
+         return mMemo != null ? mMemo.equals(split.mMemo) : split.mMemo == null;
+-
+     }
+ 
+     @Override
+@@ -472,4 +502,74 @@ public int hashCode() {
+         result = 31 * result + (int) mReconcileState;
+         return result;
+     }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(Parcel dest, int flags) {
++        dest.writeString(getUID());
++        dest.writeString(mAccountUID);
++        dest.writeString(mTransactionUID);
++        dest.writeString(mSplitType.name());
++
++        dest.writeLong(mValue.getNumerator());
++        dest.writeLong(mValue.getDenominator());
++        dest.writeString(mValue.getCommodity().getCurrencyCode());
++
++        dest.writeLong(mQuantity.getNumerator());
++        dest.writeLong(mQuantity.getDenominator());
++        dest.writeString(mQuantity.getCommodity().getCurrencyCode());
++
++        dest.writeString(mMemo == null ? "" : mMemo);
++        dest.writeString(String.valueOf(mReconcileState));
++        dest.writeString(mReconcileDate.toString());
++    }
++
++    /**
++     * Constructor for creating a Split object from a Parcel
++     * @param source Source parcel containing the split
++     * @see #CREATOR
++     */
++    private Split(Parcel source){
++        setUID(source.readString());
++        mAccountUID = source.readString();
++        mTransactionUID = source.readString();
++        mSplitType = TransactionType.valueOf(source.readString());
++
++        long valueNum = source.readLong();
++        long valueDenom = source.readLong();
++        String valueCurrency = source.readString();
++        mValue = new Money(valueNum, valueDenom, valueCurrency);
++
++        long qtyNum = source.readLong();
++        long qtyDenom = source.readLong();
++        String qtyCurrency = source.readString();
++        mQuantity = new Money(qtyNum, qtyDenom, qtyCurrency);
++
++        String memo = source.readString();
++        mMemo = memo.isEmpty() ? null : memo;
++        mReconcileState = source.readString().charAt(0);
++        mReconcileDate = Timestamp.valueOf(source.readString());
++    }
++
++    /**
++     * Creates new Parcels containing the information in this split during serialization
++     */
++    public static final Parcelable.Creator<Split> CREATOR
++            = new Parcelable.Creator<Split>() {
++
++        @Override
++        public Split createFromParcel(Parcel source) {
++            return new Split(source);
++        }
++
++        @Override
++        public Split[] newArray(int size) {
++            return new Split[size];
++        }
++    };
++
+ }
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index 2f661676..7ff34aa6 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -190,6 +190,19 @@ public Split createAutoBalanceSplit(){
+     }
+ 
+     /**
++     * Set the GUID of the transaction
++     * If the transaction has Splits, their transactionGUID will be updated as well
++     * @param uid String unique ID
++     */
++    @Override
++    public void setUID(String uid) {
++        super.setUID(uid);
++        for (Split split : mSplitList) {
++            split.setTransactionUID(uid);
++        }
++    }
++
++    /**
+      * Returns list of splits for this transaction
+      * @return {@link java.util.List} of splits in the transaction
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java b/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
+index 7566ba15..b2077c62 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/UxArgument.java
+@@ -102,12 +102,6 @@
+      */
+     public static final String BUDGET_AMOUNT_LIST = "budget_amount_list";
+ 
+-    /**
+-     * GUID of splits which have been removed from the split editor
+-     */
+-    public static String REMOVED_SPLITS = "removed_split_guids";
+-
+-
+     //prevent initialization of instances of this class
+     private UxArgument(){
+         //prevent even the native class from calling the ctor
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+index 505bda04..210a3408 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/SplitEditorFragment.java
+@@ -92,8 +92,6 @@
+ 
+     private BigDecimal mBaseAmount = BigDecimal.ZERO;
+ 
+-    private ArrayList<String> mRemovedSplitUIDs = new ArrayList<>();
+-
+     CalculatorKeyboard mCalculatorKeyboard;
+ 
+     BalanceTextWatcher mImbalanceWatcher = new BalanceTextWatcher();
+@@ -131,13 +129,9 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 
+         //we are editing splits for a new transaction.
+         // But the user may have already created some splits before. Let's check
+-        List<String> splitStrings = getArguments().getStringArrayList(UxArgument.SPLIT_LIST);
+-        List<Split> splitList = new ArrayList<>();
+-        if (splitStrings != null) {
+-            for (String splitString : splitStrings) {
+-                splitList.add(Split.parseSplit(splitString));
+-            }
+-        }
++
++        List<Split> splitList = getArguments().getParcelableArrayList(UxArgument.SPLIT_LIST);
++        assert splitList != null;
+ 
+         initArgs();
+         if (!splitList.isEmpty()) {
+@@ -264,7 +258,6 @@ private void setListeners(Split split){
+             removeSplitButton.setOnClickListener(new View.OnClickListener() {
+                 @Override
+                 public void onClick(View view) {
+-                    mRemovedSplitUIDs.add(splitUidTextView.getText().toString());
+                     mSplitsLinearLayout.removeView(splitView);
+                     mSplitItemViewList.remove(splitView);
+                     mImbalanceWatcher.afterTextChanged(null);
+@@ -377,14 +370,8 @@ private void saveSplits() {
+             return;
+         }
+ 
+-        List<Split> splitList = extractSplitsFromView();
+-        ArrayList<String> splitStrings = new ArrayList<>();
+-        for (Split split : splitList) {
+-            splitStrings.add(split.toCsv());
+-        }
+         Intent data = new Intent();
+-        data.putStringArrayListExtra(UxArgument.SPLIT_LIST, splitStrings);
+-        data.putStringArrayListExtra(UxArgument.REMOVED_SPLITS, mRemovedSplitUIDs);
++        data.putParcelableArrayListExtra(UxArgument.SPLIT_LIST, extractSplitsFromView());
+         getActivity().setResult(Activity.RESULT_OK, data);
+ 
+         getActivity().finish();
+@@ -394,8 +381,8 @@ private void saveSplits() {
+      * Extracts the input from the views and builds {@link org.gnucash.android.model.Split}s to correspond to the input.
+      * @return List of {@link org.gnucash.android.model.Split}s represented in the view
+      */
+-    private List<Split> extractSplitsFromView(){
+-        List<Split> splitList = new ArrayList<>();
++    private ArrayList<Split> extractSplitsFromView(){
++        ArrayList<Split> splitList = new ArrayList<>();
+         for (View splitView : mSplitItemViewList) {
+             SplitViewHolder viewHolder = (SplitViewHolder) splitView.getTag();
+             if (viewHolder.splitAmountEditText.getValue() == null)
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 064348db..126bf5f1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -24,12 +24,15 @@
+ import android.database.Cursor;
+ import android.inputmethodservice.KeyboardView;
+ import android.os.Bundle;
++import android.os.Parcelable;
++import android.support.annotation.NonNull;
+ import android.support.v4.app.Fragment;
+ import android.support.v4.widget.SimpleCursorAdapter;
+ import android.support.v7.app.ActionBar;
+ import android.support.v7.app.AppCompatActivity;
+ import android.text.format.DateUtils;
+ import android.util.Log;
++import android.util.Pair;
+ import android.view.LayoutInflater;
+ import android.view.Menu;
+ import android.view.MenuInflater;
+@@ -60,11 +63,13 @@
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.DatabaseAdapter;
++import org.gnucash.android.db.adapter.PricesDbAdapter;
+ import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
++import org.gnucash.android.model.Price;
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Split;
+@@ -610,13 +615,8 @@ private void openSplitEditor(){
+         intent.putExtra(UxArgument.FORM_TYPE, FormActivity.FormType.SPLIT_EDITOR.name());
+         intent.putExtra(UxArgument.SELECTED_ACCOUNT_UID, mAccountUID);
+         intent.putExtra(UxArgument.AMOUNT_STRING, baseAmountString);
+-        if (mSplitsList != null) {
+-            ArrayList<String> splitStrings = new ArrayList<>();
+-            for (Split split : mSplitsList) {
+-                splitStrings.add(split.toCsv());
+-            }
+-            intent.putStringArrayListExtra(UxArgument.SPLIT_LIST, splitStrings);
+-        }
++        intent.putParcelableArrayListExtra(UxArgument.SPLIT_LIST, (ArrayList<Split>) extractSplitsFromView());
++
+         startActivityForResult(intent, REQUEST_SPLIT_EDITOR);
+     }
+ 
+@@ -685,110 +685,149 @@ private void setSelectedTransferAccount(long accountId){
+             mTransferAccountSpinner.setSelection(position);
+ 	}
+ 
++    /**
++     * Returns a list of splits based on the input in the transaction form.
++     * This only gets the splits from the simple view, and not those from the Split Editor.
++     * If the Split Editor has been used and there is more than one split, then it returns {@link #mSplitsList}
++     * @return List of splits in the view or {@link #mSplitsList} is there are more than 2 splits in the transaction
++     */
++    private List<Split> extractSplitsFromView(){
++        if (mTransactionTypeSwitch.getVisibility() != View.VISIBLE){
++            return mSplitsList;
++        }
++
++        BigDecimal amountBigd = mAmountEditText.getValue();
++        String baseCurrencyCode = mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID);
++        Money value 	= new Money(amountBigd, Commodity.getInstance(baseCurrencyCode)).abs();
++        Money quantity = new Money(value);
++
++        String transferAcctUID = getTransferAccountUID();
++        CommoditiesDbAdapter cmdtyDbAdapter = CommoditiesDbAdapter.getInstance();
++
++        if (isMultiCurrencyTransaction()){ //if multi-currency transaction
++            String transferCurrencyCode = mAccountsDbAdapter.getCurrencyCode(transferAcctUID);
++            String commodityUID = cmdtyDbAdapter.getCommodityUID(baseCurrencyCode);
++            String targetCmdtyUID = cmdtyDbAdapter.getCommodityUID(transferCurrencyCode);
++            
++            Pair<Long, Long> pricePair = PricesDbAdapter.getInstance()
++                    .getPrice(commodityUID, targetCmdtyUID);
++
++            if (pricePair.first > 0 && pricePair.second > 0) {
++                quantity = quantity.multiply(pricePair.first.intValue())
++                        .divide(pricePair.second.intValue())
++                        .withCurrency(cmdtyDbAdapter.getRecord(targetCmdtyUID));
++            }
++        }
++
++        Split split1 = new Split(value, mAccountUID);
++        split1.setType(mTransactionTypeSwitch.getTransactionType());
++        Split split2 = new Split(value, quantity, transferAcctUID);
++        split2.setType(mTransactionTypeSwitch.getTransactionType().invert());
++
++        List<Split> splitList = new ArrayList<>();
++        splitList.add(split1);
++        splitList.add(split2);
++
++        return splitList;
++    }
++
++    /**
++     * Returns the GUID of the currently selected transfer account.
++     * If double-entry is disabled, this method returns the GUID of the imbalance account for the currently active account
++     * @return GUID of transfer account
++     */
++    private @NonNull String getTransferAccountUID() {
++        String transferAcctUID;
++        if (mUseDoubleEntry) {
++            long transferAcctId = mTransferAccountSpinner.getSelectedItemId();
++            transferAcctUID = mAccountsDbAdapter.getUID(transferAcctId);
++        } else {
++            String baseCurrencyCode = mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID);
++            transferAcctUID = mAccountsDbAdapter.getOrCreateImbalanceAccountUID(Currency.getInstance(baseCurrencyCode));
++        }
++        return transferAcctUID;
++    }
++
++    /**
++     * Extracts a transaction from the input in the form fragment
++     * @return New transaction object containing all info in the form
++     */
++    private @NonNull Transaction extractTransactionFromView(){
++        Calendar cal = new GregorianCalendar(
++                mDate.get(Calendar.YEAR),
++                mDate.get(Calendar.MONTH),
++                mDate.get(Calendar.DAY_OF_MONTH),
++                mTime.get(Calendar.HOUR_OF_DAY),
++                mTime.get(Calendar.MINUTE),
++                mTime.get(Calendar.SECOND));
++        String description = mDescriptionEditText.getText().toString();
++        String notes = mNotesEditText.getText().toString();
++        String currencyCode = mAccountsDbAdapter.getAccountCurrencyCode(mAccountUID);
++        Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(currencyCode);
++
++        List<Split> splits = extractSplitsFromView();
++
++        Transaction transaction = new Transaction(description);
++        transaction.setTime(cal.getTimeInMillis());
++        transaction.setCommodity(commodity);
++        transaction.setCurrencyCode(currencyCode);
++        transaction.setNote(notes);
++        transaction.setSplits(splits);
++        transaction.setExported(false); //not necessary as exports use timestamps now. Because, legacy
++
++        return transaction;
++    }
++
++    /**
++     * Checks whether the split editor has been used for editing this transaction.
++     * <p>The Split Editor is considered to have been used if the transaction type switch is not visible</p>
++     * @return {@code true} if split editor was used, {@code false} otherwise
++     */
++    private boolean splitEditorUsed(){
++        return mTransactionTypeSwitch.getVisibility() != View.VISIBLE;
++    }
++
++    /**
++     * Checks if this is a multi-currency transaction being created/edited
++     * <p>A multi-currency transaction is one in which the main account and transfer account have different currencies. <br>
++     *     Single-entry transactions cannot be multi-currency</p>
++     * @return {@code true} if multi-currency transaction, {@code false} otherwise
++     */
++    private boolean isMultiCurrencyTransaction(){
++        if (!mUseDoubleEntry)
++            return false;
++
++        String transferAcctUID = mAccountsDbAdapter.getUID(mTransferAccountSpinner.getSelectedItemId());
++        String currencyCode = mAccountsDbAdapter.getAccountCurrencyCode(mAccountUID);
++        String transferCurrencyCode = mAccountsDbAdapter.getCurrencyCode(transferAcctUID);
++
++        return !currencyCode.equals(transferCurrencyCode);
++    }
++
+ 	/**
+ 	 * Collects information from the fragment views and uses it to create
+ 	 * and save a transaction
+ 	 */
+ 	private void saveNewTransaction() {
+         mAmountEditText.getCalculatorKeyboard().hideCustomKeyboard();
+-		Calendar cal = new GregorianCalendar(
+-				mDate.get(Calendar.YEAR),
+-				mDate.get(Calendar.MONTH),
+-				mDate.get(Calendar.DAY_OF_MONTH),
+-				mTime.get(Calendar.HOUR_OF_DAY),
+-				mTime.get(Calendar.MINUTE),
+-				mTime.get(Calendar.SECOND));
+-		String description = mDescriptionEditText.getText().toString();
+-		String notes = mNotesEditText.getText().toString();
+-		BigDecimal amountBigd = mAmountEditText.getValue();
+-
+-        if (amountBigd == null){ //if for whatever reason we cannot process the amount
+-            Toast.makeText(getActivity(), R.string.toast_transanction_amount_required,
+-                    Toast.LENGTH_SHORT).show();
+-            return;
+-        }
+ 
+-		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getAccountCurrencyCode(mAccountUID));
+-		Money amount 	= new Money(amountBigd, Commodity.getInstance(currency.getCurrencyCode())).abs();
++        //determine whether we need to do currency conversion
+ 
+-        if (mSplitsList.size() == 1){ //means split editor was opened but no split was added
+-            String transferAcctUID;
+-            if (mUseDoubleEntry) {
+-                long transferAcctId = mTransferAccountSpinner.getSelectedItemId();
+-                transferAcctUID = mAccountsDbAdapter.getUID(transferAcctId);
+-            } else {
+-                transferAcctUID = mAccountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
+-            }
+-            mSplitsList.add(mSplitsList.get(0).createPair(transferAcctUID));
++        if (isMultiCurrencyTransaction() && !splitEditorUsed() && !mCurrencyConversionDone){
++            startTransferFunds();
++            return;
+         }
+ 
+-        //capture any edits which were done directly (not using split editor)
+-        if (mSplitsList.size() == 2 && mSplitsList.get(0).isPairOf(mSplitsList.get(1))
+-                //we also check that at least one of the splits belongs to this account, otherwise the account was changed in the splits and the value would be zero
+-                && (mSplitsList.get(0).getAccountUID().equals(mAccountUID) || mSplitsList.get(1).getAccountUID().equals(mAccountUID))) {
+-            //if it is a simple transfer where the editor was not used, then respect the button
+-            for (Split split : mSplitsList) {
+-                if (split.getAccountUID().equals(mAccountUID)){
+-                    split.setType(mTransactionTypeSwitch.getTransactionType());
+-                    split.setValue(amount);
+-                    split.setQuantity(amount);
+-                } else {
+-                    split.setType(mTransactionTypeSwitch.getTransactionType().invert());
+-                    if (mSplitQuantity != null)
+-                        split.setQuantity(mSplitQuantity);
+-                    else
+-                        split.setQuantity(amount);
+-                    split.setValue(amount);
+-                }
+-            }
++        Transaction transaction = extractTransactionFromView();
++        if (mEditMode) { //if editing an existing transaction
++            transaction.setUID(mTransaction.getUID());
++            mTransaction = transaction;
++        } else {
++            mTransaction = transaction;
+         }
+ 
+         mAccountsDbAdapter.beginTransaction();
+         try {
+-            if (mTransaction != null) { //if editing an existing transaction
+-                mTransaction.setSplits(mSplitsList);
+-                mTransaction.setDescription(description);
+-            } else {
+-                mTransaction = new Transaction(description);
+-
+-                //****************** amount entered in the simple interface (not using splits Editor) ************************
+-                if (mSplitsList.isEmpty()) {
+-                    Split split = new Split(amount, mAccountUID);
+-                    split.setType(mTransactionTypeSwitch.getTransactionType());
+-                    mTransaction.addSplit(split);
+-
+-                    String transferAcctUID;
+-                    long transferAcctId = mTransferAccountSpinner.getSelectedItemId();
+-                    if (mUseDoubleEntry && transferAcctId > 0) {
+-                        transferAcctUID = mAccountsDbAdapter.getUID(transferAcctId);
+-                    } else {
+-                        transferAcctUID = mAccountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
+-                    }
+-                    Split pair = split.createPair(transferAcctUID);
+-                    if (mSplitQuantity != null)
+-                        pair.setQuantity(mSplitQuantity);
+-                    else {
+-                        if (!mAccountsDbAdapter.getCurrencyCode(transferAcctUID).equals(currency.getCurrencyCode())){
+-                            startTransferFunds();
+-                            mTransaction = null;
+-                            return;
+-                        }
+-                    }
+-                    mTransaction.addSplit(pair);
+-                } else { //split editor was used to enter splits
+-                    mTransaction.setSplits(mSplitsList);
+-                }
+-            }
+-
+-            String currencyCode = mAccountsDbAdapter.getAccountCurrencyCode(mAccountUID);
+-            mTransaction.setCurrencyCode(currencyCode);
+-            Commodity commodity = CommoditiesDbAdapter.getInstance().getCommodity(currencyCode);
+-            mTransaction.setCommodity(commodity);
+-            mTransaction.setTime(cal.getTimeInMillis());
+-            mTransaction.setNote(notes);
+-
+-            // set as not exported because we have just edited it
+-            mTransaction.setExported(false);
+             // 1) mTransactions may be existing or non-existing
+             // 2) when mTransactions exists in the db, the splits may exist or not exist in the db
+             // So replace is chosen.
+@@ -904,14 +943,14 @@ public boolean onOptionsItemSelected(MenuItem item) {
+      */
+     private boolean canSave(){
+         return (mAmountEditText.isInputValid())
+-                || (mUseDoubleEntry && mTransferAccountSpinner.getCount() > 0);
++                && (mUseDoubleEntry && mTransferAccountSpinner.getCount() > 0);
+     }
+ 
+     /**
+      * Called by the split editor fragment to notify of finished editing
+      * @param splitList List of splits produced in the fragment
+      */
+-    public void setSplitList(List<Split> splitList, List<String> removedSplitUIDs){
++    public void setSplitList(List<Split> splitList){
+         mSplitsList = splitList;
+         Money balance = Transaction.computeBalance(mAccountUID, mSplitsList);
+ 
+@@ -978,8 +1017,14 @@ public static String stripCurrencyFormatting(String s){
+ 		return stripped;
+ 	}
+ 
++    /**
++     * Flag for checking where the TransferFunds dialog has already been displayed to the user
++     */
++    boolean mCurrencyConversionDone = false;
++
+     @Override
+     public void transferComplete(Money amount) {
++        mCurrencyConversionDone = true;
+         mSplitQuantity = amount;
+     }
+ 
+@@ -1005,13 +1050,13 @@ public void onRecurrenceSet(String rrule) {
+     @Override
+     public void onActivityResult(int requestCode, int resultCode, Intent data) {
+         if (resultCode == Activity.RESULT_OK){
+-            List<String> splits = data.getStringArrayListExtra(UxArgument.SPLIT_LIST);
+-            List<Split> splitList = new ArrayList<>();
+-            for (String splitCsv : splits) {
+-                splitList.add(Split.parseSplit(splitCsv));
+-            }
+-            List<String> removedSplits = data.getStringArrayListExtra(UxArgument.REMOVED_SPLITS);
+-            setSplitList(splitList, removedSplits);
++            List<Split> splitList = data.getParcelableArrayListExtra(UxArgument.SPLIT_LIST);
++            setSplitList(splitList);
++
++            //once split editor has been used and saved, only allow editing through it
++            toggleAmountInputEntryMode(false);
++            setDoubleEntryViewsVisibility(View.GONE);
++            mOpenSplitEditor.setVisibility(View.VISIBLE);
+         }
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+index edb49dd8..f3f3b5c6 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/widget/CalculatorEditText.java
+@@ -289,8 +289,8 @@ public String evaluate(){
+      * @return @{code true} if the input is valid, {@code false} otherwise
+      */
+     public boolean isInputValid(){
+-        evaluate();
+-        return getText().length() > 0 && getError() == null;
++        String text = evaluate();
++        return !text.isEmpty() && getError() == null;
+     }
+ 
+     /**
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+index 262c6cda..9c787f33 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/SplitTest.java
+@@ -49,6 +49,7 @@ public void testCloning(){
+ 
+         Split clone2 = new Split(split, true);
+         assertThat(clone2.getUID()).isNotEqualTo(split.getUID());
++        assertThat(split.isEquivalentTo(clone2)).isTrue();
+     }
+ 
+     /**
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+index fa2e9b09..e6b4380b 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+@@ -8,10 +8,14 @@
+ import org.gnucash.android.test.unit.testutil.GnucashTestRunner;
+ import org.gnucash.android.test.unit.testutil.ShadowCrashlytics;
+ import org.gnucash.android.test.unit.testutil.ShadowUserVoice;
++import org.gnucash.android.ui.transaction.SplitEditorFragment;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.robolectric.annotation.Config;
+ 
++import java.util.ArrayList;
++import java.util.List;
++
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
+ @RunWith(GnucashTestRunner.class)
+@@ -52,4 +56,24 @@ public void addingSplitsShouldSetTransactionUID(){
+ 		assertThat(split.getTransactionUID()).isEqualTo(transaction.getUID());
+ 	}
+ 
++	@Test
++	public void settingUID_shouldSetTransactionUidOfSplits(){
++		Transaction t1 = new Transaction("Test");
++		Split split1 = new Split(Money.getZeroInstance(), "random");
++		split1.setTransactionUID("non-existent");
++
++		Split split2 = new Split(Money.getZeroInstance(), "account-something");
++		split2.setTransactionUID("pre-existent");
++
++		List<Split> splits = new ArrayList<>();
++		splits.add(split1);
++		splits.add(split2);
++
++		t1.setSplits(splits);
++
++		assertThat(t1.getSplits()).extracting("mTransactionUID")
++				.contains(t1.getUID())
++				.doesNotContain("random")
++				.doesNotContain("account-something");
++	}
+ }
+
+From 4d33d656c5d984258d9987f2ecc4ae681dad3f4e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 5 Aug 2016 17:12:21 +0200
+Subject: [PATCH 4/5] Re-enable previously deactivated test which edits a
+ transaction away from the account within which it was created
+
+This is done by removing the split from the account. The account balance should become zero
+---
+ .../android/test/ui/TransactionsActivityTest.java  | 29 +++++++++++-----------
+ 1 file changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 27ccf936..e2813839 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -22,6 +22,7 @@
+ import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
+ import android.support.test.espresso.Espresso;
++import android.support.test.espresso.contrib.RecyclerViewActions;
+ import android.support.test.rule.ActivityTestRule;
+ import android.support.test.runner.AndroidJUnit4;
+ 
+@@ -68,6 +69,7 @@
+ import static android.support.test.espresso.assertion.ViewAssertions.matches;
+ import static android.support.test.espresso.matcher.RootMatchers.withDecorView;
+ import static android.support.test.espresso.matcher.ViewMatchers.hasDescendant;
++import static android.support.test.espresso.matcher.ViewMatchers.hasSibling;
+ import static android.support.test.espresso.matcher.ViewMatchers.isChecked;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
+ import static android.support.test.espresso.matcher.ViewMatchers.withId;
+@@ -582,7 +584,11 @@ public void testMoveTransaction(){
+ 
+ 	}
+ 
+-//	@Test //// FIXME: 03.11.2015 fix and re-enable this test
++	/**
++	 * This test edits a transaction from within an account and removes the split belonging to that account.
++	 * The account should then have a balance of 0 and the transaction has "moved" to another account
++	 */
++	@Test
+ 	public void editingSplit_shouldNotSetAmountToZero(){
+ 		setDoubleEntryEnabled(true);
+ 		mTransactionsDbAdapter.deleteAllRecords();
+@@ -597,29 +603,24 @@ public void editingSplit_shouldNotSetAmountToZero(){
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+ 
++		assertThat(mTransactionsDbAdapter.getTransactionsCount(TRANSACTIONS_ACCOUNT_UID)).isEqualTo(1);
++
++		sleep(500);
+ 		onView(withText("Test Split")).perform(click());
+ 		onView(withId(R.id.fab_edit_transaction)).perform(click());
+ 
+ 		onView(withId(R.id.btn_split_editor)).perform(click());
+ 
+-//		onView(withSpinnerText(TRANSACTIONS_ACCOUNT_NAME)).perform(click()); //// FIXME: 03.11.2015 properly select the spinner
+-		onData(withId(R.id.input_accounts_spinner))
+-				.inAdapterView(withId(R.id.split_list_layout))
+-				.atPosition(1)
+-				.perform(click());
+-		onData(allOf(is(instanceOf(String.class)), is(account.getFullName()))).perform(click());
+-//		onView(withText(account.getFullName())).perform(click());
++		onView(withText(TRANSACTIONS_ACCOUNT_NAME)).perform(click());
++		onView(withText(account.getFullName())).perform(click());
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+ 		onView(withId(R.id.menu_save)).perform(click());
+ 
+-		//split should have moved from account, it should now be empty
+-		onView(withId(R.id.empty_view)).check(matches(isDisplayed()));
+-
+-		assertThat(mAccountsDbAdapter.getAccountBalance(TRANSACTIONS_ACCOUNT_UID)).isEqualTo(Money.createZeroInstance(CURRENCY_CODE));
++		assertThat(mTransactionsDbAdapter.getTransactionsCount(TRANSACTIONS_ACCOUNT_UID)).isZero();
+ 
+-		//split
+-		assertThat(mAccountsDbAdapter.getAccountBalance(account.getUID())).isEqualTo(new Money("1024", CURRENCY_CODE));
++		assertThat(mAccountsDbAdapter.getAccountBalance(account.getUID()))
++				.isEqualTo(new Money("1024", CURRENCY_CODE));
+ 	}
+ 
+ 	@Test
+
+From 567b66995d62a78179f8cb663bb3b40f486ff40c Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 6 Aug 2016 00:24:11 +0200
+Subject: [PATCH 5/5] Fix typo in tests
+
+---
+ .../java/org/gnucash/android/test/unit/model/TransactionTest.java     | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+index e6b4380b..1d8b6ca7 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/TransactionTest.java
+@@ -73,7 +73,7 @@ public void settingUID_shouldSetTransactionUidOfSplits(){
+ 
+ 		assertThat(t1.getSplits()).extracting("mTransactionUID")
+ 				.contains(t1.getUID())
+-				.doesNotContain("random")
+-				.doesNotContain("account-something");
++				.doesNotContain("non-existent")
++				.doesNotContain("pre-existent");
+ 	}
+ }

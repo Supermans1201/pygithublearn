@@ -1,0 +1,677 @@
+From 6b3dd40ccfba05655322e194f1d1a9e87d04757e Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Tue, 24 Feb 2015 10:58:26 +0100
+Subject: [PATCH] Added support for hidden accounts and auto-generated
+ imbalance accounts
+
+* Imbalance accounts are created on-the-fly when required. They are only visible to user when double-entry mode is activated.
+* All transactions now always have at least 2 splits. In single-entry mode, the second split will be assigned to an (automatically-generated) imbalance account.
+* GnuCash root account marked as hidden
+* Enabled foreign_key constraints on database open
+* Added ON DELETE CASCADE to foreign key constrain on Account->Split tables
+* Code refactoring
+
+TODO: Database migration
+TODO: Re-assign account splits before delete
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 103 ++++++++++++---------
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  19 ++++
+ .../org/gnucash/android/db/DatabaseHelper.java     |  19 +++-
+ .../org/gnucash/android/db/DatabaseSchema.java     |   1 +
+ .../gnucash/android/db/TransactionsDbAdapter.java  |  13 +--
+ .../gnucash/android/importer/GncXmlHandler.java    |   4 +-
+ .../java/org/gnucash/android/model/Account.java    |  23 +++++
+ .../android/ui/account/AccountsListFragment.java   |   6 +-
+ .../android/ui/settings/SettingsActivity.java      |  26 +++++-
+ .../settings/TransactionsPreferenceFragment.java   |  11 ++-
+ .../ui/transaction/TransactionFormFragment.java    |  35 ++-----
+ 11 files changed, 171 insertions(+), 89 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 9b9c72e7..b62a0a6d 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2012 - 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 - 2015 Ngewi Fet <ngewif@gmail.com>
+  * Copyright (c) 2014 Yongxin Wang <fefe.wyx@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -81,6 +81,7 @@ public long addAccount(Account account){
+ 		contentValues.put(AccountEntry.COLUMN_TYPE,         account.getAccountType().name());
+ 		contentValues.put(AccountEntry.COLUMN_CURRENCY,     account.getCurrency().getCurrencyCode());
+         contentValues.put(AccountEntry.COLUMN_PLACEHOLDER,  account.isPlaceholderAccount() ? 1 : 0);
++        contentValues.put(AccountEntry.COLUMN_HIDDEN,       account.isHidden() ? 1 : 0);
+         if (account.getColorHexCode() != null) {
+             contentValues.put(AccountEntry.COLUMN_COLOR_CODE, account.getColorHexCode());
+         } else {
+@@ -136,8 +137,9 @@ public long bulkAddAccounts(List<Account> accountList){
+                     + AccountEntry.COLUMN_FULL_NAME 	    + " , "
+                     + AccountEntry.COLUMN_PLACEHOLDER       + " , "
+                     + AccountEntry.COLUMN_CREATED_AT        + " , "
++                    + AccountEntry.COLUMN_HIDDEN            + " , "
+                     + AccountEntry.COLUMN_PARENT_ACCOUNT_UID    + " , "
+-                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ?, ? )");
++                    + AccountEntry.COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID   + " ) VALUES ( ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? , ? )");
+             for (Account account:accountList) {
+                 replaceStatement.clearBindings();
+                 replaceStatement.bindString(1, account.getUID());
+@@ -147,15 +149,16 @@ public long bulkAddAccounts(List<Account> accountList){
+                 if (account.getColorHexCode() != null) {
+                     replaceStatement.bindString(5, account.getColorHexCode());
+                 }
+-                replaceStatement.bindLong(6, account.isFavorite() ? 1 : 0);
+-                replaceStatement.bindString(7, account.getFullName());
+-                replaceStatement.bindLong(8, account.isPlaceholderAccount() ? 1 : 0);
+-                replaceStatement.bindString(9, account.getCreatedTimestamp().toString());
++                replaceStatement.bindLong(6,    account.isFavorite() ? 1 : 0);
++                replaceStatement.bindString(7,  account.getFullName());
++                replaceStatement.bindLong(8,    account.isPlaceholderAccount() ? 1 : 0);
++                replaceStatement.bindString(9,  account.getCreatedTimestamp().toString());
++                replaceStatement.bindLong(10, account.isHidden() ? 1 : 0);
+                 if (account.getParentUID() != null) {
+-                    replaceStatement.bindString(10, account.getParentUID());
++                    replaceStatement.bindString(11, account.getParentUID());
+                 }
+                 if (account.getDefaultTransferAccountUID() != null) {
+-                    replaceStatement.bindString(11, account.getDefaultTransferAccountUID());
++                    replaceStatement.bindString(12, account.getDefaultTransferAccountUID());
+                 }
+                 //Log.d(TAG, "Replacing account in db");
+                 replaceStatement.execute();
+@@ -293,7 +296,7 @@ public boolean destructiveDeleteAccount(long rowId){
+                     }
+                 }
+             }
+-            // TODO: with "ON DELETE CASCADE", the first two delete will not be necessary.
++            // TODO: with "ON DELETE CASCADE", re-assign to imbalance accounts before delete.
+             //       deleteRecord(AccountEntry.TABLE_NAME, rowId); will delete related
+             //       transactions and splits
+             //delete splits in this account
+@@ -436,6 +439,7 @@ private Account buildSimpleAccountInstance(Cursor c) {
+         account.setColorCode(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_COLOR_CODE)));
+         account.setFavorite(c.getInt(c.getColumnIndexOrThrow(AccountEntry.COLUMN_FAVORITE)) == 1);
+         account.setFullName(c.getString(c.getColumnIndexOrThrow(AccountEntry.COLUMN_FULL_NAME)));
++        account.setHidden(c.getInt(c.getColumnIndexOrThrow(AccountEntry.COLUMN_HIDDEN)) == 1);
+         return account;
+     }
+ 
+@@ -576,7 +580,7 @@ public String getName(long accountID) {
+      */
+     public List<Account> getSimpleAccountList(){
+         LinkedList<Account> accounts = new LinkedList<Account>();
+-        Cursor c = fetchAccounts(null, null);
++        Cursor c = fetchAccounts(null, null, null);
+ 
+         try {
+             while (c.moveToNext()) {
+@@ -650,6 +654,7 @@ public String getOrCreateImbalanceAccountUID(Currency currency){
+         if (uid == null){
+             Account account = new Account(imbalanceAccountName, currency);
+             account.setAccountType(AccountType.BANK);
++            account.setHidden(!GnuCashApplication.isDoubleEntryEnabled());
+             addAccount(account);
+             uid = account.getUID();
+         }
+@@ -657,6 +662,17 @@ public String getOrCreateImbalanceAccountUID(Currency currency){
+     }
+ 
+     /**
++     * Returns the GUID of the imbalance account for the currency
++     * @param currency Currency for the imbalance account
++     * @return GUID of the account or null if the account doesn't exist yet
++     * @see #getOrCreateImbalanceAccountUID(java.util.Currency)
++     */
++    public String getImbalanceAccountUID(Currency currency){
++        String imbalanceAccountName = getImbalanceAccountName(currency);
++        return findAccountUidByFullName(imbalanceAccountName);
++    }
++
++    /**
+      * Creates the account with the specified name and returns its unique identifier.
+      * <p>If a full hierarchical account name is provided, then the whole hierarchy is created and the
+      * unique ID of the last account (at bottom) of the hierarchy is returned</p>
+@@ -711,7 +727,7 @@ public String getOrCreateOpeningBalanceAccountUID() {
+     /**
+      * Finds an account unique ID by its full name
+      * @param fullName Fully qualified name of the account
+-     * @return String unique ID of the account
++     * @return String unique ID of the account or null if no match is found
+      */
+     public String findAccountUidByFullName(String fullName){
+         Cursor c = mDb.query(AccountEntry.TABLE_NAME, new String[]{AccountEntry.COLUMN_UID},
+@@ -730,13 +746,13 @@ public String findAccountUidByFullName(String fullName){
+ 
+ 	/**
+ 	 * Returns a cursor to all account records in the database.
+-     * GnuCash ROOT accounts are ignored
++     * GnuCash ROOT accounts and hidden accounts will <b>not</b> be included in the result set
+ 	 * @return {@link Cursor} to all account records
+ 	 */
+     @Override
+ 	public Cursor fetchAllRecords(){
+ 		Log.v(TAG, "Fetching all accounts from db");
+-        String selection =  AccountEntry.COLUMN_TYPE + " != ?" ;
++        String selection =  AccountEntry.COLUMN_HIDDEN + " = 0 AND " + AccountEntry.COLUMN_TYPE + " != ?" ;
+         return mDb.query(AccountEntry.TABLE_NAME,
+                 null,
+                 selection,
+@@ -747,12 +763,12 @@ public Cursor fetchAllRecords(){
+ 
+     /**
+      * Returns a cursor to all account records in the database ordered by full name.
+-     * GnuCash ROOT accounts are ignored
++     * GnuCash ROOT accounts and hidden accounts will not be included in the result set.
+      * @return {@link Cursor} to all account records
+      */
+     public Cursor fetchAllRecordsOrderedByFullName(){
+         Log.v(TAG, "Fetching all accounts from db");
+-        String selection =  AccountEntry.COLUMN_TYPE + " != ?" ;
++        String selection =  AccountEntry.COLUMN_HIDDEN + " = 0 AND " + AccountEntry.COLUMN_TYPE + " != ?" ;
+         return mDb.query(AccountEntry.TABLE_NAME,
+                 null,
+                 selection,
+@@ -762,19 +778,6 @@ public Cursor fetchAllRecordsOrderedByFullName(){
+     }
+ 
+     /**
+-	 * Returns a Cursor set of accounts which fulfill <code>where</code>
+-	 * @param where SQL WHERE statement without the 'WHERE' itself
+-     * @param whereArgs where args
+-	 * @return Cursor set of accounts which fulfill <code>where</code>
+-	 */
+-	public Cursor fetchAccounts(String where, String[] whereArgs) {
+-        Log.v(TAG, "Fetching all accounts from db where " + where);
+-        return mDb.query(AccountEntry.TABLE_NAME,
+-                null, where, whereArgs, null, null,
+-                AccountEntry.COLUMN_NAME + " ASC");
+-    }
+-
+-    /**
+      * Returns a Cursor set of accounts which fulfill <code>where</code>
+      * and ordered by <code>orderBy</code>
+      * @param where SQL WHERE statement without the 'WHERE' itself
+@@ -930,9 +933,11 @@ public Money getAccountBalance(String accountUID){
+      */
+     public Cursor fetchSubAccounts(String accountUID) {
+         Log.v(TAG, "Fetching sub accounts for account id " + accountUID);
++        String selection = AccountEntry.COLUMN_HIDDEN + " = 0 AND "
++                + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ?";
+         return mDb.query(AccountEntry.TABLE_NAME,
+                 null,
+-                AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ?",
++                selection,
+                 new String[]{accountUID}, null, null, AccountEntry.COLUMN_NAME + " ASC");
+     }
+ 
+@@ -944,8 +949,9 @@ public Cursor fetchTopLevelAccounts() {
+         //condition which selects accounts with no parent, whose UID is not ROOT and whose name is not ROOT
+         return fetchAccounts("(" + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " IS NULL OR "
+                         + AccountEntry.COLUMN_PARENT_ACCOUNT_UID + " = ?) AND "
++                        + AccountEntry.COLUMN_HIDDEN + " = 0 AND "
+                         + AccountEntry.COLUMN_TYPE + " != ?",
+-                new String[]{"" + getGnuCashRootAccountUID(), AccountType.ROOT.name()});
++                new String[]{"" + getGnuCashRootAccountUID(), AccountType.ROOT.name()}, null);
+     }
+ 
+     /**
+@@ -960,7 +966,7 @@ public Cursor fetchRecentAccounts(int numberOfRecent) {
+                         + " , " + AccountEntry.TABLE_NAME + " ON " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID
+                         + " = " + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID,
+                 new String[]{AccountEntry.TABLE_NAME + ".*"},
+-                null,
++                AccountEntry.COLUMN_HIDDEN + " = 0",
+                 null,
+                 SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_ACCOUNT_UID, //groupby
+                 null, //haveing
+@@ -992,7 +998,7 @@ public Cursor fetchFavoriteAccounts(){
+      */
+     public String getGnuCashRootAccountUID() {
+         Cursor cursor = fetchAccounts(AccountEntry.COLUMN_TYPE + "= ?",
+-                new String[]{AccountType.ROOT.name()});
++                new String[]{AccountType.ROOT.name()}, null);
+         String rootUID = null;
+         try {
+             if (cursor.moveToFirst()) {
+@@ -1154,7 +1160,8 @@ public boolean isPlaceholderAccount(String accountUID) {
+                 new String[]{accountUID}, null, null, null);
+ 
+         try {
+-            return cursor.moveToFirst() && cursor.getInt(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_PLACEHOLDER)) == 1;
++            return cursor.moveToFirst()
++                    && cursor.getInt(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_PLACEHOLDER)) == 1;
+         } finally {
+             cursor.close();
+         }
+@@ -1162,11 +1169,21 @@ public boolean isPlaceholderAccount(String accountUID) {
+ 
+     /**
+      * Convenience method, resolves the account unique ID and calls {@link #isPlaceholderAccount(String)}
+-     * @param accountId Database row ID of the account
+-     * @return <code>true</code> if the account is a placeholder account, <code>false</code> otherwise
++     * @param accountUID GUID of the account
++     * @return <code>true</code> if the account is hidden, <code>false</code> otherwise
+      */
+-    public boolean isPlaceholderAccount(long accountId){
+-        return isPlaceholderAccount(getUID(accountId));
++    public boolean isHiddenAccount(String accountUID){
++        Cursor cursor = mDb.query(AccountEntry.TABLE_NAME,
++                new String[]{AccountEntry.COLUMN_HIDDEN},
++                AccountEntry.COLUMN_UID + " = ?",
++                new String[]{accountUID}, null, null, null);
++
++        try {
++            return cursor.moveToFirst()
++                    && cursor.getInt(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_HIDDEN)) == 1;
++        } finally {
++            cursor.close();
++        }
+     }
+ 
+     /**
+@@ -1180,21 +1197,19 @@ public boolean isFavoriteAccount(String accountUID){
+                 AccountEntry.COLUMN_UID + " = ?", new String[]{accountUID},
+                 null, null, null);
+ 
+-        boolean isFavorite = false;
+-        if (cursor != null){
+-            if (cursor.moveToFirst()){
+-                isFavorite = cursor.getInt(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_FAVORITE)) == 1;
+-            }
++        try {
++            return cursor.moveToFirst()
++                    && cursor.getInt(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_FAVORITE)) == 1;
++        } finally {
+             cursor.close();
+         }
+-        return isFavorite;
+     }
+ 
+     /**
+      * Updates all opening balances to the current account balances
+      */
+     public List<Transaction> getAllOpeningBalanceTransactions(){
+-        Cursor cursor = fetchAccounts(null, null);
++        Cursor cursor = fetchAccounts(null, null, null);
+         List<Transaction> openingTransactions = new ArrayList<Transaction>();
+         try {
+             SplitsDbAdapter splitsDbAdapter = mTransactionsAdapter.getSplitDbAdapter();
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index f522f191..6a06ac6b 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -20,6 +20,7 @@
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ 
++import android.support.annotation.NonNull;
+ import android.util.Log;
+ import org.gnucash.android.db.DatabaseSchema.*;
+ import org.gnucash.android.model.AccountType;
+@@ -349,6 +350,24 @@ public int updateRecord(String tableName, long recordId, String columnKey, Strin
+     }
+ 
+     /**
++     * Updates a record in the table
++     * @param uid GUID of the record
++     * @param columnKey Name of column to be updated
++     * @param newValue  New value to be assigned to the columnKey
++     * @return Number of records affected
++     */
++    public int updateRecord(@NonNull String tableName, @NonNull String uid, String columnKey, String newValue) {
++        ContentValues contentValues = new ContentValues();
++        if (newValue == null) {
++            contentValues.putNull(columnKey);
++        } else {
++            contentValues.put(columnKey, newValue);
++        }
++        return mDb.update(tableName, contentValues,
++                CommonColumns.COLUMN_UID + "= ?", new String[]{uid});
++    }
++
++    /**
+      * Deletes a record from the database given its unique identifier.
+      * <p>Overload of the method {@link #deleteRecord(long)}</p>
+      * @param uid GUID of the record
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index fabff780..f0efe01e 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -69,6 +69,7 @@
+ 			+ AccountEntry.COLUMN_CURRENCY          + " varchar(255) not null, "
+             + AccountEntry.COLUMN_COLOR_CODE        + " varchar(255), "
+             + AccountEntry.COLUMN_FAVORITE 		    + " tinyint default 0, "
++            + AccountEntry.COLUMN_HIDDEN 		    + " tinyint default 0, "
+             + AccountEntry.COLUMN_FULL_NAME 	    + " varchar(255), "
+             + AccountEntry.COLUMN_PLACEHOLDER           + " tinyint default 0, "
+             + AccountEntry.COLUMN_PARENT_ACCOUNT_UID    + " varchar(255), "
+@@ -106,7 +107,7 @@
+             + SplitEntry.COLUMN_TRANSACTION_UID + " varchar(255) not null, "
+             + SplitEntry.COLUMN_CREATED_AT       + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+             + SplitEntry.COLUMN_MODIFIED_AT      + " TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+-            + "FOREIGN KEY (" 	+ SplitEntry.COLUMN_ACCOUNT_UID + ") REFERENCES " + AccountEntry.TABLE_NAME + " (" + AccountEntry.COLUMN_UID + "), "
++            + "FOREIGN KEY (" 	+ SplitEntry.COLUMN_ACCOUNT_UID + ") REFERENCES " + AccountEntry.TABLE_NAME + " (" + AccountEntry.COLUMN_UID + ") ON DELETE CASCADE, "
+             + "FOREIGN KEY (" 	+ SplitEntry.COLUMN_TRANSACTION_UID + ") REFERENCES " + TransactionEntry.TABLE_NAME + " (" + TransactionEntry.COLUMN_UID + ") ON DELETE CASCADE "
+             + ");" + createUpdatedAtTrigger(SplitEntry.TABLE_NAME);
+ 
+@@ -154,7 +155,13 @@ public void onCreate(SQLiteDatabase db) {
+ 		createDatabaseTables(db);
+ 	}
+ 
+-	@Override
++    @Override
++    public void onOpen(SQLiteDatabase db) {
++        super.onOpen(db);
++        db.execSQL("PRAGMA foreign_keys=ON");
++    }
++
++    @Override
+ 	public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 		Log.i(LOG_TAG, "Upgrading database from version "
+ 				+ oldVersion + " to " + newVersion);
+@@ -349,8 +356,14 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 7 && newVersion >= 8){
+                 Log.i(LOG_TAG, "Upgrading database to version 8");
+-
+                 //TODO: consider just backing up, recreating database and reimporting
++                //FIXME: We really need to do this because the ON DELETE CASCADE constraint does not exist on older db versions
++                //TODO: Also, we need to go through db and add second split with imbalance account wherever only one split exists.
++
++                Log.i(LOG_TAG, "Adding hidden flag to accounts table");
++                String addHiddenFlagSql = "ALTER TABLE " + AccountEntry.TABLE_NAME +
++                        " ADD COLUMN " + AccountEntry.COLUMN_HIDDEN + " tinyint default 0";
++                db.execSQL(addHiddenFlagSql);
+ 
+                 Log.i(LOG_TAG, "Adding created_at and modified_at columns to database tables");
+                 MigrationHelper.createUpdatedAndModifiedColumns(db, AccountEntry.TABLE_NAME);
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index e1ba49df..1641ad99 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -59,6 +59,7 @@ private DatabaseSchema(){}
+         public static final String COLUMN_FAVORITE              = "favorite";
+         public static final String COLUMN_FULL_NAME             = "full_name";
+         public static final String COLUMN_TYPE                  = "type";
++        public static final String COLUMN_HIDDEN                = "is_hidden";
+         public static final String COLUMN_DEFAULT_TRANSFER_ACCOUNT_UID = "default_transfer_account_uid";
+ 
+         public static final String INDEX_UID                    = "account_uid_index";
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 7e58286b..05e5f47b 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -389,14 +389,11 @@ public Transaction buildTransactionInstance(Cursor c){
+             transaction.addSplit(split);
+ 
+             String transferAccountUID = c.getString(c.getColumnIndexOrThrow(DatabaseHelper.KEY_DOUBLE_ENTRY_ACCOUNT_UID));
+-            //TODO: Enable this when we can successfully hide imbalance accounts from the user
+-//            if (transferAccountUID == null) {
+-//                AccountsDbAdapter accountsDbAdapter = new AccountsDbAdapter(mDb);
+-//                transferAccountUID = accountsDbAdapter.getOrCreateImbalanceAccountUID(Currency.getInstance(currencyCode));
+-//                accountsDbAdapter.close();
+-//            }
+-            if (transferAccountUID != null)
+-                transaction.addSplit(split.createPair(transferAccountUID));
++            if (transferAccountUID == null) {
++                AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++                transferAccountUID = accountsDbAdapter.getOrCreateImbalanceAccountUID(Currency.getInstance(currencyCode));
++            }
++            transaction.addSplit(split.createPair(transferAccountUID));
+         } else {
+             transaction.setCurrencyCode(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_CURRENCY)));
+             long transactionID = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 3aeb5e49..db0dfa7a 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -183,7 +183,9 @@ else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_ACCT_ID)){
+             mAccount.setUID(characterString);
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_TYPE)){
+-            mAccount.setAccountType(AccountType.valueOf(characterString));
++            AccountType accountType = AccountType.valueOf(characterString);
++            mAccount.setAccountType(accountType);
++            mAccount.setHidden(accountType == AccountType.ROOT); //flag root account as hidden
+         }
+         else if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_COMMODITY_SPACE)){
+             if (characterString.equalsIgnoreCase("ISO4217")){
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index 6745b12c..37489005 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -121,6 +121,11 @@
+      */
+     private boolean mIsFavorite;
+ 
++    /**
++     * Flag which indicates if this account is a hidden account or not
++     */
++    private boolean mIsHidden;
++
+ 	/**
+ 	 * An extra key for passing the currency code (according ISO 4217) in an intent
+ 	 */
+@@ -355,6 +360,24 @@ public boolean isPlaceholderAccount(){
+     }
+ 
+     /**
++     * Returns the hidden property of this account.
++     * <p>Hidden accounts are not visible in the UI</p>
++     * @return <code>true</code> if the account is hidden, <code>false</code> otherwise.
++     */
++    public boolean isHidden(){
++        return mIsHidden;
++    }
++
++    /**
++     * Toggles the hidden property of the account.
++     * <p>Hidden accounts are not visible in the UI</p>
++     * @param hidden boolean specifying is hidden or not
++     */
++    public void setHidden(boolean hidden){
++        this.mIsHidden = hidden;
++    }
++
++    /**
+      * Sets the placeholder flag for this account.
+      * Placeholder accounts cannot have transactions
+      * @param isPlaceholder Boolean flag indicating if the account is a placeholder account or not
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+index 2f93a0cc..97c436f5 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsListFragment.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2012 - 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -598,7 +598,9 @@ public Cursor loadInBackground() {
+ 
+             if (mFilter != null){
+                 cursor = ((AccountsDbAdapter)mDatabaseAdapter)
+-                        .fetchAccounts(DatabaseSchema.AccountEntry.COLUMN_NAME + " LIKE '%" + mFilter + "%'", null);
++                        .fetchAccounts(DatabaseSchema.AccountEntry.COLUMN_HIDDEN + "= 0 AND "
++                                + DatabaseSchema.AccountEntry.COLUMN_NAME + " LIKE '%" + mFilter + "%'",
++                                null, null);
+             } else {
+                 if (mParentAccountUID != null && mParentAccountUID.length() > 0)
+                     cursor = ((AccountsDbAdapter) mDatabaseAdapter).fetchSubAccounts(mParentAccountUID);
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index 05c77dab..75bb8c8e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2012 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 - 2015 Ngewi Fet <ngewif@gmail.com>
+  * Copyright (c) 2014 Yongxin Wang <fefe.wyx@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -39,6 +39,7 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+@@ -54,6 +55,7 @@
+ import java.io.FileNotFoundException;
+ import java.io.InputStream;
+ import java.util.ArrayList;
++import java.util.Currency;
+ import java.util.List;
+ import java.util.Timer;
+ import java.util.TimerTask;
+@@ -134,6 +136,9 @@ protected void onCreate(Bundle savedInstanceState) {
+             pref = findPreference(getString(R.string.key_import_accounts));
+             pref.setOnPreferenceClickListener(this);
+ 
++            pref = findPreference(getString(R.string.key_use_double_entry));
++            pref.setOnPreferenceChangeListener(this);
++
+             pref = findPreference(getString(R.string.key_delete_all_transactions));
+             pref.setOnPreferenceClickListener(this);
+ 
+@@ -207,12 +212,27 @@ public boolean onPreferenceChange(Preference preference, Object newValue) {
+                     .edit()
+                     .putBoolean(UxArgument.ENABLED_PASSCODE, (Boolean) newValue)
+                     .commit();
++        } else if (preference.getKey().equals(getString(R.string.key_use_double_entry))){
++            setImbalanceAccountsHidden((Boolean) newValue);
+         }
+ 
+ 		return true;
+ 	}
+-	
+-	private void setDefaultCurrencyListener() {
++
++    public void setImbalanceAccountsHidden(boolean useDoubleEntry) {
++        String isHidden = useDoubleEntry ? "0" : "1";
++        AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++        List<Currency> currencies = accountsDbAdapter.getCurrencies();
++        for (Currency currency : currencies) {
++            String uid = accountsDbAdapter.getImbalanceAccountUID(currency);
++            if (uid != null){
++                accountsDbAdapter.updateRecord(DatabaseSchema.AccountEntry.TABLE_NAME,
++                        uid, DatabaseSchema.AccountEntry.COLUMN_HIDDEN, isHidden);
++            }
++        }
++    }
++
++    private void setDefaultCurrencyListener() {
+ 		SharedPreferences manager = PreferenceManager.getDefaultSharedPreferences(this);
+ 		String defaultCurrency = manager.getString(getString(R.string.key_default_currency), Money.DEFAULT_CURRENCY_CODE);
+ 		@SuppressWarnings("deprecation")
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
+index 5198c82d..0922554e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/TransactionsPreferenceFragment.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2012 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2012 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -57,6 +57,9 @@ public void onResume() {
+ 		setLocalizedSummary(pref, defaultTransactionType);
+ 		pref.setOnPreferenceChangeListener(this);
+ 
++        pref = findPreference(getString(R.string.key_use_double_entry));
++        pref.setOnPreferenceChangeListener(this);
++
+         Preference preference = findPreference(getString(R.string.key_delete_all_transactions));
+         preference.setOnPreferenceClickListener(new Preference.OnPreferenceClickListener() {
+             @Override
+@@ -70,7 +73,11 @@ public boolean onPreferenceClick(Preference preference) {
+ 
+ 	@Override
+ 	public boolean onPreferenceChange(Preference preference, Object newValue) {
+-		setLocalizedSummary(preference, newValue.toString());
++		if (preference.getKey().equals(getString(R.string.key_use_double_entry))){
++            ((SettingsActivity)getActivity()).setImbalanceAccountsHidden((Boolean)newValue);
++        } else {
++            setLocalizedSummary(preference, newValue.toString());
++        }
+ 		return true;
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 8323d423..aaf01ea1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -629,30 +629,11 @@ private void saveNewTransaction() {
+             }
+         }
+ 
+-		if (mTransaction != null){
+-            if (!mUseDoubleEntry){
+-                //first remove old splits for this transaction, since there is only one split
+-                SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
+-                for (Split split : mTransaction.getSplits()) {
+-                    splitsDbAdapter.deleteSplit(split.getUID());
+-                }
+-
+-                Split split = new Split(amount, accountUID);
+-                split.setType(mTransactionTypeButton.getTransactionType());
+-                mTransaction.getSplits().clear();
+-                mTransaction.addSplit(split);
+-            } else {
+-                mTransaction.setSplits(mSplitsList);
+-            }
+-			mTransaction.setDescription(description);
++		if (mTransaction != null){ //if editing an existing transaction
++            mTransaction.setSplits(mSplitsList);
++            mTransaction.setDescription(description);
+ 		} else {
+ 			mTransaction = new Transaction(description);
+-            if (!mUseDoubleEntry){
+-                Split split = new Split(amount, accountUID);
+-                split.setType(mTransactionTypeButton.getTransactionType());
+-                mSplitsList.clear();
+-                mSplitsList.add(split);
+-            }
+ 
+             if (mSplitsList.isEmpty()) { //amount entered in the simple interface (not using splits Editor)
+                 Split split = new Split(amount, accountUID);
+@@ -663,15 +644,15 @@ private void saveNewTransaction() {
+                 if (mUseDoubleEntry) {
+                     long transferAcctId = mDoubleAccountSpinner.getSelectedItemId();
+                     transferAcctUID = mAccountsDbAdapter.getUID(transferAcctId);
+-                    mTransaction.addSplit(split.createPair(transferAcctUID));
+                 } else {
+-                      //TODO: enable this when we can hide certain accounts from the user
+-//                    transferAcctUID = mAccountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
++                    transferAcctUID = mAccountsDbAdapter.getOrCreateImbalanceAccountUID(currency);
+                 }
++                mTransaction.addSplit(split.createPair(transferAcctUID));
+             } else { //split editor was used to enter splits
+                 mTransaction.setSplits(mSplitsList);
+             }
+ 		}
++
+         mTransaction.setCurrencyCode(mAccountsDbAdapter.getAccountCurrencyCode(mAccountUID));
+ 		mTransaction.setTime(cal.getTimeInMillis());
+ 		mTransaction.setNote(notes);
+@@ -707,13 +688,15 @@ private void scheduleRecurringTransaction() {
+         mTransactionsDbAdapter.addTransaction(recurringTransaction);
+ 
+         ScheduledEventDbAdapter scheduledEventDbAdapter = GnuCashApplication.getScheduledEventDbAdapter();
+-        Toast.makeText(getActivity(), "Found " + events.size() + " events", Toast.LENGTH_LONG).show();
++
+         for (ScheduledEvent event : events) {
+             event.setEventUID(recurringTransaction.getUID());
+             scheduledEventDbAdapter.addScheduledEvent(event);
+ 
+             Log.i("TransactionFormFragment", event.toString());
+         }
++        if (events.size() > 0)
++            Toast.makeText(getActivity(), "Scheduled transaction", Toast.LENGTH_SHORT).show();
+     }
+ 
+ 

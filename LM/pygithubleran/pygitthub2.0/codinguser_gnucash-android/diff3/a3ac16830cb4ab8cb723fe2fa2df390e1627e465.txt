@@ -1,0 +1,354 @@
+From a3ac16830cb4ab8cb723fe2fa2df390e1627e465 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sun, 30 Aug 2015 01:46:34 +0200
+Subject: [PATCH] Added prompt to rate the app after opening 10 times
+
+Used commodities table for commodity entries in account form
+Code refactoring for QualifiedAccountNameCursorAdapter
+---
+ app/build.gradle                                   |  3 +-
+ .../gnucash/android/db/CommoditiesDbAdapter.java   |  6 +++
+ .../android/ui/account/AccountFormFragment.java    | 39 +++++++++++-------
+ .../android/ui/account/AccountsActivity.java       |  8 ++++
+ .../ui/account/DeleteAccountDialogFragment.java    |  8 +---
+ .../ui/transaction/TransactionFormFragment.java    |  4 +-
+ .../ui/transaction/TransactionsActivity.java       |  5 +--
+ .../transaction/dialog/BulkMoveDialogFragment.java |  4 +-
+ .../ui/transaction/dialog/SplitEditorFragment.java |  4 +-
+ .../ui/widget/WidgetConfigurationActivity.java     |  5 +--
+ .../android/util/CommoditiesCursorAdapter.java     | 46 ++++++++++++++++++++++
+ .../util/QualifiedAccountNameCursorAdapter.java    |  9 +++--
+ 12 files changed, 98 insertions(+), 43 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/util/CommoditiesCursorAdapter.java
+
+diff --git a/app/build.gradle b/app/build.gradle
+index b3096178..1cbbdbfe 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -168,7 +168,8 @@ dependencies {
+             'joda-time:joda-time:2.7',
+             'org.ocpsoft.prettytime:prettytime:3.2.7.Final',
+             'com.google.android.gms:play-services-drive:7.0.0',
+-            'com.jakewharton:butterknife:7.0.1'
++            'com.jakewharton:butterknife:7.0.1',
++            'com.kobakei:ratethisapp:0.0.3'
+     )
+ 
+     compile('com.crashlytics.sdk.android:crashlytics:2.5.0@aar') {
+diff --git a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+index af20a75d..c23ab334 100644
+--- a/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/CommoditiesDbAdapter.java
+@@ -75,6 +75,12 @@ public Commodity buildModelInstance(@NonNull final Cursor cursor) {
+         return commodity;
+     }
+ 
++    @Override
++    public Cursor fetchAllRecords() {
++        return mDb.query(mTableName, null, null, null, null, null,
++                CommodityEntry.COLUMN_FULLNAME + " ASC");
++    }
++
+     /**
+      * Returns the commodity associated with the ISO4217 currency code
+      * @param currencyCode 3-letter currency code
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 6f5286a4..c5e1b77e 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -55,14 +55,17 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.AccountsDbAdapter;
++import org.gnucash.android.db.CommoditiesDbAdapter;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.colorpicker.ColorPickerDialog;
+ import org.gnucash.android.ui.colorpicker.ColorPickerSwatch;
+ import org.gnucash.android.ui.colorpicker.ColorSquare;
++import org.gnucash.android.util.CommoditiesCursorAdapter;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ import java.util.ArrayList;
+@@ -326,12 +329,17 @@ public void onClick(View view) {
+ 	public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+ 		
+-		ArrayAdapter<String> currencyArrayAdapter = new ArrayAdapter<String>(
++		ArrayAdapter<String> currencyArrayAdapter = new ArrayAdapter<>(
+ 				getActivity(), 
+ 				android.R.layout.simple_spinner_item, 
+ 				getResources().getStringArray(R.array.currency_names));
+ 		currencyArrayAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+-		mCurrencySpinner.setAdapter(currencyArrayAdapter);
++
++        Cursor cursor = CommoditiesDbAdapter.getInstance().fetchAllRecords();
++        CommoditiesCursorAdapter commoditiesAdapter = new CommoditiesCursorAdapter(
++                getActivity(), cursor);
++        mCurrencySpinner.setAdapter(commoditiesAdapter);
++
+ 
+         mAccountUID = getArguments().getString(UxArgument.SELECTED_ACCOUNT_UID);
+ 
+@@ -463,10 +471,15 @@ private void setDefaultTransferAccountInputsVisible(boolean visible) {
+      * @param currencyCode ISO 4217 currency code to be selected
+      */
+     private void setSelectedCurrency(String currencyCode){
+-        mCurrencyCodes = Arrays.asList(getResources().getStringArray(R.array.key_currency_codes));
+-        if (mCurrencyCodes.contains(currencyCode)){
+-            mCurrencySpinner.setSelection(mCurrencyCodes.indexOf(currencyCode));
++        CommoditiesDbAdapter commodityDbAdapter = CommoditiesDbAdapter.getInstance();
++        long commodityId = commodityDbAdapter.getID(commodityDbAdapter.getCommodityUID(currencyCode));
++        int position = 0;
++        for (int i = 0; i < mCurrencySpinner.getCount(); i++) {
++            if (commodityId == mCurrencySpinner.getItemIdAtPosition(i)) {
++                position = i;
++            }
+         }
++        mCurrencySpinner.setSelection(position);
+     }
+ 
+     /**
+@@ -581,9 +594,7 @@ private void loadDefaultTransferAccountList(){
+         }
+ 
+         mDefaultTransferAccountCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+-                android.R.layout.simple_spinner_item,
+                 defaultTransferAccountCursor);
+-        mDefaultTransferAccountCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+         mDefaulTransferAccountSpinner.setAdapter(mDefaultTransferAccountCursorAdapter);
+     }
+ 
+@@ -624,10 +635,7 @@ private void loadParentAccountList(AccountType accountType){
+         }
+ 
+ 		mParentAccountCursorAdapter = new QualifiedAccountNameCursorAdapter(
+-				getActivity(), 
+-				android.R.layout.simple_spinner_item,
+-                mParentAccountCursor);
+-		mParentAccountCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++				getActivity(), mParentAccountCursor);
+ 		mParentAccountSpinner.setAdapter(mParentAccountCursorAdapter);
+ 	}
+ 
+@@ -749,10 +757,11 @@ private void saveAccount() {
+             nameChanged = !mAccount.getName().equals(getEnteredName());
+             mAccount.setName(getEnteredName());
+         }
+-			
+-		String curCode = mCurrencyCodes.get(mCurrencySpinner
+-                .getSelectedItemPosition());
+-		mAccount.setCurrency(Currency.getInstance(curCode));
++
++        long commodityId = mCurrencySpinner.getSelectedItemId();
++        Commodity commodity = CommoditiesDbAdapter.getInstance().getRecord(commodityId);
++        mAccount.setCommodityUID(commodity.getUID());
++        mAccount.setCurrency(Currency.getInstance(commodity.getMnemonic()));
+ 
+         AccountType selectedAccountType = getSelectedAccountType();
+         mAccount.setAccountType(selectedAccountType);
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index a716ccb4..d3dcacd0 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -49,6 +49,7 @@
+ import android.widget.ArrayAdapter;
+ 
+ import com.crashlytics.android.Crashlytics;
++import com.kobakei.ratethisapp.RateThisApp;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+@@ -267,6 +268,13 @@ public void onClick(View v) {
+         });
+ 	}
+ 
++    @Override
++    protected void onStart() {
++        super.onStart();
++        RateThisApp.onStart(this);
++        RateThisApp.showRateDialogIfNeeded(this);
++    }
++
+     /**
+      * Handles the case where another application has selected to open a (.gnucash or .gnca) file with this app
+      * @param intent Intent containing the data to be imported
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
+index 61d2d087..c30cc0a0 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/DeleteAccountDialogFragment.java
+@@ -147,9 +147,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         Cursor cursor = accountsDbAdapter.fetchAccountsOrderedByFullName(transactionDeleteConditions,
+                 new String[]{mOriginAccountUID, currencyCode, accountType.name()});
+ 
+-        SimpleCursorAdapter mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+-                android.R.layout.simple_spinner_item, cursor);
+-        mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        SimpleCursorAdapter mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(), cursor);
+         mTransactionsDestinationAccountSpinner.setAdapter(mCursorAdapter);
+ 
+         //target accounts for transactions and accounts have different conditions
+@@ -160,9 +158,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+                 + ")";
+         cursor = accountsDbAdapter.fetchAccountsOrderedByFullName(accountMoveConditions,
+                 new String[]{mOriginAccountUID, currencyCode, accountType.name()});
+-        mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+-                android.R.layout.simple_spinner_item, cursor);
+-        mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(), cursor);
+         mAccountsDestinationAccountSpinner.setAdapter(mCursorAdapter);
+ 
+         setListeners();
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 02f547ba..5ee7ad63 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -529,9 +529,7 @@ private void updateTransferAccountsList(){
+         }
+ 		mCursor = mAccountsDbAdapter.fetchAccountsOrderedByFullName(conditions, new String[]{mAccountUID, AccountType.ROOT.name()});
+ 
+-        mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+-                android.R.layout.simple_spinner_item, mCursor);
+-		mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(), mCursor);
+ 		mDoubleAccountSpinner.setAdapter(mCursorAdapter);
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+index 76dcf864..70f3953d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsActivity.java
+@@ -354,10 +354,7 @@ private void setupActionBarNavigation() {
+ 		mAccountsCursor = mAccountsDbAdapter.fetchAllRecordsOrderedByFullName();
+ 
+         SpinnerAdapter mSpinnerAdapter = new QualifiedAccountNameCursorAdapter(
+-                getSupportActionBar().getThemedContext(),
+-                android.R.layout.simple_spinner_item, mAccountsCursor);
+-		((ResourceCursorAdapter) mSpinnerAdapter).setDropDownViewResource(
+-                android.R.layout.simple_spinner_dropdown_item);
++                getSupportActionBar().getThemedContext(), mAccountsCursor);
+ 
+         mToolbarSpinner = (Spinner) findViewById(R.id.spinner_toolbar);
+         mToolbarSpinner.setAdapter(mSpinnerAdapter);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+index fa0b0ddb..33ba6bc7 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/BulkMoveDialogFragment.java
+@@ -113,9 +113,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+                         "" + accountsDbAdapter.getOrCreateGnuCashRootAccountUID()
+                 });
+ 
+-		SimpleCursorAdapter mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+-                android.R.layout.simple_spinner_item, cursor);
+-		mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++		SimpleCursorAdapter mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(), cursor);
+ 		mDestinationAccountSpinner.setAdapter(mCursorAdapter);
+ 		setListeners();
+ 	}
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorFragment.java
+index 5ea836e4..6c02798c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/SplitEditorFragment.java
+@@ -317,9 +317,7 @@ private void setSelectedTransferAccount(long accountId, final Spinner accountsSp
+      */
+     private void updateTransferAccountsList(Spinner transferAccountSpinner){
+ 
+-        mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(),
+-                R.layout.split_account_spinner_item, mCursor);
+-        mCursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        mCursorAdapter = new QualifiedAccountNameCursorAdapter(getActivity(), mCursor);
+         transferAccountSpinner.setAdapter(mCursorAdapter);
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index 415e8b63..bfbb4493 100644
+--- a/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -78,10 +78,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 			finish();
+ 		}
+ 
+-        SimpleCursorAdapter cursorAdapter = new QualifiedAccountNameCursorAdapter(this,
+-                android.R.layout.simple_spinner_item,
+-                cursor);
+-		cursorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++        SimpleCursorAdapter cursorAdapter = new QualifiedAccountNameCursorAdapter(this, cursor);
+ 		mAccountsSpinner.setAdapter(cursorAdapter);
+ 		
+ 		bindListeners();
+diff --git a/app/src/main/java/org/gnucash/android/util/CommoditiesCursorAdapter.java b/app/src/main/java/org/gnucash/android/util/CommoditiesCursorAdapter.java
+new file mode 100644
+index 00000000..26d6f193
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/util/CommoditiesCursorAdapter.java
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (c) 2015 Ngewi Fet <ngewif@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.gnucash.android.util;
++
++import android.content.Context;
++import android.database.Cursor;
++import android.support.v4.widget.SimpleCursorAdapter;
++import android.text.TextUtils;
++import android.view.View;
++import android.widget.TextView;
++
++import org.gnucash.android.db.DatabaseSchema;
++
++/**
++ * Cursor adapter for displaying list of commodities in a spinner
++ */
++public class CommoditiesCursorAdapter extends SimpleCursorAdapter {
++
++    public CommoditiesCursorAdapter(Context context, Cursor c) {
++        super(context, android.R.layout.simple_spinner_item, c,
++                new String[] {DatabaseSchema.CommodityEntry.COLUMN_FULLNAME},
++                new int[] {android.R.id.text1}, 0);
++        setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
++    }
++
++    @Override
++    public void bindView(View view, Context context, Cursor cursor) {
++        super.bindView(view, context, cursor);
++        TextView textView = (TextView) view.findViewById(android.R.id.text1);
++        textView.setEllipsize(TextUtils.TruncateAt.MIDDLE);
++    }
++}
+diff --git a/app/src/main/java/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java b/app/src/main/java/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
+index dbd779b1..c2183a25 100644
+--- a/app/src/main/java/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
++++ b/app/src/main/java/org/gnucash/android/util/QualifiedAccountNameCursorAdapter.java
+@@ -33,10 +33,11 @@
+  */
+ public class QualifiedAccountNameCursorAdapter extends SimpleCursorAdapter {
+ 
+-    public QualifiedAccountNameCursorAdapter(Context context, int layout, Cursor c) {
+-        super(context, layout, c,
+-                new String[] {DatabaseSchema.AccountEntry.COLUMN_FULL_NAME},
+-                new int[] {android.R.id.text1}, 0);
++    public QualifiedAccountNameCursorAdapter(Context context, Cursor cursor) {
++        super(context, android.R.layout.simple_spinner_item, cursor,
++                new String[]{DatabaseSchema.AccountEntry.COLUMN_FULL_NAME},
++                new int[]{android.R.id.text1}, 0);
++        setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+     }
+ 
+     @Override

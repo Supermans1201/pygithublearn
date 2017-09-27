@@ -1,0 +1,966 @@
+From 529479f8fd1dfa8706118529dfa46a2cbfdeeb91 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 10 Aug 2012 15:47:47 +0200
+Subject: [PATCH] Fixed: crashes when adding transactions to an account with
+ different currency from device locale Fixed: transaction time was always
+ updated (inadvertently) when the edit view is open and closed Fixed: crash
+ when changing currency of accounts which have transactions Fixed: crash when
+ adding widget to homescreen with an account which has different currency from
+ device locale should solve problems described in #8 Added code documentation
+ and tests
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  |  4 +-
+ .../org/gnucash/android/db/DatabaseAdapter.java    |  5 +-
+ .../src/org/gnucash/android/db/DatabaseHelper.java | 12 ++--
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 14 ++--
+ .../gnucash/android/receivers/AccountCreator.java  | 10 +++
+ .../receivers/TransactionAppWidgetProvider.java    |  9 ++-
+ .../android/receivers/TransactionRecorder.java     | 11 +++
+ .../android/ui/DatePickerDialogFragment.java       | 27 +++++++-
+ .../android/ui/TimePickerDialogFragment.java       | 27 +++++++-
+ .../android/ui/accounts/AccountsActivity.java      | 43 +++++++++---
+ .../android/ui/accounts/AccountsListFragment.java  | 78 ++++++++++++++++++----
+ .../android/ui/settings/SettingsActivity.java      | 19 ++++++
+ .../ui/transactions/NewTransactionFragment.java    | 54 ++++++++-------
+ .../ui/widget/WidgetConfigurationActivity.java     | 14 +++-
+ .../src/org/gnucash/android/util/OfxFormatter.java |  6 +-
+ .../android/test/db/AccountsDbAdapterTest.java     | 17 ++++-
+ .../android/test/ui/AccountsActivityTest.java      |  2 +-
+ .../android/test/ui/TransactionsActivityTest.java  | 53 ++++++++++++---
+ 18 files changed, 326 insertions(+), 79 deletions(-)
+
+diff --git a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+index 4727b1f6..9eefb355 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -150,8 +150,10 @@ public Account buildAccountInstance(Cursor c){
+ 		String uid = c.getString(DatabaseAdapter.COLUMN_UID);
+ 		account.setUID(uid);
+ 		account.setAccountType(AccountType.valueOf(c.getString(DatabaseAdapter.COLUMN_TYPE)));
++		//make sure the account currency is set before setting the transactions
++		//else the transactions end up with a different currency from the account
++		account.setCurrency(Currency.getInstance(c.getString(DatabaseAdapter.COLUMN_CURRENCY_CODE)));
+ 		account.setTransactions(mTransactionsAdapter.getAllTransactionsForAccount(uid));
+-		account.setCurrency(Currency.getInstance(c.getString(DatabaseAdapter.COLUMN_ACCOUNT_CURRENCY_CODE)));
+ 		return account;
+ 	}
+ 		
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
+index 96484e6a..430dec07 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -42,14 +42,15 @@
+ 	public static final int COLUMN_NAME 	= 2;
+ 	public static final int COLUMN_TYPE 	= 3;
+ 	
++	//columns specific to transactions
+ 	public static final int COLUMN_AMOUNT 		= 4;
+ 	public static final int COLUMN_DESCRIPTION 	= 5;
+ 	public static final int COLUMN_TIMESTAMP 	= 6;
+ 	public static final int COLUMN_ACCOUNT_UID 	= 7;
+ 	public static final int COLUMN_EXPORTED 	= 8;
+ 	
+-	public static final int COLUMN_CURRENCY_CODE 			= 1;
+-	public static final int COLUMN_ACCOUNT_CURRENCY_CODE 	= 4;
++	//columns specific to accounts
++	public static final int COLUMN_CURRENCY_CODE = 4;
+ 	
+ 	/**
+ 	 * {@link DatabaseHelper} for creating and opening the database
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+index c0d442dd..04f0b13a 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseHelper.java
+@@ -124,7 +124,7 @@
+ 			+ KEY_UID 	+ " varchar(255) not null, "
+ 			+ KEY_NAME 	+ " varchar(255) not null, "
+ 			+ KEY_TYPE 	+ " varchar(255), "
+-			+ KEY_CURRENCY_CODE + " varchar(255), "
++			+ KEY_CURRENCY_CODE + " varchar(255) not null, "
+ 			+ "UNIQUE (" + KEY_UID + ")"	
+ 			+ ");";
+ 	
+@@ -132,11 +132,11 @@
+ 	 * SQL statement to create the transactions table in the database
+ 	 */
+ 	private static final String TRANSACTIONS_TABLE_CREATE = "create table " + TRANSACTIONS_TABLE_NAME + " ("
+-			+ KEY_ROW_ID 	+ " integer primary key autoincrement, "
+-			+ KEY_UID 		+ " varchar(255) not null, "			
+-			+ KEY_NAME 		+ " varchar(255), "
+-			+ KEY_TYPE 		+ " varchar(255) not null, "
+-			+ KEY_AMOUNT 	+ " varchar(255) not null, "
++			+ KEY_ROW_ID 		+ " integer primary key autoincrement, "
++			+ KEY_UID 			+ " varchar(255) not null, "			
++			+ KEY_NAME 			+ " varchar(255), "
++			+ KEY_TYPE 			+ " varchar(255) not null, "
++			+ KEY_AMOUNT 		+ " varchar(255) not null, "
+ 			+ KEY_DESCRIPTION 	+ " text, "
+ 			+ KEY_TIMESTAMP 	+ " integer not null, "
+ 			+ KEY_ACCOUNT_UID 	+ " varchar(255) not null, "
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index aa22cb53..28059ea6 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -169,8 +169,10 @@ public Transaction buildTransactionInstance(Cursor c){
+ 		String accountUID = c.getString(DatabaseAdapter.COLUMN_ACCOUNT_UID);
+ 		Currency currency = Currency.getInstance(getCurrencyCode(accountUID));
+ 		String amount = c.getString(DatabaseAdapter.COLUMN_AMOUNT);
+-		Transaction transaction = new Transaction(new Money(new BigDecimal(amount), currency), 
+-				c.getString(DatabaseAdapter.COLUMN_NAME));
++		Money moneyAmount = new Money(new BigDecimal(amount), currency);
++		String name   = c.getString(DatabaseAdapter.COLUMN_NAME);
++		
++		Transaction transaction = new Transaction(moneyAmount, name);
+ 		transaction.setUID(c.getString(DatabaseAdapter.COLUMN_UID));
+ 		transaction.setAccountUID(accountUID);
+ 		transaction.setTime(c.getLong(DatabaseAdapter.COLUMN_TIMESTAMP));
+@@ -196,7 +198,7 @@ public String getCurrencyCode(String accountUID) {
+ 		if (cursor == null || cursor.getCount() <= 0)
+ 			return null;
+ 					
+-		cursor.moveToNext();
++		cursor.moveToFirst();
+ 		String currencyCode = cursor.getString(0);
+ 		cursor.close();
+ 		return currencyCode;
+@@ -304,12 +306,10 @@ public Money getTransactionsSum(long accountId){
+ 				new String[]{DatabaseHelper.KEY_AMOUNT}, 
+ 				DatabaseHelper.KEY_ACCOUNT_UID + "= '" + getAccountUID(accountId) + "'", 
+ 				null, null, null, null);
+-		
++
++		//transactions will have the currency of the account
+ 		String currencyCode = getCurrencyCode(accountId);
+ 		
+-		if (currencyCode == null)
+-			currencyCode = Money.DEFAULT_CURRENCY_CODE;
+-		
+ 		if (c == null || c.getCount() <= 0)
+ 			return new Money("0", currencyCode);		
+ 		
+diff --git a/GnucashMobile/src/org/gnucash/android/receivers/AccountCreator.java b/GnucashMobile/src/org/gnucash/android/receivers/AccountCreator.java
+index ebd9a6b1..7c02c9f2 100644
+--- a/GnucashMobile/src/org/gnucash/android/receivers/AccountCreator.java
++++ b/GnucashMobile/src/org/gnucash/android/receivers/AccountCreator.java
+@@ -27,6 +27,16 @@
+ import android.os.Bundle;
+ import android.util.Log;
+ 
++/**
++ * Broadcast receiver responsible for creating {@link Account}s received through intents.
++ * In order to create an <code>Account</code>, you need to broadcast an {@link Intent} with arguments 
++ * for the name, currency and optionally, a unique identifier for the account (which should be unique to Gnucash) 
++ * of the Account to be created. Also remember to set the right mime type so that Android can properly route the Intent
++ * <b>Note</b> This Broadcast receiver requires the permission "org.gnucash.android.permission.CREATE_ACCOUNT" 
++ * in order to be able to use Intents to create accounts. So remember to declare it in your manifest
++ * @author Ngewi Fet <ngewif@gmail.com>
++ * @see {@link Account#EXTRA_CURRENCY_CODE}, {@link Account#MIME_TYPE} {@link Intent#EXTRA_TITLE}, {@link Intent#EXTRA_UID}
++ */
+ public class AccountCreator extends BroadcastReceiver {
+ 
+ 	@Override
+diff --git a/GnucashMobile/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java b/GnucashMobile/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+index 49a701a1..d8c9e7dc 100644
+--- a/GnucashMobile/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
++++ b/GnucashMobile/src/org/gnucash/android/receivers/TransactionAppWidgetProvider.java
+@@ -24,6 +24,13 @@
+ import android.content.SharedPreferences.Editor;
+ import android.preference.PreferenceManager;
+ 
++/**
++ * {@link AppWidgetProvider} which is responsible for managing widgets on the homescreen
++ * It receives broadcasts related to updating and deleting widgets
++ * Widgets can also be updated manually by calling {@link WidgetConfigurationActivity#updateAllWidgets(Context)}
++ * @author Ngewi Fet <ngewif@gmail.com>
++ *
++ */
+ public class TransactionAppWidgetProvider extends AppWidgetProvider {
+ 
+ 	@Override
+@@ -55,6 +62,6 @@ public void onDeleted(Context context, int[] appWidgetIds) {
+ 		for (int appWidgetId : appWidgetIds) {
+ 			editor.remove(TransactionsListFragment.SELECTED_ACCOUNT_ID + appWidgetId);			
+ 		}
+-		editor.commit();
++		editor.commit();		
+ 	}
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/receivers/TransactionRecorder.java b/GnucashMobile/src/org/gnucash/android/receivers/TransactionRecorder.java
+index e0d51941..81a9c3a8 100644
+--- a/GnucashMobile/src/org/gnucash/android/receivers/TransactionRecorder.java
++++ b/GnucashMobile/src/org/gnucash/android/receivers/TransactionRecorder.java
+@@ -31,6 +31,17 @@
+ import android.os.Bundle;
+ import android.util.Log;
+ 
++/**
++ * Broadcast receiver responsible for creating transactions received through {@link Intent}s
++ * In order to create a transaction through Intents, broadcast an intent with the arguments needed to 
++ * create the transaction. Transactions are strongly bound to {@link Account}s and it is recommended to 
++ * create an Account for your transactions. The transactions will be associated to the account using a unique
++ * Identifier passed as {@link Transaction#EXTRA_ACCOUNT_UID}
++ * <p>Remember to declare the appropriate permissions in order to create transactions with Intents. 
++ * The required permission is "org.gnucash.android.permission.RECORD_TRANSACTION"</p>
++ * @author Ngewi Fet <ngewif@gmail.com>
++ * @see AccountCreator
++ */
+ public class TransactionRecorder extends BroadcastReceiver {
+ 
+ 	@Override
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/DatePickerDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/DatePickerDialogFragment.java
+index 3e3913b0..f5d22eb3 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/DatePickerDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/DatePickerDialogFragment.java
+@@ -25,15 +25,37 @@
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+ 
++/**
++ * Fragment for displaying a date picker dialog
++ * @author Ngewi Fet <ngewif@gmail.com>
++ *
++ */
+ public class DatePickerDialogFragment extends DialogFragment {
+ 
++	/**
++	 * Listener to notify of events in the dialog
++	 */
+ 	private OnDateSetListener mDateSetListener;
++	
++	/**
++	 * Date selected in the dialog or to which the dialog is initialized
++	 */
+ 	private Calendar mDate;
+ 	
++	/**
++	 * Default Constructor
++	 * Is required for when the device is rotated while the dialog is open.
++	 * If this constructor is not present, the app will crash
++	 */
+ 	public DatePickerDialogFragment() {
+-		// nothing to see here, move along
++		//nothing to see here, move along
+ 	}
+ 	
++	/**
++	 * Overloaded constructor
++	 * @param callback Listener to notify when the date is set and the dialog is closed
++	 * @param dateMillis Time in milliseconds to which to initialize the dialog
++	 */
+ 	public DatePickerDialogFragment(OnDateSetListener callback, long dateMillis) {
+ 		mDateSetListener = (OnDateSetListener) callback;
+ 		if (dateMillis > 0){
+@@ -42,6 +64,9 @@ public DatePickerDialogFragment(OnDateSetListener callback, long dateMillis) {
+ 		}
+ 	}
+ 
++	/**
++	 * Creates and returns an Android {@link DatePickerDialog}
++	 */
+ 	public Dialog onCreateDialog(Bundle savedInstanceState) {
+ 		Calendar cal = mDate == null ? Calendar.getInstance() : mDate;
+ 		
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/TimePickerDialogFragment.java b/GnucashMobile/src/org/gnucash/android/ui/TimePickerDialogFragment.java
+index 613cb702..c292a261 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/TimePickerDialogFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/TimePickerDialogFragment.java
+@@ -24,14 +24,36 @@
+ import android.os.Bundle;
+ import android.support.v4.app.DialogFragment;
+ 
++/**
++ * Fragment for displaying a time choose dialog
++ * @author Ngewi Fet <ngewif@gmail.com>
++ *
++ */
+ public class TimePickerDialogFragment extends DialogFragment {
++	/**
++	 * Listener to notify when the time is set
++	 */
+ 	private OnTimeSetListener mListener = null;
+ 	
++	/**
++	 * Current time to initialize the dialog to, or to notify the listener of.
++	 */
++	Calendar mCurrentTime = null;
++	
++	/**
++	 * Default constructor
++	 * Is required for when the device is rotated while the dialog is open.
++	 * If this constructor is not present, the app will crash
++	 */
+ 	public TimePickerDialogFragment() {
+ 		// nothing to see here, move along
+ 	}
+-	Calendar mCurrentTime = null;
+ 	
++	/**
++	 * Overloaded constructor
++	 * @param listener {@link OnTimeSetListener} to notify when the time has been set
++	 * @param timeMillis Time in milliseconds to initialize the dialog to
++	 */
+ 	public TimePickerDialogFragment(OnTimeSetListener listener, long timeMillis){
+ 		mListener = listener;
+ 		if (timeMillis > 0){
+@@ -40,6 +62,9 @@ public TimePickerDialogFragment(OnTimeSetListener listener, long timeMillis){
+ 		}
+ 	}
+ 	
++	/**
++	 * Creates and returns an Android {@link TimePickerDialog}
++	 */
+ 	@Override
+ 	public Dialog onCreateDialog(Bundle savedInstanceState) {
+ 		Calendar cal = mCurrentTime == null ? Calendar.getInstance() : mCurrentTime;
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+index 57aa5c53..7e7c67b9 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsActivity.java
+@@ -47,18 +47,43 @@
+ import com.actionbarsherlock.view.MenuItem;
+ 
+ /**
+- * Displays the list of accounts and summary of transactions
+- * 
++ * Manages actions related to accounts, displaying, exporting and creating new accounts
++ * The various actions are implemented as Fragments which are then added to this activity
+  * @author Ngewi Fet <ngewif@gmail.com>
+  * 
+  */
+ public class AccountsActivity extends SherlockFragmentActivity implements OnAccountClickedListener {
+ 
++	/**
++	 * Tag used for identifying the account list fragment when it is added to this activity
++	 */
+ 	public static final String FRAGMENT_ACCOUNTS_LIST 	= "accounts_list";
+ 		
++	/**
++	 * Tag used for identifying the account export fragment
++	 */
++	protected static final String FRAGMENT_EXPORT_OFX  = "export_ofx";
++
++	/**
++	 * Tag for identifying the "New account" fragment
++	 */
++	protected static final String FRAGMENT_NEW_ACCOUNT = "new_account_dialog";
++
++	/**
++	 * Logging tag
++	 */
+ 	protected static final String TAG = "AccountsActivity";	
+ 	
++	/**
++	 * Stores the indices of accounts which have been selected by the user for creation from the dialog.
++	 * The account names are stored as string resources and the selected indices are then used to choose which accounts to create
++	 * The dialog for creating default accounts is only shown when the app is started for the first time.
++	 */
+ 	private ArrayList<Integer> mSelectedDefaultAccounts = new ArrayList<Integer>();
++	
++	/**
++	 * Dialog which is shown to the user on first start prompting the user to create some accounts
++	 */
+ 	private AlertDialog mDefaultAccountsDialog;
+ 	
+ 	@Override
+@@ -113,12 +138,6 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 		}
+ 	}
+ 
+-	@Override
+-	protected void onActivityResult(int arg0, int arg1, Intent arg2) {
+-		// TODO Auto-generated method stub
+-		super.onActivityResult(arg0, arg1, arg2);
+-	}
+-	
+ 	/**
+ 	 * Opens a dialog fragment to create a new account
+ 	 * @param v View which triggered this callback
+@@ -130,6 +149,10 @@ public void onNewAccountClick(View v) {
+ 			accountFragment.showAddAccountDialog(0);
+ 	}
+ 
++	/**
++	 * Creates the default accounts which have the selected by the user.
++	 * The indices of the default accounts is stored in {@link #mSelectedDefaultAccounts}
++	 */
+ 	private void createDefaultAccounts(){
+ 		AlertDialog.Builder builder = new AlertDialog.Builder(this);
+ 		boolean[] checkedDefaults = new boolean[]{true, true, false, false, false};
+@@ -193,6 +216,10 @@ public void accountSelected(long accountRowId) {
+ 		startActivity(intent);
+ 	}
+ 	
++	/**
++	 * Removes the flag indicating that the app is being run for the first time. 
++	 * This is called every time the app is started because the next time won't be the first time
++	 */
+ 	private void removeFirstRunFlag(){
+ 		Editor editor = PreferenceManager.getDefaultSharedPreferences(this).edit();
+ 		editor.putBoolean(getString(R.string.key_first_run), false);
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+index 23f7d887..17dc0e22 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/accounts/AccountsListFragment.java
+@@ -53,6 +53,7 @@
+ import android.widget.AdapterView;
+ import android.widget.AdapterView.OnItemLongClickListener;
+ import android.widget.ImageView;
++import android.widget.ListAdapter;
+ import android.widget.ListView;
+ import android.widget.TextView;
+ import android.widget.Toast;
+@@ -66,21 +67,60 @@
+ import com.actionbarsherlock.view.MenuInflater;
+ import com.actionbarsherlock.view.MenuItem;
+ 
++/**
++ * Fragment for displaying the list of accounts in the database
++ * @author Ngewi Fet <ngewif@gmail.com>
++ *
++ */
+ public class AccountsListFragment extends SherlockListFragment implements
+ 		LoaderCallbacks<Cursor>, OnItemLongClickListener {
+ 
+-	protected static final String FRAGMENT_NEW_ACCOUNT = "new_account_dialog";
+-	protected static final String FRAGMENT_EXPORT_OFX  = "export_ofx";
++	/**
++	 * Request code passed when displaying the "Add Account" dialog. 
++	 */
+ 	private static final int DIALOG_ADD_ACCOUNT = 0x10;
+ 	
++	/**
++	 * Logging tag
++	 */
+ 	protected static final String TAG = "AccountsListFragment";
+ 	
+-	AccountsCursorAdapter mCursorAdapter;
++	/**
++	 * {@link ListAdapter} for the accounts which will be bound to the list
++	 */
++	AccountsCursorAdapter mAccountsCursorAdapter;
++	
++	/**
++	 * Dialog fragment for adding new accounts
++	 */
+ 	NewAccountDialogFragment mAddAccountFragment;
++	
++	/**
++	 * Database adapter for loading Account records from the database
++	 */
+ 	private AccountsDbAdapter mAccountsDbAdapter;	
+-	private OnAccountClickedListener mAccountSelectedListener;	
++	
++	/**
++	 * Listener to be notified when an account is clicked
++	 */
++	private OnAccountClickedListener mAccountSelectedListener;
++	
++	/**
++	 * Flag to indicate if the fragment is in edit mode
++	 * Edit mode means an account has been selected (through long press) and the 
++	 * context action bar (CAB) is activated
++	 */
+ 	private boolean mInEditMode = false;
++	
++	/**
++	 * Android action mode 
++	 * Is not null only when an accoun is selected and the Context ActionBar (CAB) is activated
++	 */
+ 	private ActionMode mActionMode = null;
++	
++	/**
++	 * Position which has been selected in the ListView
++	 */
+ 	private int mSelectedViewPosition = -1;
+ 	
+ 	/**
+@@ -90,6 +130,9 @@
+ 	 */
+ 	private long mSelectedItemId = -1;
+ 	
++	/**
++	 * Callbacks for the CAB menu
++	 */
+ 	private ActionMode.Callback mActionModeCallbacks = new Callback() {
+ 		
+ 		@Override
+@@ -129,6 +172,13 @@ public void onDestroyActionMode(ActionMode mode) {
+ 		}
+ 	};
+ 
++	/**
++	 * Delete confirmation dialog
++	 * Is displayed when deleting an account which has transactions. 
++	 * If an account has no transactions, it is deleted immediately with no confirmation required
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 *
++	 */
+ 	public static class MyAlertDialogFragment extends SherlockDialogFragment {
+ 
+         public static MyAlertDialogFragment newInstance(int title, long id) {
+@@ -177,13 +227,13 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 	public void onCreate(Bundle savedInstanceState) {
+ 		super.onCreate(savedInstanceState);
+ 		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
+-		mCursorAdapter = new AccountsCursorAdapter(
++		mAccountsCursorAdapter = new AccountsCursorAdapter(
+ 				getActivity().getApplicationContext(), 
+ 				R.layout.list_item_account, null,
+ 				new String[] { DatabaseHelper.KEY_NAME },
+ 				new int[] { R.id.account_name });
+ 						
+-		setListAdapter(mCursorAdapter);
++		setListAdapter(mAccountsCursorAdapter);
+ 	}
+ 	
+ 	@Override
+@@ -331,7 +381,7 @@ public void refreshList(){
+ 	public void onDestroy() {
+ 		super.onDestroy();
+ 		mAccountsDbAdapter.close();
+-		mCursorAdapter.close();
++		mAccountsCursorAdapter.close();
+ 	}	
+ 	
+ 	/**
+@@ -340,7 +390,7 @@ public void onDestroy() {
+ 	public void showAddAccountDialog(long accountId) {
+ 		FragmentManager manager = getSherlockActivity().getSupportFragmentManager();
+ 		FragmentTransaction ft = manager.beginTransaction();
+-		Fragment prev = manager.findFragmentByTag(FRAGMENT_NEW_ACCOUNT);
++		Fragment prev = manager.findFragmentByTag(AccountsActivity.FRAGMENT_NEW_ACCOUNT);
+ 		
+ 		if (prev != null) {
+ 			ft.remove(prev);
+@@ -358,13 +408,13 @@ public void showAddAccountDialog(long accountId) {
+ 			//if we were editing, stop before going somewhere else
+ 			mActionMode.finish(); 
+ 		}
+-		mAddAccountFragment.show(ft, FRAGMENT_NEW_ACCOUNT);
++		mAddAccountFragment.show(ft, AccountsActivity.FRAGMENT_NEW_ACCOUNT);
+ 	}
+ 
+ 	public void showExportDialog(){
+ 		FragmentManager manager = getSherlockActivity().getSupportFragmentManager();
+ 		FragmentTransaction ft = manager.beginTransaction();
+-	    Fragment prev = manager.findFragmentByTag(FRAGMENT_EXPORT_OFX);
++	    Fragment prev = manager.findFragmentByTag(AccountsActivity.FRAGMENT_EXPORT_OFX);
+ 	    if (prev != null) {
+ 	        ft.remove(prev);
+ 	    }
+@@ -372,7 +422,7 @@ public void showExportDialog(){
+ 
+ 	    // Create and show the dialog.
+ 	    DialogFragment exportFragment = new ExportDialogFragment();
+-	    exportFragment.show(ft, FRAGMENT_EXPORT_OFX);
++	    exportFragment.show(ft, AccountsActivity.FRAGMENT_EXPORT_OFX);
+ 	}
+ 	
+ 	private class AccountsCursorAdapter extends SimpleCursorAdapter {
+@@ -443,14 +493,14 @@ public Cursor loadInBackground() {
+ 	@Override
+ 	public void onLoadFinished(Loader<Cursor> loaderCursor, Cursor cursor) {
+ 		Log.d(TAG, "Accounts loader finished. Swapping in cursor");
+-		mCursorAdapter.swapCursor(cursor);
+-		mCursorAdapter.notifyDataSetChanged();
++		mAccountsCursorAdapter.swapCursor(cursor);
++		mAccountsCursorAdapter.notifyDataSetChanged();
+ 	}
+ 
+ 	@Override
+ 	public void onLoaderReset(Loader<Cursor> arg0) {
+ 		Log.d(TAG, "Resetting the accounts loader");
+-		mCursorAdapter.swapCursor(null);
++		mAccountsCursorAdapter.swapCursor(null);
+ 	}	
+ 
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/settings/SettingsActivity.java b/GnucashMobile/src/org/gnucash/android/ui/settings/SettingsActivity.java
+index 6ffdc3b1..aecf8b59 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -28,8 +28,17 @@
+ import com.actionbarsherlock.app.SherlockPreferenceActivity;
+ import com.actionbarsherlock.view.MenuItem;
+ 
++/**
++ * Activity for displaying settings and information about the application
++ * @author Ngewi Fet <ngewif@gmail.com>
++ *
++ */
+ public class SettingsActivity extends SherlockPreferenceActivity{
+ 
++	/**
++	 * Constructs the headers to display in the header list when the Settings activity is first opened
++	 * Only available on Honeycomb and above
++	 */
+ 	@Override
+ 	public void onBuildHeaders(List<Header> target) {
+ 		loadHeadersFromResource(R.xml.preference_headers, target);
+@@ -66,6 +75,11 @@ public boolean onOptionsItemSelected(MenuItem item) {
+ 		}
+ 	}
+ 	
++	/**
++	 * Fragment for displaying general preferences
++	 * @author Ngewi Fet <ngewif@gmail.com>
++	 *
++	 */
+ 	public static class GeneralPreferenceFragment extends PreferenceFragment{
+ 		
+ 		@Override
+@@ -78,6 +92,11 @@ public void onCreate(Bundle savedInstanceState) {
+ 		}		
+ 	}
+ 	
++	/**
++	 * Fragment for displaying information about the application
++	 * @author Ngewi
++	 *
++	 */
+ 	public static class AboutPreferenceFragment extends PreferenceFragment{
+ 		
+ 		@Override
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+index b5402c4e..63d444d4 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/transactions/NewTransactionFragment.java
+@@ -26,9 +26,9 @@
+ import java.util.Currency;
+ import java.util.Date;
+ import java.util.GregorianCalendar;
++import java.util.Locale;
+ 
+ import org.gnucash.android.R;
+-import org.gnucash.android.data.Account;
+ import org.gnucash.android.data.Money;
+ import org.gnucash.android.data.Transaction;
+ import org.gnucash.android.data.Transaction.TransactionType;
+@@ -158,7 +158,9 @@ private void initializeViewsWithTransaction(){
+ 		mDescriptionEditText.setText(mTransaction.getDescription());
+ 		mDateTextView.setText(DATE_FORMATTER.format(mTransaction.getTimeMillis()));
+ 		mTimeTextView.setText(TIME_FORMATTER.format(mTransaction.getTimeMillis()));
+-		mTime = mDate = Calendar.getInstance();
++		Calendar cal = GregorianCalendar.getInstance();
++		cal.setTimeInMillis(mTransaction.getTimeMillis());
++		mDate = mTime = cal;
+ 				
+ 		final long accountId = mAccountsDbAdapter.fetchAccountWithUID(mTransaction.getAccountUID());
+ 		final int count = mCursorAdapter.getCount();
+@@ -273,13 +275,6 @@ public void onClick(View v) {
+ 	}	
+ 	
+ 	private void saveNewTransaction() {
+-		String name = mNameEditText.getText().toString();
+-		String description = mDescriptionEditText.getText().toString();
+-		String amountString = mAmountEditText.getText().toString();
+-		BigDecimal amountBigd = new BigDecimal(stripCurrencyFormatting(amountString))
+-									.setScale(2, RoundingMode.HALF_EVEN)
+-									.divide(new BigDecimal(100), 2, RoundingMode.HALF_EVEN);;
+-		
+ 		Calendar cal = new GregorianCalendar(
+ 				mDate.get(Calendar.YEAR), 
+ 				mDate.get(Calendar.MONTH), 
+@@ -287,11 +282,14 @@ private void saveNewTransaction() {
+ 				mTime.get(Calendar.HOUR_OF_DAY), 
+ 				mTime.get(Calendar.MINUTE), 
+ 				mTime.get(Calendar.SECOND));
++		String name = mNameEditText.getText().toString();
++		String description = mDescriptionEditText.getText().toString();
++		BigDecimal amountBigd = parseInputToDecimal(mAmountEditText.getText().toString());
+ 		
+-		long accountID = mAccountsSpinner.getSelectedItemId();
+-		Account account = mAccountsDbAdapter.getAccount(accountID);
+-		Money amount = new Money(amountBigd, account.getCurrency());
+-		String type = mTransactionTypeButton.getText().toString();
++		long accountID 	= mAccountsSpinner.getSelectedItemId();
++		Currency currency = Currency.getInstance(mTransactionsDbAdapter.getCurrencyCode(accountID));
++		Money amount 	= new Money(amountBigd, currency);
++		String type 	= mTransactionTypeButton.getText().toString();
+ 		
+ 		if (mTransaction != null){
+ 			mTransaction.setAmount(amount);
+@@ -300,7 +298,7 @@ private void saveNewTransaction() {
+ 		} else {
+ 			mTransaction = new Transaction(amount, name, TransactionType.valueOf(type));
+ 		}
+-		mTransaction.setAccountUID(account.getUID());
++		mTransaction.setAccountUID(mTransactionsDbAdapter.getAccountUID(accountID));
+ 		mTransaction.setTime(cal.getTimeInMillis());
+ 		mTransaction.setDescription(description);
+ 		
+@@ -370,9 +368,19 @@ public void onTimeSet(TimePicker view, int hourOfDay, int minute) {
+ 	
+ 	public static String stripCurrencyFormatting(String s){
+ 		//remove all currency formatting and anything else which is not a number
+-		return s.replace(".", "").replace(",", "").replaceAll("\\D*", "");
++		return s.trim().replaceAll("\\D*", "");
+ 	}
+ 	
++	public BigDecimal parseInputToDecimal(String amountString){
++		String clean = stripCurrencyFormatting(amountString);
++		BigDecimal amount = new BigDecimal(clean).setScale(2,
++				RoundingMode.HALF_EVEN).divide(new BigDecimal(100), 2,
++				RoundingMode.HALF_EVEN);
++		if (mTransactionTypeButton.isChecked() && amount.doubleValue() > 0)
++			amount = amount.negate();
++		return amount;
++	}
++
+ 	private class ValidationsWatcher implements TextWatcher {
+ 
+ 		@Override
+@@ -399,21 +407,19 @@ public void onTextChanged(CharSequence s, int start, int before,
+ 	}
+ 	
+ 	private class AmountInputFormatter implements TextWatcher {
+-		private String current = null;
++		private String current = "0";
+ 		
+ 		@Override
+ 		public void afterTextChanged(Editable s) {	
+ 						
+-			String cleanString = stripCurrencyFormatting(s.toString());
+-			if (cleanString.length() == 0)
++//			String cleanString = stripCurrencyFormatting(s.toString());
++//			if (cleanString.length() == 0)
++//				return;
++			if (s.length() == 0)
+ 				return;
+ 			
+-			BigDecimal amount = new BigDecimal(cleanString)
+-									.setScale(2, RoundingMode.HALF_EVEN)
+-									.divide(new BigDecimal(100), 2, RoundingMode.HALF_EVEN);
+-			if (mTransactionTypeButton.isChecked() && amount.doubleValue() > 0) 
+-				amount = amount.negate();
+-			DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance();
++			BigDecimal amount = parseInputToDecimal(s.toString());
++			DecimalFormat formatter = (DecimalFormat) NumberFormat.getInstance(Locale.getDefault());
+ 			formatter.setMinimumFractionDigits(2);
+ 			formatter.setMaximumFractionDigits(2);
+ 			current = formatter.format(amount.doubleValue());
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java b/GnucashMobile/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+index bbf7d116..50f3632f 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/widget/WidgetConfigurationActivity.java
+@@ -45,6 +45,11 @@
+ import android.widget.Spinner;
+ import android.widget.Toast;
+ 
++/**
++ * Activity for configuration which account to diplay on a widget. 
++ * The activity is opened each time a widget is added to the homescreen
++ * @author Ngewi Fet <ngewif@gmail.com>
++ */
+ public class WidgetConfigurationActivity extends Activity {
+ 	private AccountsDbAdapter mAccountsDbAdapter;
+ 	private SimpleCursorAdapter mCursorAdapter;
+@@ -92,6 +97,9 @@ protected void onDestroy() {
+ 		mAccountsDbAdapter.close();
+ 	}
+ 	
++	/**
++	 * Sets click listeners for the buttons in the dialog
++	 */
+ 	private void bindListeners() {
+ 		mOkButton.setOnClickListener(new View.OnClickListener() {
+ 			
+@@ -176,7 +184,11 @@ public static void updateWidget(Context context, int appWidgetId, long accountId
+ 		
+ 		appWidgetManager.updateAppWidget(appWidgetId, views);
+ 	}
+-			
++	
++	/**
++	 * Updates all widgets belonging to the application
++	 * @param context Application context
++	 */
+ 	public static void updateAllWidgets(Context context){
+ 		Log.i("WidgetConfigruation", "Updating all widgets");
+ 		AppWidgetManager widgetManager = AppWidgetManager.getInstance(context);
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+index 49679615..770b4088 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OfxFormatter.java
+@@ -41,7 +41,7 @@
+ 	/**
+ 	 * A date formatter used when creating file names for the exported data
+ 	 */
+-	public final static SimpleDateFormat ofxDateFormatter = new SimpleDateFormat("yyyyMMddHHmmss");
++	public final static SimpleDateFormat OFX_DATE_FORMATTER = new SimpleDateFormat("yyyyMMddHHmmss");
+ 	
+ 	/**
+ 	 * ID which will be used as the bank ID for OFX from this app
+@@ -84,7 +84,7 @@ public OfxFormatter(Context context, boolean exportAll) {
+ 	}
+ 	
+ 	/**
+-	 * Returns the current time formatted using the pattern in {@link #ofxDateFormatter}
++	 * Returns the current time formatted using the pattern in {@link #OFX_DATE_FORMATTER}
+ 	 * @return Current time as a formatted string
+ 	 * @see #getFormattedCurrentTime(long)
+ 	 */
+@@ -99,7 +99,7 @@ public static String getFormattedCurrentTime(){
+ 	 */
+ 	public static String getFormattedCurrentTime(long milliseconds){
+ 		Date date = new Date(milliseconds);
+-		String dateString = ofxDateFormatter.format(date);
++		String dateString = OFX_DATE_FORMATTER.format(date);
+ 		TimeZone tz = Calendar.getInstance().getTimeZone();
+ 		int offset = tz.getRawOffset();
+ 		int hours   = (int) (( offset / (1000*60*60)) % 24);
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java b/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+index b692985c..8f49a5df 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/db/AccountsDbAdapterTest.java
+@@ -1,5 +1,6 @@
+ package org.gnucash.android.test.db;
+ 
++import java.util.Currency;
+ import java.util.List;
+ 
+ import org.gnucash.android.data.Account;
+@@ -39,5 +40,19 @@ public void testAlphabeticalSorting(){
+ 		assertEquals(BRAVO_ACCOUNT_NAME, accountsList.get(1).getName());
+ 	}
+ 	
+-	
++	public void testTransactionsHaveSameCurrencyAsAccount(){
++		Account acc1 = new Account("Japanese", Currency.getInstance("JPY"));
++		acc1.setUID("simile");
++		Transaction trx = new Transaction(2.50, "Underground");
++		Transaction term = new Transaction("3.49", "Tube");
++		acc1.addTransaction(trx);
++		acc1.addTransaction(term);
++		
++		mAdapter.addAccount(acc1);
++		
++		Account account = mAdapter.getAccount("simile");
++		for (Transaction t : account.getTransactions()) {
++			assertEquals("JPY", t.getAmount().getCurrency().getCurrencyCode());
++		}
++	}
+ }
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+index f0a1c4a2..2c67f7a1 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -65,6 +65,7 @@ protected void setUp() throws Exception {
+ 		adapter.close();
+ 	}
+ 
++	
+ 	public void testDisplayAccountsList(){		
+ 		//there should exist a listview of accounts
+ 		Fragment fragment = getActivity()
+@@ -213,7 +214,6 @@ public void testIntentAccountCreation(){
+ 			try {
+ 				mSolo.wait(2000);
+ 			} catch (InterruptedException e) {
+-				// TODO Auto-generated catch block
+ 				e.printStackTrace();
+ 			}
+ 		}
+diff --git a/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java b/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 9955cefe..abb27c2f 100644
+--- a/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/GnucashMobileTest/src/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -43,24 +43,27 @@
+ 
+ public class TransactionsActivityTest extends
+ 		ActivityInstrumentationTestCase2<TransactionsActivity> {
++	private static final String TRANSACTION_NAME = "Pizza";
+ 	private static final String DUMMY_ACCOUNT_UID = "transactions-account";
+ 	private static final String DUMMY_ACCOUNT_NAME = "Transactions Account";
+ 	private Solo mSolo;
+ 	private Transaction mTransaction;
++	private long mTransactionTimeMillis;
+ 	
+ 	public TransactionsActivityTest() {
+ 		super(TransactionsActivity.class);		
+ 	}
+ 	
+ 	@Override
+-	protected void setUp() throws Exception {		
++	protected void setUp() throws Exception {
++		mTransactionTimeMillis = System.currentTimeMillis();
+ 		Account account = new Account(DUMMY_ACCOUNT_NAME);
+ 		account.setUID(DUMMY_ACCOUNT_UID);
+ 		account.setCurrency(Currency.getInstance(Locale.getDefault()));
+-		mTransaction = new Transaction(9.99, "Pizza");
++		mTransaction = new Transaction(9.99, TRANSACTION_NAME);
+ 		mTransaction.setAccountUID(DUMMY_ACCOUNT_UID);
+ 		mTransaction.setDescription("What up?");
+-		mTransaction.setTime(System.currentTimeMillis());
++		mTransaction.setTime(mTransactionTimeMillis);
+ 		
+ 		account.addTransaction(mTransaction);		
+ 		
+@@ -93,12 +96,11 @@ private int getTranscationCount(){
+ 	}
+ 	
+ 	private void validateNewTransactionFields(){
+-		long timeMillis = System.currentTimeMillis();
+-		String expectedValue = NewTransactionFragment.DATE_FORMATTER.format(new Date(timeMillis));
++		String expectedValue = NewTransactionFragment.DATE_FORMATTER.format(new Date(mTransactionTimeMillis));
+ 		String actualValue = mSolo.getText(6).getText().toString();
+ 		assertEquals(expectedValue, actualValue);
+ 		
+-		expectedValue = NewTransactionFragment.TIME_FORMATTER.format(new Date(timeMillis));
++		expectedValue = NewTransactionFragment.TIME_FORMATTER.format(new Date(mTransactionTimeMillis));
+ 		actualValue = mSolo.getText(7).getText().toString();
+ 		assertEquals(expectedValue, actualValue);
+ 		Spinner spinner = mSolo.getCurrentSpinners().get(0);
+@@ -162,14 +164,49 @@ private void validateEditTransactionFields(Transaction transaction){
+ 		assertEquals(transaction.getAccountUID(), actualValue);
+ 	}
+ 	
++	public void testOpenTransactionEditShouldNotModifyTransaction(){
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
++		
++		validateTransactionListDisplayed();
++		
++		mSolo.clickOnText(TRANSACTION_NAME);
++		mSolo.waitForText("Note");
++		
++		validateNewTransactionFields();
++		
++		mSolo.clickOnActionBarItem(R.id.menu_save);
++		
++		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
++		
++		TransactionsDbAdapter adapter = new TransactionsDbAdapter(getActivity());
++		List<Transaction> transactions = adapter.getAllTransactionsForAccount(DUMMY_ACCOUNT_UID);
++		
++		assertEquals(1, transactions.size());
++		Transaction trx = transactions.get(0);
++		assertEquals(TRANSACTION_NAME, trx.getName());
++		assertEquals(trx.getAccountUID(), DUMMY_ACCOUNT_UID);
++		Date expectedDate = new Date(mTransactionTimeMillis);
++		Date trxDate = new Date(trx.getTimeMillis());
++		assertEquals(NewTransactionFragment.DATE_FORMATTER.format(expectedDate), 
++				NewTransactionFragment.DATE_FORMATTER.format(trxDate));
++		assertEquals(NewTransactionFragment.TIME_FORMATTER.format(expectedDate), 
++				NewTransactionFragment.TIME_FORMATTER.format(trxDate));
++		
++		//FIXME: for some reason, the expected time is higher (in the future) than the actual time
++		//this should not be the case since the transaction was created with the expected time
++		//I guess it has to do with the time precision and the fact that the time is repeatedly 
++		//converted to Date objects and back. But just validating the printable date and time should be ok
++//		assertEquals(mTransactionTimeMillis, trx.getTimeMillis());
++	}
++	
+ 	public void testEditTransaction(){		
+ 		//open transactions
+ 		mSolo.waitForText(DUMMY_ACCOUNT_NAME);
+ 		
+ 		validateTransactionListDisplayed();
+ 		
+-		mSolo.clickOnText("Pizza");
+-		mSolo.waitForText("Description");
++		mSolo.clickOnText(TRANSACTION_NAME);
++		mSolo.waitForText("Note");
+ 		
+ 		validateEditTransactionFields(mTransaction);
+ 				

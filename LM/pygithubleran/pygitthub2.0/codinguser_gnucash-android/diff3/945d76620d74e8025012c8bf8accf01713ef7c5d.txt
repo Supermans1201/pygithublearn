@@ -1,0 +1,190 @@
+From 945d76620d74e8025012c8bf8accf01713ef7c5d Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 11 Aug 2014 10:33:32 +0200
+Subject: [PATCH] Preserve default transfer accounts during upgrade database
+ migration
+
+- Improved: Mark opening balances as exported transactions
+- Fixed: Editing transactions loaded from templates only partially modifies splits
+- Fixed: Transaction templates do not use current date when loaded
+- Update version strings for v1.4.0-beta5 release
+---
+ app/AndroidManifest.xml                                   |  2 +-
+ app/res/values/strings.xml                                |  2 +-
+ app/src/org/gnucash/android/db/AccountsDbAdapter.java     |  1 +
+ app/src/org/gnucash/android/export/xml/GncXmlHelper.java  |  6 +++---
+ app/src/org/gnucash/android/importer/GncXmlHandler.java   | 12 +++++++++++-
+ app/src/org/gnucash/android/model/Account.java            | 10 +++++++---
+ app/src/org/gnucash/android/model/Transaction.java        |  2 +-
+ .../android/ui/transaction/TransactionFormFragment.java   | 15 ++++++++++-----
+ 8 files changed, 35 insertions(+), 15 deletions(-)
+
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index 84a8fc42..55e5acb5 100644
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -17,7 +17,7 @@
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     package="org.gnucash.android"
+-    android:versionCode="33"
++    android:versionCode="34"
+     android:versionName="@string/app_version_name" >
+ 
+     <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="16"/>
+diff --git a/app/res/values/strings.xml b/app/res/values/strings.xml
+index 786e173b..59e0ed31 100644
+--- a/app/res/values/strings.xml
++++ b/app/res/values/strings.xml
+@@ -17,7 +17,7 @@
+ 
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="app_name">GnuCash</string>
+-    <string name="app_version_name">1.4.0-beta4</string>
++    <string name="app_version_name">1.4.0-beta5</string>
+     <string name="title_add_account">Create Account</string>
+     <string name="title_edit_account">Edit Account</string>
+     <string name="info_details">Info</string>
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index f5d12081..26a5e277 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -973,6 +973,7 @@ public boolean isFavoriteAccount(long accountId){
+                 split.setType(transactionType);
+                 transaction.addSplit(split);
+                 transaction.addSplit(split.createPair(getOrCreateOpeningBalanceAccountUID()));
++                transaction.setExported(true);
+                 openingTransactions.add(transaction);
+             }
+             cursor.close();
+diff --git a/app/src/org/gnucash/android/export/xml/GncXmlHelper.java b/app/src/org/gnucash/android/export/xml/GncXmlHelper.java
+index 79246a20..992ea14b 100644
+--- a/app/src/org/gnucash/android/export/xml/GncXmlHelper.java
++++ b/app/src/org/gnucash/android/export/xml/GncXmlHelper.java
+@@ -79,7 +79,7 @@
+     public static final String KEY_COLOR            = "color";
+     public static final String KEY_FAVORITE         = "favorite";
+     public static final String KEY_NOTES            = "notes";
+-
++    public static final String KEY_DEFAULT_TRANSFER_ACCOUNT = "default_transfer_account";
+ 
+     /**
+      * Formats dates for the GnuCash XML format
+@@ -132,12 +132,12 @@ public static BigDecimal parseMoney(String amountString){
+      * @param value Slot value as String
+      * @return Element node containing the key-value pair
+      */
+-    public static Element createSlot(Document doc, String key, String value){
++    public static Element createSlot(Document doc, String key, String value, String valueType){
+         Element slotNode  = doc.createElement(TAG_SLOT);
+         Element slotKeyNode = doc.createElement(TAG_SLOT_KEY);
+         slotKeyNode.appendChild(doc.createTextNode(key));
+         Element slotValueNode = doc.createElement(TAG_SLOT_VALUE);
+-        slotValueNode.setAttribute(ATTR_KEY_TYPE, ATTR_VALUE_STRING);
++        slotValueNode.setAttribute(ATTR_KEY_TYPE, valueType);
+         slotValueNode.appendChild(doc.createTextNode(value));
+         slotNode.appendChild(slotKeyNode);
+         slotNode.appendChild(slotValueNode);
+diff --git a/app/src/org/gnucash/android/importer/GncXmlHandler.java b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+index c52e374d..5154b566 100644
+--- a/app/src/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/org/gnucash/android/importer/GncXmlHandler.java
+@@ -80,7 +80,8 @@
+     boolean mInFavoriteSlot     = false;
+     boolean mISO4217Currency    = false;
+     boolean mIsDatePosted       = false;
+-    boolean mIsNote = false;
++    boolean mIsNote             = false;
++    boolean mInDefaultTransferAccount = false;
+ 
+     private Context mContext;
+     private TransactionsDbAdapter mTransactionsDbAdapter;
+@@ -185,6 +186,10 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             if (characterString.equals(GncXmlHelper.KEY_NOTES)){
+                 mIsNote = true;
+             }
++
++            if (characterString.equals(GncXmlHelper.KEY_DEFAULT_TRANSFER_ACCOUNT)){
++                mInDefaultTransferAccount = true;
++            }
+         }
+ 
+         if (qualifiedName.equalsIgnoreCase(GncXmlHelper.TAG_SLOT_VALUE)){
+@@ -223,6 +228,11 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     mIsNote = false;
+                 }
+             }
++
++            if (mInDefaultTransferAccount){
++                mAccount.setDefaultTransferAccountUID(characterString);
++                mInDefaultTransferAccount = false;
++            }
+         }
+ 
+ 
+diff --git a/app/src/org/gnucash/android/model/Account.java b/app/src/org/gnucash/android/model/Account.java
+index 598bdc30..319667e8 100644
+--- a/app/src/org/gnucash/android/model/Account.java
++++ b/app/src/org/gnucash/android/model/Account.java
+@@ -608,14 +608,18 @@ public void toGncXml(Document doc, Element rootNode) {
+ 
+         Element acctSlotsNode = doc.createElement(GncXmlHelper.TAG_ACT_SLOTS);
+         acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_PLACEHOLDER,
+-                Boolean.toString(mIsPlaceholderAccount)));
++                Boolean.toString(mIsPlaceholderAccount), GncXmlHelper.ATTR_VALUE_STRING));
+ 
+         if (mColorCode != null && mColorCode.trim().length() > 0){
+-            acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_COLOR, mColorCode));
++            acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_COLOR, mColorCode, GncXmlHelper.ATTR_VALUE_STRING));
++        }
++
++        if (mDefaultTransferAccountUID != null && mDefaultTransferAccountUID.trim().length() > 0){
++            acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_DEFAULT_TRANSFER_ACCOUNT, mDefaultTransferAccountUID, "guid"));
+         }
+ 
+         acctSlotsNode.appendChild(GncXmlHelper.createSlot(doc,
+-                GncXmlHelper.KEY_FAVORITE, Boolean.toString(mIsFavorite)));
++                GncXmlHelper.KEY_FAVORITE, Boolean.toString(mIsFavorite), GncXmlHelper.ATTR_VALUE_STRING));
+ 
+         Element accountNode = doc.createElement(GncXmlHelper.TAG_ACCOUNT);
+         accountNode.setAttribute(GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+diff --git a/app/src/org/gnucash/android/model/Transaction.java b/app/src/org/gnucash/android/model/Transaction.java
+index 05220ba0..d76982ee 100644
+--- a/app/src/org/gnucash/android/model/Transaction.java
++++ b/app/src/org/gnucash/android/model/Transaction.java
+@@ -635,7 +635,7 @@ public void toGncXml(Document doc, Element rootElement) {
+ 
+         Element trnSlotsNode = doc.createElement(GncXmlHelper.TAG_TRN_SLOTS);
+         if (mNotes != null && mNotes.length() > 0) {
+-            trnSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_NOTES, mNotes));
++            trnSlotsNode.appendChild(GncXmlHelper.createSlot(doc, GncXmlHelper.KEY_NOTES, mNotes, GncXmlHelper.ATTR_VALUE_STRING));
+             //TODO: Consider adding future transactions date as slot here too
+         }
+         Element trnSplits = doc.createElement(GncXmlHelper.TAG_TRN_SPLITS);
+diff --git a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 82f0d936..400a91d1 100644
+--- a/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -291,12 +291,17 @@ public Cursor runQuery(CharSequence name) {
+             @Override
+             public void onItemClick(AdapterView<?> adapterView, View view, int position, long id) {
+                 mTransaction = new Transaction(mTransactionsDbAdapter.getTransaction(id), true);
+-                if (!GnuCashApplication.isDoubleEntryEnabled(true)) { //if no double entry, use only splits for this acct
+-                    List<Split> accountSplits = mTransaction.getSplits(mAccountsDbAdapter.getAccountUID(mAccountId));
+-                    mTransaction.setSplits(accountSplits);
+-                }
++                mTransaction.setTime(System.currentTimeMillis());
+                 initializeViewsWithTransaction();
+-                setAmountEditViewVisible(View.GONE);
++                List<Split> splitList = mTransaction.getSplits();
++                boolean isSplitPair = splitList.size() == 2 && splitList.get(0).isPairOf(splitList.get(1));
++                if (isSplitPair){
++                    mSplitsList.clear();
++                    mAmountEditText.setText(splitList.get(0).getAmount().toPlainString());
++                } else {
++                    setAmountEditViewVisible(View.GONE);
++                }
++                mTransaction = null; //we are creating a new transaction after all
+             }
+         });
+ 

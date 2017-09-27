@@ -1,0 +1,134 @@
+From d8b008740f659651714b9e3a0f997d62eae0f9b2 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 13 Sep 2014 16:48:02 +0800
+Subject: [PATCH 1/2] Rewrite getExportableAccounts
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 35 +++++++++++++++-------
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 13 ++++----
+ 2 files changed, 31 insertions(+), 17 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index b98d815a..a5317be1 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -474,17 +474,30 @@ public String getName(long accountID) {
+ 	 * @return List of {@link Account}s with unexported transactions
+ 	 */
+ 	public List<Account> getExportableAccounts(){
+-        //TODO: Optimize to use SQL DISTINCT and load only necessary accounts from db
+-		List<Account> accountsList = getAllAccounts();
+-		Iterator<Account> it = accountsList.iterator();
+-		
+-		while (it.hasNext()){
+-			Account account = it.next();
+-			
+-			if (!account.hasUnexportedTransactions())
+-				it.remove();
+-		}
+-		return accountsList;
++        LinkedList<Account> accountsList = new LinkedList<Account>();
++        Cursor cursor = mDb.query(
++                TransactionEntry.TABLE_NAME + " , " + SplitEntry.TABLE_NAME +
++                        " ON " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = " +
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID + " , " +
++                        AccountEntry.TABLE_NAME + " ON " + AccountEntry.TABLE_NAME + "." +
++                        AccountEntry.COLUMN_UID + " = " + SplitEntry.TABLE_NAME + "." +
++                        SplitEntry.COLUMN_ACCOUNT_UID,
++                new String[]{AccountEntry.TABLE_NAME + ".*"},
++                TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_EXPORTED + " == 0",
++                null,
++                AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID,
++                null,
++                null
++        );
++        try {
++            while (cursor.moveToNext()) {
++                accountsList.add(buildAccountInstance(cursor));
++            }
++        }
++        finally {
++            cursor.close();
++        }
++        return accountsList;
+ 	}
+ 
+     /**
+diff --git a/app/src/org/gnucash/android/db/DatabaseAdapter.java b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+index e8eff5ee..82d53123 100644
+--- a/app/src/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/org/gnucash/android/db/DatabaseAdapter.java
+@@ -197,14 +197,15 @@ public String getCurrencyCode(String accountUID) {
+ 
+         if (cursor == null)
+             return null;
+-        if (cursor.getCount() <= 0) {
++        String currencyCode = null;
++        try {
++            if (cursor.moveToFirst()) {
++                currencyCode = cursor.getString(0);
++            }
++        }
++        finally {
+             cursor.close();
+-            return null;
+         }
+-
+-        cursor.moveToFirst();
+-        String currencyCode = cursor.getString(0);
+-        cursor.close();
+         return currencyCode;
+     }
+ 
+
+From 45041153954801a0f2a69007aa776f1608ec7a12 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 13 Sep 2014 18:02:58 +0800
+Subject: [PATCH 2/2] Rewrite accountsDbAdapter.markAsExported
+
+---
+ .../org/gnucash/android/db/AccountsDbAdapter.java  | 31 +++++++++++-----------
+ 1 file changed, 15 insertions(+), 16 deletions(-)
+
+diff --git a/app/src/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+index a5317be1..0ffbe08b 100644
+--- a/app/src/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -168,22 +168,21 @@ public long bulkAddAccounts(List<Account> accountList){
+     public int markAsExported(String accountUID){
+         ContentValues contentValues = new ContentValues();
+         contentValues.put(TransactionEntry.COLUMN_EXPORTED, 1);
+-        Cursor cursor = mTransactionsAdapter.fetchAllTransactionsForAccount(accountUID);
+-        List<Long> transactionIdList = new ArrayList<Long>();
+-        if (cursor != null){
+-            while(cursor.moveToNext()){
+-                long id = cursor.getLong(cursor.getColumnIndexOrThrow(TransactionEntry._ID));
+-                transactionIdList.add(id);
+-            }
+-            cursor.close();
+-        }
+-        int recordsTouched = 0;
+-        for (long id : transactionIdList) {
+-            recordsTouched += mDb.update(TransactionEntry.TABLE_NAME,
+-                    contentValues,
+-                    TransactionEntry._ID + "=" + id, null);
+-        }
+-        return recordsTouched;
++        return mDb.update(
++                TransactionEntry.TABLE_NAME,
++                contentValues,
++                TransactionEntry.COLUMN_UID + " IN ( " +
++                        "SELECT DISTINCT " + TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID +
++                        " FROM " + TransactionEntry.TABLE_NAME + " , " + SplitEntry.TABLE_NAME + " ON " +
++                        TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_UID + " = " +
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TRANSACTION_UID + " , " +
++                        AccountEntry.TABLE_NAME + " ON " + SplitEntry.TABLE_NAME + "." +
++                        SplitEntry.COLUMN_ACCOUNT_UID + " = " + AccountEntry.TABLE_NAME + "." +
++                        AccountEntry.COLUMN_UID + " WHERE " + AccountEntry.TABLE_NAME + "." +
++                        AccountEntry.COLUMN_UID + " = ? "
++                        + " ) ",
++                new String[] {accountUID}
++        );
+     }
+ 
+     /**

@@ -1,0 +1,456 @@
+From 6d91b5f8c047124c8247af87e1b62a7c24ad59a5 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 8 Apr 2015 16:33:03 +0200
+Subject: [PATCH] Renamed export SD card folders to use application ID as
+ folder name. Also created separate folders for export and backup.
+
+This enables separation of files between the dev and production builds .Also added migration to move existing files.
+
+Fixed: crash when deleting transactions after export
+Improved: No confirmation dialog is shown after export the transactions are immediately deleted
+---
+ .../org/gnucash/android/db/DatabaseHelper.java     | 160 ++++++++++++++-------
+ .../org/gnucash/android/db/DatabaseSchema.java     |   4 +-
+ .../org/gnucash/android/db/MigrationHelper.java    |  72 +++++++++-
+ .../gnucash/android/export/ExportAsyncTask.java    |  27 ++--
+ .../java/org/gnucash/android/export/Exporter.java  |  13 +-
+ ...ansactionsDeleteConfirmationDialogFragment.java |   5 +-
+ 6 files changed, 206 insertions(+), 75 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+index 632b1b39..019bffb6 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseHelper.java
+@@ -233,81 +233,93 @@ public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+ 
+             if (oldVersion == 5 && newVersion >= 6){
+                 Log.i(LOG_TAG, "Upgrading database to version 6");
+-
+-                String addFullAccountNameQuery = " ALTER TABLE " + AccountEntry.TABLE_NAME
+-                        + " ADD COLUMN " + AccountEntry.COLUMN_FULL_NAME + " varchar(255) ";
+-                db.execSQL(addFullAccountNameQuery);
+-
+-                //update all existing accounts with their fully qualified name
+-                Cursor cursor = db.query(AccountEntry.TABLE_NAME,
+-                        new String[]{AccountEntry._ID, AccountEntry.COLUMN_UID},
+-                        null, null, null, null, null);
+-                while(cursor != null && cursor.moveToNext()){
+-                    String uid = cursor.getString(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_UID));
+-                    String fullName = MigrationHelper.getFullyQualifiedAccountName(db, uid);
+-
+-                    if (fullName == null)
+-                        continue;
+-
+-                    ContentValues contentValues = new ContentValues();
+-                    contentValues.put(AccountEntry.COLUMN_FULL_NAME, fullName);
+-
+-                    long id = cursor.getLong(cursor.getColumnIndexOrThrow(AccountEntry._ID));
+-                    db.update(AccountEntry.TABLE_NAME, contentValues, AccountEntry._ID + " = " + id, null);
+-                }
+-
+-                if (cursor != null) {
+-                    cursor.close();
+-                }
+-
+-                oldVersion = 6;
++                oldVersion = upgradeDbToVersion6(db);
+             }
+ 
+             if (oldVersion == 6 && newVersion >= DatabaseSchema.SPLITS_DB_VERSION){
+                 Log.i(LOG_TAG, "Upgrading database to version 7");
+-                oldVersion = upgradeToVersion7(db);
++                oldVersion = upgradeDbToVersion7(db);
+             }
+ 
+             if (oldVersion == 7 && newVersion >= 8){
+                 Log.i(LOG_TAG, "Upgrading database to version 8");
+-                //TODO: consider just backing up, recreating database and reimporting
+-                //FIXME: We really need to do this because the ON DELETE CASCADE constraint does not exist on older db versions
++                oldVersion = upgradeDbToVersion8(db);
++            }
++		}
+ 
+-                //TODO: Also, we need to go through db and add second split with imbalance account wherever only one split exists.
++        if (oldVersion != newVersion) {
++            Log.w(LOG_TAG, "Upgrade for the database failed. The Database is currently at version " + oldVersion);
++        }
++	}
+ 
+-                Log.i(LOG_TAG, "Adding hidden flag to accounts table");
+-                String addHiddenFlagSql = "ALTER TABLE " + AccountEntry.TABLE_NAME +
+-                        " ADD COLUMN " + AccountEntry.COLUMN_HIDDEN + " tinyint default 0";
+-                db.execSQL(addHiddenFlagSql);
++    /**
++     * Upgrades the database from version 7 to version 8.
++     * <p>This migration accomplishes the following:
++     *      <ul>
++     *          <li>Added created_at and modified_at columns to all tables (including triggers for updating the columns).</li>
++     *          <li>New table for scheduled actions</li>
++     *          <li>Auto-balancing of all existing splits</li>
++     *          <li>Added "hidden" flag to accounts table</li>
++     *          <li>Add flag for transaction templates</li>
++     *          <li>Migrate all export/backup files to new locations on SD card</li>
++     *      </ul>
++     * </p>
++     * @param db SQLite Database to be upgraded
++     * @return New database version (8) if upgrade successful, old version (7) if unsuccessful
++     */
++    private int upgradeDbToVersion8(SQLiteDatabase db) {
++        Log.i(LOG_TAG, "Upgrading database to version 8");
++        int oldVersion = 7;
++        //start moving the files in background thread before we do the database stuff
++        new Thread(MigrationHelper.moveExportedFilesToNewDefaultLocation).start();
+ 
+-                Log.i(LOG_TAG, "Adding created_at and modified_at columns to database tables");
+-                MigrationHelper.createUpdatedAndModifiedColumns(db, AccountEntry.TABLE_NAME);
+-                MigrationHelper.createUpdatedAndModifiedColumns(db, TransactionEntry.TABLE_NAME);
+-                MigrationHelper.createUpdatedAndModifiedColumns(db, SplitEntry.TABLE_NAME);
++        db.beginTransaction();
++        try {
++            //TODO: Use raw sql to do all migrations (avoid using code constructs)
+ 
+-                Log.i(LOG_TAG, "Creating scheduled events table");
+-                db.execSQL(SCHEDULED_ACTIONS_TABLE_CREATE); //TODO: Use the actual SQL statements
+-                //TODO: Migrate existing scheduled transactions (cancel pending intents)
++            Log.i(LOG_TAG, "Adding hidden flag to accounts table");
++            String addHiddenFlagSql = "ALTER TABLE " + AccountEntry.TABLE_NAME +
++                    " ADD COLUMN " + AccountEntry.COLUMN_HIDDEN + " tinyint default 0";
++            db.execSQL(addHiddenFlagSql);
+ 
+-                //TODO: Migrate old scheduled events using only SQL, code had changed
+-                GnuCashApplication.startScheduledEventExecutionService(GnuCashApplication.getAppContext());
+-                //TODO: Take care to properly migrate the created_at dates for transactions (use the date already in the transaction)
++            //TODO: Add flag for transaction templates
++            //TODO: ADD uid of originating scheduled event to transactions
+ 
+-            }
+-		}
++            Log.i(LOG_TAG, "Adding created_at and modified_at columns to database tables");
++            MigrationHelper.createUpdatedAndModifiedColumns(db, AccountEntry.TABLE_NAME);
++            MigrationHelper.createUpdatedAndModifiedColumns(db, TransactionEntry.TABLE_NAME);
++            MigrationHelper.createUpdatedAndModifiedColumns(db, SplitEntry.TABLE_NAME);
+ 
+-        if (oldVersion != newVersion) {
+-            Log.w(LOG_TAG, "Upgrade for the database failed. The Database is currently at version " + oldVersion);
++            Log.i(LOG_TAG, "Creating scheduled events table");
++            db.execSQL(SCHEDULED_ACTIONS_TABLE_CREATE); //TODO: Use the actual SQL statements, in case this string changes in the future
++
++            //TODO: Migrate existing scheduled transactions (cancel pending intents)
++            //TODO: Migrate old scheduled events using only SQL, code had changed
++            //TODO: Take care to properly migrate the created_at dates for transactions (use the date already in the transaction)
++            //TODO: auto-balance existing splits during migration
++
++            db.setTransactionSuccessful();
++            oldVersion = 8;
++        } finally {
++            db.endTransaction();
+         }
+-	}
++
++        GnuCashApplication.startScheduledEventExecutionService(GnuCashApplication.getAppContext());
++
++        return oldVersion;
++    }
+ 
+     /**
+-     * Code for upgrading the database to the {@link DatabaseSchema#SPLITS_DB_VERSION}
+-     * Main new featurs is the introduction of multiple-splits for transactions
++     * Code for upgrading the database to the {@link DatabaseSchema#SPLITS_DB_VERSION} from version 6.<br>
++     * Tasks accomplished in migration:
++     *  <ul>
++     *      <li>Added new splits table for transaction splits</li>
++     *      <li>Extract existing info from transactions table to populate split table</li>
++     *  </ul>
+      * @param db SQLite Database
+-     * @return The new database version is upgrade was successful, or the old db version if it failed
++     * @return The new database version if upgrade was successful, or the old db version if it failed
+      */
+-    private int upgradeToVersion7(SQLiteDatabase db) {
++    private int upgradeDbToVersion7(SQLiteDatabase db) {
+         int oldVersion = 6;
+         db.beginTransaction();
+         try {
+@@ -402,6 +414,44 @@ private int upgradeToVersion7(SQLiteDatabase db) {
+     }
+ 
+     /**
++     * Upgrades the database from version 5 to version 6.<br>
++     * This migration adds support for fully qualified account names and updates existing accounts.
++     * @param db SQLite Database to be upgraded
++     * @return New database version (6) if upgrade successful, old version (5) if unsuccessful
++     */
++    private int upgradeDbToVersion6(SQLiteDatabase db) {
++        int oldVersion = 5;
++        String addFullAccountNameQuery = " ALTER TABLE " + AccountEntry.TABLE_NAME
++                + " ADD COLUMN " + AccountEntry.COLUMN_FULL_NAME + " varchar(255) ";
++        db.execSQL(addFullAccountNameQuery);
++
++        //update all existing accounts with their fully qualified name
++        Cursor cursor = db.query(AccountEntry.TABLE_NAME,
++                new String[]{AccountEntry._ID, AccountEntry.COLUMN_UID},
++                null, null, null, null, null);
++        while(cursor != null && cursor.moveToNext()){
++            String uid = cursor.getString(cursor.getColumnIndexOrThrow(AccountEntry.COLUMN_UID));
++            String fullName = MigrationHelper.getFullyQualifiedAccountName(db, uid);
++
++            if (fullName == null)
++                continue;
++
++            ContentValues contentValues = new ContentValues();
++            contentValues.put(AccountEntry.COLUMN_FULL_NAME, fullName);
++
++            long id = cursor.getLong(cursor.getColumnIndexOrThrow(AccountEntry._ID));
++            db.update(AccountEntry.TABLE_NAME, contentValues, AccountEntry._ID + " = " + id, null);
++        }
++
++        if (cursor != null) {
++            cursor.close();
++        }
++
++        oldVersion = 6;
++        return oldVersion;
++    }
++
++    /**
+      * Creates the tables in the database
+      * @param db Database instance
+      */
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+index 91e1df08..d2d83111 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseSchema.java
+@@ -39,7 +39,7 @@
+     private DatabaseSchema(){}
+ 
+     public interface CommonColumns extends BaseColumns {
+-        public static final String COLUMN_UID       = "uid";
++        public static final String COLUMN_UID           = "uid";
+         public static final String COLUMN_CREATED_AT    = "created_at";
+         public static final String COLUMN_MODIFIED_AT   = "modified_at";
+     }
+@@ -113,7 +113,7 @@ private DatabaseSchema(){}
+         public static final String COLUMN_PERIOD            = "period";
+         public static final String COLUMN_TAG               = "tag"; //for any action-specific information
+         public static final String COLUMN_ENABLED           = "is_enabled";
+-        public static final String COLUMN_NUM_OCCURRENCES   = "num_occurrences";
++        public static final String COLUMN_NUM_OCCURRENCES   = "num_occurrences"; //FIXME: This should not be here, rather transactions table should store UID of action which created it
+         public static final String COLUMN_EXECUTION_COUNT   = "execution_count";
+ 
+         public static final String INDEX_UID            = "scheduled_action_uid_index";
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index c84e7cbd..ebf0a069 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -18,12 +18,19 @@
+ 
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
++import android.os.Environment;
+ import android.util.Log;
+ 
++import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.model.AccountType;
+ 
++import java.io.File;
+ import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOError;
++import java.io.IOException;
++import java.nio.channels.FileChannel;
+ 
+ import static org.gnucash.android.db.DatabaseSchema.AccountEntry;
+ 
+@@ -132,4 +139,67 @@ static void createUpdatedAndModifiedColumns(SQLiteDatabase db, String tableName)
+         db.execSQL(addModifiedColumn);
+         db.execSQL(DatabaseHelper.createUpdatedAtTrigger(tableName));
+     }
++
++    /**
++     * Copies the contents of the file in {@code src} to {@code dst} and then deletes the {@code src} if copy was successful.
++     * If the file copy was unsuccessful, the src file will not be deleted.
++     * @param src Source file
++     * @param dst Destination file
++     * @throws IOException if an error occurred during the file copy
++     */
++    static void moveFile(File src, File dst) throws IOException {
++        FileChannel inChannel = new FileInputStream(src).getChannel();
++        FileChannel outChannel = new FileOutputStream(dst).getChannel();
++        try {
++            long bytesCopied = inChannel.transferTo(0, inChannel.size(), outChannel);
++            if(bytesCopied >= src.length())
++                src.delete();
++        } finally {
++            if (inChannel != null)
++                inChannel.close();
++            outChannel.close();
++        }
++    }
++
++    /**
++     * Runnable which moves all exported files (exports and backups) from the old SD card location which
++     * was generic to the new folder structure which uses the application ID as folder name.
++     * <p>The new folder structure also futher enables parallel installation of multiple flavours of
++     * the program (like development and production) on the same device.</p>
++     */
++    static final Runnable moveExportedFilesToNewDefaultLocation = new Runnable() {
++        @Override
++        public void run() {
++            File oldExportFolder = new File(Environment.getExternalStorageDirectory() + "/gnucash");
++            if (oldExportFolder.exists()){
++                for (File src : oldExportFolder.listFiles()) {
++                    if (src.isDirectory())
++                        continue;
++                    File dst = new File(Exporter.EXPORT_FOLDER_PATH + "/" + src.getName());
++                    try {
++                        MigrationHelper.moveFile(src, dst);
++                    } catch (IOException e) {
++                        Log.e(LOG_TAG, "Error migrating " + src.getName());
++                        e.printStackTrace();
++                    }
++                }
++            }
++
++            File oldBackupFolder = new File(oldExportFolder, "backup");
++            if (oldBackupFolder.exists()){
++                for (File src : new File(oldExportFolder, "backup").listFiles()) {
++                    File dst = new File(Exporter.BACKUP_FOLDER_PATH + "/" + src.getName());
++                    try {
++                        MigrationHelper.moveFile(src, dst);
++                    } catch (IOException e) {
++                        Log.e(LOG_TAG, "Error migrating backup: " + src.getName());
++                        e.printStackTrace();
++                    }
++                }
++            }
++
++            if (oldBackupFolder.delete())
++                oldExportFolder.delete();
++        }
++    };
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index 2b268da0..a932cfeb 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -32,11 +32,13 @@
+ import android.widget.Toast;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.db.TransactionsDbAdapter;
+ import org.gnucash.android.export.ofx.OfxExporter;
+ import org.gnucash.android.export.qif.QifExporter;
+ import org.gnucash.android.export.qif.QifHelper;
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.ui.account.AccountsActivity;
++import org.gnucash.android.ui.transaction.TransactionsActivity;
+ import org.gnucash.android.ui.transaction.dialog.TransactionsDeleteConfirmationDialogFragment;
+ 
+ import java.io.BufferedReader;
+@@ -205,20 +207,21 @@ protected void onPostExecute(Boolean exportResult) {
+                 break;
+         }
+ 
+-        if (mContext instanceof Activity) {
+-            if (mExportParams.shouldDeleteTransactionsAfterExport()) {
+-                android.support.v4.app.FragmentManager fragmentManager = ((FragmentActivity) mContext).getSupportFragmentManager();
+-                Fragment currentFragment = ((AccountsActivity) mContext).getCurrentAccountListFragment();
+-
+-                TransactionsDeleteConfirmationDialogFragment alertFragment =
+-                        TransactionsDeleteConfirmationDialogFragment.newInstance(R.string.title_confirm_delete, 0);
+-                alertFragment.setTargetFragment(currentFragment, 0);
++        if (mExportParams.shouldDeleteTransactionsAfterExport()) {
++            //TODO: we delete with impunity here, make sure files are backed-up first
++            TransactionsDbAdapter.getInstance().deleteAllRecords();
+ 
+-                alertFragment.show(fragmentManager, "transactions_delete_confirmation_dialog");
++            //now refresh the respective views
++            if (mContext instanceof AccountsActivity){
++                ((AccountsActivity) mContext).getCurrentAccountListFragment().refresh();
++            }
++            if (mContext instanceof TransactionsActivity){
++                ((TransactionsActivity) mContext).refresh();
++            }
++            if (mContext instanceof Activity) {
++                if (mProgressDialog != null && mProgressDialog.isShowing())
++                    mProgressDialog.dismiss();
+             }
+-
+-            if (mProgressDialog != null && mProgressDialog.isShowing())
+-                mProgressDialog.dismiss();
+         }
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index e9627a94..275dbf28 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2014 Ngewi Fet <ngewif@gmail.com>
++ * Copyright (c) 2014 - 2015 Ngewi Fet <ngewif@gmail.com>
+  * Copyright (c) 2014 Yongxin Wang <fefe.wyx@gmail.com>
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -21,6 +21,7 @@
+ import android.database.sqlite.SQLiteDatabase;
+ import android.os.Environment;
+ 
++import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.ScheduledActionDbAdapter;
+@@ -41,15 +42,21 @@
+  * @author Yongxin Wang <fefe.wyx@gmail.com>
+  */
+ public abstract class Exporter {
++
++    /**
++     * Application folder on external storage
++     */
++    public static final String BASE_FOLDER_PATH = Environment.getExternalStorageDirectory() + "/" + BuildConfig.APPLICATION_ID;
++
+     /**
+      * Folder where exports like QIF and OFX will be saved for access by external programs
+      */
+-    public static final String EXPORT_FOLDER_PATH = Environment.getExternalStorageDirectory() + "/gnucash/";
++    public static final String EXPORT_FOLDER_PATH =  BASE_FOLDER_PATH + "/exports/";
+ 
+     /**
+      * Folder where GNC_XML backups will be saved
+      */
+-    public static final String BACKUP_FOLDER_PATH = EXPORT_FOLDER_PATH + "backup/";
++    public static final String BACKUP_FOLDER_PATH = BASE_FOLDER_PATH + "/backups/";
+ 
+     /**
+      * Export options
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
+index e7549048..47341061 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/dialog/TransactionsDeleteConfirmationDialogFragment.java
+@@ -31,6 +31,7 @@
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.ui.UxArgument;
+ import org.gnucash.android.ui.account.AccountsListFragment;
++import org.gnucash.android.ui.util.Refreshable;
+ import org.gnucash.android.ui.widget.WidgetConfigurationActivity;
+ 
+ import java.util.ArrayList;
+@@ -80,8 +81,8 @@ public void onClick(DialogInterface dialog, int whichButton) {
+                                 } else {
+                                     transactionsDbAdapter.deleteRecord(rowId);
+                                 }
+-                                if (getTargetFragment() instanceof AccountsListFragment) {
+-                                    ((AccountsListFragment) getTargetFragment()).refresh();
++                                if (getTargetFragment() instanceof Refreshable) {
++                                    ((Refreshable) getTargetFragment()).refresh();
+                                 }
+                                 WidgetConfigurationActivity.updateAllWidgets(getActivity());
+                             }

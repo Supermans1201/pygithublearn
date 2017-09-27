@@ -1,0 +1,1181 @@
+From 8fd061f151d527278b3ee41d993d77c2a14b18b4 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 25 Aug 2016 14:39:58 +0200
+Subject: [PATCH 1/5] Update version string for v2.1.0-beta5 release
+
+---
+ app/build.gradle | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app/build.gradle b/app/build.gradle
+index a764cb1a..f4bf0726 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -7,7 +7,7 @@ apply plugin: 'io.fabric'
+ def versionMajor = 2
+ def versionMinor = 1
+ def versionPatch = 0
+-def versionBuild = 4
++def versionBuild = 5
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd HH:mm 'UTC'")
+
+From 41f368bfdd2bfcba7858194410a1eba591beb175 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 31 Aug 2016 10:01:13 +0200
+Subject: [PATCH 2/5] Fix bug with counting number of occurrences (some
+ occurrences missed)
+
+Switch Recurrence to use LocalDateTimes to avoid time zone and DST issues
+Fix breaking tests
+---
+ .../java/org/gnucash/android/model/Recurrence.java | 50 +++++++++++++++++-----
+ .../unit/service/ScheduledActionServiceTest.java   |  5 +--
+ 2 files changed, 40 insertions(+), 15 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/model/Recurrence.java b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+index 2b1c4169..48db0af9 100644
+--- a/app/src/main/java/org/gnucash/android/model/Recurrence.java
++++ b/app/src/main/java/org/gnucash/android/model/Recurrence.java
+@@ -25,7 +25,9 @@
+ import org.joda.time.DateTime;
+ import org.joda.time.Days;
+ import org.joda.time.LocalDate;
++import org.joda.time.LocalDateTime;
+ import org.joda.time.Months;
++import org.joda.time.ReadablePeriod;
+ import org.joda.time.Weeks;
+ import org.joda.time.Years;
+ 
+@@ -273,25 +275,51 @@ public int getCount(){
+         if (mPeriodEnd == null)
+             return -1;
+ 
+-        int count = 0;
+-        DateTime startDate = new DateTime(mPeriodStart.getTime());
+-        DateTime endDate = new DateTime(mPeriodEnd.getTime());
++        int multiple = mPeriodType.getMultiplier();
++        ReadablePeriod jodaPeriod;
+         switch (mPeriodType){
+             case DAY:
+-                count = Days.daysBetween(startDate, endDate).getDays();
++                jodaPeriod = Days.days(multiple);
+                 break;
+             case WEEK:
+-                count = Weeks.weeksBetween(startDate, endDate).getWeeks();
++                jodaPeriod = Weeks.weeks(multiple);
+                 break;
+             case MONTH:
+-                count = Months.monthsBetween(startDate, endDate).getMonths();
++                jodaPeriod = Months.months(multiple);
+                 break;
+             case YEAR:
+-                count = Years.yearsBetween(startDate, endDate).getYears();
++                jodaPeriod = Years.years(multiple);
+                 break;
++            default:
++                jodaPeriod = Months.months(multiple);
++        }
++        int count = 0;
++        LocalDateTime startTime = new LocalDateTime(mPeriodStart.getTime());
++        while (startTime.toDateTime().getMillis() < mPeriodEnd.getTime()){
++            ++count;
++            startTime = startTime.plus(jodaPeriod);
+         }
++        return count;
+ 
+-        return count/mPeriodType.getMultiplier();
++/*
++        //this solution does not use looping, but is not very accurate
++
++        int multiplier = mPeriodType.getMultiplier();
++        LocalDateTime startDate = new LocalDateTime(mPeriodStart.getTime());
++        LocalDateTime endDate = new LocalDateTime(mPeriodEnd.getTime());
++        switch (mPeriodType){
++            case DAY:
++                return Days.daysBetween(startDate, endDate).dividedBy(multiplier).getDays();
++            case WEEK:
++                return Weeks.weeksBetween(startDate, endDate).dividedBy(multiplier).getWeeks();
++            case MONTH:
++                return Months.monthsBetween(startDate, endDate).dividedBy(multiplier).getMonths();
++            case YEAR:
++                return Years.yearsBetween(startDate, endDate).dividedBy(multiplier).getYears();
++            default:
++                return -1;
++        }
++*/
+     }
+ 
+     /**
+@@ -299,8 +327,8 @@ public int getCount(){
+      * @param numberOfOccurences Number of occurences from the start time
+      */
+     public void setPeriodEnd(int numberOfOccurences){
+-        DateTime localDate = new DateTime(mPeriodStart.getTime());
+-        DateTime endDate;
++        LocalDateTime localDate = new LocalDateTime(mPeriodStart.getTime());
++        LocalDateTime endDate;
+         int occurrenceDuration = numberOfOccurences * mPeriodType.getMultiplier();
+         switch (mPeriodType){
+             case DAY:
+@@ -317,7 +345,7 @@ public void setPeriodEnd(int numberOfOccurences){
+                 endDate = localDate.plusYears(occurrenceDuration);
+                 break;
+         }
+-        mPeriodEnd = new Timestamp(endDate.getMillis());
++        mPeriodEnd = new Timestamp(endDate.toDateTime().getMillis());
+     }
+ 
+     /**
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+index 0e6adb24..08e5f3a5 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/service/ScheduledActionServiceTest.java
+@@ -199,10 +199,7 @@ public void missedScheduledTransactions_shouldBeGenerated(){
+         actions.add(scheduledAction);
+         ScheduledActionService.processScheduledActions(actions, mDb);
+ 
+-        int weeks = Weeks.weeksBetween(startTime, new DateTime(2016, 8, 29, 10, 0)).getWeeks();
+-        int expectedTransactionCount = weeks/2;
+-
+-        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(expectedTransactionCount);
++        assertThat(transactionsDbAdapter.getRecordsCount()).isEqualTo(7);
+     }
+ 
+     public void endTimeInTheFuture_shouldExecuteOnlyUntilPresent(){
+
+From 77d9323bd5cb4a1fb40fb9a894943a9e9d7a73c4 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 31 Aug 2016 10:15:03 +0200
+Subject: [PATCH 3/5] Clear book shared preferences when the book is deleted
+ from db - fixes #561
+
+Refactored deleteBook method in to the correct adapter
+---
+ .../android/test/ui/ExportTransactionsTest.java      |  6 +++---
+ .../gnucash/android/test/ui/PieChartReportTest.java  |  9 +--------
+ .../android/test/ui/TransactionsActivityTest.java    |  8 ++------
+ .../org/gnucash/android/app/GnuCashApplication.java  |  4 ++--
+ .../gnucash/android/db/adapter/BooksDbAdapter.java   | 20 ++++++++++++++++++++
+ .../gnucash/android/db/adapter/DatabaseAdapter.java  | 16 +++-------------
+ .../android/ui/account/AccountFormFragment.java      |  2 +-
+ .../android/ui/settings/PreferenceActivity.java      | 18 ++++++++++++++----
+ .../ui/transaction/TransactionFormFragment.java      |  4 ++--
+ .../ui/transaction/TransactionsListFragment.java     |  2 +-
+ .../org/gnucash/android/util/PreferencesHelper.java  |  2 +-
+ 11 files changed, 50 insertions(+), 41 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+index ed52133e..c641bce1 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/ExportTransactionsTest.java
+@@ -148,7 +148,7 @@ public void setUp() throws Exception {
+ 	 */
+ 	@Test
+ 	public void testOfxExport(){
+-		SharedPreferences.Editor prefsEditor = PreferenceActivity.getActiveBookSharedPreferences(mAcccountsActivity)
++		SharedPreferences.Editor prefsEditor = PreferenceActivity.getActiveBookSharedPreferences()
+ 				.edit();
+ 		prefsEditor.putBoolean(mAcccountsActivity.getString(R.string.key_use_double_entry), false)
+ 				.commit();
+@@ -159,7 +159,7 @@ public void testOfxExport(){
+ 
+ 	@Test
+ 	public void whenInSingleEntry_shouldHideXmlExportOption(){
+-		SharedPreferences.Editor prefsEditor = PreferenceActivity.getActiveBookSharedPreferences(mAcccountsActivity)
++		SharedPreferences.Editor prefsEditor = PreferenceActivity.getActiveBookSharedPreferences()
+ 				.edit();
+ 		prefsEditor.putBoolean(mAcccountsActivity.getString(R.string.key_use_double_entry), false)
+ 				.commit();
+@@ -232,7 +232,7 @@ public void testDeleteTransactionsAfterExport(){
+ 		editor.putBoolean(mAcccountsActivity.getString(R.string.key_delete_transactions_after_export), true);
+ 		editor.commit();
+ 
+-		PreferenceActivity.getActiveBookSharedPreferences(getActivity())
++		PreferenceActivity.getActiveBookSharedPreferences()
+ 				.edit()
+ 				.putBoolean(mAcccountsActivity.getString(R.string.key_use_double_entry), true)
+ 				.apply();
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartReportTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartReportTest.java
+index 1f171074..b0b1a15c 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartReportTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/PieChartReportTest.java
+@@ -17,9 +17,6 @@
+ package org.gnucash.android.test.ui;
+ 
+ import android.content.Context;
+-import android.content.Intent;
+-import android.database.SQLException;
+-import android.database.sqlite.SQLiteDatabase;
+ import android.support.test.espresso.ViewAction;
+ import android.support.test.espresso.action.CoordinatesProvider;
+ import android.support.test.espresso.action.GeneralClickAction;
+@@ -27,17 +24,14 @@
+ import android.support.test.espresso.action.Tap;
+ import android.support.test.rule.ActivityTestRule;
+ import android.support.test.runner.AndroidJUnit4;
+-import android.util.Log;
+ import android.view.View;
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+-import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.db.adapter.DatabaseAdapter;
+-import org.gnucash.android.db.adapter.SplitsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.importer.GncXmlImporter;
+ import org.gnucash.android.model.AccountType;
+@@ -47,7 +41,6 @@
+ import org.gnucash.android.model.Transaction;
+ import org.gnucash.android.model.TransactionType;
+ import org.gnucash.android.test.ui.util.DisableAnimationsRule;
+-import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.report.BaseReportFragment;
+ import org.gnucash.android.ui.report.ReportsActivity;
+ import org.gnucash.android.ui.report.piechart.PieChartFragment;
+@@ -131,7 +124,7 @@ public static void prepareTestCase() throws Exception {
+ 
+         CURRENCY = CommoditiesDbAdapter.getInstance().getCommodity("USD");
+ 
+-        PreferenceActivity.getActiveBookSharedPreferences(context).edit()
++        PreferenceActivity.getActiveBookSharedPreferences().edit()
+                 .putString(context.getString(R.string.key_default_currency), CURRENCY.getCurrencyCode())
+                 .commit();
+     }
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index 36d5fd7b..bf5373a5 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -22,7 +22,6 @@
+ import android.content.SharedPreferences;
+ import android.content.SharedPreferences.Editor;
+ import android.support.test.espresso.Espresso;
+-import android.support.test.espresso.contrib.RecyclerViewActions;
+ import android.support.test.rule.ActivityTestRule;
+ import android.support.test.runner.AndroidJUnit4;
+ 
+@@ -61,7 +60,6 @@
+ import java.util.List;
+ import java.util.Locale;
+ 
+-import static android.support.test.espresso.Espresso.onData;
+ import static android.support.test.espresso.Espresso.onView;
+ import static android.support.test.espresso.action.ViewActions.clearText;
+ import static android.support.test.espresso.action.ViewActions.click;
+@@ -69,7 +67,6 @@
+ import static android.support.test.espresso.assertion.ViewAssertions.matches;
+ import static android.support.test.espresso.matcher.RootMatchers.withDecorView;
+ import static android.support.test.espresso.matcher.ViewMatchers.hasDescendant;
+-import static android.support.test.espresso.matcher.ViewMatchers.hasSibling;
+ import static android.support.test.espresso.matcher.ViewMatchers.isChecked;
+ import static android.support.test.espresso.matcher.ViewMatchers.isDisplayed;
+ import static android.support.test.espresso.matcher.ViewMatchers.withId;
+@@ -77,7 +74,6 @@
+ import static android.support.test.espresso.matcher.ViewMatchers.withText;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.hamcrest.Matchers.allOf;
+-import static org.hamcrest.Matchers.instanceOf;
+ import static org.hamcrest.Matchers.is;
+ import static org.hamcrest.Matchers.not;
+ 
+@@ -451,7 +447,7 @@ public void testSplitEditor(){
+ 
+ 
+     private void setDoubleEntryEnabled(boolean enabled){
+-        SharedPreferences prefs = PreferenceActivity.getActiveBookSharedPreferences(mTransactionsActivity);
++        SharedPreferences prefs = PreferenceActivity.getActiveBookSharedPreferences();
+         Editor editor = prefs.edit();
+         editor.putBoolean(mTransactionsActivity.getString(R.string.key_use_double_entry), enabled);
+         editor.apply();
+@@ -466,7 +462,7 @@ public void testDefaultTransactionType(){
+ 	}
+ 
+ 	private void setDefaultTransactionType(TransactionType type) {
+-		SharedPreferences prefs = PreferenceActivity.getActiveBookSharedPreferences(mTransactionsActivity);
++		SharedPreferences prefs = PreferenceActivity.getActiveBookSharedPreferences();
+ 		Editor editor = prefs.edit();
+ 		editor.putString(mTransactionsActivity.getString(R.string.key_default_transaction_type), type.name());
+ 		editor.commit();
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index 325ceb04..859e87b0 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -252,7 +252,7 @@ public static boolean isRoboUnitTest(){
+      * @return <code>true</code> if double entry is enabled, <code>false</code> otherwise
+      */
+     public static boolean isDoubleEntryEnabled(){
+-        SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences(context);
++        SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences();
+         return sharedPrefs.getBoolean(context.getString(R.string.key_use_double_entry), true);
+     }
+ 
+@@ -263,7 +263,7 @@ public static boolean isDoubleEntryEnabled(){
+      * @return <code>true</code> if opening balances should be saved, <code>false</code> otherwise
+      */
+     public static boolean shouldSaveOpeningBalances(boolean defaultValue){
+-        SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences(context);
++        SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences();
+         return sharedPrefs.getBoolean(context.getString(R.string.key_save_opening_balances), defaultValue);
+     }
+ 
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index 799f4ea3..e8e6460e 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -17,6 +17,7 @@
+ package org.gnucash.android.db.adapter;
+ 
+ import android.content.ContentValues;
++import android.content.Context;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
+@@ -26,6 +27,7 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseSchema.BookEntry;
+ import org.gnucash.android.model.Book;
++import org.gnucash.android.ui.settings.PreferenceActivity;
+ import org.gnucash.android.util.TimestampHelper;
+ 
+ /**
+@@ -92,6 +94,24 @@ public Book buildModelInstance(@NonNull Cursor cursor) {
+         return stmt;
+     }
+ 
++
++    /**
++     * Deletes a book - removes the book record from the database and deletes the database file from the disk
++     * @param bookUID GUID of the book
++     * @return <code>true</code> if deletion was successful, <code>false</code> otherwise
++     * @see #deleteRecord(String)
++     */
++    public boolean deleteBook(@NonNull String bookUID){
++        Context context = GnuCashApplication.getAppContext();
++        boolean result = context.deleteDatabase(bookUID);
++        if (result) //delete the db entry only if the file deletion was successful
++            result &= deleteRecord(bookUID);
++
++        PreferenceActivity.getBookSharedPreferences(bookUID).edit().clear().apply();
++
++        return result;
++    }
++    
+     /**
+      * Sets the book with unique identifier {@code uid} as active and all others as inactive
+      * <p>If the parameter is null, then the currently active book is not changed</p>
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
+index f12c2e4d..d6de7287 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/DatabaseAdapter.java
+@@ -17,6 +17,8 @@
+ package org.gnucash.android.db.adapter;
+ 
+ import android.content.ContentValues;
++import android.content.Context;
++import android.content.SharedPreferences;
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
+ import android.database.sqlite.SQLiteStatement;
+@@ -32,6 +34,7 @@
+ import org.gnucash.android.db.DatabaseSchema.TransactionEntry;
+ import org.gnucash.android.model.AccountType;
+ import org.gnucash.android.model.BaseModel;
++import org.gnucash.android.ui.settings.PreferenceActivity;
+ import org.gnucash.android.util.TimestampHelper;
+ 
+ import java.util.ArrayList;
+@@ -713,19 +716,6 @@ public boolean deleteRecord(@NonNull String uid){
+     }
+ 
+     /**
+-     * Deletes a book - removes the book record from the database and deletes the database file from the disk
+-     * @param bookUID GUID of the book
+-     * @return <code>true</code> if deletion was successful, <code>false</code> otherwise
+-     * @see #deleteRecord(String)
+-     */
+-    public boolean deleteBook(@NonNull String bookUID){
+-        boolean result = GnuCashApplication.getAppContext().deleteDatabase(bookUID);
+-        if (result) //delete the db entry only if the file deletion was successful
+-            result &= deleteRecord(bookUID);
+-        return result;
+-    }
+-
+-    /**
+      * Returns an attribute from a specific column in the database for a specific record.
+      * <p>The attribute is returned as a string which can then be converted to another type if
+      * the caller was expecting something other type </p>
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index d407db82..066e68d1 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -238,7 +238,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 		setHasOptionsMenu(true);
+         mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+ 
+-        SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences(getActivity());
++        SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences();
+         mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), true);
+ 	}
+ 	
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
+index a5016ece..f5c87a9c 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/PreferenceActivity.java
+@@ -34,7 +34,9 @@
+ import android.view.View;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
++import org.gnucash.android.model.Book;
+ import org.gnucash.android.ui.passcode.PasscodeLockActivity;
+ 
+ import butterknife.Bind;
+@@ -147,12 +149,20 @@ public boolean onOptionsItemSelected(MenuItem item) {
+     /**
+      * Returns the shared preferences file for the currently active book.
+      * Should be used instead of {@link PreferenceManager#getDefaultSharedPreferences(Context)}
+-     * @param context Application context
+      * @return Shared preferences file
+      */
+-    public static SharedPreferences getActiveBookSharedPreferences(Context context){
+-        //// TODO: 21.12.2015 optimize the getActiveBookUID retrieval by caching it somewhere
+-        return context.getSharedPreferences(BooksDbAdapter.getInstance().getActiveBookUID(), Context.MODE_PRIVATE);
++    public static SharedPreferences getActiveBookSharedPreferences(){
++        return getBookSharedPreferences(BooksDbAdapter.getInstance().getActiveBookUID());
++    }
++
++    /**
++     * Return the {@link SharedPreferences} for a specific book
++     * @param bookUID GUID of the book
++     * @return Shared preferences
++     */
++    public static SharedPreferences getBookSharedPreferences(String bookUID){
++        Context context = GnuCashApplication.getAppContext();
++        return context.getSharedPreferences(bookUID, Context.MODE_PRIVATE);
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index aa4a77b2..67e34d4b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -293,7 +293,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+ 		setHasOptionsMenu(true);
+ 
+-		SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences(getActivity());
++		SharedPreferences sharedPrefs = PreferenceActivity.getActiveBookSharedPreferences();
+ 		mUseDoubleEntry = sharedPrefs.getBoolean(getString(R.string.key_use_double_entry), false);
+ 		if (!mUseDoubleEntry){
+ 			mDoubleEntryLayout.setVisibility(View.GONE);
+@@ -538,7 +538,7 @@ private void initalizeViews() {
+ 		mTime = mDate = Calendar.getInstance();
+ 
+         mTransactionTypeSwitch.setAccountType(mAccountType);
+-		String typePref = PreferenceActivity.getActiveBookSharedPreferences(getActivity()).getString(getString(R.string.key_default_transaction_type), "DEBIT");
++		String typePref = PreferenceActivity.getActiveBookSharedPreferences().getString(getString(R.string.key_default_transaction_type), "DEBIT");
+         mTransactionTypeSwitch.setChecked(TransactionType.valueOf(typePref));
+ 
+ 		String code = GnuCashApplication.getDefaultCurrencyCode();
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+index bf1bcc5b..8d27d592 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionsListFragment.java
+@@ -95,7 +95,7 @@ public void onCreate(Bundle savedInstanceState) {
+ 		Bundle args = getArguments();
+ 		mAccountUID = args.getString(UxArgument.SELECTED_ACCOUNT_UID);
+ 
+-		mUseCompactView = PreferenceActivity.getActiveBookSharedPreferences(getActivity())
++		mUseCompactView = PreferenceActivity.getActiveBookSharedPreferences()
+ 				.getBoolean(getActivity().getString(R.string.key_use_compact_list), !GnuCashApplication.isDoubleEntryEnabled());
+ 		//if there was a local override of the global setting, respect it
+ 		if (savedInstanceState != null)
+diff --git a/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java b/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+index 2b67ac6c..d58f2e7d 100644
+--- a/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
++++ b/app/src/main/java/org/gnucash/android/util/PreferencesHelper.java
+@@ -78,7 +78,7 @@ public static void setLastExportTime(Timestamp lastExportTime, String bookUID) {
+      * @return A {@link Timestamp} with the time.
+      */
+     public static Timestamp getLastExportTime() {
+-        final String utcString = PreferenceActivity.getActiveBookSharedPreferences(GnuCashApplication.getAppContext())
++        final String utcString = PreferenceActivity.getActiveBookSharedPreferences()
+                 .getString(PREFERENCE_LAST_EXPORT_TIME_KEY,
+                         TimestampHelper.getUtcStringFromTimestamp(TimestampHelper.getTimestampFromEpochZero()));
+         Log.d(LOG_TAG, "Retrieving '" + utcString + "' as lastExportTime from Android Preferences.");
+
+From 4c42484cea1131cc3b9c74aad50343ddc559ebcd Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 31 Aug 2016 10:21:49 +0200
+Subject: [PATCH 4/5] Update Chinese Simplified translation Extract default
+ book name string for translation
+
+---
+ .../gnucash/android/db/adapter/BooksDbAdapter.java |  7 ++-
+ app/src/main/res/values-af-rZA/strings.xml         |  1 +
+ app/src/main/res/values-ar-rSA/strings.xml         |  1 +
+ app/src/main/res/values-ca-rES/strings.xml         |  1 +
+ app/src/main/res/values-cs-rCZ/strings.xml         |  1 +
+ app/src/main/res/values-de/strings.xml             |  1 +
+ app/src/main/res/values-el-rGR/strings.xml         |  1 +
+ app/src/main/res/values-en-rGB/strings.xml         |  1 +
+ app/src/main/res/values-es-rMX/strings.xml         |  1 +
+ app/src/main/res/values-es/strings.xml             |  1 +
+ app/src/main/res/values-fi-rFI/strings.xml         |  1 +
+ app/src/main/res/values-fr/strings.xml             |  1 +
+ app/src/main/res/values-hu-rHU/strings.xml         |  1 +
+ app/src/main/res/values-it-rIT/strings.xml         |  1 +
+ app/src/main/res/values-iw-rIL/strings.xml         |  1 +
+ app/src/main/res/values-ja-rJP/strings.xml         |  1 +
+ app/src/main/res/values-ko-rKR/strings.xml         |  1 +
+ app/src/main/res/values-lv-rLV/strings.xml         |  1 +
+ app/src/main/res/values-nb/strings.xml             |  1 +
+ app/src/main/res/values-nl-rNL/strings.xml         |  1 +
+ app/src/main/res/values-no-rNO/strings.xml         |  1 +
+ app/src/main/res/values-pl-rPL/strings.xml         |  1 +
+ app/src/main/res/values-pt-rBR/strings.xml         |  1 +
+ app/src/main/res/values-pt-rPT/strings.xml         |  1 +
+ app/src/main/res/values-ro-rRO/strings.xml         |  1 +
+ app/src/main/res/values-ru/strings.xml             |  1 +
+ app/src/main/res/values-sr-rSP/strings.xml         |  1 +
+ app/src/main/res/values-sv-rSE/strings.xml         |  1 +
+ app/src/main/res/values-tr-rTR/strings.xml         |  1 +
+ app/src/main/res/values-uk-rUA/strings.xml         |  1 +
+ app/src/main/res/values-vi-rVN/strings.xml         |  1 +
+ app/src/main/res/values-zh-rCN/strings.xml         | 56 +++++++++++-----------
+ app/src/main/res/values-zh-rTW/strings.xml         |  1 +
+ app/src/main/res/values/strings.xml                |  1 +
+ 34 files changed, 66 insertions(+), 29 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index e8e6460e..65e06c95 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -24,6 +24,7 @@
+ import android.net.Uri;
+ import android.support.annotation.NonNull;
+ 
++import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseSchema.BookEntry;
+ import org.gnucash.android.model.Book;
+@@ -111,7 +112,7 @@ public boolean deleteBook(@NonNull String bookUID){
+ 
+         return result;
+     }
+-    
++
+     /**
+      * Sets the book with unique identifier {@code uid} as active and all others as inactive
+      * <p>If the parameter is null, then the currently active book is not changed</p>
+@@ -191,7 +192,9 @@ public boolean isActive(String bookUID){
+         SQLiteStatement statement = mDb.compileStatement(sql);
+ 
+         while (true) {
+-            String name = "Book" + " " + bookCount;
++            Context context = GnuCashApplication.getAppContext();
++            String name = context.getString(R.string.book_default_name, bookCount);
++            //String name = "Book" + " " + bookCount;
+ 
+             statement.clearBindings();
+             statement.bindString(1, name);
+diff --git a/app/src/main/res/values-af-rZA/strings.xml b/app/src/main/res/values-af-rZA/strings.xml
+index 0de912cd..0c1a4909 100644
+--- a/app/src/main/res/values-af-rZA/strings.xml
++++ b/app/src/main/res/values-af-rZA/strings.xml
+@@ -477,4 +477,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-ar-rSA/strings.xml b/app/src/main/res/values-ar-rSA/strings.xml
+index 11564b05..63d41923 100644
+--- a/app/src/main/res/values-ar-rSA/strings.xml
++++ b/app/src/main/res/values-ar-rSA/strings.xml
+@@ -505,4 +505,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-ca-rES/strings.xml b/app/src/main/res/values-ca-rES/strings.xml
+index e4eff21d..84e02fd3 100644
+--- a/app/src/main/res/values-ca-rES/strings.xml
++++ b/app/src/main/res/values-ca-rES/strings.xml
+@@ -475,4 +475,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-cs-rCZ/strings.xml b/app/src/main/res/values-cs-rCZ/strings.xml
+index a5574746..2603b4b9 100644
+--- a/app/src/main/res/values-cs-rCZ/strings.xml
++++ b/app/src/main/res/values-cs-rCZ/strings.xml
+@@ -484,4 +484,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+index b91c5629..bfc9863a 100644
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -474,4 +474,5 @@ No user-identifiable information will be collected as part of this process!</str
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-el-rGR/strings.xml b/app/src/main/res/values-el-rGR/strings.xml
+index d1bffc59..05fdf60d 100644
+--- a/app/src/main/res/values-el-rGR/strings.xml
++++ b/app/src/main/res/values-el-rGR/strings.xml
+@@ -488,4 +488,5 @@ No user-identifiable information will be collected as part of this process!
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-en-rGB/strings.xml b/app/src/main/res/values-en-rGB/strings.xml
+index 73da1649..90a0d4a3 100644
+--- a/app/src/main/res/values-en-rGB/strings.xml
++++ b/app/src/main/res/values-en-rGB/strings.xml
+@@ -477,4 +477,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-es-rMX/strings.xml b/app/src/main/res/values-es-rMX/strings.xml
+index de0d9308..46d68e91 100644
+--- a/app/src/main/res/values-es-rMX/strings.xml
++++ b/app/src/main/res/values-es-rMX/strings.xml
+@@ -474,4 +474,5 @@ Este proceso solo recoge informacin que no permite identificar al usuario</str
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index ff8befdf..450a2052 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -472,4 +472,5 @@ Este proceso solo recoge informacin que no permite identificar al usuario</str
+   <string name="repeat_on_weekday">en %1$s</string>
+   <string name="repeat_x_times">%1$s veces</string>
+   <string name="menu_show_compact_view">Vista compacta</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-fi-rFI/strings.xml b/app/src/main/res/values-fi-rFI/strings.xml
+index 0de912cd..0c1a4909 100644
+--- a/app/src/main/res/values-fi-rFI/strings.xml
++++ b/app/src/main/res/values-fi-rFI/strings.xml
+@@ -477,4 +477,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-fr/strings.xml b/app/src/main/res/values-fr/strings.xml
+index 11908cf5..c7c68286 100644
+--- a/app/src/main/res/values-fr/strings.xml
++++ b/app/src/main/res/values-fr/strings.xml
+@@ -474,4 +474,5 @@ Aucune information permettant d\'identifier l\'utilisateur ne sera recueillis da
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-hu-rHU/strings.xml b/app/src/main/res/values-hu-rHU/strings.xml
+index fb9698ba..fc8c18ac 100644
+--- a/app/src/main/res/values-hu-rHU/strings.xml
++++ b/app/src/main/res/values-hu-rHU/strings.xml
+@@ -479,4 +479,5 @@ No user-identifiable information will be collected as part of this process!
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-it-rIT/strings.xml b/app/src/main/res/values-it-rIT/strings.xml
+index fc66c7d7..5ba00961 100644
+--- a/app/src/main/res/values-it-rIT/strings.xml
++++ b/app/src/main/res/values-it-rIT/strings.xml
+@@ -474,4 +474,5 @@
+   <string name="repeat_on_weekday">il %1$s</string>
+   <string name="repeat_x_times">per %1$s volte</string>
+   <string name="menu_show_compact_view">Visualizzazione compatta</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-iw-rIL/strings.xml b/app/src/main/res/values-iw-rIL/strings.xml
+index cecdad90..c6ab8173 100644
+--- a/app/src/main/res/values-iw-rIL/strings.xml
++++ b/app/src/main/res/values-iw-rIL/strings.xml
+@@ -491,4 +491,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-ja-rJP/strings.xml b/app/src/main/res/values-ja-rJP/strings.xml
+index 86bbaf36..52068efd 100644
+--- a/app/src/main/res/values-ja-rJP/strings.xml
++++ b/app/src/main/res/values-ja-rJP/strings.xml
+@@ -463,4 +463,5 @@
+   <string name="repeat_on_weekday">%1$s </string>
+   <string name="repeat_x_times">%1$s </string>
+   <string name="menu_show_compact_view"></string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-ko-rKR/strings.xml b/app/src/main/res/values-ko-rKR/strings.xml
+index 53b54015..da71a40d 100644
+--- a/app/src/main/res/values-ko-rKR/strings.xml
++++ b/app/src/main/res/values-ko-rKR/strings.xml
+@@ -464,4 +464,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-lv-rLV/strings.xml b/app/src/main/res/values-lv-rLV/strings.xml
+index 2e9f40e2..0f691ac0 100644
+--- a/app/src/main/res/values-lv-rLV/strings.xml
++++ b/app/src/main/res/values-lv-rLV/strings.xml
+@@ -484,4 +484,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-nb/strings.xml b/app/src/main/res/values-nb/strings.xml
+index b659fee3..07497392 100644
+--- a/app/src/main/res/values-nb/strings.xml
++++ b/app/src/main/res/values-nb/strings.xml
+@@ -469,4 +469,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-nl-rNL/strings.xml b/app/src/main/res/values-nl-rNL/strings.xml
+index 52a94696..734ca4e5 100644
+--- a/app/src/main/res/values-nl-rNL/strings.xml
++++ b/app/src/main/res/values-nl-rNL/strings.xml
+@@ -478,4 +478,5 @@ No user-identifiable information will be collected as part of this process!
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-no-rNO/strings.xml b/app/src/main/res/values-no-rNO/strings.xml
+index e027f439..362ea0f3 100644
+--- a/app/src/main/res/values-no-rNO/strings.xml
++++ b/app/src/main/res/values-no-rNO/strings.xml
+@@ -469,4 +469,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-pl-rPL/strings.xml b/app/src/main/res/values-pl-rPL/strings.xml
+index 8dfd26c0..e80d09de 100644
+--- a/app/src/main/res/values-pl-rPL/strings.xml
++++ b/app/src/main/res/values-pl-rPL/strings.xml
+@@ -478,4 +478,5 @@ Konto docelowe uywa innej waluty ni konto wyjciowe</string>
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rBR/strings.xml b/app/src/main/res/values-pt-rBR/strings.xml
+index b057ca29..404cbe75 100644
+--- a/app/src/main/res/values-pt-rBR/strings.xml
++++ b/app/src/main/res/values-pt-rBR/strings.xml
+@@ -472,4 +472,5 @@ Neste processo no sero recolhidas informaes do utilizador!</string>
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-pt-rPT/strings.xml b/app/src/main/res/values-pt-rPT/strings.xml
+index 3ca9d0b6..07b38733 100644
+--- a/app/src/main/res/values-pt-rPT/strings.xml
++++ b/app/src/main/res/values-pt-rPT/strings.xml
+@@ -471,4 +471,5 @@ Neste processo no sero recolhidas informaes do utilizador!</string>
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-ro-rRO/strings.xml b/app/src/main/res/values-ro-rRO/strings.xml
+index 266e93c4..9c9c4d03 100644
+--- a/app/src/main/res/values-ro-rRO/strings.xml
++++ b/app/src/main/res/values-ro-rRO/strings.xml
+@@ -484,4 +484,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index d4df2fa5..da95b50a 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -482,4 +482,5 @@
+   <string name="repeat_on_weekday"> %1$s</string>
+   <string name="repeat_x_times"> %1$s </string>
+   <string name="menu_show_compact_view"> </string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-sr-rSP/strings.xml b/app/src/main/res/values-sr-rSP/strings.xml
+index a1940ab8..1d8a2d7a 100644
+--- a/app/src/main/res/values-sr-rSP/strings.xml
++++ b/app/src/main/res/values-sr-rSP/strings.xml
+@@ -484,4 +484,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-sv-rSE/strings.xml b/app/src/main/res/values-sv-rSE/strings.xml
+index 0de912cd..0c1a4909 100644
+--- a/app/src/main/res/values-sv-rSE/strings.xml
++++ b/app/src/main/res/values-sv-rSE/strings.xml
+@@ -477,4 +477,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-tr-rTR/strings.xml b/app/src/main/res/values-tr-rTR/strings.xml
+index 1e38343b..918ccb52 100644
+--- a/app/src/main/res/values-tr-rTR/strings.xml
++++ b/app/src/main/res/values-tr-rTR/strings.xml
+@@ -477,4 +477,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-uk-rUA/strings.xml b/app/src/main/res/values-uk-rUA/strings.xml
+index 26fc66f7..9e28f0e0 100644
+--- a/app/src/main/res/values-uk-rUA/strings.xml
++++ b/app/src/main/res/values-uk-rUA/strings.xml
+@@ -480,4 +480,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-vi-rVN/strings.xml b/app/src/main/res/values-vi-rVN/strings.xml
+index 3ebe7226..1df061e4 100644
+--- a/app/src/main/res/values-vi-rVN/strings.xml
++++ b/app/src/main/res/values-vi-rVN/strings.xml
+@@ -470,4 +470,5 @@
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 36e22493..e2b73fd7 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -132,12 +132,12 @@
+   <string name="summary_xml_ofx_header">GnuCash</string>
+   <string name="title_whats_new"></string>
+   <string name="whats_new">
+-        - Support for multiple different books \n
+-        - Adds ownCloud as destination for exports\n
+-        - Compact view for transactions list\n
+-        - Re-design of passcode lock screen\n
+-        - Improved handling of scheduled transactions\n
+-        - Multiple bug fixes and improvements\n
++-  \n
++- ownCloud\n
++- \n
++- \n
++- \n
++- \n
+ 	</string>
+   <string name="label_dismiss"></string>
+   <string name="toast_transanction_amount_required"></string>
+@@ -174,7 +174,7 @@
+   <string name="label_no_recurring_transactions"></string>
+   <string name="toast_recurring_transaction_deleted"></string>
+   <string name="label_placeholder_account"></string>
+-  <string name="label_default_transfer_account"></string>
++  <string name="label_default_transfer_account"></string>
+   <plurals name="label_sub_accounts">
+     <item quantity="other">%d </item>
+   </plurals>
+@@ -185,7 +185,7 @@
+     <item></item>
+     <item></item>
+     <item></item>
+-    <item></item>
++    <item></item>
+     <item></item>
+     <item></item>
+     <item></item>
+@@ -210,7 +210,8 @@
+   <string name="title_all_accounts"></string>
+   <string name="summary_create_default_accounts"></string>
+   <string name="title_create_default_accounts"></string>
+-  <string name="msg_confirm_create_default_accounts_setting">A new book will be opened with the default accounts\n\nYour current accounts and transactions will not be modified!</string>
++  <string name="msg_confirm_create_default_accounts_setting">
++</string>
+   <string name="menu_scheduled_transactions"></string>
+   <string name="msg_confirm_create_default_accounts_first_run">GnuCash Android \n12\
+     </string>
+@@ -271,7 +272,7 @@
+   <string name="label_delete_account_transactions_description"> \n</string>
+   <string name="label_delete_account_subaccounts_description"> \n</string>
+   <string name="label_delete_transactions"></string>
+-  <string name="toast_disable_double_entry_to_save_transaction"></string>
++  <string name="toast_disable_double_entry_to_save_transaction"></string>
+   <string name="label_tap_to_create_schedule"></string>
+   <string name="title_restore_backup">&#8230;</string>
+   <string name="header_backup_and_export_settings"></string>
+@@ -437,32 +438,33 @@
+   <string name="title_confirm_delete_book"></string>
+   <string name="msg_all_book_data_will_be_deleted"></string>
+   <string name="btn_delete_book"></string>
+-  <string name="label_last_export_time"></string>
++  <string name="label_last_export_time"></string>
+   <string name="menu_title_enable_sync"></string>
+   <string name="menu_title_new_book"></string>
+   <string name="toast_transaction_has_no_splits_and_cannot_open"></string>
+   <string name="label_split_count">%1$d </string>
+   <string name="label_inside_account_with_name"> %1$s</string>
+   <plurals name="book_account_stats">
+-    <item quantity="other">%d </item>
++    <item quantity="other">%d</item>
+   </plurals>
+   <plurals name="book_transaction_stats">
+-    <item quantity="other">%d </item>
++    <item quantity="other">%d</item>
+   </plurals>
+   <string-array name="report_account_types">
+-    <item>EXPENSE</item>
+-    <item>INCOME</item>
++    <item></item>
++    <item></item>
+   </string-array>
+-  <string name="toast_connected_to_google_drive">Connected to Google Drive</string>
+-  <string name="toast_unable_to_connect_to_google_drive">Unable to connect to Google Drive</string>
+-  <string name="toast_enter_amount_to_split">Please enter an amount to split</string>
+-  <string name="label_export_target_external_service">external service</string>
+-  <string name="toast_updated_transaction_recurring_schedule">Updated transaction recurring schedule</string>
+-  <string name="label_export_transactions_since_date">Since</string>
+-  <string name="switch_export_transactions_from_all_time">All time</string>
+-  <string name="label_recommend_app">Recommend in Play Store</string>
+-  <string name="repeat_until_date">until %1$s</string>
+-  <string name="repeat_on_weekday">on %1$s</string>
+-  <string name="repeat_x_times">for %1$s times</string>
+-  <string name="menu_show_compact_view">Compact View</string>
++  <string name="toast_connected_to_google_drive">Google Drive</string>
++  <string name="toast_unable_to_connect_to_google_drive">Google Drive</string>
++  <string name="toast_enter_amount_to_split"></string>
++  <string name="label_export_target_external_service"></string>
++  <string name="toast_updated_transaction_recurring_schedule"></string>
++  <string name="label_export_transactions_since_date"></string>
++  <string name="switch_export_transactions_from_all_time"></string>
++  <string name="label_recommend_app">Paly Store</string>
++  <string name="repeat_until_date">%1$s</string>
++  <string name="repeat_on_weekday">%1$s</string>
++  <string name="repeat_x_times">%1$s</string>
++  <string name="menu_show_compact_view"></string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+index 23a7d53b..9ceab027 100644
+--- a/app/src/main/res/values-zh-rTW/strings.xml
++++ b/app/src/main/res/values-zh-rTW/strings.xml
+@@ -467,4 +467,5 @@ No user-identifiable information will be collected as part of this process!
+   <string name="repeat_on_weekday">on %1$s</string>
+   <string name="repeat_x_times">for %1$s times</string>
+   <string name="menu_show_compact_view">Compact View</string>
++  <string name="book_default_name">Book %1$d</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 011323aa..206a9685 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -485,4 +485,5 @@
+     <string name="repeat_on_weekday">on %1$s</string>
+     <string name="repeat_x_times">for %1$s times</string>
+     <string name="menu_show_compact_view">Compact View</string>
++    <string name="book_default_name">Book %1$d</string>
+ </resources>
+
+From 6bbc2b0f48d83b3d249fb5efb0ad57e85166ea70 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Wed, 31 Aug 2016 10:30:33 +0200
+Subject: [PATCH 5/5] Update version string for v2.1.0 release
+
+Update README and CONTRIBUTORS files
+---
+ CHANGELOG.md     |  4 +++-
+ CONTRIBUTORS     | 33 ---------------------------------
+ CONTRIBUTORS.md  | 34 ++++++++++++++++++++++++++++++++++
+ README.md        |  6 +++---
+ app/build.gradle |  5 +++--
+ 5 files changed, 43 insertions(+), 39 deletions(-)
+ delete mode 100644 CONTRIBUTORS
+ create mode 100644 CONTRIBUTORS.md
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c1c4b109..3c0bdc9b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,6 +1,6 @@
+ Change Log
+ ===============================================================================
+-Version 2.1.0 *(2016-xx-xx)*
++Version 2.1.0 *(2016-09-01)*
+ ----------------------------
+ * Feature: Use multiple GnuCash books in single application
+ * Feature: Backup/Export to ownCloud servers
+@@ -8,7 +8,9 @@ Version 2.1.0 *(2016-xx-xx)*
+ * Improved: Redesign of passcode screen with included alphabet keys
+ * Improved: Scheduled transactions now have more accurate timestamps
+ * Improved: Generate all scheduled transactions even if a scheduled is missed (e.g. device off)
++* Improved: Updated translations (and extracted some hard-coded strings)
+ * Fixed: Accounts lists not properly refreshed after switching between recent and all
++* Fixed: Inaccurate execution of some scheduled transactions
+ 
+ Version 2.0.7 *(2016-05-05)*
+ ----------------------------
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+deleted file mode 100644
+index a2db1919..00000000
+--- a/CONTRIBUTORS
++++ /dev/null
+@@ -1,33 +0,0 @@
+-GnuCash for Android is a community effort which is made possible by the contributions of
+-several different people.
+-Appreciation goes to Muslim Chochlov and the to whole GnuCash community for guiding the
+-project through the early phases and providing valuable feedback.
+-
+-Maintainer:
+-Ngewi Fet <ngewif@gmail.com>
+-
+-Core contributors:
+-Yongxin Wang <fefe.wyx@gmail.com>
+-Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
+-lex Magaz Graa <rivaldi8@gmail.com>
+-
+-The following people (in no particular order) contributed (patches and translations) to GnuCash Android:
+-Christian Stimming <christian@cstimming.de>
+-Cristian Marchi <cri.penta@gmail.com>
+-Menelaos Maglis <mmaglis@metacom.gr>
+-Kjell Thomas Pedersen <kjelltp@gmail.com>
+-Alexander Galanin <al@galanin.nnov.ru>
+-Jorge Martnez Lpez <jorgeml@gmail.com>
+-Israel Buitron <israel.buitron@gmail.com>
+-Geert Janssens <janssens-geert@telenet.be>
+-Nicolas Barranger <wicowyn@gmail.com>
+-Sigurd Gartmann <sigurdga-github@sigurdga.no>
+-Pedro Abel <pedroabel@gmail.com>
+-windwarrior <lennartbuit@gmail.com>
+-Alex Lei <lxbzmy@gmail.com>
+-Matthew Hague <matthewhague@zoho.com>
+-Spanti Nicola <rydroid_dev@yahoo.com>
+-Jesse Shieh <jesse.shieh.pub@gmail.com>
+-Terry Chung <terrywmc@gmail.com>
+-Caesar Wirth <cjwirth@gmail.com>
+-Alceu Rodrigues Neto <alceurneto@gmail.com>
+diff --git a/CONTRIBUTORS.md b/CONTRIBUTORS.md
+new file mode 100644
+index 00000000..0ce07a1d
+--- /dev/null
++++ b/CONTRIBUTORS.md
+@@ -0,0 +1,34 @@
++GnuCash for Android is a community effort which is made possible by the contributions of
++several different people.
++Appreciation goes to Muslim Chochlov and the to whole GnuCash community for guiding the
++project through the early phases (as Google Summer of Code project 2012) and providing valuable feedback.
++
++### Core Developers:
++* Ngewi Fet <ngewif@gmail.com> - Project maintainer
++* Yongxin Wang <fefe.wyx@gmail.com>
++* Oleksandr Tyshkovets <olexandr.tyshkovets@gmail.com>
++* lex Magaz Graa <rivaldi8@gmail.com>
++
++### Other Contributors
++The following (incomplete list of) people (in no particular order) contributed (patches and translations) to GnuCash Android:
++* Christian Stimming <christian@cstimming.de>
++* Cristian Marchi <cri.penta@gmail.com>
++* Menelaos Maglis <mmaglis@metacom.gr>
++* Kjell Thomas Pedersen <kjelltp@gmail.com>
++* Alexander Galanin <al@galanin.nnov.ru>
++* Jorge Martnez Lpez <jorgeml@gmail.com>
++* Israel Buitron <israel.buitron@gmail.com>
++* Geert Janssens <janssens-geert@telenet.be>
++* Nicolas Barranger <wicowyn@gmail.com>
++* Sigurd Gartmann <sigurdga-github@sigurdga.no>
++* Pedro Abel <pedroabel@gmail.com>
++* windwarrior <lennartbuit@gmail.com>
++* Alex Lei <lxbzmy@gmail.com>
++* Matthew Hague <matthewhague@zoho.com>
++* Spanti Nicola <rydroid_dev@yahoo.com>
++* Jesse Shieh <jesse.shieh.pub@gmail.com>
++* Terry Chung <terrywmc@gmail.com>
++* Caesar Wirth <cjwirth@gmail.com>
++* Alceu Rodrigues Neto <alceurneto@gmail.com>
++
++Please visit https://crowdin.com/project/gnucash-android for a more complete list of translation contributions
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index 71d91420..13e89dc1 100644
+--- a/README.md
++++ b/README.md
+@@ -65,8 +65,8 @@ It will build the project for you and install it to the connected Android device
+ The app is configured to allow you to install a development and production version in parallel on your device.
+ 
+ ### With Android Studio
+-The easiest way to build is to install [Android Studio](https://developer.android.com/sdk/index.html) v1.+
+-with [Gradle](https://www.gradle.org/) v2.4.
++The easiest way to build is to install [Android Studio](https://developer.android.com/sdk/index.html) v2.+
++with [Gradle](https://www.gradle.org/) v2.10
+ Once installed, then you can import the project into Android Studio:
+ 
+ 1. Open `File`
+@@ -85,7 +85,7 @@ Google+ Community: https://plus.google.com/communities/104728406764752407046
+ There are several ways you could contribute to the development.
+ 
+ * One way is providing translations for locales which are not yet available, or improving translations.
+-See this [blog post](http://www.codinguser.com/2012/09/gnucash-for-android-beta-2-lost-in-translation/) for some guidelines.
++Please visit [CrowdIn](https://crowdin.com/project/gnucash-android) in order to update and create new translations
+ 
+ * You could as well contribute code, fixing bugs, new features or automated tests. Pull requests are always welcome.
+ Take a look at the [bug tracker](https://github.com/codinguser/gnucash-android/issues?state=open)
+diff --git a/app/build.gradle b/app/build.gradle
+index f4bf0726..0c8bf59c 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -1,13 +1,14 @@
+-import java.text.SimpleDateFormat
+ import org.apache.tools.ant.taskdefs.condition.Os
+ 
++import java.text.SimpleDateFormat
++
+ apply plugin: 'com.android.application'
+ apply plugin: 'io.fabric'
+ 
+ def versionMajor = 2
+ def versionMinor = 1
+ def versionPatch = 0
+-def versionBuild = 5
++def versionBuild = 6
+ 
+ def buildTime() {
+     def df = new SimpleDateFormat("yyyyMMdd HH:mm 'UTC'")

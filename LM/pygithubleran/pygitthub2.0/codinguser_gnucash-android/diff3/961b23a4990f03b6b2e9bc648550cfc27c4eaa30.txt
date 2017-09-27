@@ -1,0 +1,239 @@
+From 16ea65608c7564a29ce1541264369f75bd56a33f Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Wed, 19 Aug 2015 22:11:45 +0800
+Subject: [PATCH 1/3] fix crash if empty list is bulk added
+
+---
+ app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index f3612fb8..5174c8d1 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -198,7 +198,7 @@ public void addRecord(@NonNull final Model model){
+      */
+     public long bulkAddRecords(@NonNull List<Model> modelList) {
+         Log.i(LOG_TAG, String.format("Bulk adding %d %s records to the database", modelList.size(),
+-                modelList.get(0).getClass().getName()));
++                modelList.size() == 0 ? "null": modelList.get(0).getClass().getName()));
+         long nRow = 0;
+         try {
+             mDb.beginTransaction();
+
+From d415e575949198bb80735eb731f457b5095a0a03 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 22 Aug 2015 12:21:10 +0800
+Subject: [PATCH 2/3] update view for numerator/denominator
+
+---
+ .../org/gnucash/android/db/DatabaseAdapter.java    | 14 ++++++------
+ .../org/gnucash/android/db/SplitsDbAdapter.java    | 16 +++++++-------
+ .../main/java/org/gnucash/android/model/Money.java | 25 ++++++++++++++++++++++
+ 3 files changed, 40 insertions(+), 15 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 5174c8d1..9338d51e 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -73,9 +73,6 @@ public DatabaseAdapter(SQLiteDatabase db, @NonNull String tableName) {
+ 
+     private void createTempView() {
+         //the multiplication by 1.0 is to cause sqlite to handle the value as REAL and not to round off
+-        String splitValueSql = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + "*1.0 / " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_DENOM;
+-
+-        final String SPLIT_VALUE_AMOUNT = "amount";
+ 
+         // Create some temporary views. Temporary views only exists in one DB session, and will not
+         // be saved in the DB
+@@ -103,8 +100,10 @@ private void createTempView() {
+                         + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_UID + " , "
+                         + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TYPE + " AS "
+                         + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_TYPE + " , "
+-                        + splitValueSql + " AS " //FIXME: Check if the split value is properly extracted. Also consider adding split quantity to the view
+-                        + SplitEntry.TABLE_NAME + "_" + SPLIT_VALUE_AMOUNT + " , "
++                        + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + " AS "
++                        + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_VALUE_NUM + " , "
++                        + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_DENOM + " AS "
++                        + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_VALUE_DENOM + " , "
+                         + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_MEMO + " AS "
+                         + SplitEntry.TABLE_NAME + "_" + SplitEntry.COLUMN_MEMO + " , "
+                         + AccountEntry.TABLE_NAME + "." + AccountEntry.COLUMN_UID + " AS "
+@@ -163,8 +162,9 @@ private void createTempView() {
+                 AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_UID +
+                 " ) , 2 ) AS trans_acct_a_uid , TOTAL ( CASE WHEN " + SplitEntry.TABLE_NAME + "_" +
+                 SplitEntry.COLUMN_TYPE + " = 'DEBIT' THEN "+ SplitEntry.TABLE_NAME + "_" +
+-                SPLIT_VALUE_AMOUNT + " ELSE - " + SplitEntry.TABLE_NAME + "_" +
+-                SPLIT_VALUE_AMOUNT + " END ) AS trans_acct_balance , COUNT ( DISTINCT " +
++                SplitEntry.COLUMN_VALUE_NUM + " ELSE - " + SplitEntry.TABLE_NAME + "_" +
++                SplitEntry.COLUMN_VALUE_NUM + " END ) * 1.0 / " + SplitEntry.TABLE_NAME + "_" +
++                SplitEntry.COLUMN_VALUE_DENOM + " AS trans_acct_balance , COUNT ( DISTINCT " +
+                 AccountEntry.TABLE_NAME + "_" + AccountEntry.COLUMN_CURRENCY +
+                 " ) AS trans_currency_count , COUNT (*) AS trans_split_count FROM trans_split_acct " +
+                 " GROUP BY " + TransactionEntry.TABLE_NAME + "_" + TransactionEntry.COLUMN_UID
+diff --git a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+index e99cf6d5..6f1faedd 100644
+--- a/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/SplitsDbAdapter.java
+@@ -197,22 +197,22 @@ private Money calculateSplitBalance(List<String> accountUIDList, String currency
+             selectionArgs = new String[]{String.valueOf(startTimestamp)};
+         }
+ 
+-        //the multiplication by 1.0 is to cause sqlite to handle the value as REAL and not to round off
+-        String splitValueSql = SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + "*1.0 / " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_DENOM;
+         cursor = mDb.query(SplitEntry.TABLE_NAME + " , " + TransactionEntry.TABLE_NAME,
+                 new String[]{"TOTAL ( CASE WHEN " + SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_TYPE + " = 'DEBIT' THEN " +
+-                        splitValueSql + " ELSE - " + splitValueSql + " END )"},
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + " ELSE - " +
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_NUM + " END )",
++                        SplitEntry.TABLE_NAME + "." + SplitEntry.COLUMN_VALUE_DENOM},
+                 selection, selectionArgs, null, null, null);
+ 
+         try {
+             if (cursor.moveToFirst()) {
+-                double amount = cursor.getDouble(0);
+-                cursor.close();
+-                Log.d(LOG_TAG, "amount return " + amount);
++                int amount_num = cursor.getInt(0);
++                int amount_denom = cursor.getInt(1);
++                Log.d(LOG_TAG, "amount return " + amount_num + "/" + amount_denom);
+                 if (!hasDebitNormalBalance) {
+-                    amount = -amount;
++                    amount_num = -amount_num;
+                 }
+-                return new Money(BigDecimal.valueOf(amount).setScale(2, BigDecimal.ROUND_HALF_UP), Currency.getInstance(currencyCode));
++                return new Money(amount_num, amount_denom, Currency.getInstance(currencyCode));
+             }
+         } finally {
+             cursor.close();
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index fdcdeab0..8d50966f 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -24,8 +24,10 @@
+ import org.gnucash.android.app.GnuCashApplication;
+ 
+ import java.math.BigDecimal;
++import java.math.BigInteger;
+ import java.math.MathContext;
+ import java.math.RoundingMode;
++import java.security.InvalidParameterException;
+ import java.text.DecimalFormat;
+ import java.text.DecimalFormatSymbols;
+ import java.text.NumberFormat;
+@@ -113,6 +115,29 @@ public static Money getZeroInstance(){
+ 	public Money() {
+ 		init();
+ 	}
++
++	/**
++	 * Overloaded constructor
++	 * @param numerator numerator of the money instance
++	 * @param denominator denominator of the money instance
++	 * @param currency {@link Currency} associated with the <code>amount</code>
++	 */
++	public Money(long numerator, int denominator, Currency currency){
++		int scale;
++		if (numerator == 0 && denominator == 0) {
++			denominator = 1;
++		}
++		switch (denominator) {
++			case 1: scale = 0; break;
++			case 10: scale = 1; break;
++			case 100: scale = 2; break;
++			case 1000: scale = 3; break;
++			default:
++				throw new InvalidParameterException("invalid denominator " + denominator);
++		}
++		this.mAmount = new BigDecimal(BigInteger.valueOf(numerator), scale);
++		this.mCurrency = currency;
++	}
+ 	
+ 	/**
+ 	 * Overloaded constructor
+
+From d108bf1b7888108cab2188c0ffbe425431f16eb7 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sat, 22 Aug 2015 14:43:19 +0800
+Subject: [PATCH 3/3] using numerator/denomenator in export
+
+---
+ .../gnucash/android/export/xml/GncXmlExporter.java   | 10 +++++++---
+ .../main/java/org/gnucash/android/model/Money.java   | 20 ++++++++++++--------
+ 2 files changed, 19 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 746b931a..0f7c4a27 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -30,6 +30,7 @@
+ import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Money;
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.TransactionType;
+@@ -268,7 +269,8 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_UID + " AS split_uid",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_MEMO + " AS split_memo",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_TYPE + " AS split_type",
+-                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_VALUE_NUM + " / " + SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_VALUE_DENOM + " AS split_amount",
++                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_VALUE_NUM + " AS split_value_num",
++                        SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_VALUE_DENOM + " AS split_value_denom",
+                         SplitEntry.TABLE_NAME+"."+ SplitEntry.COLUMN_ACCOUNT_UID + " AS split_acct_uid"},
+                         where, null,
+                         TransactionEntry.TABLE_NAME + "." + TransactionEntry.COLUMN_TIMESTAMP + " ASC , " +
+@@ -392,10 +394,12 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_RECONCILED_STATE);
+             // value, in the transaction's currency
+             String trxType = cursor.getString(cursor.getColumnIndexOrThrow("split_type"));
+-            BigDecimal splitAmount = new BigDecimal(cursor.getString(cursor.getColumnIndexOrThrow("split_amount")));
++            int splitValueNum = cursor.getInt(cursor.getColumnIndexOrThrow("split_value_num"));
++            int splitValueDenom = cursor.getInt(cursor.getColumnIndexOrThrow("split_value_denom"));
++            BigDecimal splitAmount = Money.getBigDecimal(splitValueNum, splitValueDenom);
+             String strValue = "0/" + denomString;
+             if (!exportTemplates) { //when doing normal transaction export
+-                strValue = (trxType.equals("CREDIT") ? "-" : "") + GncXmlHelper.formatSplitAmount(splitAmount, trxCurrency);
++                strValue = (trxType.equals("CREDIT") ? "-" : "") + splitValueNum + "/" + splitValueDenom;
+             }
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SPLIT_VALUE);
+             xmlSerializer.text(strValue);
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 8d50966f..3f89ebc2 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -116,13 +116,7 @@ public Money() {
+ 		init();
+ 	}
+ 
+-	/**
+-	 * Overloaded constructor
+-	 * @param numerator numerator of the money instance
+-	 * @param denominator denominator of the money instance
+-	 * @param currency {@link Currency} associated with the <code>amount</code>
+-	 */
+-	public Money(long numerator, int denominator, Currency currency){
++	public static BigDecimal getBigDecimal(long numerator, int denominator) {
+ 		int scale;
+ 		if (numerator == 0 && denominator == 0) {
+ 			denominator = 1;
+@@ -135,7 +129,17 @@ public Money(long numerator, int denominator, Currency currency){
+ 			default:
+ 				throw new InvalidParameterException("invalid denominator " + denominator);
+ 		}
+-		this.mAmount = new BigDecimal(BigInteger.valueOf(numerator), scale);
++		return new BigDecimal(BigInteger.valueOf(numerator), scale);
++	}
++
++	/**
++	 * Overloaded constructor
++	 * @param numerator numerator of the money instance
++	 * @param denominator denominator of the money instance
++	 * @param currency {@link Currency} associated with the <code>amount</code>
++	 */
++	public Money(long numerator, int denominator, Currency currency){
++		this.mAmount = getBigDecimal(numerator, denominator);
+ 		this.mCurrency = currency;
+ 	}
+ 	

@@ -1,0 +1,443 @@
+From 26095af5b587e585438429945a0a41d940bfaf70 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Fri, 8 Jun 2012 15:59:54 +0200
+Subject: [PATCH] Improved transactions display views Improved formatting of
+ currency Fixed bug causing wrong transactions to be loaded for accounts
+
+---
+ GnucashMobile/res/layout/list_item_transaction.xml |  5 +-
+ GnucashMobile/res/values/strings.xml               |  2 +
+ .../src/org/gnucash/android/data/Transaction.java  | 14 ++++++
+ .../gnucash/android/db/DatabaseCursorLoader.java   |  4 +-
+ .../gnucash/android/db/TransactionsDbAdapter.java  | 10 ++--
+ .../org/gnucash/android/ui/AccountsActivity.java   |  6 ++-
+ .../gnucash/android/ui/AccountsListFragment.java   | 36 ++++++++------
+ .../gnucash/android/ui/NewTransactionFragment.java |  3 +-
+ .../android/ui/TransactionsListFragment.java       | 56 +++++++++++++++-------
+ .../android/util/OnAccountSelectedListener.java    |  2 +-
+ 10 files changed, 97 insertions(+), 41 deletions(-)
+
+diff --git a/GnucashMobile/res/layout/list_item_transaction.xml b/GnucashMobile/res/layout/list_item_transaction.xml
+index 56bee0e9..dc310dfd 100644
+--- a/GnucashMobile/res/layout/list_item_transaction.xml
++++ b/GnucashMobile/res/layout/list_item_transaction.xml
+@@ -45,7 +45,10 @@
+             android:layout_height="match_parent"
+             android:singleLine="true"
+             android:ellipsize="end"
+-            android:text="@string/label_transaction_amount"                 
++            android:text="@string/label_transaction_amount"         
++            android:minWidth="100dp"   
++            android:gravity="right"  
++            android:layout_marginRight="12dp"   
+             style="@style/ListItemText" /> 
+ 	
+ </LinearLayout>
+\ No newline at end of file
+diff --git a/GnucashMobile/res/values/strings.xml b/GnucashMobile/res/values/strings.xml
+index 213432ff..7a4e5c64 100644
+--- a/GnucashMobile/res/values/strings.xml
++++ b/GnucashMobile/res/values/strings.xml
+@@ -45,5 +45,7 @@
+     <string name="label_account">Account</string>
+     <string name="debit">DEBIT</string>
+     <string name="credit">CREDIT</string>
++    <string name="title_accounts">Accounts</string>
++    <string name="title_transactions">Transactions</string>
+ 
+ </resources>
+\ No newline at end of file
+diff --git a/GnucashMobile/src/org/gnucash/android/data/Transaction.java b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+index 76d30172..67219386 100644
+--- a/GnucashMobile/src/org/gnucash/android/data/Transaction.java
++++ b/GnucashMobile/src/org/gnucash/android/data/Transaction.java
+@@ -24,6 +24,8 @@
+ 
+ package org.gnucash.android.data;
+ 
++import java.text.DecimalFormat;
++import java.text.NumberFormat;
+ import java.util.Date;
+ import java.util.UUID;
+ 
+@@ -106,6 +108,18 @@ public double getAmount() {
+ 	}
+ 	
+ 	/**
++	 * Returns the transaction properly formatted for display
++	 * @return Properly formatted string amount
++	 */
++	public static String getFormattedAmount(double amount){
++		DecimalFormat formatter = (DecimalFormat)NumberFormat.getCurrencyInstance();
++		String symbol = formatter.getCurrency().getSymbol();
++		formatter.setNegativePrefix("-" + symbol); 
++		formatter.setNegativeSuffix("");
++		return formatter.format(amount);
++	}
++	
++	/**
+ 	 * Returns the name of the transaction
+ 	 * @return Name of the transaction
+ 	 */
+diff --git a/GnucashMobile/src/org/gnucash/android/db/DatabaseCursorLoader.java b/GnucashMobile/src/org/gnucash/android/db/DatabaseCursorLoader.java
+index 3f3bc81b..977b5642 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/DatabaseCursorLoader.java
++++ b/GnucashMobile/src/org/gnucash/android/db/DatabaseCursorLoader.java
+@@ -107,7 +107,9 @@ protected void onReset() {
+      * @param c {@link Cursor} to be released
+      */
+ 	protected void onReleaseResources(Cursor c) {
+-		c.close();
++		if (c != null)
++			c.close();
++		
+ 		if (mDatabaseAdapter != null){
+ 			mDatabaseAdapter.close();
+ 		}
+diff --git a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+index b4ee2a00..b780e01d 100644
+--- a/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/GnucashMobile/src/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -137,12 +137,16 @@ public Cursor fetchAllTransactionsForAccount(String accountUID){
+ 	 * @return Cursor holding set of transactions for particular account
+ 	 */
+ 	public Cursor fetchAllTransactionsForAccount(long accountID){
+-		Cursor cursor = mDb.query(DatabaseHelper.TRANSACTIONS_TABLE_NAME, 
+-				null, 
++		Cursor c = mDb.query(DatabaseHelper.ACCOUNTS_TABLE_NAME, 
++				new String[] {DatabaseHelper.KEY_UID}, 
+ 				DatabaseHelper.KEY_ROW_ID + " = '" + accountID + "'", 
+ 				null, null, null, null);
++		String uid = null;
++		if (c != null && c.moveToFirst()){
++			uid = c.getString(0);
++		}
+ 		
+-		return cursor;
++		return fetchAllTransactionsForAccount(uid);		
+ 	}
+ 	
+ 	/**
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java b/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
+index c1400ef0..d6097220 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/AccountsActivity.java
+@@ -30,6 +30,7 @@
+ import android.os.Bundle;
+ import android.support.v4.app.FragmentManager;
+ import android.support.v4.app.FragmentTransaction;
++import android.util.Log;
+ import android.view.View;
+ 
+ import com.actionbarsherlock.app.SherlockFragmentActivity;
+@@ -94,15 +95,16 @@ public void onNewTransactionClick(View v){
+ 	}
+ 	
+ 	@Override
+-	public void accountSelected(long accountRowId) {
++	public void accountSelected(long accountRowId, String accountName) {
+ 		FragmentManager fragmentManager = getSupportFragmentManager();
+ 		FragmentTransaction fragmentTransaction = fragmentManager
+ 				.beginTransaction();
+ 		TransactionsListFragment transactionsFragment = new TransactionsListFragment();
+ 		Bundle args = new Bundle();
+ 		args.putLong(TransactionsListFragment.SELECTED_ACCOUNT_ID, accountRowId);		
++		args.putString(TransactionsListFragment.SELECTED_ACCOUNT_NAME, accountName);
+ 		transactionsFragment.setArguments(args);
+-		
++		Log.i(TAG, "Opening transactions for account " + accountName);
+ 		fragmentTransaction.replace(R.id.fragment_container,
+ 				transactionsFragment, FRAGMENT_TRANSACTIONS_LIST);
+ 
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+index ac4bb1dc..ea35495e 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/AccountsListFragment.java
+@@ -24,11 +24,9 @@
+ 
+ package org.gnucash.android.ui;
+ 
+-import java.text.NumberFormat;
+-import java.util.Locale;
+-
+ import org.gnucash.android.R;
+ import org.gnucash.android.data.Account;
++import org.gnucash.android.data.Transaction;
+ import org.gnucash.android.db.AccountsDbAdapter;
+ import org.gnucash.android.db.DatabaseAdapter;
+ import org.gnucash.android.db.DatabaseCursorLoader;
+@@ -44,6 +42,7 @@
+ import android.support.v4.app.LoaderManager.LoaderCallbacks;
+ import android.support.v4.content.Loader;
+ import android.support.v4.widget.SimpleCursorAdapter;
++import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+@@ -63,6 +62,8 @@
+ 
+ 	private static final int DIALOG_ADD_ACCOUNT = 0x10;
+ 	
++	protected static final String TAG = "AccountsListFragment";
++	
+ 	SimpleCursorAdapter mCursorAdapter;
+ 	NewAccountDialogFragment mAddAccountFragment;
+ 	private AccountsDbAdapter mAccountsDbAdapter;	
+@@ -79,13 +80,16 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 	@Override
+ 	public void onActivityCreated(Bundle savedInstanceState) {
+ 		super.onActivityCreated(savedInstanceState);
+-		mAccountsDbAdapter = new AccountsDbAdapter(getActivity().getApplicationContext());
++		mAccountsDbAdapter = new AccountsDbAdapter(getActivity());
++		
++		getSherlockActivity().getSupportActionBar().setTitle(R.string.title_accounts);
+ 		
+ 		setHasOptionsMenu(true);
+-		mCursorAdapter = new AccountsCursorAdapter(getActivity()
+-				.getApplicationContext(), R.layout.list_item_account, null,
++		mCursorAdapter = new AccountsCursorAdapter(
++				getActivity(), 
++				R.layout.list_item_account, null,
+ 				new String[] { DatabaseHelper.KEY_NAME },
+-				new int[] { R.id.account_name }, 0);
++				new int[] { R.id.account_name });
+ 
+ 		getLoaderManager().initLoader(0, null, this);
+ 		setListAdapter(mCursorAdapter);	
+@@ -105,7 +109,9 @@ public void onAttach(Activity activity) {
+ 	@Override
+ 	public void onListItemClick(ListView l, View v, int position, long id) {
+ 		super.onListItemClick(l, v, position, id);
+-		mAccountSelectedListener.accountSelected(id);
++		TextView tv = (TextView) v.findViewById(R.id.account_name);
++		String name = tv.getText().toString();
++		mAccountSelectedListener.accountSelected(id, name);
+ 	}	
+ 	
+ 	@Override
+@@ -171,8 +177,8 @@ public void onClick(View v) {
+ 	
+ 	private class AccountsCursorAdapter extends SimpleCursorAdapter {
+ 		public AccountsCursorAdapter(Context context, int layout, Cursor c,
+-				String[] from, int[] to, int flags) {
+-			super(context, layout, c, from, to, flags);
++				String[] from, int[] to) {
++			super(context, layout, c, from, to, 0);
+ 		}
+ 		
+ 		@Override
+@@ -195,10 +201,8 @@ public void bindView(View v, Context context, Cursor cursor) {
+ 
+ 				// TODO: Allow the user to set locale, or get it from phone
+ 				// location
+-				NumberFormat currencyformatter = NumberFormat
+-						.getCurrencyInstance(Locale.getDefault());
+ 
+-				String formattedAmount = currencyformatter.format(balance);
++				String formattedAmount = Transaction.getFormattedAmount(balance);
+ 				statement = count + pluralizedText + formattedAmount;
+ 			}
+ 			summary.setText(statement);		
+@@ -232,18 +236,20 @@ public Cursor loadInBackground() {
+ 
+ 	@Override
+ 	public Loader<Cursor> onCreateLoader(int id, Bundle args) {
+-		return new AccountsCursorLoader(this.getActivity()
+-				.getApplicationContext());
++		Log.d(TAG, "Creating the accounts loader");
++		return new AccountsCursorLoader(this.getActivity());
+ 	}
+ 
+ 	@Override
+ 	public void onLoadFinished(Loader<Cursor> loaderCursor, Cursor cursor) {
++		Log.d(TAG, "Accounts loader finished. Swapping in cursor");
+ 		mCursorAdapter.swapCursor(cursor);
+ 		mCursorAdapter.notifyDataSetChanged();
+ 	}
+ 
+ 	@Override
+ 	public void onLoaderReset(Loader<Cursor> arg0) {
++		Log.d(TAG, "Resetting the accounts loader");
+ 		mCursorAdapter.swapCursor(null);
+ 	}
+ 
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java b/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
+index 154a3632..c04b4b1b 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/NewTransactionFragment.java
+@@ -203,6 +203,7 @@ private void saveNewTransaction() {
+ 		String name = ((TextView)getView().findViewById(R.id.input_transaction_name)).getText().toString();
+ 		String amountString = ((TextView)getView().findViewById(R.id.input_transaction_amount)).getText().toString();
+ 		double amount = Double.parseDouble(stripCurrencyFormatting(amountString))/100;
++		amount *= mTransactionTypeButton.isChecked() ? -1 : 1; //set negative for debit
+ 		Calendar cal = new GregorianCalendar(
+ 				mDate.get(Calendar.YEAR), 
+ 				mDate.get(Calendar.MONTH), 
+@@ -272,7 +273,7 @@ private static String stripCurrencyFormatting(String s){
+ 		@Override
+ 		public void afterTextChanged(Editable s) {
+ 			String cleanString = stripCurrencyFormatting(s.toString());
+-			if (cleanString.isEmpty())
++			if (cleanString.length() == 0)
+ 				return;
+ 
+ 			double parsed = Double.parseDouble(cleanString);
+diff --git a/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java b/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
+index 8d5e30d2..57689b9a 100644
+--- a/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
++++ b/GnucashMobile/src/org/gnucash/android/ui/TransactionsListFragment.java
+@@ -25,6 +25,8 @@
+ package org.gnucash.android.ui;
+ 
+ import org.gnucash.android.R;
++import org.gnucash.android.data.Transaction;
++import org.gnucash.android.db.DatabaseAdapter;
+ import org.gnucash.android.db.DatabaseCursorLoader;
+ import org.gnucash.android.db.DatabaseHelper;
+ import org.gnucash.android.db.TransactionsDbAdapter;
+@@ -35,15 +37,22 @@
+ import android.support.v4.app.LoaderManager.LoaderCallbacks;
+ import android.support.v4.content.Loader;
+ import android.support.v4.widget.SimpleCursorAdapter;
++import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
++import android.widget.TextView;
+ 
+ import com.actionbarsherlock.app.SherlockListFragment;
++import com.actionbarsherlock.view.Menu;
++import com.actionbarsherlock.view.MenuInflater;
+ 
+ public class TransactionsListFragment extends SherlockListFragment implements LoaderCallbacks<Cursor>{
+ 
++	protected static final String TAG = "TransactionsListFragment";
++	
+ 	public static final String SELECTED_ACCOUNT_ID = "selected_account_id";
++	public static final String SELECTED_ACCOUNT_NAME = "selected_account_name";
+ 	private TransactionsDbAdapter mDbAdapter;
+ 	private SimpleCursorAdapter mCursorAdapter;
+ 	private long mAccountID;
+@@ -51,7 +60,7 @@
+ 	@Override
+ 	public void onCreate(Bundle savedInstanceState) {		
+ 		super.onCreate(savedInstanceState);
+-
++		setHasOptionsMenu(true);
+ 		Bundle args = getArguments();
+ 		mAccountID = args.getLong(SELECTED_ACCOUNT_ID);		
+ 	}
+@@ -65,15 +74,17 @@ public View onCreateView(LayoutInflater inflater, ViewGroup container,
+ 	@Override
+ 	public void onActivityCreated(Bundle savedInstanceState) {		
+ 		super.onActivityCreated(savedInstanceState);
++		String title = getArguments().getString(TransactionsListFragment.SELECTED_ACCOUNT_NAME);
++		getSherlockActivity().getSupportActionBar().setTitle(title);
+ 		
+ 		mDbAdapter = new TransactionsDbAdapter(getActivity().getApplicationContext());
+-		mCursorAdapter = new SimpleCursorAdapter(
++		mCursorAdapter = new TransactionsCursorAdapter(
+ 				getActivity().getApplicationContext(), 
+ 				R.layout.list_item_transaction, null, 
+ 				new String[] {DatabaseHelper.KEY_NAME, DatabaseHelper.KEY_AMOUNT}, 
+-				new int[] {R.id.transaction_name, R.id.transaction_amount}, 
+-				0);
++				new int[] {R.id.transaction_name, R.id.transaction_amount});
+ 		setListAdapter(mCursorAdapter);
++		
+ 		getLoaderManager().initLoader(0, null, this);
+ 	}
+ 
+@@ -84,55 +95,66 @@ public void onDestroy() {
+ 	}
+ 	
+ 	@Override
++	public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {		
++		super.onCreateOptionsMenu(menu, inflater);		
++	}
++	
++	@Override
+ 	public Loader<Cursor> onCreateLoader(int arg0, Bundle arg1) {
++		Log.d(TAG, "Creating transactions loader");
+ 		return new TransactionsCursorLoader(getActivity(), mAccountID);
+ 	}
+ 
+ 	@Override
+ 	public void onLoadFinished(Loader<Cursor> loader, Cursor cursor) {
++		Log.d(TAG, "Transactions loader finished. Swapping in cursor");
+ 		mCursorAdapter.swapCursor(cursor);
+ 		mCursorAdapter.notifyDataSetChanged();
+ 	}
+ 
+ 	@Override
+ 	public void onLoaderReset(Loader<Cursor> loader) {
++		Log.d(TAG, "Resetting transactions loader");
+ 		mCursorAdapter.swapCursor(null);		
+ 	}
+ 	
+-/*	
+-	private class TransactionsCursorAdapter extends SimpleCursorAdapter {
++	
++	protected class TransactionsCursorAdapter extends SimpleCursorAdapter {
+ 		
+ 		public TransactionsCursorAdapter(Context context, int layout, Cursor c,
+-				String[] from, int[] to, int flags) {
+-			super(context, layout, c, from, to, flags);
++				String[] from, int[] to) {
++			super(context, layout, c, from, to, 0);
+ 		}
+ 		
+ 		@Override
+ 		public void bindView(View view, Context context, Cursor cursor) {
+ 			super.bindView(view, context, cursor);
+ 			
+-			Transaction transaction = mDbAdapter.buildTransactionInstance(cursor);
+-			TextView trname = (TextView) view.findViewById(R.id.transaction_name);
+-			trname.setText(transaction.getName());
++			double amount = cursor.getDouble(DatabaseAdapter.COLUMN_AMOUNT);
+ 			
+-			//TODO: Create a method in transaction for formatting the amount
+ 			TextView tramount = (TextView) view.findViewById(R.id.transaction_amount);
+-			tramount.setText(Double.toString(transaction.getAmount()));
++			tramount.setText(Transaction.getFormattedAmount(amount));
++			
++			if (amount < 0)
++				tramount.setTextColor(getResources().getColor(R.color.debit_red));
++			else
++				tramount.setTextColor(getResources().getColor(R.color.credit_green));
++			
+ 		}
+ 	}
+-*/	
++	
+ 	protected static class TransactionsCursorLoader extends DatabaseCursorLoader {
+-		private long mAccountUid; 
++		private long accountID; 
+ 		
+ 		public TransactionsCursorLoader(Context context, long accountID) {
+ 			super(context);			
+-			this.mAccountUid = accountID;
++			this.accountID = accountID;
+ 		}
+ 		
+ 		@Override
+ 		public Cursor loadInBackground() {
+ 			mDatabaseAdapter = new TransactionsDbAdapter(mContext);
+-			return ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllTransactionsForAccount(mAccountUid);
++			return ((TransactionsDbAdapter) mDatabaseAdapter).fetchAllTransactionsForAccount(accountID);
+ 		}		
+ 	}
+ }
+diff --git a/GnucashMobile/src/org/gnucash/android/util/OnAccountSelectedListener.java b/GnucashMobile/src/org/gnucash/android/util/OnAccountSelectedListener.java
+index ea3934f6..1c6440f6 100644
+--- a/GnucashMobile/src/org/gnucash/android/util/OnAccountSelectedListener.java
++++ b/GnucashMobile/src/org/gnucash/android/util/OnAccountSelectedListener.java
+@@ -2,7 +2,7 @@
+ 
+ public interface OnAccountSelectedListener {
+ 
+-	public void accountSelected(long accountRowId);
++	public void accountSelected(long accountRowId, String accountName);
+ 	
+ 	public void createNewTransaction(long accountRowId);
+ }

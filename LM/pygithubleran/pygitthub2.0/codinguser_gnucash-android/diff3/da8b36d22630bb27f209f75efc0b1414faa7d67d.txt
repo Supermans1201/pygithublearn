@@ -1,0 +1,247 @@
+From da8b36d22630bb27f209f75efc0b1414faa7d67d Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Mon, 23 Nov 2015 00:41:10 +0100
+Subject: [PATCH] Fix crash when creating budgets
+
+Add view for setting budget start
+---
+ .../org/gnucash/android/db/MigrationHelper.java    |  3 +-
+ .../android/ui/budget/BudgetFormFragment.java      | 52 ++++++++++++++++++++--
+ .../gnucash/android/ui/util/RecurrenceParser.java  |  6 +--
+ app/src/main/res/layout/fragment_budget_form.xml   | 24 ++++++++++
+ 4 files changed, 77 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+index 1617ccb1..d9462664 100644
+--- a/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
++++ b/app/src/main/java/org/gnucash/android/db/MigrationHelper.java
+@@ -1343,8 +1343,9 @@ static int upgradeDbToVersion12(SQLiteDatabase db){
+ 
+             db.execSQL(" ALTER TABLE " + SplitEntry.TABLE_NAME
+                     + " ADD COLUMN " + SplitEntry.COLUMN_RECONCILE_STATE + " varchar(1) not null default 'n' ");
++            //// FIXME: 22.11.15 Cannot add a column with non-constant default. Create new structure and migrate whole table
+             db.execSQL(" ALTER TABLE " + SplitEntry.TABLE_NAME
+-                    + " ADD COLUMN " + SplitEntry.COLUMN_RECONCILE_DATE + " timestamp not null default CURRENT_TIMESTAMP ");
++                    + " ADD COLUMN " + SplitEntry.COLUMN_RECONCILE_DATE + " timestamp not null default '' ");
+ 
+             db.setTransactionSuccessful();
+             oldVersion = 12;
+diff --git a/app/src/main/java/org/gnucash/android/ui/budget/BudgetFormFragment.java b/app/src/main/java/org/gnucash/android/ui/budget/BudgetFormFragment.java
+index 4ec87947..fe50d322 100644
+--- a/app/src/main/java/org/gnucash/android/ui/budget/BudgetFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/budget/BudgetFormFragment.java
+@@ -24,6 +24,7 @@
+ import android.support.v4.app.Fragment;
+ import android.support.v7.app.ActionBar;
+ import android.support.v7.app.AppCompatActivity;
++import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.Menu;
+ import android.view.MenuInflater;
+@@ -39,6 +40,7 @@
+ import android.widget.TextView;
+ import android.widget.Toast;
+ 
++import com.codetroopers.betterpickers.calendardatepicker.CalendarDatePickerDialogFragment;
+ import com.codetroopers.betterpickers.recurrencepicker.EventRecurrence;
+ import com.codetroopers.betterpickers.recurrencepicker.EventRecurrenceFormatter;
+ import com.codetroopers.betterpickers.recurrencepicker.RecurrencePickerDialogFragment;
+@@ -51,25 +53,32 @@
+ import org.gnucash.android.model.BudgetAmount;
+ import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.model.Money;
+-import org.gnucash.android.model.ScheduledAction;
++import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.ui.common.UxArgument;
++import org.gnucash.android.ui.transaction.TransactionFormFragment;
+ import org.gnucash.android.ui.util.RecurrenceParser;
+ import org.gnucash.android.ui.util.RecurrenceViewClickListener;
+ import org.gnucash.android.ui.util.widget.CalculatorEditText;
+ import org.gnucash.android.util.QualifiedAccountNameCursorAdapter;
+ 
+ import java.math.BigDecimal;
++import java.sql.Timestamp;
++import java.text.ParseException;
+ import java.util.ArrayList;
++import java.util.Calendar;
+ import java.util.Currency;
++import java.util.Date;
++import java.util.GregorianCalendar;
+ import java.util.List;
+ 
+ import butterknife.Bind;
+ import butterknife.ButterKnife;
++import butterknife.OnClick;
+ 
+ /**
+  * Fragment for creating or editing Budgets
+  */
+-public class BudgetFormFragment extends Fragment implements RecurrencePickerDialogFragment.OnRecurrenceSetListener {
++public class BudgetFormFragment extends Fragment implements RecurrencePickerDialogFragment.OnRecurrenceSetListener, CalendarDatePickerDialogFragment.OnDateSetListener {
+ 
+     @Bind(R.id.input_budget_name)   EditText mBudgetNameInput;
+     @Bind(R.id.input_description)   EditText mDescriptionInput;
+@@ -78,6 +87,7 @@
+     @Bind(R.id.calculator_keyboard)     KeyboardView mKeyboardView;
+     @Bind(R.id.budget_amount_table_layout) TableLayout mBudgetAmountTableLayout;
+     @Bind(R.id.btn_add_budget_amount)   Button mAddBudgetAmount;
++    @Bind(R.id.input_start_date)        TextView mStartDateInput;
+ 
+     EventRecurrence mEventRecurrence = new EventRecurrence();
+     String mRecurrenceRule;
+@@ -91,6 +101,8 @@
+ 
+     private List<View> mBudgetAmountViews = new ArrayList<>();
+ 
++    private Calendar mStartDate;
++
+     @Nullable
+     @Override
+     public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+@@ -107,6 +119,7 @@ public void onClick(View v) {
+                 addBudgetAmountView(null);
+             }
+         });
++        mStartDateInput.setText(TransactionFormFragment.DATE_FORMATTER.format(mStartDate.getTime()));
+         return view;
+     }
+ 
+@@ -115,6 +128,7 @@ public void onCreate(@Nullable Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         mAccountsDbAdapter = AccountsDbAdapter.getInstance();
+         mBudgetsDbAdapter = BudgetsDbAdapter.getInstance();
++        mStartDate = Calendar.getInstance();
+     }
+ 
+     @Override
+@@ -280,7 +294,9 @@ private void saveBudget(){
+ 
+         mBudget.setDescription(mDescriptionInput.getText().toString().trim());
+ 
+-        mBudget.setRecurrence(RecurrenceParser.parse(mEventRecurrence));
++        Recurrence recurrence = RecurrenceParser.parse(mEventRecurrence);
++        recurrence.setPeriodStart(new Timestamp(mStartDate.getTimeInMillis()));
++        mBudget.setRecurrence(recurrence);
+ 
+         mBudgetsDbAdapter.addRecord(mBudget);
+         getActivity().finish();
+@@ -301,6 +317,27 @@ public boolean onOptionsItemSelected(MenuItem item) {
+         return false;
+     }
+ 
++    @OnClick(R.id.input_start_date)
++    public void onClick(View v) {
++        long dateMillis = 0;
++        try {
++            Date date = TransactionFormFragment.DATE_FORMATTER.parse(((TextView) v).getText().toString());
++            dateMillis = date.getTime();
++        } catch (ParseException e) {
++            Log.e(getTag(), "Error converting input time to Date object");
++        }
++        Calendar calendar = Calendar.getInstance();
++        calendar.setTimeInMillis(dateMillis);
++
++        int year = calendar.get(Calendar.YEAR);
++        int monthOfYear = calendar.get(Calendar.MONTH);
++        int dayOfMonth = calendar.get(Calendar.DAY_OF_MONTH);
++        CalendarDatePickerDialogFragment datePickerDialog = CalendarDatePickerDialogFragment.newInstance(
++                BudgetFormFragment.this,
++                year, monthOfYear, dayOfMonth);
++        datePickerDialog.show(getFragmentManager(), "date_picker_fragment");
++    }
++
+     @Override
+     public void onRecurrenceSet(String rrule) {
+         mRecurrenceRule = rrule;
+@@ -313,6 +350,15 @@ public void onRecurrenceSet(String rrule) {
+         mRecurrenceInput.setText(repeatString);
+     }
+ 
++    @Override
++    public void onDateSet(CalendarDatePickerDialogFragment dialog, int year, int monthOfYear, int dayOfMonth) {
++        Calendar cal = new GregorianCalendar(year, monthOfYear, dayOfMonth);
++        mStartDateInput.setText(TransactionFormFragment.DATE_FORMATTER.format(cal.getTime()));
++        mStartDate.set(Calendar.YEAR, year);
++        mStartDate.set(Calendar.MONTH, monthOfYear);
++        mStartDate.set(Calendar.DAY_OF_MONTH, dayOfMonth);
++    }
++
+     /**
+      * View holder for budget amounts
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+index f408a8dd..3e19812d 100644
+--- a/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
++++ b/app/src/main/java/org/gnucash/android/ui/util/RecurrenceParser.java
+@@ -22,12 +22,9 @@
+ 
+ import org.gnucash.android.model.PeriodType;
+ import org.gnucash.android.model.Recurrence;
+-import org.gnucash.android.model.ScheduledAction;
+ 
+ import java.sql.Timestamp;
+-import java.util.ArrayList;
+ import java.util.Calendar;
+-import java.util.List;
+ 
+ /**
+  * Parses {@link EventRecurrence}s to generate
+@@ -80,7 +77,8 @@ public static Recurrence parse(EventRecurrence eventRecurrence){
+         Recurrence recurrence = new Recurrence(periodType);
+         parseEndTime(eventRecurrence, recurrence);
+         recurrence.setByDay(parseByDay(eventRecurrence.byday));
+-        recurrence.setPeriodStart(new Timestamp(eventRecurrence.startDate.toMillis(false)));
++        if (eventRecurrence.startDate != null)
++            recurrence.setPeriodStart(new Timestamp(eventRecurrence.startDate.toMillis(false)));
+ 
+         return recurrence;
+     }
+diff --git a/app/src/main/res/layout/fragment_budget_form.xml b/app/src/main/res/layout/fragment_budget_form.xml
+index 386397e8..43955696 100644
+--- a/app/src/main/res/layout/fragment_budget_form.xml
++++ b/app/src/main/res/layout/fragment_budget_form.xml
+@@ -16,6 +16,7 @@
+ -->
+ 
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools"
+     android:animateLayoutChanges="true"
+     android:orientation="vertical"
+     android:layout_width="match_parent"
+@@ -62,6 +63,7 @@
+                 android:inputType="textMultiLine|textCapSentences" />
+         </TableRow>
+         <View style="@style/Divider" />
++
+         <TableRow style="@style/FormRow"
+             android:paddingLeft="@dimen/dialog_padding"
+             android:paddingRight="@dimen/dialog_padding">
+@@ -78,6 +80,28 @@
+                 style="@style/Dropdown.TextView" />
+ 
+         </TableRow>
++
++        <TableRow style="@style/FormRow"
++            android:paddingLeft="@dimen/dialog_padding"
++            android:paddingRight="@dimen/dialog_padding">
++
++            <TextView
++                android:layout_width="0dp"
++                android:layout_weight="2"
++                android:layout_height="wrap_content"
++                android:textAllCaps="true"
++                android:text="START"/>
++
++            <TextView android:id="@+id/input_start_date"
++                android:layout_width="0dp"
++                android:layout_weight="5"
++                android:layout_height="wrap_content"
++                tools:text="29.11.2015"
++                android:clickable="true"
++                android:textColor="@android:color/black"
++                android:gravity="left"      />
++        </TableRow>
++
+         <TableRow style="@style/FormRow"
+             android:paddingLeft="@dimen/dialog_padding"
+             android:layout_marginBottom="@dimen/dialog_padding"

@@ -1,0 +1,281 @@
+From 817cfe0d91b505e9b8ecff764c060e9d4b93d786 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Sat, 21 Jan 2017 20:50:42 +0100
+Subject: [PATCH 1/2] Remove Transaction.getCurrency()
+
+Commodity should be used in place of Currency, as it's a superset. This
+is just a step in the migration process.
+---
+ .../main/java/org/gnucash/android/importer/GncXmlHandler.java  |  6 +++---
+ app/src/main/java/org/gnucash/android/model/Transaction.java   | 10 ----------
+ .../android/ui/transaction/TransactionFormFragment.java        |  2 +-
+ 3 files changed, 4 insertions(+), 14 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 5f9c0ff1..38a97a66 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -438,8 +438,8 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_COMMODITY_ID:
+                 String currencyCode = mISO4217Currency ? characterString : NO_CURRENCY_CODE;
++                Commodity commodity = mCommoditiesDbAdapter.getCommodity(currencyCode);
+                 if (mAccount != null) {
+-                    Commodity commodity = mCommoditiesDbAdapter.getCommodity(currencyCode);
+                     if (commodity != null) {
+                         mAccount.setCommodity(commodity);
+                     } else {
+@@ -453,7 +453,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     }
+                 }
+                 if (mTransaction != null) {
+-                    mTransaction.setCurrencyCode(currencyCode);
++                    mTransaction.setCommodity(commodity);
+                 }
+                 if (mPrice != null) {
+                     if (mPriceCommodity) {
+@@ -675,7 +675,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                     //the split amount uses the account currency
+                     mSplit.setQuantity(new Money(mQuantity, getCommodityForAccount(characterString)));
+                     //the split value uses the transaction currency
+-                    mSplit.setValue(new Money(mValue, mCommoditiesDbAdapter.getCommodity(mTransaction.getCurrency().getCurrencyCode())));
++                    mSplit.setValue(new Money(mValue, mTransaction.getCommodity()));
+                     mSplit.setAccountUID(characterString);
+                 } else {
+                     if (!mIgnoreTemplateTransaction)
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index c98a0436..bbc0dfb9 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -26,7 +26,6 @@
+ import org.w3c.dom.Element;
+ 
+ import java.util.ArrayList;
+-import java.util.Currency;
+ import java.util.Date;
+ import java.util.List;
+ 
+@@ -345,15 +344,6 @@ public void setCurrencyCode(String currencyCode) {
+     }
+ 
+     /**
+-     * Returns the {@link java.util.Currency} used by this transaction
+-     * @return Currency of the transaction
+-     * @see #getCurrencyCode()
+-     */
+-    public Currency getCurrency(){
+-        return Currency.getInstance(this.mCurrencyCode);
+-    }
+-
+-    /**
+      * Returns the  commodity for this transaction
+      * @return Commodity of the transaction
+      */
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index 3567658e..d6054a2b 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -461,7 +461,7 @@ private void initializeViewsWithTransaction(){
+             //when autocompleting, only change the amount if the user has not manually changed it already
+             mAmountEditText.setValue(mTransaction.getBalance(mAccountUID).asBigDecimal());
+         }
+-		mCurrencyTextView.setText(mTransaction.getCurrency().getSymbol());
++		mCurrencyTextView.setText(mTransaction.getCommodity().getSymbol());
+ 		mNotesEditText.setText(mTransaction.getNote());
+ 		mDateTextView.setText(DATE_FORMATTER.format(mTransaction.getTimeMillis()));
+ 		mTimeTextView.setText(TIME_FORMATTER.format(mTransaction.getTimeMillis()));
+
+From 86f2343ed1f0c0d67f7ef60a1cdaef49f42faaa2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <alexandre.magaz@gmail.com>
+Date: Tue, 24 Jan 2017 18:30:07 +0100
+Subject: [PATCH 2/2] Remove Transaction.mCurrencyCode to avoid inconsistencies
+ with mCommodity
+
+Both fields refer to the same concept and must have consistent values,
+which can break if not careful.
+---
+ .../android/test/ui/AccountsActivityTest.java      |  2 +-
+ .../android/db/adapter/AccountsDbAdapter.java      |  2 +-
+ .../android/db/adapter/TransactionsDbAdapter.java  |  8 +----
+ .../org/gnucash/android/model/Transaction.java     | 36 +++++++---------------
+ .../android/receivers/TransactionRecorder.java     |  2 +-
+ .../ui/transaction/TransactionFormFragment.java    |  1 -
+ 6 files changed, 15 insertions(+), 36 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 39b40f2e..bfa7fb14 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -328,7 +328,7 @@ public void editingAccountShouldNotDeleteTransactions(){
+         Account account = new Account("Transfer Account");
+         account.setCommodity(Commodity.getInstance(ACCOUNTS_CURRENCY.getCurrencyCode()));
+         Transaction transaction = new Transaction("Simple transaction");
+-        transaction.setCurrencyCode(ACCOUNTS_CURRENCY.getCurrencyCode());
++        transaction.setCommodity(ACCOUNTS_CURRENCY);
+         Split split = new Split(new Money(BigDecimal.TEN, ACCOUNTS_CURRENCY), account.getUID());
+         transaction.addSplit(split);
+         transaction.addSplit(split.createPair(SIMPLE_ACCOUNT_UID));
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+index cc27e47f..273dd908 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+@@ -1176,7 +1176,7 @@ public boolean isFavoriteAccount(String accountUID){
+ 
+                 Transaction transaction = new Transaction(GnuCashApplication.getAppContext().getString(R.string.account_name_opening_balances));
+                 transaction.setNote(getAccountName(accountUID));
+-                transaction.setCurrencyCode(currencyCode);
++                transaction.setCommodity(Commodity.getInstance(currencyCode));
+                 TransactionType transactionType = Transaction.getTypeForBalance(getAccountType(accountUID),
+                         balance.isNegative());
+                 Split split = new Split(balance.abs(), accountUID);
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+index e1cc41a8..f86c6fa5 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/TransactionsDbAdapter.java
+@@ -184,12 +184,7 @@ public long bulkAddRecords(@NonNull List<Transaction> transactionList, UpdateMet
+         stmt.bindLong(3, transaction.getTimeMillis());
+         stmt.bindLong(4, transaction.isExported() ? 1 : 0);
+         stmt.bindString(5, transaction.getCurrencyCode());
+-
+-        Commodity commodity = transaction.getCommodity();
+-        if (commodity == null)
+-            commodity = mCommoditiesDbAdapter.getCommodity(transaction.getCurrencyCode());
+-
+-        stmt.bindString(6, commodity.getUID());
++        stmt.bindString(6, transaction.getCommodity().getUID());
+         stmt.bindString(7, TimestampHelper.getUtcStringFromTimestamp(transaction.getCreatedTimestamp()));
+ 
+         if (transaction.getScheduledActionUID() == null)
+@@ -414,7 +409,6 @@ public Transaction buildModelInstance(@NonNull final Cursor c){
+ 		transaction.setExported(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_EXPORTED)) == 1);
+ 		transaction.setTemplate(c.getInt(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_TEMPLATE)) == 1);
+         String currencyCode = c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_CURRENCY));
+-        transaction.setCurrencyCode(currencyCode);
+         transaction.setCommodity(mCommoditiesDbAdapter.getCommodity(currencyCode));
+         transaction.setScheduledActionUID(c.getString(c.getColumnIndexOrThrow(TransactionEntry.COLUMN_SCHEDX_ACTION_UID)));
+         long transactionID = c.getLong(c.getColumnIndexOrThrow(TransactionEntry._ID));
+diff --git a/app/src/main/java/org/gnucash/android/model/Transaction.java b/app/src/main/java/org/gnucash/android/model/Transaction.java
+index bbc0dfb9..2dc7b10d 100644
+--- a/app/src/main/java/org/gnucash/android/model/Transaction.java
++++ b/app/src/main/java/org/gnucash/android/model/Transaction.java
+@@ -17,6 +17,7 @@
+ package org.gnucash.android.model;
+ 
+ import android.content.Intent;
++import android.support.annotation.NonNull;
+ 
+ import org.gnucash.android.BuildConfig;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+@@ -80,11 +81,6 @@
+     public static final String EXTRA_SPLITS = "org.gnucash.android.extra.transaction.splits";
+ 
+     /**
+-     * Currency used by splits in this transaction
+-     */
+-    private String mCurrencyCode = Money.DEFAULT_CURRENCY_CODE;
+-
+-    /**
+      * GUID of commodity associated with this transaction
+      */
+     private Commodity mCommodity;
+@@ -149,7 +145,7 @@ public Transaction(Transaction transaction, boolean generateNewUID){
+         setDescription(transaction.getDescription());
+         setNote(transaction.getNote());
+         setTime(transaction.getTimeMillis());
+-        mCurrencyCode = transaction.mCurrencyCode;
++        setCommodity(transaction.getCommodity());
+         //exported flag is left at default value of false
+ 
+         for (Split split : transaction.mSplitList) {
+@@ -180,8 +176,9 @@ private void initDefaults(){
+     public Split createAutoBalanceSplit(){
+         Money imbalance = getImbalance(); //returns imbalance of 0 for multicurrency transactions
+         if (!imbalance.isAmountZero()){
+-            Split split = new Split(imbalance.negate(), mCurrencyCode); //yes, this is on purpose
+-            //the account UID is set to the currency. This should be overridden before saving to db
++            // yes, this is on purpose the account UID is set to the currency.
++            // This should be overridden before saving to db
++            Split split = new Split(imbalance.negate(), mCommodity.getCurrencyCode());
+             addSplit(split);
+             return split;
+         }
+@@ -265,13 +262,13 @@ public Money getBalance(String accountUID){
+      * @return Money imbalance of the transaction or zero if it is a multi-currency transaction
+      */
+     public Money getImbalance(){
+-        Money imbalance = Money.createZeroInstance(mCurrencyCode);
++        Money imbalance = Money.createZeroInstance(mCommodity.getCurrencyCode());
+         for (Split split : mSplitList) {
+-            if (!split.getQuantity().getCommodity().getCurrencyCode().equals(mCurrencyCode)) {
++            if (!split.getQuantity().getCommodity().equals(mCommodity)) {
+                 // this may happen when importing XML exported from GNCA before 2.0.0
+                 // these transactions should only be imported from XML exported from GNC desktop
+                 // so imbalance split should not be generated for them
+-                return Money.createZeroInstance(mCurrencyCode);
++                return Money.createZeroInstance(mCommodity.getCurrencyCode());
+             }
+             Money amount = split.getValue().abs();
+             if (split.getType() == TransactionType.DEBIT)
+@@ -330,24 +327,14 @@ public static Money computeBalance(String accountUID, List<Split> splitList) {
+      * @return ISO 4217 currency code string
+      */
+     public String getCurrencyCode() {
+-        return mCurrencyCode;
+-    }
+-
+-    /**
+-     * Sets the ISO 4217 currency code used by this transaction
+-     * <p>The currency remains in the object model and is not persisted to the database
+-     * Transactions always use the currency of their accounts. </p>
+-     * @param currencyCode String with ISO 4217 currency code
+-     */
+-    public void setCurrencyCode(String currencyCode) {
+-        this.mCurrencyCode = currencyCode;
++        return mCommodity.getCurrencyCode();
+     }
+ 
+     /**
+      * Returns the  commodity for this transaction
+      * @return Commodity of the transaction
+      */
+-    public Commodity getCommodity() {
++    public @NonNull Commodity getCommodity() {
+         return mCommodity;
+     }
+ 
+@@ -355,9 +342,8 @@ public Commodity getCommodity() {
+      * Sets the commodity for this transaction
+      * @param commodity Commodity instance
+      */
+-    public void setCommodity(Commodity commodity) {
++    public void setCommodity(@NonNull Commodity commodity) {
+         this.mCommodity = commodity;
+-        this.mCurrencyCode = commodity.getCurrencyCode();
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java b/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
+index f1118597..521f47ac 100644
+--- a/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
++++ b/app/src/main/java/org/gnucash/android/receivers/TransactionRecorder.java
+@@ -68,7 +68,7 @@ public void onReceive(Context context, Intent intent) {
+         Transaction transaction = new Transaction(name);
+         transaction.setTime(System.currentTimeMillis());
+         transaction.setNote(note);
+-        transaction.setCurrencyCode(currencyCode);
++        transaction.setCommodity(Commodity.getInstance(currencyCode));
+ 
+         //Parse deprecated args for compatibility. Transactions were bound to accounts, now only splits are
+ 		String accountUID = args.getString(Transaction.EXTRA_ACCOUNT_UID);
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+index d6054a2b..f2a55ad0 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionFormFragment.java
+@@ -772,7 +772,6 @@ private void setSelectedTransferAccount(long accountId){
+         Transaction transaction = new Transaction(description);
+         transaction.setTime(cal.getTimeInMillis());
+         transaction.setCommodity(commodity);
+-        transaction.setCurrencyCode(currencyCode);
+         transaction.setNote(notes);
+         transaction.setSplits(splits);
+         transaction.setExported(false); //not necessary as exports use timestamps now. Because, legacy

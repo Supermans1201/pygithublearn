@@ -1,0 +1,416 @@
+From 17a4e5be256dd77e8a83b0b7bcace1e5589d4b1b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=80lex=20Magaz=20Gra=C3=A7a?= <rivaldi8@gmail.com>
+Date: Sat, 18 Jun 2016 14:16:55 +0200
+Subject: [PATCH] Remove Currency and currency code uses from Account.
+
+Account already holds a reference to a Commodity which substitutes Currency.
+---
+ .../android/test/ui/AccountsActivityTest.java      |  7 +++----
+ .../android/db/adapter/AccountsDbAdapter.java      |  2 +-
+ .../gnucash/android/importer/GncXmlHandler.java    |  3 ++-
+ .../java/org/gnucash/android/model/Account.java    | 24 +---------------------
+ .../android/ui/account/AccountFormFragment.java    |  2 +-
+ .../android/ui/report/BaseReportFragment.java      | 12 +++++------
+ .../android/ui/report/ReportsOverviewFragment.java |  8 ++------
+ .../report/barchart/StackedBarChartFragment.java   |  9 ++++----
+ .../linechart/CashFlowLineChartFragment.java       |  8 ++++----
+ .../ui/report/piechart/PieChartFragment.java       |  4 ++--
+ .../android/test/unit/model/AccountTest.java       | 21 +------------------
+ 11 files changed, 27 insertions(+), 73 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+index 73eecf12..69f6e4a0 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/AccountsActivityTest.java
+@@ -228,7 +228,7 @@ public void testCreateAccount(){
+         Account newestAccount = accounts.get(0); //because of alphabetical sorting
+ 
+         assertThat(newestAccount.getName()).isEqualTo(NEW_ACCOUNT_NAME);
+-        assertThat(newestAccount.getCurrency().getCurrencyCode()).isEqualTo(Money.DEFAULT_CURRENCY_CODE);
++        assertThat(newestAccount.getCommodity().getCurrencyCode()).isEqualTo(Money.DEFAULT_CURRENCY_CODE);
+         assertThat(newestAccount.isPlaceholderAccount()).isTrue();
+     }
+ 
+@@ -316,7 +316,7 @@ public void testEditAccount(){
+         Account latest = accounts.get(0);  //will be the first due to alphabetical sorting
+ 
+         assertThat(latest.getName()).isEqualTo(editedAccountName);
+-        assertThat(latest.getCurrency().getCurrencyCode()).isEqualTo(ACCOUNTS_CURRENCY_CODE);
++        assertThat(latest.getCommodity().getCurrencyCode()).isEqualTo(ACCOUNTS_CURRENCY_CODE);
+     }
+ 
+     @Test
+@@ -402,7 +402,6 @@ public void testDeleteAccountMovingSubaccounts() {
+         subAccount.setParentUID(SIMPLE_ACCOUNT_UID);
+ 
+         Account tranferAcct = new Account("Other account");
+-        tranferAcct.setCurrencyCode(ACCOUNTS_CURRENCY_CODE);
+         mAccountsDbAdapter.addRecord(subAccount, DatabaseAdapter.UpdateMethod.insert);
+         mAccountsDbAdapter.addRecord(tranferAcct, DatabaseAdapter.UpdateMethod.insert);
+ 
+@@ -456,7 +455,7 @@ public void testIntentAccountCreation(){
+         assertThat(account).isNotNull();
+         assertThat(account.getName()).isEqualTo("Intent Account");
+         assertThat(account.getUID()).isEqualTo("intent-account");
+-        assertThat(account.getCurrency().getCurrencyCode()).isEqualTo("EUR");
++        assertThat(account.getCommodity().getCurrencyCode()).isEqualTo("EUR");
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+index 5048eda0..dd8d26dc 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/AccountsDbAdapter.java
+@@ -171,7 +171,7 @@ public long bulkAddRecords(@NonNull List<Account> accountList, UpdateMethod upda
+         if (account.getDescription() != null)
+             stmt.bindString(2, account.getDescription());
+         stmt.bindString(3, account.getAccountType().name());
+-        stmt.bindString(4, account.getCurrency().getCurrencyCode());
++        stmt.bindString(4, account.getCommodity().getCurrencyCode());
+         if (account.getColor() != Account.DEFAULT_COLOR) {
+             stmt.bindString(5, convertToRGBHexString(account.getColor()));
+         }
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 227adfa1..86dd7818 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -439,7 +439,7 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+             case GncXmlHelper.TAG_COMMODITY_ID:
+                 String currencyCode = mISO4217Currency ? characterString : NO_CURRENCY_CODE;
+                 if (mAccount != null) {
+-                    mAccount.setCurrencyCode(currencyCode);
++                    mAccount.setCommodity(mCommoditiesDbAdapter.getCommodity(currencyCode));
+                     if (mCurrencyCount.containsKey(currencyCode)) {
+                         mCurrencyCount.put(currencyCode, mCurrencyCount.get(currencyCode) + 1);
+                     } else {
+@@ -893,6 +893,7 @@ public void endDocument() throws SAXException {
+ 
+         // Set the account for created balancing splits to correct imbalance accounts
+         for (Split split: mAutoBalanceSplits) {
++            // XXX: yes, getAccountUID() returns a currency code in this case (see Transaction.getAutoBalanceSplit())
+             String currencyCode = split.getAccountUID();
+             Account imbAccount = mapImbalanceAccount.get(currencyCode);
+             if (imbAccount == null) {
+diff --git a/app/src/main/java/org/gnucash/android/model/Account.java b/app/src/main/java/org/gnucash/android/model/Account.java
+index b4569a49..71f30ff8 100644
+--- a/app/src/main/java/org/gnucash/android/model/Account.java
++++ b/app/src/main/java/org/gnucash/android/model/Account.java
+@@ -27,7 +27,6 @@
+ 
+ import java.sql.Timestamp;
+ import java.util.ArrayList;
+-import java.util.Currency;
+ import java.util.List;
+ 
+ /**
+@@ -77,11 +76,6 @@
+ 	private String mDescription = "";
+ 
+ 	/**
+-	 * Currency used by transactions in this account
+-	 */
+-	private String mCurrencyCode;
+-
+-	/**
+ 	 * Commodity used by this account
+ 	 */
+ 	private Commodity mCommodity;
+@@ -271,7 +265,7 @@ public int getTransactionCount(){
+ 	 * @return {@link Money} aggregate amount of all transactions in account.
+ 	 */
+ 	public Money getBalance(){
+-		Money balance = Money.createZeroInstance(mCurrencyCode);
++		Money balance = Money.createZeroInstance(mCommodity.getCurrencyCode());
+         for (Transaction transaction : mTransactionsList) {
+             balance.add(transaction.getBalance(getUID()));
+ 		}
+@@ -325,21 +319,6 @@ public void setFavorite(boolean isFavorite) {
+         this.mIsFavorite = isFavorite;
+     }
+ 
+-    /**
+-	 * Returns the currency for this account.
+-	 */
+-	public Currency getCurrency() {
+-		return Currency.getInstance(mCurrencyCode);
+-	}
+-
+-	/**
+-	 * Sets the currency code of this account
+-	 * @param currencyCode ISO 4217 3-letter currency code
+-	 */
+-	public void setCurrencyCode(String currencyCode){
+-		this.mCurrencyCode = currencyCode;
+-	}
+-
+ 	/**
+ 	 * Return the commodity for this account
+ 	 */
+@@ -354,7 +333,6 @@ public Commodity getCommodity(){
+ 	 */
+ 	public void setCommodity(@NonNull Commodity commodity){
+ 		this.mCommodity = commodity;
+-		this.mCurrencyCode = commodity.getCurrencyCode();
+ 		//todo: should we also change commodity of transactions? Transactions can have splits from different accounts
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+index 2a90bdcc..d714dd15 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountFormFragment.java
+@@ -376,7 +376,7 @@ private void initializeViewsWithAccount(Account account){
+             setParentAccountSelection(mAccountsDbAdapter.getID(mParentAccountUID));
+         }
+ 
+-        String currencyCode = account.getCurrency().getCurrencyCode();
++        String currencyCode = account.getCommodity().getCurrencyCode();
+         setSelectedCurrency(currencyCode);
+ 
+         if (mAccountsDbAdapter.getTransactionMaxSplitNum(mAccount.getUID()) > 1)
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/BaseReportFragment.java b/app/src/main/java/org/gnucash/android/ui/report/BaseReportFragment.java
+index ee53923b..e6f849e4 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/BaseReportFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/BaseReportFragment.java
+@@ -30,7 +30,6 @@
+ import android.view.MenuInflater;
+ import android.view.View;
+ import android.view.ViewGroup;
+-import android.widget.ProgressBar;
+ import android.widget.TextView;
+ 
+ import com.github.mikephil.charting.data.Entry;
+@@ -39,14 +38,14 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+ import org.gnucash.android.model.AccountType;
++import org.gnucash.android.model.Commodity;
+ import org.gnucash.android.ui.common.Refreshable;
+ import org.joda.time.LocalDateTime;
+ import org.joda.time.Months;
+ import org.joda.time.Years;
+ 
+-import java.util.Currency;
+-
+ import butterknife.Bind;
+ import butterknife.ButterKnife;
+ 
+@@ -88,9 +87,9 @@
+     protected AccountType mAccountType;
+ 
+     /**
+-     * Currency for which to display reports
++     * Commodity for which to display reports
+      */
+-    protected Currency mCurrency;
++    protected Commodity mCommodity;
+ 
+     /**
+      * Intervals in which to group reports
+@@ -181,7 +180,8 @@ public void onActivityCreated(@Nullable Bundle savedInstanceState) {
+         actionBar.setTitle(getTitle());
+ 
+         setHasOptionsMenu(true);
+-        mCurrency = Currency.getInstance(GnuCashApplication.getDefaultCurrencyCode());
++        mCommodity = CommoditiesDbAdapter.getInstance()
++                    .getCommodity(GnuCashApplication.getDefaultCurrencyCode());
+ 
+         ReportsActivity reportsActivity = (ReportsActivity) getActivity();
+         mReportPeriodStart = reportsActivity.getReportPeriodStart();
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/ReportsOverviewFragment.java b/app/src/main/java/org/gnucash/android/ui/report/ReportsOverviewFragment.java
+index bae16da2..f0139f67 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/ReportsOverviewFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/ReportsOverviewFragment.java
+@@ -35,7 +35,6 @@
+ import com.github.mikephil.charting.data.PieDataSet;
+ 
+ import org.gnucash.android.R;
+-import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.model.Account;
+ import org.gnucash.android.model.AccountType;
+@@ -49,9 +48,7 @@
+ 
+ import java.util.ArrayList;
+ import java.util.Collections;
+-import java.util.Currency;
+ import java.util.List;
+-import java.util.Locale;
+ 
+ import butterknife.Bind;
+ import butterknife.OnClick;
+@@ -151,7 +148,7 @@ protected void generateReport() {
+             mChart.setData(pieData);
+             float sum = mChart.getData().getYValueSum();
+             String total = getResources().getString(R.string.label_chart_total);
+-            String currencySymbol = Currency.getInstance(GnuCashApplication.getDefaultCurrencyCode()).getSymbol(Locale.getDefault());
++            String currencySymbol = mCommodity.getSymbol();
+             mChart.setCenterText(String.format(PieChartFragment.TOTAL_VALUE_LABEL_PATTERN, total, sum, currencySymbol));
+             mChartHasData = true;
+         } else {
+@@ -178,14 +175,13 @@ protected void generateReport() {
+      * @return {@code PieData} instance
+      */
+     private PieData getData() {
+-        String mCurrencyCode = GnuCashApplication.getDefaultCurrencyCode();
+         PieDataSet dataSet = new PieDataSet(null, "");
+         List<String> labels = new ArrayList<>();
+         List<Integer> colors = new ArrayList<>();
+         for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+             if (account.getAccountType() == AccountType.EXPENSE
+                     && !account.isPlaceholderAccount()
+-                    && account.getCurrency() == Currency.getInstance(mCurrencyCode)) {
++                    && account.getCommodity().equals(mCommodity)) {
+ 
+                 long start = new LocalDate().minusMonths(2).dayOfMonth().withMinimumValue().toDate().getTime();
+                 long end = new LocalDate().plusDays(1).toDate().getTime();
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/barchart/StackedBarChartFragment.java b/app/src/main/java/org/gnucash/android/ui/report/barchart/StackedBarChartFragment.java
+index c834dd5f..3297b230 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/barchart/StackedBarChartFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/barchart/StackedBarChartFragment.java
+@@ -17,7 +17,6 @@
+ 
+ package org.gnucash.android.ui.report.barchart;
+ 
+-import android.graphics.Color;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.annotation.Nullable;
+@@ -110,7 +109,7 @@ public void onActivityCreated(@Nullable Bundle savedInstanceState) {
+         mChart.getAxisRight().setEnabled(false);
+         mChart.getAxisLeft().setStartAtZero(false);
+         mChart.getAxisLeft().enableGridDashedLine(4.0f, 4.0f, 0);
+-        mChart.getAxisLeft().setValueFormatter(new LargeValueFormatter(mCurrency.getSymbol(Locale.getDefault())));
++        mChart.getAxisLeft().setValueFormatter(new LargeValueFormatter(mCommodity.getSymbol()));
+         Legend chartLegend = mChart.getLegend();
+         chartLegend.setForm(Legend.LegendForm.CIRCLE);
+         chartLegend.setPosition(Legend.LegendPosition.BELOW_CHART_CENTER);
+@@ -163,7 +162,7 @@ protected BarData getData() {
+             for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+                 if (account.getAccountType() == mAccountType
+                         && !account.isPlaceholderAccount()
+-                        && account.getCurrency() == mCurrency) {
++                        && account.getCommodity().equals(mCommodity)) {
+ 
+                     double balance = mAccountsDbAdapter.getAccountsBalance(
+                             Collections.singletonList(account.getUID()), start, end).asDouble();
+@@ -244,7 +243,7 @@ private BarData getEmptyData() {
+      */
+     private LocalDate getStartDate(AccountType accountType) {
+         TransactionsDbAdapter adapter = TransactionsDbAdapter.getInstance();
+-        String code = mCurrency.getCurrencyCode();
++        String code = mCommodity.getCurrencyCode();
+         LocalDate startDate;
+         if (mReportPeriodStart == -1) {
+             startDate = new LocalDate(adapter.getTimestampOfEarliestTransaction(accountType, code));
+@@ -263,7 +262,7 @@ private LocalDate getStartDate(AccountType accountType) {
+      */
+     private LocalDate getEndDate(AccountType accountType) {
+         TransactionsDbAdapter adapter = TransactionsDbAdapter.getInstance();
+-        String code = mCurrency.getCurrencyCode();
++        String code = mCommodity.getCurrencyCode();
+         LocalDate endDate;
+         if (mReportPeriodEnd == -1) {
+             endDate = new LocalDate(adapter.getTimestampOfLatestTransaction(accountType, code));
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/linechart/CashFlowLineChartFragment.java b/app/src/main/java/org/gnucash/android/ui/report/linechart/CashFlowLineChartFragment.java
+index 7f72d7cd..69670658 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/linechart/CashFlowLineChartFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/linechart/CashFlowLineChartFragment.java
+@@ -102,7 +102,7 @@ public void onActivityCreated(Bundle savedInstanceState) {
+         mChart.getXAxis().setDrawGridLines(false);
+         mChart.getAxisRight().setEnabled(false);
+         mChart.getAxisLeft().enableGridDashedLine(4.0f, 4.0f, 0);
+-        mChart.getAxisLeft().setValueFormatter(new LargeValueFormatter(mCurrency.getSymbol(Locale.getDefault())));
++        mChart.getAxisLeft().setValueFormatter(new LargeValueFormatter(mCommodity.getSymbol()));
+ 
+         Legend legend = mChart.getLegend();
+         legend.setPosition(Legend.LegendPosition.BELOW_CHART_CENTER);
+@@ -209,7 +209,7 @@ private LineData getEmptyData() {
+         for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+             if (account.getAccountType() == accountType
+                     && !account.isPlaceholderAccount()
+-                    && account.getCurrency().equals(mCurrency)) {
++                    && account.getCommodity().equals(mCommodity)) {
+                 accountUIDList.add(account.getUID());
+             }
+         }
+@@ -276,8 +276,8 @@ private void calculateEarliestAndLatestTimestamps(List<AccountType> accountTypeL
+         TransactionsDbAdapter dbAdapter = TransactionsDbAdapter.getInstance();
+         for (Iterator<AccountType> iter = accountTypeList.iterator(); iter.hasNext();) {
+             AccountType type = iter.next();
+-            long earliest = dbAdapter.getTimestampOfEarliestTransaction(type, mCurrency.getCurrencyCode());
+-            long latest = dbAdapter.getTimestampOfLatestTransaction(type, mCurrency.getCurrencyCode());
++            long earliest = dbAdapter.getTimestampOfEarliestTransaction(type, mCommodity.getCurrencyCode());
++            long latest = dbAdapter.getTimestampOfLatestTransaction(type, mCommodity.getCurrencyCode());
+             if (earliest > 0 && latest > 0) {
+                 mEarliestTimestampsMap.put(type, earliest);
+                 mLatestTimestampsMap.put(type, latest);
+diff --git a/app/src/main/java/org/gnucash/android/ui/report/piechart/PieChartFragment.java b/app/src/main/java/org/gnucash/android/ui/report/piechart/PieChartFragment.java
+index 6ff5bfa8..7f20203f 100644
+--- a/app/src/main/java/org/gnucash/android/ui/report/piechart/PieChartFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/report/piechart/PieChartFragment.java
+@@ -120,7 +120,7 @@ protected void generateReport() {
+             mChart.setData(mGroupSmallerSlices ? groupSmallerSlices(pieData, getActivity()) : pieData);
+             float sum = mChart.getData().getYValueSum();
+             String total = getResources().getString(R.string.label_chart_total);
+-            String currencySymbol = mCurrency.getSymbol(Locale.getDefault());
++            String currencySymbol = mCommodity.getSymbol();
+             mChart.setCenterText(String.format(TOTAL_VALUE_LABEL_PATTERN, total, sum, currencySymbol));
+         } else {
+             mChartDataPresent = false;
+@@ -152,7 +152,7 @@ private PieData getData() {
+         for (Account account : mAccountsDbAdapter.getSimpleAccountList()) {
+             if (account.getAccountType() == mAccountType
+                     && !account.isPlaceholderAccount()
+-                    && account.getCurrency() == mCurrency) {
++                    && account.getCommodity().equals(mCommodity)) {
+ 
+                 double balance = mAccountsDbAdapter.getAccountsBalance(Collections.singletonList(account.getUID()),
+                         mReportPeriodStart, mReportPeriodEnd).asDouble();
+diff --git a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+index a172e361..106897bd 100644
+--- a/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
++++ b/app/src/test/java/org/gnucash/android/test/unit/model/AccountTest.java
+@@ -29,8 +29,6 @@
+ import org.junit.runner.RunWith;
+ import org.robolectric.annotation.Config;
+ 
+-import java.util.Currency;
+-
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
+ @RunWith(GnucashTestRunner.class)
+@@ -40,7 +38,7 @@
+ 	@Test
+ 	public void testAccountUsesDefaultCurrency(){
+ 		Account account = new Account("Dummy account");
+-		assertThat(account.getCurrency().getCurrencyCode()).isEqualTo(Money.DEFAULT_CURRENCY_CODE);
++		assertThat(account.getCommodity().getCurrencyCode()).isEqualTo(Money.DEFAULT_CURRENCY_CODE);
+ 	}
+ 
+ 	@Test
+@@ -96,23 +94,6 @@ public void settingNameShouldNotChangeFullName(){
+ 	}
+ 
+ 	@Test
+-	public void settingCommodity_shouldSetCurrencyCode(){
+-		Account account = new Account("Test", Commodity.USD);
+-		account.setCommodity(Commodity.JPY);
+-
+-		assertThat(account.getCurrency()).isEqualTo(Currency.getInstance("JPY"));
+-	}
+-
+-	@Test
+-	public void settingCurrencyCode_shouldNotSetCommodity(){
+-		Account account = new Account("Test EUR account", Commodity.EUR);
+-		account.setCurrencyCode("USD");
+-
+-		assertThat(account.getCommodity()).isEqualTo(Commodity.EUR);
+-		assertThat(account.getCurrency()).isEqualTo(Currency.getInstance("USD"));
+-	}
+-
+-	@Test
+ 	public void newInstance_shouldReturnNonNullValues() {
+ 		Account account = new Account("Test account");
+ 		assertThat(account.getDescription()).isEqualTo("");

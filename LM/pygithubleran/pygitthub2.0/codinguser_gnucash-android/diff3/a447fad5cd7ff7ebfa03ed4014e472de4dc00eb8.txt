@@ -1,0 +1,227 @@
+From a447fad5cd7ff7ebfa03ed4014e472de4dc00eb8 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 3 Sep 2015 01:16:39 +0200
+Subject: [PATCH] Added running account balance to transaction detail view
+
+Improved layout of transaction detail view, always show individual splits
+---
+ .../ui/transaction/TransactionDetailActivity.java  | 69 +++++++---------------
+ .../res/layout/activity_transaction_detail.xml     | 59 ++++++++++++------
+ app/src/main/res/layout/item_split_amount_info.xml |  6 +-
+ 3 files changed, 65 insertions(+), 69 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionDetailActivity.java b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionDetailActivity.java
+index bf33040e..87691359 100644
+--- a/app/src/main/java/org/gnucash/android/ui/transaction/TransactionDetailActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/transaction/TransactionDetailActivity.java
+@@ -44,23 +44,17 @@
+ public class TransactionDetailActivity extends AppCompatActivity{
+ 
+     @Bind(R.id.trn_description) TextView mTransactionDescription;
+-    @Bind(R.id.transaction_amount)TextView mTransactionAmount;
+-    @Bind(R.id.trn_transfer_account) TextView mTransferAccount;
+     @Bind(R.id.trn_time_and_date) TextView mTimeAndDate;
+     @Bind(R.id.trn_recurrence) TextView mRecurrence;
+     @Bind(R.id.trn_notes) TextView mNotes;
+     @Bind(R.id.toolbar) Toolbar mToolBar;
+     @Bind(R.id.transaction_account) TextView mTransactionAccount;
++    @Bind(R.id.balance_debit) TextView mDebitBalance;
++    @Bind(R.id.balance_credit) TextView mCreditBalance;
+ 
+     @Bind(R.id.fragment_transaction_details)
+     TableLayout mDetailTableLayout;
+ 
+-    @Bind(R.id.row_amount)
+-    TableRow mRowSplitAmount;
+-
+-    @Bind(R.id.row_transfer_account)
+-    TableRow mRowTransferAccount;
+-
+     private String mTransactionUID;
+     private String mAccountUID;
+ 
+@@ -113,8 +107,9 @@ public SplitAmountViewHolder(View view, Split split){
+ 
+             AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
+             accountName.setText(accountsDbAdapter.getAccountName(split.getAccountUID()));
+-            TextView balanceView = split.getType() == TransactionType.DEBIT ? splitDebit : splitCredit;
+-            TransactionsActivity.displayBalance(balanceView, split.getQuantity());
++            Money quantity = split.getFormattedQuantity();
++            TextView balanceView = quantity.isNegative() ? splitDebit : splitCredit;
++            TransactionsActivity.displayBalance(balanceView, quantity);
+         }
+     }
+ 
+@@ -126,48 +121,28 @@ private void bindViews(){
+         Transaction transaction = transactionsDbAdapter.getRecord(mTransactionUID);
+ 
+         mTransactionDescription.setText(transaction.getDescription());
+-        Money balance = transaction.getBalance(mAccountUID);
+-        TransactionsActivity.displayBalance(mTransactionAmount, balance);
+         mTransactionAccount.setText("in " + AccountsDbAdapter.getInstance().getAccountFullName(mAccountUID));
+ 
+-        if (!GnuCashApplication.isDoubleEntryEnabled()){
+-            findViewById(R.id.row_transfer_account).setVisibility(View.GONE);
+-        } else {
+-            findViewById(R.id.row_transfer_account).setVisibility(View.VISIBLE);
+-            if (transaction.getSplits().size() == 2) {
+-                if (transaction.getSplits().get(0).isPairOf(transaction.getSplits().get(1))) {
+-                    for (Split split : transaction.getSplits()) {
+-                        if (!split.getAccountUID().equals(mAccountUID)) {
+-                            mTransferAccount.setText(
+-                                    AccountsDbAdapter.getInstance()
+-                                            .getFullyQualifiedAccountName(split.getAccountUID()));
+-                            break;
+-                        }
+-                    }
+-                }
+-            } else {
+-                mRowSplitAmount.setVisibility(View.GONE);
+-                mRowTransferAccount.setVisibility(View.GONE);
+-                LayoutInflater inflater = LayoutInflater.from(this);
+-                int index = 0;
+-                for (Split split : transaction.getSplits()) {
+-                    View view = inflater.inflate(R.layout.item_split_amount_info, mDetailTableLayout, false);
+-                    SplitAmountViewHolder viewHolder = new SplitAmountViewHolder(view, split);
+-                    mDetailTableLayout.addView(view, index++);
+-                }
+-
+-                View view = inflater.inflate(R.layout.item_split_amount_info, mDetailTableLayout, false);
+-                Money accountBalance = AccountsDbAdapter.getInstance().getAccountBalance(mAccountUID, -1, transaction.getTimeMillis());
+-                Split split = new Split(accountBalance, mAccountUID);
+-                new SplitAmountViewHolder(view, split);
+-                TextView runningBalanceLabel = (TextView) view.findViewById(R.id.split_account_name);
+-                runningBalanceLabel.setText("Running balance");
+-                runningBalanceLabel.setTextSize(16);
+-                runningBalanceLabel.setGravity(Gravity.RIGHT);
+-                mDetailTableLayout.addView(view, index);
++        AccountsDbAdapter accountsDbAdapter = AccountsDbAdapter.getInstance();
++
++        Money accountBalance = accountsDbAdapter.getAccountBalance(mAccountUID, -1, transaction.getTimeMillis());
++        TextView balanceTextView = accountBalance.isNegative() ? mDebitBalance : mCreditBalance;
++        TransactionsActivity.displayBalance(balanceTextView, accountBalance);
++
++        boolean useDoubleEntry = GnuCashApplication.isDoubleEntryEnabled();
++        LayoutInflater inflater = LayoutInflater.from(this);
++        int index = 0;
++        for (Split split : transaction.getSplits()) {
++            if (useDoubleEntry && split.getAccountUID().equals(accountsDbAdapter.getImbalanceAccountUID(split.getValue().getCurrency()))){
++                //do now show imbalance accounts for single entry use case
++                continue;
+             }
++            View view = inflater.inflate(R.layout.item_split_amount_info, mDetailTableLayout, false);
++            SplitAmountViewHolder viewHolder = new SplitAmountViewHolder(view, split);
++            mDetailTableLayout.addView(view, index++);
+         }
+ 
++
+         Date trnDate = new Date(transaction.getTimeMillis());
+         String timeAndDate = DateFormat.getDateTimeInstance(DateFormat.FULL, DateFormat.SHORT).format(trnDate);
+         mTimeAndDate.setText(timeAndDate);
+diff --git a/app/src/main/res/layout/activity_transaction_detail.xml b/app/src/main/res/layout/activity_transaction_detail.xml
+index bfc10e70..89f09c0d 100644
+--- a/app/src/main/res/layout/activity_transaction_detail.xml
++++ b/app/src/main/res/layout/activity_transaction_detail.xml
+@@ -79,31 +79,52 @@
+             android:stretchColumns="1"
+             android:orientation="vertical" >
+ 
+-            <TableRow android:id="@+id/row_amount"
+-                style="@style/FormRow">
+-                <TextView
+-                    android:id="@+id/currency_symbol"
+-                    style="@style/FormIcon"
+-                    android:gravity="center"
+-                    android:textSize="22dp"
+-                    android:text="$" />
+-
+-                <TextView android:id="@+id/transaction_amount"
+-                    style="@style/TransactionInfo"
+-                    android:textSize="22sp"/>
+-            </TableRow>
++            <TableRow xmlns:tools="http://schemas.android.com/tools"
++                xmlns:android="http://schemas.android.com/apk/res/android"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:weightSum="5"
++                android:paddingTop="5dp"
++                android:paddingBottom="5dp"
++                android:layout_marginLeft="6dp">
+ 
+-            <TableRow android:id="@+id/row_transfer_account"
+-                style="@style/FormRow" >
++                <TextView
++                    android:layout_width="0dp"
++                    android:layout_weight="2"
++                    android:layout_height="wrap_content"
++                    android:gravity="center_vertical|right"
++                    android:textSize="16sp"
++                    android:textStyle="bold"
++                    android:text="@string/account_balance"
++                    android:textColor="@android:color/black" />
+ 
+-                <ImageView style="@style/FormIcon"
+-                    android:src="@drawable/ic_action_forward"/>
++                <TextView
++                    android:id="@+id/balance_debit"
++                    android:layout_width="0dp"
++                    android:layout_weight="1.5"
++                    android:layout_height="wrap_content"
++                    android:gravity="right"
++                    android:layout_gravity="center"
++                    android:textSize="16sp"
++                    android:textStyle="bold"
++                    tools:text="$ 2000"
++                    android:textColor="@android:color/black" />
+ 
+-                <TextView android:id="@+id/trn_transfer_account"
+-                    style="@style/TransactionInfo" />
++                <TextView
++                    android:id="@+id/balance_credit"
++                    android:layout_width="0dp"
++                    android:layout_weight="1.5"
++                    android:layout_height="wrap_content"
++                    android:gravity="right"
++                    android:layout_gravity="center"
++                    android:textSize="16sp"
++                    android:textStyle="bold"
++                    tools:text="$ 2000"
++                    android:textColor="@android:color/black" />
+             </TableRow>
+ 
+             <TableRow android:id="@+id/row_time_and_date"
++                android:layout_marginTop="@dimen/edge_padding"
+                 style="@style/FormRow" >
+ 
+                 <ImageView style="@style/FormIcon"
+diff --git a/app/src/main/res/layout/item_split_amount_info.xml b/app/src/main/res/layout/item_split_amount_info.xml
+index 7766ad23..1088dc12 100644
+--- a/app/src/main/res/layout/item_split_amount_info.xml
++++ b/app/src/main/res/layout/item_split_amount_info.xml
+@@ -26,7 +26,7 @@
+     <TextView
+         android:id="@+id/split_account_name"
+         android:layout_width="0dp"
+-        android:layout_weight="3"
++        android:layout_weight="2"
+         android:layout_height="wrap_content"
+         android:gravity="center_vertical"
+         android:layout_gravity="center"
+@@ -38,7 +38,7 @@
+     <TextView
+         android:id="@+id/split_debit"
+         android:layout_width="0dp"
+-        android:layout_weight="1"
++        android:layout_weight="1.5"
+         android:layout_height="wrap_content"
+         android:gravity="right"
+         android:layout_gravity="center"
+@@ -49,7 +49,7 @@
+     <TextView
+         android:id="@+id/split_credit"
+         android:layout_width="0dp"
+-        android:layout_weight="1"
++        android:layout_weight="1.5"
+         android:layout_height="wrap_content"
+         android:gravity="right"
+         android:layout_gravity="center"

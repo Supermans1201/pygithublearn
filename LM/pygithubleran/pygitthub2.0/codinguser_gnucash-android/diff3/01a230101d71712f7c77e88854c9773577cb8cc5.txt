@@ -1,0 +1,151 @@
+From 01a230101d71712f7c77e88854c9773577cb8cc5 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewi.fet@uni-due.de>
+Date: Wed, 8 Jul 2015 13:41:20 +0200
+Subject: [PATCH] Fixed: crash when devices report locale as es_LG which is
+ unsupported
+
+Fixed: crash when files in backup folder have no timestamp
+---
+ .../gnucash/android/test/ui/TransactionsActivityTest.java  | 14 +++++++++++++-
+ .../java/org/gnucash/android/app/GnuCashApplication.java   |  7 ++++++-
+ .../java/org/gnucash/android/db/AccountsDbAdapter.java     |  2 +-
+ app/src/main/java/org/gnucash/android/export/Exporter.java |  3 +++
+ app/src/main/java/org/gnucash/android/model/Money.java     |  4 +++-
+ .../org/gnucash/android/ui/account/AccountsActivity.java   |  2 +-
+ .../org/gnucash/android/ui/settings/SettingsActivity.java  |  5 ++++-
+ 7 files changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+index f13a95fc..618be35c 100644
+--- a/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
++++ b/app/src/androidTest/java/org/gnucash/android/test/ui/TransactionsActivityTest.java
+@@ -182,7 +182,7 @@ public void testAddTransactionShouldRequireAmount(){
+ 				.perform(typeText("Lunch"));
+ 
+ 		onView(withId(R.id.menu_save)).perform(click());
+-
++		sleep(500);
+ 		assertToastDisplayed(R.string.toast_transanction_amount_required);
+ 
+ 		int afterCount = mTransactionsDbAdapter.getTransactionsCount(DUMMY_ACCOUNT_UID);
+@@ -191,6 +191,18 @@ public void testAddTransactionShouldRequireAmount(){
+ 	}
+ 
+ 	/**
++	 * Sleep the thread for a specified period
++	 * @param millis Duration to sleep in milliseconds
++	 */
++	private void sleep(long millis) {
++		try {
++			Thread.sleep(millis);
++		} catch (InterruptedException e) {
++			e.printStackTrace();
++		}
++	}
++
++	/**
+ 	 * Checks that a specific toast message is displayed
+ 	 * @param toastString
+ 	 */
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index ecfe9b0d..247296f5 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -158,13 +158,18 @@ public static boolean shouldSaveOpeningBalances(boolean defaultValue){
+      *
+      * @return Default currency code string for the application
+      */
+-    public static String getDefaultCurrency(){
++    public static String getDefaultCurrencyCode(){
+         Locale locale = Locale.getDefault();
+         //sometimes the locale en_UK is returned which causes a crash with Currency
+         if (locale.getCountry().equals("UK")) {
+             locale = new Locale(locale.getLanguage(), "GB");
+         }
+ 
++        //for unsupported locale es_LG
++        if (locale.getCountry().equals("LG")){
++            locale = new Locale(locale.getLanguage(), "ES");
++        }
++
+         String currencyCode = "USD"; //start with USD as the default
+         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+         try { //there are some strange locales out there
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 493f9f0e..8b2d7f87 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -813,7 +813,7 @@ private Money computeBalance(String accountUID, long startTimestamp, long endTim
+      * @return the absolute balance of account list
+      */
+     public Money getAccountsBalance(List<String> accountUIDList, long startTimestamp, long endTimestamp) {
+-        String currencyCode = GnuCashApplication.getDefaultCurrency();
++        String currencyCode = GnuCashApplication.getDefaultCurrencyCode();
+         Money balance = Money.createZeroInstance(currencyCode);
+ 
+         SplitsDbAdapter splitsDbAdapter = SplitsDbAdapter.getInstance();
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 8e9c5aa2..29ce1e79 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -118,6 +118,9 @@ public static String buildExportFilename(ExportFormat format) {
+     public static long getExportTime(String filename){
+         String[] tokens = filename.split("_");
+         long timeMillis = 0;
++        if (tokens.length < 2){
++            return timeMillis;
++        }
+         try {
+             Date date = EXPORT_FILENAME_DATE_FORMAT.parse(tokens[0] + "_" + tokens[1]);
+             timeMillis = date.getTime();
+diff --git a/app/src/main/java/org/gnucash/android/model/Money.java b/app/src/main/java/org/gnucash/android/model/Money.java
+index 9b9a4217..340bf541 100644
+--- a/app/src/main/java/org/gnucash/android/model/Money.java
++++ b/app/src/main/java/org/gnucash/android/model/Money.java
+@@ -21,6 +21,8 @@
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
++import org.gnucash.android.app.GnuCashApplication;
++
+ import java.math.BigDecimal;
+ import java.math.MathContext;
+ import java.math.RoundingMode;
+@@ -90,7 +92,7 @@
+      * A zero instance with the currency of the default locale.
+      * This can be used anywhere where a starting amount is required without having to create a new object
+      */
+-    private static final Money sDefaultZero = Money.createZeroInstance(Currency.getInstance(Locale.getDefault()).getCurrencyCode());
++    private static final Money sDefaultZero = Money.createZeroInstance(GnuCashApplication.getDefaultCurrencyCode());
+ 
+     /**
+      * Returns a Money instance initialized to the local currency and value 0
+diff --git a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+index 2f778431..f0660c74 100644
+--- a/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/account/AccountsActivity.java
+@@ -309,7 +309,7 @@ public void setTab(int index){
+     private void init() {
+         PreferenceManager.setDefaultValues(this, R.xml.fragment_transaction_preferences, false);
+ 
+-        Money.DEFAULT_CURRENCY_CODE = GnuCashApplication.getDefaultCurrency();
++        Money.DEFAULT_CURRENCY_CODE = GnuCashApplication.getDefaultCurrencyCode();
+ 
+         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+         boolean firstRun = prefs.getBoolean(getString(R.string.key_first_run), true);
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+index a4ef751e..3aca7b37 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/SettingsActivity.java
+@@ -538,7 +538,10 @@ public void restoreBackup() {
+         final DateFormat dateFormatter = SimpleDateFormat.getDateTimeInstance();
+         for (File backupFile : sortedBackupFiles) {
+             long time = Exporter.getExportTime(backupFile.getName());
+-            arrayAdapter.add(dateFormatter.format(new Date(time)));
++            if (time > 0)
++                arrayAdapter.add(dateFormatter.format(new Date(time)));
++            else //if no timestamp was found in the filename, just use the name
++                arrayAdapter.add(backupFile.getName());
+         }
+ 
+         AlertDialog.Builder restoreDialogBuilder =  new AlertDialog.Builder(this);

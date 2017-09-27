@@ -1,0 +1,1016 @@
+From 55c8f1817865ada708523e040fb3559747adc0dd Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 20 Apr 2017 11:31:47 +0200
+Subject: [PATCH 1/4] Perform auto backups of all books on daily basis (with
+ sync service) - closes #565 Use Storage Access Framework for selecting
+ default backup location - fixes #646
+
+If a default backup location is set, all backups will be performed to that specified file.
+Otherwise, the default locations on the SD card will be used
+---
+ .../gnucash/android/db/adapter/BooksDbAdapter.java | 14 ++++++
+ .../gnucash/android/export/ExportAsyncTask.java    | 53 ++++++++++++++++++++++
+ .../org/gnucash/android/export/ExportParams.java   | 40 ++++++++++++++--
+ .../gnucash/android/export/xml/GncXmlExporter.java | 27 +++++++++--
+ .../android/service/ScheduledActionService.java    | 47 ++++++++++++++++++-
+ .../ui/settings/BackupPreferenceFragment.java      | 41 +++++++++++++++++
+ .../java/org/gnucash/android/util/BookUtils.java   | 25 ++++++++++
+ app/src/main/res/values/donottranslate.xml         |  1 +
+ .../main/res/xml/fragment_backup_preferences.xml   |  3 ++
+ 9 files changed, 241 insertions(+), 10 deletions(-)
+ create mode 100644 app/src/main/java/org/gnucash/android/util/BookUtils.java
+
+diff --git a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+index 65e06c95..6b105446 100644
+--- a/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/adapter/BooksDbAdapter.java
+@@ -31,6 +31,9 @@
+ import org.gnucash.android.ui.settings.PreferenceActivity;
+ import org.gnucash.android.util.TimestampHelper;
+ 
++import java.util.ArrayList;
++import java.util.List;
++
+ /**
+  * Database adapter for creating/modifying book entries
+  */
+@@ -161,6 +164,17 @@ public boolean isActive(String bookUID){
+         }
+     }
+ 
++    public @NonNull List<String> getAllBookUIDs(){
++        List<String> bookUIDs = new ArrayList<>();
++        try (Cursor cursor = mDb.query(true, mTableName, new String[]{BookEntry.COLUMN_UID},
++                null, null, null, null, null, null)) {
++            while (cursor.moveToNext()) {
++                bookUIDs.add(cursor.getString(cursor.getColumnIndexOrThrow(BookEntry.COLUMN_UID)));
++            }
++        }
++
++        return bookUIDs;
++    }
+ 
+     /**
+      * Return the name of the currently active book.
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index dc1ce846..812c9008 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -261,11 +261,42 @@ private void moveToTarget() throws Exporter.ExporterException {
+                 moveExportToSDCard();
+                 break;
+ 
++            case URI:
++                moveExportToUri();
++                break;
++
+             default:
+                 throw new Exporter.ExporterException(mExportParams, "Invalid target");
+         }
+     }
+ 
++    /**
++     * Move the exported files to a specified URI.
++     * This URI could be a Storage Access Framework file
++     * @throws Exporter.ExporterException
++     */
++    private void moveExportToUri() throws Exporter.ExporterException {
++        Uri exportUri = Uri.parse(mExportParams.getExportLocation());
++        if (exportUri == null){
++            Log.w(TAG, "No URI found for export destination");
++            return;
++        }
++
++        //we only support exporting to a single file
++        String exportedFile = mExportedFiles.get(0);
++        try {
++            moveFile(exportedFile, mContext.getContentResolver().openOutputStream(exportUri));
++        } catch (IOException e) {
++            e.printStackTrace();
++            Log.e(TAG, "Error moving export file to: " + exportUri);
++            Crashlytics.logException(e);
++        }
++    }
++
++    /**
++     * Move the exported files to a GnuCash folder on Google Drive
++     * @throws Exporter.ExporterException
++     */
+     private void moveExportToGoogleDrive() throws Exporter.ExporterException {
+         Log.i(TAG, "Moving exported file to Google Drive");
+         final GoogleApiClient googleApiClient = BackupPreferenceFragment.getGoogleApiClient(GnuCashApplication.getAppContext());
+@@ -514,6 +545,28 @@ public void moveFile(String src, String dst) throws IOException {
+         srcFile.delete();
+     }
+ 
++    /**
++     * Move file from a location on disk to an outputstream.
++     * The outputstream could be for a URI in the Storage Access Framework
++     * @param src Input file (usually newly exported file)
++     * @param outputStream Output stream to write to
++     * @throws IOException if error occurred while moving the file
++     */
++    public void moveFile(@NonNull String src, @NonNull OutputStream outputStream) throws IOException {
++        byte[] buffer = new byte[1024];
++        int read;
++        try (FileInputStream inputStream = new FileInputStream(src)) {
++            while ((read = inputStream.read(buffer)) != -1) {
++                outputStream.write(buffer, 0, read);
++            }
++        } finally {
++            outputStream.flush();
++            outputStream.close();
++        }
++        Log.i(TAG, "Deleting temp export file: " + src);
++        new File(src).delete();
++    }
++
+     private void reportSuccess() {
+         String targetLocation;
+         switch (mExportParams.getExportTarget()){
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportParams.java b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+index d751cac6..836faa79 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportParams.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportParams.java
+@@ -16,6 +16,8 @@
+ 
+ package org.gnucash.android.export;
+ 
++import android.net.Uri;
++
+ import org.gnucash.android.ui.export.ExportFormFragment;
+ import org.gnucash.android.util.TimestampHelper;
+ 
+@@ -35,7 +37,7 @@
+      * Options for the destination of the exported transctions file.
+      * It could be stored on the {@link #SD_CARD} or exported through another program via {@link #SHARING}
+      */
+-    public enum ExportTarget {SD_CARD, SHARING, DROPBOX, GOOGLE_DRIVE, OWNCLOUD }
++    public enum ExportTarget {SD_CARD, SHARING, DROPBOX, GOOGLE_DRIVE, OWNCLOUD, URI}
+ 
+     /**
+      * Format to use for the exported transactions
+@@ -60,6 +62,12 @@
+     private ExportTarget mExportTarget      = ExportTarget.SHARING;
+ 
+     /**
++     * Location to save the file name being exported.
++     * This is typically a Uri and used for {@link ExportTarget#URI} target
++     */
++    private String mExportLocation;
++
++    /**
+      * Creates a new set of paramters and specifies the export format
+      * @param format Format to use when exporting the transactions
+      */
+@@ -132,10 +140,28 @@ public void setExportTarget(ExportTarget mExportTarget) {
+         this.mExportTarget = mExportTarget;
+     }
+ 
++    /**
++     * Return the location where the file should be exported to.
++     * When used with {@link ExportTarget#URI}, the returned value will be a URI which can be parsed
++     * with {@link Uri#parse(String)}
++     * @return String representing export file destination.
++     */
++    public String getExportLocation(){
++        return mExportLocation;
++    }
++
++    /**
++     * Set the location where to export the file
++     * @param exportLocation Destination of the export
++     */
++    public void setExportLocation(String exportLocation){
++        mExportLocation = exportLocation;
++    }
++
+     @Override
+     public String toString() {
+         return "Export all transactions created since " + TimestampHelper.getUtcStringFromTimestamp(mExportStartTime) + " UTC"
+-                + " as "+ mExportFormat.name() + " to " + mExportTarget.name();
++                + " as "+ mExportFormat.name() + " to " + mExportTarget.name() + (mExportLocation != null ? " (" + mExportLocation +")" : "");
+     }
+ 
+     /**
+@@ -146,9 +172,11 @@ public String toString() {
+     public String toCsv(){
+         String separator = ";";
+ 
+-        return mExportFormat.name() + separator + mExportTarget.name() + separator
++        return mExportFormat.name() + separator
++                + mExportTarget.name() + separator
+                 + TimestampHelper.getUtcStringFromTimestamp(mExportStartTime) + separator
+-                + Boolean.toString(mDeleteTransactionsAfterExport);
++                + Boolean.toString(mDeleteTransactionsAfterExport) + separator
++                + (mExportLocation != null ? mExportLocation : "");
+     }
+ 
+     /**
+@@ -162,7 +190,9 @@ public static ExportParams parseCsv(String csvParams){
+         params.setExportTarget(ExportTarget.valueOf(tokens[1]));
+         params.setExportStartTime(TimestampHelper.getTimestampFromUtcString(tokens[2]));
+         params.setDeleteTransactionsAfterExport(Boolean.parseBoolean(tokens[3]));
+-
++        if (tokens.length == 5){
++            params.setExportLocation(tokens[4]);
++        }
+         return params;
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index 49d37d85..a8f5d346 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -19,10 +19,12 @@
+ 
+ import android.database.Cursor;
+ import android.database.sqlite.SQLiteDatabase;
++import android.net.Uri;
+ import android.util.Log;
+ 
+ import com.crashlytics.android.Crashlytics;
+ 
++import org.gnucash.android.app.GnuCashApplication;
+ import org.gnucash.android.db.DatabaseSchema;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.CommoditiesDbAdapter;
+@@ -43,6 +45,7 @@
+ import org.gnucash.android.model.Recurrence;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.TransactionType;
++import org.gnucash.android.util.BookUtils;
+ import org.gnucash.android.util.TimestampHelper;
+ import org.xmlpull.v1.XmlPullParserFactory;
+ import org.xmlpull.v1.XmlSerializer;
+@@ -50,13 +53,13 @@
+ import java.io.BufferedOutputStream;
+ import java.io.FileOutputStream;
+ import java.io.IOException;
++import java.io.OutputStream;
+ import java.io.OutputStreamWriter;
+ import java.io.Writer;
+ import java.math.BigDecimal;
+ import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.Collection;
+-import java.util.Currency;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.TreeMap;
+@@ -910,10 +913,26 @@ public String getExportMimeType(){
+      * @return {@code true} if backup was successful, {@code false} otherwise
+      */
+     public static boolean createBackup(){
++        return createBackup(BooksDbAdapter.getInstance().getActiveBookUID());
++    }
++
++    /**
++     * Create a backup of the book in the default backup location
++     * @param bookUID Unique ID of the book
++     * @return {@code true} if backup was successful, {@code false} otherwise
++     */
++    public static boolean createBackup(String bookUID){
++        OutputStream outputStream;
+         try {
+-            String bookUID = BooksDbAdapter.getInstance().getActiveBookUID();
+-            FileOutputStream fileOutputStream = new FileOutputStream(getBackupFilePath(bookUID));
+-            BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
++            String backupFile = BookUtils.getBookBackupFileUri(bookUID);
++            if (backupFile != null){
++                outputStream = GnuCashApplication.getAppContext().getContentResolver().openOutputStream(Uri.parse(backupFile));
++            } else { //no Uri set by user, use default location on SD card
++                backupFile = getBackupFilePath(bookUID);
++                outputStream = new FileOutputStream(backupFile);
++            }
++
++            BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(outputStream);
+             GZIPOutputStream gzipOutputStream = new GZIPOutputStream(bufferedOutputStream);
+             OutputStreamWriter writer = new OutputStreamWriter(gzipOutputStream);
+ 
+diff --git a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+index e792fc22..b6efb3f4 100644
+--- a/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
++++ b/app/src/main/java/org/gnucash/android/service/ScheduledActionService.java
+@@ -18,8 +18,10 @@
+ 
+ import android.app.IntentService;
+ import android.content.ContentValues;
++import android.content.Context;
+ import android.content.Intent;
+ import android.database.sqlite.SQLiteDatabase;
++import android.net.Uri;
+ import android.os.PowerManager;
+ import android.support.annotation.VisibleForTesting;
+ import android.util.Log;
+@@ -36,16 +38,23 @@
+ import org.gnucash.android.db.adapter.SplitsDbAdapter;
+ import org.gnucash.android.db.adapter.TransactionsDbAdapter;
+ import org.gnucash.android.export.ExportAsyncTask;
++import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.model.Book;
+ import org.gnucash.android.model.ScheduledAction;
+ import org.gnucash.android.model.Transaction;
++import org.gnucash.android.util.BookUtils;
+ 
++import java.io.BufferedOutputStream;
++import java.io.IOException;
++import java.io.OutputStreamWriter;
+ import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.Date;
+ import java.util.List;
+ import java.util.concurrent.ExecutionException;
++import java.util.zip.GZIPOutputStream;
+ 
+ /**
+  * Service for running scheduled events.
+@@ -70,10 +79,11 @@ protected void onHandleIntent(Intent intent) {
+         PowerManager.WakeLock wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, LOG_TAG);
+         wakeLock.acquire();
+ 
++        autoBackup(); //First run automatic backup of all books before doing anything else
+         try {
+             BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
+             List<Book> books = booksDbAdapter.getAllRecords();
+-            for (Book book : books) {
++            for (Book book : books) { //// TODO: 20.04.2017 Retrieve only the book UIDs with new method
+                 DatabaseHelper dbHelper = new DatabaseHelper(GnuCashApplication.getAppContext(), book.getUID());
+                 SQLiteDatabase db = dbHelper.getWritableDatabase();
+                 RecurrenceDbAdapter recurrenceDbAdapter = new RecurrenceDbAdapter(db);
+@@ -181,6 +191,11 @@ private static int executeBackup(ScheduledAction scheduledAction, SQLiteDatabase
+         return 1;
+     }
+ 
++    /**
++     * Check if a scheduled action is due for execution
++     * @param scheduledAction Scheduled action
++     * @return {@code true} if execution is due, {@code false} otherwise
++     */
+     private static boolean shouldExecuteScheduledBackup(ScheduledAction scheduledAction) {
+         long now = System.currentTimeMillis();
+         long endTime = scheduledAction.getEndTime();
+@@ -244,4 +259,34 @@ private static int executeTransactions(ScheduledAction scheduledAction, SQLiteDa
+         scheduledAction.setExecutionCount(previousExecutionCount);
+         return executionCount;
+     }
++
++    /**
++     * Perform an automatic backup of all books in the database.
++     * This method is run everytime the service is executed
++     */
++    private static void autoBackup(){
++        BooksDbAdapter booksDbAdapter = BooksDbAdapter.getInstance();
++        List<String> bookUIDs = booksDbAdapter.getAllBookUIDs();
++        Context context = GnuCashApplication.getAppContext();
++
++        for (String bookUID : bookUIDs) {
++            String backupFile = BookUtils.getBookBackupFileUri(bookUID);
++            if (backupFile == null){
++                GncXmlExporter.createBackup();
++                continue;
++            }
++
++            try (BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(context.getContentResolver().openOutputStream(Uri.parse(backupFile)))){
++                GZIPOutputStream gzipOutputStream = new GZIPOutputStream(bufferedOutputStream);
++                OutputStreamWriter writer = new OutputStreamWriter(gzipOutputStream);
++                ExportParams params = new ExportParams(ExportFormat.XML);
++                new GncXmlExporter(params).generateExport(writer);
++                writer.close();
++            } catch (IOException ex) {
++                Log.e(LOG_TAG, "Auto backup failed for book " + bookUID);
++                ex.printStackTrace();
++                Crashlytics.logException(ex);
++            }
++        }
++    }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index e0d61879..f7886454 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -51,6 +51,7 @@
+ import org.gnucash.android.export.xml.GncXmlExporter;
+ import org.gnucash.android.importer.ImportAsyncTask;
+ import org.gnucash.android.ui.settings.dialog.OwnCloudDialogFragment;
++import org.gnucash.android.util.BookUtils;
+ 
+ import java.io.File;
+ import java.text.DateFormat;
+@@ -76,6 +77,11 @@
+ 	public static final int REQUEST_RESOLVE_CONNECTION = 0x12;
+ 
+ 	/**
++	 * Request code for the backup file where to save backups
++	 */
++	private static final int REQUEST_BACKUP_FILE = 0x13;
++
++	/**
+ 	 * Testing app key for DropBox API
+ 	 */
+ 	final static public String DROPBOX_APP_KEY      = "dhjh8ke9wf05948";
+@@ -143,6 +149,13 @@ public void onResume() {
+ 		pref = findPreference(getString(R.string.key_create_backup));
+ 		pref.setOnPreferenceClickListener(this);
+ 
++		pref = findPreference(getString(R.string.key_backup_location));
++		pref.setOnPreferenceClickListener(this);
++		String defaultBackupLocation = BookUtils.getBookBackupFileUri(BooksDbAdapter.getInstance().getActiveBookUID());
++		if (defaultBackupLocation != null){
++			pref.setSummary(Uri.parse(defaultBackupLocation).getAuthority());
++		}
++
+ 		pref = findPreference(getString(R.string.key_dropbox_sync));
+ 		pref.setOnPreferenceClickListener(this);
+ 		toggleDropboxPreference(pref);
+@@ -164,6 +177,13 @@ public boolean onPreferenceClick(Preference preference) {
+ 			restoreBackup();
+ 		}
+ 
++		if (key.equals(getString(R.string.key_backup_location))){
++			Intent createIntent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
++			createIntent.setType("application/xml");
++			createIntent.addCategory(Intent.CATEGORY_OPENABLE);
++			createIntent.putExtra(Intent.EXTRA_TITLE, "gnucash_android_backup.gnca");
++			startActivityForResult(createIntent, REQUEST_BACKUP_FILE);
++		}
+ 
+ 		if (key.equals(getString(R.string.key_dropbox_sync))){
+ 			toggleDropboxSync();
+@@ -428,6 +448,27 @@ public void onActivityResult(int requestCode, int resultCode, Intent data) {
+ 					toggleDropboxPreference(pref);
+ 				}
+ 				break;
++
++			case REQUEST_BACKUP_FILE:
++				if (resultCode == Activity.RESULT_OK){
++					Uri backupFileUri = null;
++					if (data != null){
++						backupFileUri = data.getData();
++					}
++
++					final int takeFlags = data.getFlags()
++							& (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
++					getActivity().getContentResolver().takePersistableUriPermission(backupFileUri, takeFlags);
++
++					PreferenceActivity.getActiveBookSharedPreferences()
++							.edit()
++							.putString(BookUtils.KEY_BACKUP_FILE, backupFileUri.toString())
++							.apply();
++
++					Preference pref = findPreference(getString(R.string.key_backup_location));
++					pref.setSummary(backupFileUri.getAuthority());
++				}
++				break;
+ 		}
+ 	}
+ }
+diff --git a/app/src/main/java/org/gnucash/android/util/BookUtils.java b/app/src/main/java/org/gnucash/android/util/BookUtils.java
+new file mode 100644
+index 00000000..92e258e9
+--- /dev/null
++++ b/app/src/main/java/org/gnucash/android/util/BookUtils.java
+@@ -0,0 +1,25 @@
++package org.gnucash.android.util;
++
++import android.content.SharedPreferences;
++import android.support.annotation.Nullable;
++
++import org.gnucash.android.ui.settings.PreferenceActivity;
++
++/**
++ * Utility class for common operations involving books
++ */
++
++public class BookUtils {
++    public static final String KEY_BACKUP_FILE = "book_backup_file_key";
++
++    /**
++     * Return the backup file for the book
++     * @param bookUID Unique ID of the book
++     * @return DocumentFile for book backups
++     */
++    @Nullable
++    public static String getBookBackupFileUri(String bookUID){
++        SharedPreferences sharedPreferences = PreferenceActivity.getBookSharedPreferences(bookUID);
++        return sharedPreferences.getString(KEY_BACKUP_FILE, null);
++    }
++}
+diff --git a/app/src/main/res/values/donottranslate.xml b/app/src/main/res/values/donottranslate.xml
+index 9f8fcf7b..4885d0d6 100644
+--- a/app/src/main/res/values/donottranslate.xml
++++ b/app/src/main/res/values/donottranslate.xml
+@@ -40,6 +40,7 @@
+     <string name="empty"></string>
+     <string name="key_prefs_header_general">prefs_header_general</string>
+     <string name="key_dropbox_access_token">dropbox_access_token</string>
++    <string name="key_backup_location">backup_location</string>
+     <string-array name="key_transaction_type_values" translatable="false">
+         <item>CREDIT</item>
+         <item>DEBIT</item>
+diff --git a/app/src/main/res/xml/fragment_backup_preferences.xml b/app/src/main/res/xml/fragment_backup_preferences.xml
+index be2fb59f..78938863 100644
+--- a/app/src/main/res/xml/fragment_backup_preferences.xml
++++ b/app/src/main/res/xml/fragment_backup_preferences.xml
+@@ -17,6 +17,9 @@
+ 
+ <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" >
+     <PreferenceCategory android:title="@string/title_backup_preference_category">
++        <Preference android:title="Select backup file"
++                    android:key="@string/key_backup_location"
++                    android:summary="Select a location for automatic backups" />
+         <Preference android:title="@string/title_create_backup_pref"
+             android:key="@string/key_create_backup"
+             android:summary="@string/summary_create_backup_pref" />
+
+From 8ad3e047e3fe5f74f610fb9ab96cb01cb808968f Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 20 Apr 2017 13:17:46 +0200
+Subject: [PATCH 2/4] Select export destination using Storage Access Framework
+ (SAF) - #646
+
+    Remove UI references to explicit Google Drive integration. It can now all be accomplished using the SAF.
+    Previously scheduled explicit Google Drive exports would still work, but users will be warned of its deprecation.
+    In the next version, explicit integrations for Google Drive would be removed.
+
+- Improve mime type selection for opening files from navigation drawer
+- Refactored some strings
+---
+ .../android/ui/common/BaseDrawerActivity.java      |  4 +-
+ .../android/ui/export/ExportFormFragment.java      | 78 +++++++++++++++++-----
+ .../ui/settings/BackupPreferenceFragment.java      | 14 +---
+ app/src/main/res/values/strings.xml                |  9 +--
+ .../main/res/xml/fragment_backup_preferences.xml   | 10 +--
+ 5 files changed, 76 insertions(+), 39 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index 4a5b7eb3..6ead30e2 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -237,7 +237,9 @@ protected void onDrawerMenuItemClicked(int itemId) {
+                     //use the storage access framework
+                     Intent openDocument = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                     openDocument.addCategory(Intent.CATEGORY_OPENABLE);
+-                    openDocument.setType("*/*");
++                    openDocument.setType("text/*|application/*");
++                    String[] mimeTypes = {"text/*", "application/*"};
++                    openDocument.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+                     startActivityForResult(openDocument, REQUEST_OPEN_DOCUMENT);
+ 
+                 } else {
+diff --git a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+index e937a854..c10b5e34 100644
+--- a/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/export/ExportFormFragment.java
+@@ -16,12 +16,10 @@
+ 
+ package org.gnucash.android.ui.export;
+ 
+-import android.Manifest;
+ import android.app.Activity;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+-import android.content.pm.PackageManager;
+-import android.os.Build;
++import android.net.Uri;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.v4.app.Fragment;
+@@ -53,15 +51,16 @@
+ 
+ import org.gnucash.android.R;
+ import org.gnucash.android.app.GnuCashApplication;
++import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.DatabaseAdapter;
+ import org.gnucash.android.db.adapter.ScheduledActionDbAdapter;
+ import org.gnucash.android.export.DropboxHelper;
+ import org.gnucash.android.export.ExportAsyncTask;
+ import org.gnucash.android.export.ExportFormat;
+ import org.gnucash.android.export.ExportParams;
++import org.gnucash.android.export.Exporter;
+ import org.gnucash.android.model.BaseModel;
+ import org.gnucash.android.model.ScheduledAction;
+-import org.gnucash.android.ui.account.AccountsActivity;
+ import org.gnucash.android.ui.common.UxArgument;
+ import org.gnucash.android.ui.settings.BackupPreferenceFragment;
+ import org.gnucash.android.ui.settings.dialog.OwnCloudDialogFragment;
+@@ -91,7 +90,12 @@
+ 		RecurrencePickerDialogFragment.OnRecurrenceSetListener,
+ 		CalendarDatePickerDialogFragment.OnDateSetListener,
+ 		RadialTimePickerDialogFragment.OnTimeSetListener {
+-		
++
++	/**
++	 * Request code for intent to pick export file destination
++	 */
++	private static final int REQUEST_EXPORT_FILE = 0x14;
++
+ 	/**
+ 	 * Spinner for selecting destination for the exported file.
+ 	 * The destination could either be SD card, or another application which
+@@ -156,6 +160,16 @@
+ 
+ 	private ExportParams.ExportTarget mExportTarget = ExportParams.ExportTarget.SD_CARD;
+ 
++	/**
++	 * The Uri target for the export
++	 */
++	private Uri mExportUri;
++
++	/**
++	 * Flag to determine if export has been started.
++	 * Used to continue export after user has picked a destination file
++	 */
++	private boolean mExportStarted = false;
+ 
+ 	private void onRadioButtonClicked(View view){
+         switch (view.getId()){
+@@ -254,6 +268,12 @@ public void onPause() {
+ 	 * Starts the export of transactions with the specified parameters
+ 	 */
+ 	private void startExport(){
++		if (mExportTarget == ExportParams.ExportTarget.URI && mExportUri == null){
++			mExportStarted = true;
++			selectExportFile();
++			return;
++		}
++
+ 		ExportParams exportParameters = new ExportParams(mExportFormat);
+ 
+ 		if (mExportAllSwitch.isChecked()){
+@@ -263,6 +283,7 @@ private void startExport(){
+ 		}
+ 
+ 		exportParameters.setExportTarget(mExportTarget);
++		exportParameters.setExportLocation(mExportUri != null ? mExportUri.toString() : null);
+ 		exportParameters.setDeleteTransactionsAfterExport(mDeleteAllCheckBox.isChecked());
+ 
+ 		Log.i(TAG, "Commencing async export of transactions");
+@@ -301,8 +322,9 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 				View recurrenceOptionsView = getView().findViewById(R.id.recurrence_options);
+ 				switch (position) {
+ 					case 0:
+-						mExportTarget = ExportParams.ExportTarget.SD_CARD;
++						mExportTarget = ExportParams.ExportTarget.URI;
+ 						recurrenceOptionsView.setVisibility(View.VISIBLE);
++						selectExportFile();
+ 						break;
+ 					case 1:
+ 						recurrenceOptionsView.setVisibility(View.VISIBLE);
+@@ -316,12 +338,6 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 						break;
+ 					case 2:
+ 						recurrenceOptionsView.setVisibility(View.VISIBLE);
+-						mExportTarget = ExportParams.ExportTarget.GOOGLE_DRIVE;
+-						BackupPreferenceFragment.mGoogleApiClient = BackupPreferenceFragment.getGoogleApiClient(getActivity());
+-						BackupPreferenceFragment.mGoogleApiClient.connect();
+-						break;
+-					case 3:
+-						recurrenceOptionsView.setVisibility(View.VISIBLE);
+ 						mExportTarget = ExportParams.ExportTarget.OWNCLOUD;
+ 						if(!(PreferenceManager.getDefaultSharedPreferences(getActivity())
+ 								.getBoolean(getString(R.string.key_owncloud_sync), false))) {
+@@ -329,7 +345,7 @@ public void onItemSelected(AdapterView<?> parent, View view, int position, long
+ 							ocDialog.show(getActivity().getSupportFragmentManager(), "ownCloud dialog");
+ 						}
+ 						break;
+-					case 4:
++					case 3:
+ 						mExportTarget = ExportParams.ExportTarget.SHARING;
+ 						recurrenceOptionsView.setVisibility(View.GONE);
+ 						break;
+@@ -455,6 +471,17 @@ public void onClick(View view) {
+ 
+ 	}
+ 
++	/**
++	 * Open a chooser for user to pick a file to export to
++	 */
++	private void selectExportFile() {
++		Intent createIntent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
++		createIntent.setType("text/*").addCategory(Intent.CATEGORY_OPENABLE);
++		String bookName = BooksDbAdapter.getInstance().getActiveBookDisplayName();
++		createIntent.putExtra(Intent.EXTRA_TITLE, Exporter.buildExportFilename(mExportFormat, bookName));
++		startActivityForResult(createIntent, REQUEST_EXPORT_FILE);
++	}
++
+ 	@Override
+ 	public void onRecurrenceSet(String rrule) {
+ 		mRecurrenceRule = rrule;
+@@ -473,8 +500,29 @@ public void onRecurrenceSet(String rrule) {
+ 	 */
+ 	@Override
+ 	public void onActivityResult(int requestCode, int resultCode, Intent data) {
+-		if (requestCode == BackupPreferenceFragment.REQUEST_RESOLVE_CONNECTION && resultCode == Activity.RESULT_OK) {
+-			BackupPreferenceFragment.mGoogleApiClient.connect();
++
++		switch (requestCode){
++			case BackupPreferenceFragment.REQUEST_RESOLVE_CONNECTION:
++				if (resultCode == Activity.RESULT_OK) {
++					BackupPreferenceFragment.mGoogleApiClient.connect();
++				}
++				break;
++
++			case REQUEST_EXPORT_FILE:
++				if (resultCode == Activity.RESULT_OK){
++					if (data != null){
++						mExportUri = data.getData();
++					}
++
++					final int takeFlags = data.getFlags()
++							& (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
++					getActivity().getContentResolver().takePersistableUriPermission(mExportUri, takeFlags);
++
++					if (mExportStarted)
++						startExport();
++
++				}
++				break;
+ 		}
+ 	}
+ 
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index f7886454..ad78b2af 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -160,10 +160,6 @@ public void onResume() {
+ 		pref.setOnPreferenceClickListener(this);
+ 		toggleDropboxPreference(pref);
+ 
+-		pref = findPreference(getString(R.string.key_google_drive_sync));
+-		pref.setOnPreferenceClickListener(this);
+-		toggleGoogleDrivePreference(pref);
+-
+ 		pref = findPreference(getString(R.string.key_owncloud_sync));
+ 		pref.setOnPreferenceClickListener(this);
+ 		toggleOwnCloudPreference(pref);
+@@ -179,9 +175,10 @@ public boolean onPreferenceClick(Preference preference) {
+ 
+ 		if (key.equals(getString(R.string.key_backup_location))){
+ 			Intent createIntent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+-			createIntent.setType("application/xml");
++			createIntent.setType("application/zip");
+ 			createIntent.addCategory(Intent.CATEGORY_OPENABLE);
+-			createIntent.putExtra(Intent.EXTRA_TITLE, "gnucash_android_backup.gnca");
++			String bookName = BooksDbAdapter.getInstance().getActiveBookDisplayName();
++			createIntent.putExtra(Intent.EXTRA_TITLE, Exporter.sanitizeFilename(bookName)+ "_" + "gnucash_android_backup.gnca");
+ 			startActivityForResult(createIntent, REQUEST_BACKUP_FILE);
+ 		}
+ 
+@@ -190,11 +187,6 @@ public boolean onPreferenceClick(Preference preference) {
+ 			toggleDropboxPreference(preference);
+ 		}
+ 
+-		if (key.equals(getString(R.string.key_google_drive_sync))){
+-			toggleGoogleDriveSync();
+-			toggleGoogleDrivePreference(preference);
+-		}
+-
+ 		if (key.equals(getString(R.string.key_owncloud_sync))){
+ 			toggleOwnCloudSync(preference);
+ 			toggleOwnCloudPreference(preference);
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index dc73d2f3..eff3c2ce 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -63,9 +63,8 @@
+     <string name="hint_delete_after_export">All exported transactions will be deleted when exporting is completed</string>
+     <string name="title_settings">Settings</string>
+     <string-array name="export_destinations">
+-        <item>SD Card</item>
++        <item>Select File</item>
+         <item>Dropbox</item>
+-        <item>Google Drive</item>
+         <item>ownCloud</item>
+         <item>Send to&#8230;</item>
+     </string-array>
+@@ -293,8 +292,8 @@
+     <string name="title_select_gnucash_xml_file">Select GnuCash XML file</string>
+     <string name="title_backup_prefs">Backup Preferences</string>
+     <string name="title_create_backup_pref">Create Backup</string>
+-    <string name="summary_create_backup_pref">By default backups are saved to the SDCARD</string>
+-    <string name="summary_restore_backup_pref">Select a specific backup to restore</string>
++    <string name="summary_create_backup_pref">Create a backup of the active book</string>
++    <string name="summary_restore_backup_pref">Restore most recent backup of active book</string>
+     <string name="toast_backup_successful">Backup successful</string>
+     <string name="toast_backup_failed">Backup failed</string>
+     <string name="export_warning_xml">Exports all accounts and transactions</string>
+@@ -496,4 +495,6 @@
+     <string name="title_rename_book">Rename Book</string>
+     <string name="btn_rename">Rename</string>
+     <string name="menu_rename">Rename</string>
++    <string name="title_select_backup_file">Select backup file</string>
++    <string name="summary_select_backup_file">Select a file for automatic backups</string>
+ </resources>
+diff --git a/app/src/main/res/xml/fragment_backup_preferences.xml b/app/src/main/res/xml/fragment_backup_preferences.xml
+index 78938863..9c2c0ad0 100644
+--- a/app/src/main/res/xml/fragment_backup_preferences.xml
++++ b/app/src/main/res/xml/fragment_backup_preferences.xml
+@@ -17,9 +17,9 @@
+ 
+ <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" >
+     <PreferenceCategory android:title="@string/title_backup_preference_category">
+-        <Preference android:title="Select backup file"
++        <Preference android:title="@string/title_select_backup_file"
+                     android:key="@string/key_backup_location"
+-                    android:summary="Select a location for automatic backups" />
++                    android:summary="@string/summary_select_backup_file" />
+         <Preference android:title="@string/title_create_backup_pref"
+             android:key="@string/key_create_backup"
+             android:summary="@string/summary_create_backup_pref" />
+@@ -32,12 +32,6 @@
+             android:key="@string/key_dropbox_sync"
+             android:icon="@drawable/ic_dropbox_android" />
+ 
+-        <CheckBoxPreference android:title="@string/title_google_drive_sync_pref"
+-            android:summary="@string/summary_google_drive_sync"
+-            android:checked="false"
+-            android:key="@string/key_google_drive_sync"
+-            android:icon="@drawable/ic_google_drive" />
+-
+         <CheckBoxPreference android:title="@string/title_owncloud_sync_preference"
+             android:summary="@string/summary_owncloud_sync"
+             android:checked="false"
+
+From 97eb433bfa30fe1e204abf162844db6a07f2c60a Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 20 Apr 2017 13:37:06 +0200
+Subject: [PATCH 3/4] Restore backups from default backup location (wherever
+ that might be) - related #646
+
+Default to looking for backups on SD card if no default location was set by user
+---
+ .../ui/settings/BackupPreferenceFragment.java      | 29 +++++++++++++++++++---
+ app/src/main/res/values/strings.xml                |  7 ++++++
+ 2 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+index ad78b2af..ac0dc24a 100644
+--- a/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
++++ b/app/src/main/java/org/gnucash/android/ui/settings/BackupPreferenceFragment.java
+@@ -178,7 +178,7 @@ public boolean onPreferenceClick(Preference preference) {
+ 			createIntent.setType("application/zip");
+ 			createIntent.addCategory(Intent.CATEGORY_OPENABLE);
+ 			String bookName = BooksDbAdapter.getInstance().getActiveBookDisplayName();
+-			createIntent.putExtra(Intent.EXTRA_TITLE, Exporter.sanitizeFilename(bookName)+ "_" + "gnucash_android_backup.gnca");
++			createIntent.putExtra(Intent.EXTRA_TITLE, Exporter.sanitizeFilename(bookName)+ "_" + getString(R.string.label_backup_filename));
+ 			startActivityForResult(createIntent, REQUEST_BACKUP_FILE);
+ 		}
+ 
+@@ -370,11 +370,34 @@ public void onConnectionFailed(ConnectionResult connectionResult) {
+ 	private void restoreBackup() {
+ 		Log.i("Settings", "Opening GnuCash XML backups for restore");
+ 		String bookUID = BooksDbAdapter.getInstance().getActiveBookUID();
++
++		final String defaultBackupFile = BookUtils.getBookBackupFileUri(bookUID);
++		if (defaultBackupFile != null){
++			android.support.v7.app.AlertDialog.Builder builder = new android.support.v7.app.AlertDialog.Builder(getActivity())
++					.setTitle(R.string.title_confirm_restore_backup)
++					.setMessage(R.string.msg_confirm_restore_backup_into_new_book)
++					.setNegativeButton(R.string.btn_cancel, new DialogInterface.OnClickListener() {
++						@Override
++						public void onClick(DialogInterface dialog, int which) {
++							dialog.dismiss();
++						}
++					})
++					.setPositiveButton(R.string.btn_restore, new DialogInterface.OnClickListener() {
++						@Override
++						public void onClick(DialogInterface dialogInterface, int i) {
++							new ImportAsyncTask(getActivity()).execute(Uri.parse(defaultBackupFile));
++						}
++					});
++			builder.create().show();
++			return; //stop here if the default backup file exists
++		}
++
++		//If no default location was set, look in the internal SD card location
+ 		File[] backupFiles = new File(Exporter.getBackupFolderPath(bookUID)).listFiles();
+ 		if (backupFiles == null || backupFiles.length == 0){
+ 			android.support.v7.app.AlertDialog.Builder builder = new android.support.v7.app.AlertDialog.Builder(getActivity())
+-					.setTitle("No backups found")
+-					.setMessage("There are no existing backup files to restore from")
++					.setTitle(R.string.title_no_backups_found)
++					.setMessage(R.string.msg_no_backups_to_restore_from)
+ 					.setNegativeButton(R.string.label_dismiss, new DialogInterface.OnClickListener() {
+ 						@Override
+ 						public void onClick(DialogInterface dialog, int which) {
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index eff3c2ce..c7c24b1a 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -497,4 +497,11 @@
+     <string name="menu_rename">Rename</string>
+     <string name="title_select_backup_file">Select backup file</string>
+     <string name="summary_select_backup_file">Select a file for automatic backups</string>
++    <string name="title_confirm_restore_backup">Confirm restore from backup</string>
++    <string name="msg_confirm_restore_backup_into_new_book">A new book will be opened with the contents of this backup. Do you wish to proceed?</string>
++    <string name="btn_restore">Restore</string>
++    <string name="title_no_backups_found">No backups found</string>
++    <string name="msg_no_backups_to_restore_from">There are no existing backup files to restore from</string>
++    <!-- This is the filename for default backups. So use only simple characters and no spaces. Do not change the extension -->
++    <string name="label_backup_filename">gnucash_android_backup.gnca</string>
+ </resources>
+
+From 83c5b92ba1748953c333d51b8291a905c1cea031 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Thu, 20 Apr 2017 13:42:02 +0200
+Subject: [PATCH 4/4] Start scheduled service every hour (instead of daily) to
+ better support hourly schedules - related #625
+
+Remove WRITE_EXTERNAL_STORAGE declaration. No longer needed since minimum API level is now 19
+---
+ app/src/main/AndroidManifest.xml                     | 12 +++++-------
+ .../org/gnucash/android/app/GnuCashApplication.java  |  3 +--
+ .../android/ui/common/BaseDrawerActivity.java        | 20 +++++++-------------
+ 3 files changed, 13 insertions(+), 22 deletions(-)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 22b5ccc7..c8857485 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -33,19 +33,17 @@
+         android:protectionLevel="dangerous" />
+     
+     <uses-permission android:label="@string/label_permission_record_transactions"
+-        android:name="org.gnucash.android.permission.RECORD_TRANSACTION" />
++                     android:name="org.gnucash.android.permission.RECORD_TRANSACTION" />
+     <uses-permission android:label="@string/label_permission_create_accounts"
+-        android:name="org.gnucash.android.permission.CREATE_ACCOUNT" />
+-    <uses-permission android:label="@string/permission_access_sdcard"
+-                     android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+-                     android:maxSdkVersion="18"/>
++                     android:name="org.gnucash.android.permission.CREATE_ACCOUNT" />
++
+     <uses-permission android:name="android.permission.VIBRATE"
+                      android:label="Allow device to vibrate with notifications" />
+     <uses-permission android:name="android.permission.WAKE_LOCK" />
+     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"
+-        android:label="Schedule repeating transactions when device is rebooted"/>
++                     android:label="Schedule repeating transactions when device is rebooted"/>
+     <uses-permission android:name="android.permission.INTERNET"
+-        android:label="Export and backup to 3rd party hosting services" />
++                     android:label="Export and backup to 3rd party hosting services" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+ 
+     <application android:name="org.gnucash.android.app.GnuCashApplication"
+diff --git a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+index c0dfac82..3365fa76 100644
+--- a/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
++++ b/app/src/main/java/org/gnucash/android/app/GnuCashApplication.java
+@@ -40,7 +40,6 @@
+ import org.gnucash.android.R;
+ import org.gnucash.android.db.BookDbHelper;
+ import org.gnucash.android.db.DatabaseHelper;
+-import org.gnucash.android.db.MigrationHelper;
+ import org.gnucash.android.db.adapter.AccountsDbAdapter;
+ import org.gnucash.android.db.adapter.BooksDbAdapter;
+ import org.gnucash.android.db.adapter.BudgetAmountsDbAdapter;
+@@ -357,7 +356,7 @@ public static void startScheduledActionExecutionService(Context context){
+         AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+         alarmManager.setInexactRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                 SystemClock.elapsedRealtime() + AlarmManager.INTERVAL_FIFTEEN_MINUTES,
+-                AlarmManager.INTERVAL_HALF_DAY, pendingIntent);
++                AlarmManager.INTERVAL_HOUR, pendingIntent);
+ 
+         context.startService(alarmIntent); //run the service the first time
+     }
+diff --git a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+index 6ead30e2..5cf93cd5 100644
+--- a/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
++++ b/app/src/main/java/org/gnucash/android/ui/common/BaseDrawerActivity.java
+@@ -22,7 +22,6 @@
+ import android.database.Cursor;
+ import android.graphics.Color;
+ import android.graphics.PorterDuff;
+-import android.os.Build;
+ import android.os.Bundle;
+ import android.preference.PreferenceManager;
+ import android.support.annotation.LayoutRes;
+@@ -233,18 +232,13 @@ protected void updateActiveBookName(){
+     protected void onDrawerMenuItemClicked(int itemId) {
+         switch (itemId){
+             case R.id.nav_item_open: { //Open... files
+-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT){
+-                    //use the storage access framework
+-                    Intent openDocument = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+-                    openDocument.addCategory(Intent.CATEGORY_OPENABLE);
+-                    openDocument.setType("text/*|application/*");
+-                    String[] mimeTypes = {"text/*", "application/*"};
+-                    openDocument.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+-                    startActivityForResult(openDocument, REQUEST_OPEN_DOCUMENT);
+-
+-                } else {
+-                    AccountsActivity.startXmlFileChooser(this);
+-                }
++                //use the storage access framework
++                Intent openDocument = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++                openDocument.addCategory(Intent.CATEGORY_OPENABLE);
++                openDocument.setType("text/*|application/*");
++                String[] mimeTypes = {"text/*", "application/*"};
++                openDocument.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
++                startActivityForResult(openDocument, REQUEST_OPEN_DOCUMENT);
+             }
+             break;
+ 

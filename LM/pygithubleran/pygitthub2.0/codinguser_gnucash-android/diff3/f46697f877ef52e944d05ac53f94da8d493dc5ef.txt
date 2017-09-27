@@ -1,0 +1,120 @@
+From 3f60f10bf28307407b3214e83fe004ba8816cac1 Mon Sep 17 00:00:00 2001
+From: Yongxin Wang <fefe.wyx@gmail.com>
+Date: Sun, 23 Aug 2015 16:49:39 +0800
+Subject: [PATCH] clear the database (much) faster
+
+---
+ .../main/java/org/gnucash/android/db/AccountsDbAdapter.java   | 11 ++++++++---
+ .../java/org/gnucash/android/db/TransactionsDbAdapter.java    |  8 +++++---
+ .../main/java/org/gnucash/android/importer/GncXmlHandler.java |  8 +++++---
+ .../java/org/gnucash/android/importer/GncXmlImporter.java     |  4 ++--
+ 4 files changed, 20 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+index 46970c78..71386a3e 100644
+--- a/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/AccountsDbAdapter.java
+@@ -1180,11 +1180,16 @@ public static int getActiveAccountColorResource(@NonNull String accountUID) {
+      * Basically empties all 3 tables, so use with care ;)
+ 	 */
+     @Override
+-	public int deleteAllRecords(){
+-		mDb.delete(TransactionEntry.TABLE_NAME, null, null); //this will take the splits along with it
++	public int deleteAllRecords() {
++        // Relies "ON DELETE CASCADE" takes too much time
++        // It take more than 300s to complete the deletion on my dataset without
++        // clearing the split table first, but only needs a little more that 1s
++        // if the split table is cleared first.
++        mDb.delete(SplitEntry.TABLE_NAME, null, null);
++        mDb.delete(TransactionEntry.TABLE_NAME, null, null);
+         mDb.delete(DatabaseSchema.ScheduledActionEntry.TABLE_NAME, null, null);
+         return mDb.delete(AccountEntry.TABLE_NAME, null, null);
+-	}
++    }
+ 
+     public int getTransactionMaxSplitNum(@NonNull String accountUID) {
+         Cursor cursor = mDb.query("trans_extra_info",
+diff --git a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+index 0b78fd96..ec586c58 100644
+--- a/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/TransactionsDbAdapter.java
+@@ -82,7 +82,6 @@ public SplitsDbAdapter getSplitDbAdapter() {
+ 	 * If a transaction already exists in the database with the same unique ID, 
+ 	 * then the record will just be updated instead
+ 	 * @param transaction {@link Transaction} to be inserted to database
+-	 * @return Database row ID of the inserted transaction
+ 	 */
+     @Override
+ 	public void addRecord(@NonNull Transaction transaction){
+@@ -127,16 +126,19 @@ public void addRecord(@NonNull Transaction transaction){
+      */
+     @Override
+     public long bulkAddRecords(@NonNull List<Transaction> transactionList){
++        long start = System.nanoTime();
+         long rowInserted = super.bulkAddRecords(transactionList);
+-
++        long end = System.nanoTime();
++        Log.d(getClass().getSimpleName(), String.format("bulk add transaction time %d ", end - start));
+         List<Split> splitList = new ArrayList<>(transactionList.size()*3);
+         for (Transaction transaction : transactionList) {
+             splitList.addAll(transaction.getSplits());
+         }
+         if (rowInserted != 0 && !splitList.isEmpty()) {
+             try {
++                start = System.nanoTime();
+                 long nSplits = mSplitsDbAdapter.bulkAddRecords(splitList);
+-                Log.d(LOG_TAG, String.format("%d splits inserted", nSplits));
++                Log.d(LOG_TAG, String.format("%d splits inserted in %d ns", splitList.size(), System.nanoTime()-start));
+             }
+             finally {
+                 SQLiteStatement deleteEmptyTransaction = mDb.compileStatement("DELETE FROM " +
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+index 602ebdca..d557bae4 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlHandler.java
+@@ -387,11 +387,11 @@ public void endElement(String uri, String localName, String qualifiedName) throw
+                 break;
+             case GncXmlHelper.TAG_SLOT_VALUE:
+                 if (mInPlaceHolderSlot) {
+-                    Log.v(LOG_TAG, "Setting account placeholder flag");
++                    //Log.v(LOG_TAG, "Setting account placeholder flag");
+                     mAccount.setPlaceHolderFlag(Boolean.parseBoolean(characterString));
+                     mInPlaceHolderSlot = false;
+                 } else if (mInColorSlot) {
+-                    Log.d(LOG_TAG, "Parsing color code: " + characterString);
++                    //Log.d(LOG_TAG, "Parsing color code: " + characterString);
+                     String color = characterString.trim();
+                     //Gnucash exports the account color in format #rrrgggbbb, but we need only #rrggbb.
+                     //so we trim the last digit in each block, doesn't affect the color much
+@@ -707,9 +707,11 @@ public void endDocument() throws SAXException {
+         }
+         long startTime = System.nanoTime();
+         mAccountsDbAdapter.beginTransaction();
++        Log.d(getClass().getSimpleName(), "bulk insert starts");
+         try {
++            Log.d(getClass().getSimpleName(), "before clean up db");
+             mAccountsDbAdapter.deleteAllRecords();
+-
++            Log.d(getClass().getSimpleName(), String.format("deb clean up done %d ns", System.nanoTime()-startTime));
+             long nAccounts = mAccountsDbAdapter.bulkAddRecords(mAccountList);
+             Log.d("Handler:", String.format("%d accounts inserted", nAccounts));
+             //We need to add scheduled actions first because there is a foreign key constraint on transactions
+diff --git a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+index 0ebefd85..bd80e2c5 100644
+--- a/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
++++ b/app/src/main/java/org/gnucash/android/importer/GncXmlImporter.java
+@@ -82,12 +82,12 @@ public static void parse(InputStream gncXmlInputStream) throws ParserConfigurati
+             bos = new BufferedInputStream(pb);
+ 
+         //TODO: Set an error handler which can log errors
+-
++        Log.d(GncXmlImporter.class.getSimpleName(), "Start import");
+         GncXmlHandler handler = new GncXmlHandler();
+         xr.setContentHandler(handler);
+         long startTime = System.nanoTime();
+         xr.parse(new InputSource(bos));
+         long endTime = System.nanoTime();
+-        Log.d("Import", String.format("%d ns spent on importing the file", endTime-startTime));
++        Log.d(GncXmlImporter.class.getSimpleName(), String.format("%d ns spent on importing the file", endTime-startTime));
+     }
+ }

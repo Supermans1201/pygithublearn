@@ -1,0 +1,138 @@
+From bf1b15878f12dfc963fff1d733e6135510cb6266 Mon Sep 17 00:00:00 2001
+From: Ngewi Fet <ngewif@gmail.com>
+Date: Sat, 25 Apr 2015 01:23:19 +0200
+Subject: [PATCH] Fixed: crash when exporting scheduled backup actions
+
+Only export scheduled transactions
+Updated error message in ExporterException
+---
+ .../main/java/org/gnucash/android/db/DatabaseAdapter.java | 15 ++++++++++++---
+ .../java/org/gnucash/android/export/ExportAsyncTask.java  | 10 ++++------
+ .../main/java/org/gnucash/android/export/Exporter.java    |  3 ++-
+ .../org/gnucash/android/export/xml/GncXmlExporter.java    | 14 +++++++++-----
+ 4 files changed, 27 insertions(+), 15 deletions(-)
+
+diff --git a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+index 6b30c994..90ed57f3 100644
+--- a/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
++++ b/app/src/main/java/org/gnucash/android/db/DatabaseAdapter.java
+@@ -224,10 +224,19 @@ public Cursor fetchRecord(@NonNull String uid){
+ 	 * @return {@link Cursor} to all records in table <code>tableName</code>
+ 	 */
+ 	public Cursor fetchAllRecords(){
+-		return mDb.query(mTableName,
+-        		null, null, null, null, null, null);
++		return fetchAllRecords(null, null);
+ 	}
+ 
++    /**
++     * Fetch all records from database matching conditions
++     * @param where SQL where clause
++     * @param whereArgs String arguments for where clause
++     * @return Cursor to records matching conditions
++     */
++    public Cursor fetchAllRecords(String where, String[] whereArgs){
++        return mDb.query(mTableName, null, where, whereArgs, null, null, null);
++    }
++
+ 	/**
+ 	 * Deletes record with ID <code>rowID</code> from database table.
+ 	 * @param rowId ID of record to be deleted
+@@ -311,7 +320,7 @@ public String getAccountCurrencyCode(@NonNull String accountUID) {
+             if (cursor.moveToFirst()) {
+                 return cursor.getString(0);
+             } else {
+-                throw new IllegalArgumentException("account " + accountUID + " does not exist");
++                throw new IllegalArgumentException("Account " + accountUID + " does not exist");
+             }
+         } finally {
+             cursor.close();
+diff --git a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+index b8732df8..047bf00d 100644
+--- a/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
++++ b/app/src/main/java/org/gnucash/android/export/ExportAsyncTask.java
+@@ -155,20 +155,18 @@ protected Boolean doInBackground(ExportParams... params) {
+                 writer.close();
+             }
+ 
+-        } catch (Exception e) {
++        } catch (final Exception e) {
+             Log.e(TAG, "Error exporting: " + e.getMessage());
+             Crashlytics.logException(e);
+ 
+-            final String err_msg = e.getLocalizedMessage();
+             if (mContext instanceof Activity) {
+                 ((Activity)mContext).runOnUiThread(new Runnable() {
+                     @Override
+                     public void run() {
+-                        Toast.makeText(mContext, R.string.toast_export_error,
++                        Toast.makeText(mContext,
++                                mContext.getString(R.string.toast_export_error, mExportParams.getExportFormat().name())
++                                + "\n" + e.getMessage(),
+                                 Toast.LENGTH_SHORT).show();
+-                        if (err_msg != null) {
+-                            Toast.makeText(mContext, err_msg, Toast.LENGTH_LONG).show();
+-                        }
+                     }
+                 });
+             }
+diff --git a/app/src/main/java/org/gnucash/android/export/Exporter.java b/app/src/main/java/org/gnucash/android/export/Exporter.java
+index 0265b4bb..8e9c5aa2 100644
+--- a/app/src/main/java/org/gnucash/android/export/Exporter.java
++++ b/app/src/main/java/org/gnucash/android/export/Exporter.java
+@@ -190,7 +190,8 @@ public ExporterException(ExportParams params){
+         }
+ 
+         public ExporterException(ExportParams params, Throwable throwable){
+-            super("Failed to generate " + params.getExportFormat().toString(), throwable);
++            super("Failed to generate " + params.getExportFormat().toString() +"-"+ throwable.getMessage(),
++                    throwable);
+         }
+     }
+ }
+diff --git a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+index d4a9fbde..50bf361e 100644
+--- a/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
++++ b/app/src/main/java/org/gnucash/android/export/xml/GncXmlExporter.java
+@@ -467,16 +467,20 @@ private void exportTransactions(XmlSerializer xmlSerializer, boolean exportTempl
+      * @param xmlSerializer XML serializer
+      * @throws IOException
+      */
+-    private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOException{
+-        Cursor cursor = mScheduledActionDbAdapter.fetchAllRecords();
++    private void exportScheduledTransactions(XmlSerializer xmlSerializer) throws IOException{
++        //for now we will export only scheduled transactions to XML
++        Cursor cursor = mScheduledActionDbAdapter.fetchAllRecords(
++                ScheduledActionEntry.COLUMN_TYPE + "=?", new String[]{ScheduledAction.ActionType.TRANSACTION.name()});
+ 
+         while (cursor.moveToNext()) {
+             String actionUID = cursor.getString(cursor.getColumnIndexOrThrow(ScheduledActionEntry.COLUMN_ACTION_UID));
++            Account accountUID = mTransactionToTemplateAccountMap.get(actionUID);
+ 
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SCHEDULED_ACTION);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_VERSION, GncXmlHelper.BOOK_VERSION);
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_ID);
+-            String nameUID = mTransactionToTemplateAccountMap.get(actionUID).getName();
++
++            String nameUID = accountUID.getName();
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+             xmlSerializer.text(nameUID);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_ID);
+@@ -548,7 +552,7 @@ private void exportScheduledActions(XmlSerializer xmlSerializer) throws IOExcept
+ 
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_TEMPL_ACCOUNT);
+             xmlSerializer.attribute(null, GncXmlHelper.ATTR_KEY_TYPE, GncXmlHelper.ATTR_VALUE_GUID);
+-            xmlSerializer.text(mTransactionToTemplateAccountMap.get(actionUID).getUID());
++            xmlSerializer.text(accountUID.getUID());
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_SX_TEMPL_ACCOUNT);
+ 
+             xmlSerializer.startTag(null, GncXmlHelper.TAG_SX_SCHEDULE);
+@@ -665,7 +669,7 @@ public void generateExport(Writer writer) throws ExporterException{
+                 xmlSerializer.endTag(null, GncXmlHelper.TAG_TEMPLATE_TRANSACTIONS);
+             }
+             //scheduled actions
+-            exportScheduledActions(xmlSerializer);
++            exportScheduledTransactions(xmlSerializer);
+ 
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_BOOK);
+             xmlSerializer.endTag(null, GncXmlHelper.TAG_ROOT);
